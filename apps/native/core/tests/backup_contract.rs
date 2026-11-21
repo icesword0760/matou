@@ -208,6 +208,16 @@ fn rotation_keeps_seven_valid_backups_and_leaves_invalid_artifacts() -> Result<(
 }
 
 #[test]
+#[ignore = "run as a child by the restore WAL test"]
+fn write_restore_target_wal() -> Result<()> {
+    let target =
+        std::env::var_os("MATOU_BACKUP_TEST_WAL_TARGET").expect("missing restore WAL fixture path");
+    let _connection = seed_wal(Path::new(&target), "original_rows", "committed-old-wal")?;
+    // Exit without running SQLite's close-time checkpoint.
+    std::process::exit(0);
+}
+
+#[test]
 fn restore_keeps_committed_old_wal_in_rollback_and_removes_obsolete_sidecars() -> Result<()> {
     let reference: Value = serde_json::from_str(REFERENCE)?;
     let root = tempfile::tempdir()?;
@@ -220,7 +230,11 @@ fn restore_keeps_committed_old_wal_in_rollback_and_removes_obsolete_sidecars() -
     let descriptor = service.create(&source, BackupReason::CleanExit, 2_000)?;
     let source_bytes = fs::read(&descriptor.path)?;
     let target = root.path().join("target.sqlite");
-    let old = seed_wal(&target, "original_rows", "committed-old-wal")?;
+    let child = std::process::Command::new(std::env::current_exe()?)
+        .args(["--ignored", "--exact", "write_restore_target_wal"])
+        .env("MATOU_BACKUP_TEST_WAL_TARGET", &target)
+        .output()?;
+    assert!(child.status.success(), "{child:?}");
     let old_wal = root.path().join("target.sqlite-wal");
     let old_shm = root.path().join("target.sqlite-shm");
     assert!(fs::metadata(&old_wal)?.len() > 0 && old_shm.is_file());
@@ -233,7 +247,6 @@ fn restore_keeps_committed_old_wal_in_rollback_and_removes_obsolete_sidecars() -
         .map(|path| path.file_name().unwrap().to_str().unwrap())
         .collect();
     assert_eq!(json!(sidecars), reference["restored"]["sidecarsPresent"]);
-    old.close().map_err(|(_, error)| error)?;
     assert_eq!(
         read_snapshot(&target, "restored_rows")?,
         reference["restored"]["target"]

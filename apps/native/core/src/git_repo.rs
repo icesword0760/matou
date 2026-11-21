@@ -545,7 +545,8 @@ pub fn is_dirty(cwd: &Path) -> Option<bool> {
             Some(dirty)
         });
     if let Ok(output) = output {
-        while start.elapsed() < Duration::from_millis(40) {
+        let timeout = Duration::from_millis(if cfg!(windows) { 250 } else { 40 });
+        while start.elapsed() < timeout {
             match child.try_wait() {
                 Ok(Some(status)) => {
                     return status
@@ -733,7 +734,7 @@ impl Repository {
         scope.run(&[
             OsStr::new("worktree"),
             OsStr::new("repair"),
-            path.as_os_str(),
+            git_cli_path(&path).as_os_str(),
         ])?;
         scope.require_registered_target(&path)
     }
@@ -1056,7 +1057,12 @@ impl WorktreeScope {
                     revision
                 }
             };
-            args.extend([OsStr::new("--"), path.as_os_str(), OsStr::new(checkout_ref)]);
+            let checkout_path = git_cli_path(&path);
+            args.extend([
+                OsStr::new("--"),
+                checkout_path.as_os_str(),
+                OsStr::new(checkout_ref),
+            ]);
             self.run(&args)?;
             let checkout = self.linked_repository(&path)?;
             ensure!(
@@ -1113,7 +1119,7 @@ impl WorktreeScope {
         self.run(&[
             OsStr::new("worktree"),
             OsStr::new("repair"),
-            path.as_os_str(),
+            git_cli_path(&path).as_os_str(),
         ])?;
         self.require_registered_target(&path)
     }
@@ -1242,7 +1248,7 @@ impl WorktreeScope {
             OsStr::new("worktree"),
             OsStr::new("remove"),
             OsStr::new("--"),
-            path.as_os_str(),
+            git_cli_path(path).as_os_str(),
         ])?;
         Ok(())
     }
@@ -1464,10 +1470,35 @@ fn symbolic_ref(cwd: &Path, reference: &str) -> Result<Option<String>> {
     Ok(Some(std::str::from_utf8(line(&stdout(output)?))?.into()))
 }
 
+fn git_cli_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        use std::path::{Component, Prefix};
+
+        let mut components = path.components();
+        if let Some(Component::Prefix(prefix)) = components.next() {
+            let mut ordinary = match prefix.kind() {
+                Prefix::VerbatimDisk(drive) => PathBuf::from(format!("{}:", char::from(drive))),
+                Prefix::VerbatimUNC(server, share) => {
+                    let mut root = OsString::from(r"\\");
+                    root.push(server);
+                    root.push(r"\");
+                    root.push(share);
+                    PathBuf::from(root)
+                }
+                _ => return path.to_owned(),
+            };
+            ordinary.push(components.as_path());
+            return ordinary;
+        }
+    }
+    path.to_owned()
+}
+
 fn git_command(cwd: &Path) -> Command {
     let mut command = Command::new("git");
     command
-        .current_dir(cwd)
+        .current_dir(git_cli_path(cwd))
         .env("LC_ALL", "C")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -1541,6 +1572,24 @@ fn git_path(bytes: &[u8]) -> PathBuf {
 mod tests {
     use super::*;
     use serde_json::Value;
+
+    #[cfg(windows)]
+    #[test]
+    fn git_cli_paths_preserve_windows_drive_and_unc_components() {
+        for (input, expected) in [
+            (r"\\?\C:\中文 workspace\tree", r"C:\中文 workspace\tree"),
+            (
+                r"\\?\UNC\server\share\中文 workspace",
+                r"\\server\share\中文 workspace",
+            ),
+            (r"C:\ordinary\tree", r"C:\ordinary\tree"),
+        ] {
+            assert_eq!(
+                git_cli_path(Path::new(input)).as_os_str(),
+                OsStr::new(expected)
+            );
+        }
+    }
 
     fn cases(operation: &str) -> impl Iterator<Item = Value> + '_ {
         let fixture: Value = serde_json::from_str(include_str!(

@@ -97,7 +97,8 @@ fn agrees_with_nine_captured_reference_cases() -> Result<()> {
         });
         if let Err(error) = &acquired {
             let directory = real.to_string_lossy();
-            let normalized = error.to_string().replace(directory.as_ref(), "<root>");
+            let native_prefix = format!("{directory}{}", std::path::MAIN_SEPARATOR);
+            let normalized = error.to_string().replace(&native_prefix, "<root>/");
             actual["error"] = json!(normalized);
             if let Some(recovery) = error.downcast_ref::<OwnerRecoveryError>() {
                 actual["issue"] = json!(recovery.issue);

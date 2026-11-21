@@ -6307,7 +6307,7 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .pl(px(74.))
+                    .pl(px(if cfg!(target_os = "macos") { 74. } else { 12. }))
                     .pr(px(NOTIFICATION_UI_SIDEBAR_RIGHT_PADDING))
                     .gap(px(4.))
                     .child(new_workspace)

@@ -377,7 +377,15 @@ impl BackupService {
                             .context(format!("restore fallback also failed: {fallback_error:#}"));
                     }
                 }
-                return Err(error.into());
+                let stage = if cfg!(windows)
+                    && (error.kind() == io::ErrorKind::PermissionDenied
+                        || matches!(error.raw_os_error(), Some(32 | 33)))
+                {
+                    "replace database (in use or access denied)"
+                } else {
+                    "replace database"
+                };
+                return Err(error).with_context(|| backup_target(stage, &target));
             }
             remove_sidecars(&target)
         })();

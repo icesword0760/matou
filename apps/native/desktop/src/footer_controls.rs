@@ -3267,24 +3267,30 @@ mod tests {
 
     #[::core::prelude::v1::test]
     fn git_projection_uses_runtime_branch_and_false_dirty_values() {
+        let path = if cfg!(windows) {
+            r"C:\work\tree"
+        } else {
+            "/work/tree"
+        };
         let node = serde_json::json!({
-            "git": {"state":"ready","branch":"old","dirty":true,"root":"/work/tree"}
+            "git": {"state":"ready","branch":"old","dirty":true,"root":path}
         });
         let live = serde_json::json!({"gitBranch":"review/feature","gitDirty":false});
         let clean = FooterGit::projected(&node, Some(&live), InterfaceLocale::English).unwrap();
         assert_eq!(clean.label, "review/feature");
         assert_eq!(clean.branch.as_deref(), Some("review/feature"));
-        assert_eq!(
-            clean.root.as_deref(),
-            Some(std::path::Path::new("/work/tree"))
-        );
+        assert_eq!(clean.root.as_deref(), Some(std::path::Path::new(path)));
         let legacy = FooterGit::projected(&node, None, InterfaceLocale::English).unwrap();
         assert_eq!(legacy.label, "old*");
     }
 
     #[::core::prelude::v1::test]
     fn hidden_finder_and_terminal_actions_do_not_launch_apps() {
-        let path = std::path::Path::new("/fixture path/with 'quotes'");
+        let path = std::path::Path::new(if cfg!(windows) {
+            r"C:\fixture path\with 'quotes'"
+        } else {
+            "/fixture path/with 'quotes'"
+        });
         for action in [PathAction::Finder, PathAction::Reveal, PathAction::Terminal] {
             assert!(open_footer_path(path, action, false).is_ok());
         }
