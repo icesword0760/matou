@@ -22,6 +22,8 @@ use matou_native_desktop::{macos, window_registry::file_url_path};
 
 #[cfg(target_os = "windows")]
 mod windows_bounds;
+#[cfg(target_os = "windows")]
+use matou_native_desktop::windows_theme;
 
 actions!(matou_native, [Quit]);
 
@@ -305,6 +307,8 @@ impl Desktop {
             let commands = runtime.commands.clone();
             let events = runtime.events.clone();
             let workspace = cx.new(|cx| Workspace::new(commands, events, window, cx));
+            #[cfg(target_os = "windows")]
+            windows_theme::set_dark(window, workspace.read(cx).uses_dark_theme());
             cx.subscribe(&workspace, |_, locale: &InterfaceLocale, cx| {
                 set_app_menu(*locale, cx)
             })

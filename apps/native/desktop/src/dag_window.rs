@@ -84,6 +84,8 @@ impl DagWindow {
                 ..Default::default()
             },
             |window, cx| {
+                #[cfg(target_os = "windows")]
+                matou_native_desktop::windows_theme::set_dark(window, dark);
                 cx.new(|cx| {
                     let content_focus = cx.focus_handle();
                     let canvas = cx.new(|cx| Self::canvas_view(state, locale, dark, cx));
@@ -121,6 +123,10 @@ impl DagWindow {
     }
 
     pub(super) fn set_dark(&mut self, dark: bool, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(target_os = "windows")]
+        if self.dark != dark {
+            matou_native_desktop::windows_theme::set_dark(window, dark);
+        }
         self.dark = dark;
         self.canvas.update(cx, |view, cx| {
             let search_focused = view.search_focused(window, cx);
@@ -279,14 +285,29 @@ impl Render for DagWindow {
                 cx.stop_propagation();
                 window.remove_window();
             });
+        let owner = self.owner;
         div()
             .size_full()
             .relative()
             .track_focus(&self.content_focus)
-            .capture_key_down(|event, window, cx| {
+            .capture_key_down(move |event, window, cx| {
                 if is_child_window_close_shortcut(&event.keystroke) {
                     cx.stop_propagation();
                     window.remove_window();
+                    #[cfg(target_os = "windows")]
+                    cx.defer(move |cx| {
+                        let _ = owner.update(cx, |workspace, window, cx| {
+                            window.activate_window();
+                            workspace.restore_dag_terminal_focus(window, cx);
+                        });
+                    });
+                } else if Workspace::is_theme_shortcut(&event.keystroke) {
+                    cx.stop_propagation();
+                    cx.defer(move |cx| {
+                        let _ = owner.update(cx, |workspace, _, cx| {
+                            workspace.toggle_theme_shortcut(cx);
+                        });
+                    });
                 }
             })
             .on_key_down(|event: &KeyDownEvent, window, cx| {
