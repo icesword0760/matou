@@ -1,3 +1,4 @@
+pub mod account_store;
 pub mod backup;
 pub mod claude_role_budget;
 pub mod database_recovery;
