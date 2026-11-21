@@ -8,8 +8,10 @@ use cocoa::{
     base::{id, nil},
     foundation::{NSInteger, NSPoint},
 };
+use matou_native_desktop::dag_canvas::{DagCanvas, DagTransform};
 use objc::{msg_send, sel, sel_impl};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use serde_json::json;
 
 #[derive(Default)]
 pub(super) struct OpenProbe {
@@ -257,6 +259,368 @@ async fn run(main: WindowHandle<Workspace>, cx: &mut AsyncApp) {
     );
     key(child.into(), cx, "escape");
     assert_closed(main, child, cx);
+
+    exercise_canvas(main, cx, &scene_a, &root).await;
+}
+
+async fn exercise_canvas(
+    main: WindowHandle<Workspace>,
+    cx: &mut AsyncApp,
+    scene: &str,
+    root: &str,
+) {
+    navigate(
+        main,
+        cx,
+        Command::FocusSession {
+            scene_id: scene.to_owned(),
+            session_id: root.to_owned(),
+        },
+    );
+    let branch = wait_graph(main, cx, |view| {
+        (view.graph["sceneId"] == scene && view.focused.as_deref() == Some(root)).then(|| {
+            session_levels::children_of(session_levels::nodes(&view.graph), Some(root))
+                .next()
+                .unwrap()["sessionId"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+    })
+    .await;
+    navigate(
+        main,
+        cx,
+        Command::SetSessionTitle {
+            session_id: branch.clone(),
+            title: Some("probe branch".to_owned()),
+        },
+    );
+    wait_graph(main, cx, |view| {
+        view.graph_node(&branch)
+            .filter(|node| node["title"] == "probe branch")
+            .map(|_| ())
+    })
+    .await;
+    click_graph(main, cx);
+    let child = child_window(main, cx);
+    frame(child, cx);
+    let start = read_canvas(child, cx, |canvas| canvas.transform);
+    assert_ne!(
+        start,
+        DagTransform::default(),
+        "initial target was not centered"
+    );
+    key(child.into(), cx, "ctrl-=");
+    assert_eq!(read_canvas(child, cx, |canvas| canvas.transform.scale), 1.1);
+    key(child.into(), cx, "ctrl--");
+    assert_eq!(read_canvas(child, cx, |canvas| canvas.transform.scale), 1.);
+    key(child.into(), cx, "ctrl-0");
+    assert_eq!(
+        read_canvas(child, cx, |canvas| canvas.transform),
+        DagTransform::default()
+    );
+    report(
+        cx,
+        "canvas-zoom",
+        main,
+        Some(child),
+        "zoom in/out and reset",
+    );
+
+    let width = read_canvas(child, cx, |canvas| canvas.viewport.width);
+    pointer(
+        child.into(),
+        cx,
+        (width - 10., 100.),
+        Some((width - 55., 135.)),
+    );
+    assert_eq!(read_canvas(child, cx, |canvas| canvas.transform.x), 115.);
+    assert_eq!(read_canvas(child, cx, |canvas| canvas.transform.y), 75.);
+    for _ in 0..4 {
+        pointer(child.into(), cx, (30., 64.), Some((600., 64.)));
+    }
+    read_canvas(child, cx, |canvas| {
+        assert_eq!(canvas.transform.x, 115. - 4. * 570.);
+        assert!(
+            canvas
+                .render_model()
+                .real_nodes
+                .iter()
+                .all(|node| node.node.session_id != branch)
+        );
+    });
+    report(
+        cx,
+        "canvas-pan",
+        main,
+        Some(child),
+        "drag and offscreen culling",
+    );
+
+    search(child, cx, "probe");
+    read_canvas(child, cx, |canvas| {
+        assert_eq!(canvas.search.visible_results().len(), 2);
+        assert_eq!(canvas.search.selected, 0);
+    });
+    key(child.into(), cx, "up");
+    read_canvas(child, cx, |canvas| assert_eq!(canvas.search.selected, 1));
+    key(child.into(), cx, "down");
+    read_canvas(child, cx, |canvas| assert_eq!(canvas.search.selected, 0));
+    key(child.into(), cx, "down");
+    let (selected, transform, preview) = read_canvas(child, cx, |canvas| {
+        (
+            canvas.search.results[1].clone(),
+            canvas.transform,
+            canvas.preview_session_id.clone(),
+        )
+    });
+    navigate(
+        main,
+        cx,
+        Command::SetSessionTitle {
+            session_id: root.to_owned(),
+            title: Some("probe".to_owned()),
+        },
+    );
+    wait_graph(main, cx, |view| {
+        view.graph_node(root)
+            .filter(|node| node["title"] == "probe")
+            .map(|_| ())
+    })
+    .await;
+    read_canvas(child, cx, |canvas| {
+        assert_eq!(canvas.search.query, "probe");
+        assert_eq!(canvas.search.results[canvas.search.selected], selected);
+        assert_eq!(canvas.preview_session_id, preview);
+        assert_eq!(canvas.transform, transform);
+    });
+    report(
+        cx,
+        "canvas-search-refresh",
+        main,
+        Some(child),
+        "title matches, keyboard wrap and selection retained on Runtime update",
+    );
+
+    search(child, cx, "outputneedle");
+    read_canvas(child, cx, |canvas| {
+        assert!(canvas.search.results.is_empty())
+    });
+    navigate(
+        main,
+        cx,
+        Command::Input {
+            session_id: root.to_owned(),
+            bytes: b"printf '%s%s\\n' output needle\r".to_vec(),
+            defer_ordering: true,
+        },
+    );
+    wait_graph(main, cx, |view| {
+        view.graph_node(root)?["latestLines"]
+            .as_array()?
+            .iter()
+            .any(|line| {
+                line.as_str()
+                    .is_some_and(|line| line.contains("outputneedle"))
+            })
+            .then_some(())
+    })
+    .await;
+    let mut graph = child
+        .read_with(cx, |child, _| child.probe_canvas().0.clone())
+        .unwrap();
+    read_canvas(child, cx, |canvas| {
+        assert_eq!(canvas.search.query, "outputneedle");
+        assert_eq!(canvas.search.results, [root]);
+    });
+    report(
+        cx,
+        "canvas-search-output",
+        main,
+        Some(child),
+        "a terminal write updates the open search",
+    );
+
+    // Stress the same child with a scoped replacement snapshot while keeping
+    // the real branch as the thirteenth result for the owner callback.
+    let nodes = graph["nodes"].as_array_mut().unwrap();
+    let chosen = nodes
+        .iter_mut()
+        .find(|node| node["sessionId"] == branch)
+        .unwrap();
+    chosen["title"] = json!("selectmatch branch");
+    for index in 0..12 {
+        nodes.push(json!({"sessionId": format!("match-{index}"), "title": "selectmatch", "cwd": "/fixture", "parentSessionId": root}));
+    }
+    let mut parent = branch.clone();
+    for index in 2..=4 {
+        let id = format!("depth-{index}");
+        let status = ["running", "needs-input", "error"][index - 2];
+        graph["nodes"].as_array_mut().unwrap().push(json!({
+            "sessionId": id, "title": id, "cwd": "/fixture", "parentSessionId": parent, "workStatus": status,
+        }));
+        graph["edges"].as_array_mut().unwrap().push(json!({
+            "parentSessionId": parent, "childSessionId": id, "relationKind": "derived-from",
+        }));
+        parent = id;
+    }
+    graph["edges"].as_array_mut().unwrap().extend((0..12).map(|index| json!({
+        "parentSessionId": root, "childSessionId": format!("match-{index}"), "relationKind": "derived-from",
+    })));
+    graph["runtimeGeneration"] = json!("probe-reconnected");
+    child
+        .update(cx, |child, _, cx| child.refresh(&graph, cx))
+        .unwrap();
+    read_canvas(child, cx, |canvas| {
+        assert_eq!(
+            (canvas.search.query.as_str(), canvas.search.selected),
+            ("outputneedle", 0)
+        );
+        assert_eq!(canvas.search.results, [root]);
+        assert_eq!(canvas.preview_session_id, preview);
+        assert_eq!(canvas.transform, transform);
+    });
+    report(
+        cx,
+        "canvas-reconnect",
+        main,
+        Some(child),
+        "replacement snapshot preserves search, selection and viewport",
+    );
+
+    key(child.into(), cx, "escape");
+    assert_closed(main, child, cx);
+    report(
+        cx,
+        "canvas-search-escape",
+        main,
+        None,
+        "Escape from the search field closes the child",
+    );
+
+    click_graph(main, cx);
+    let child = child_window(main, cx);
+    child
+        .update(cx, |child, _, cx| child.refresh(&graph, cx))
+        .unwrap();
+    frame(child, cx);
+    for _ in 0..6 {
+        key(child.into(), cx, "ctrl--");
+    }
+    let (target, aggregate) = read_canvas(child, cx, |canvas| {
+        let model = canvas.render_model();
+        let entry = model
+            .aggregates
+            .iter()
+            .find(|entry| entry.session_ids.len() == 3)
+            .unwrap();
+        assert_eq!(
+            (
+                entry.counts.running,
+                entry.counts.needs_input,
+                entry.counts.error
+            ),
+            (1, 1, 1)
+        );
+        let transform = canvas.transform;
+        let center = (
+            transform.x + (entry.rect.x + entry.rect.width * 0.5) * transform.scale,
+            transform.y + (entry.rect.y + entry.rect.height * 0.5) * transform.scale,
+        );
+        assert!(
+            center.0 > 0.
+                && center.0 < canvas.viewport.width
+                && center.1 > 54.
+                && center.1 < canvas.viewport.height,
+            "{center:?}"
+        );
+        (entry.target_session_id.to_owned(), center)
+    });
+    let right = child
+        .update(cx, |_, window, _| {
+            f64::from(window.viewport_size().width) - aggregate.0
+        })
+        .unwrap();
+    click(child.into(), cx, right, aggregate.1);
+    read_canvas(child, cx, |canvas| {
+        assert_eq!(canvas.preview_session_id, target);
+        assert!(
+            canvas
+                .render_model()
+                .real_nodes
+                .iter()
+                .any(|node| node.node.session_id == target)
+        );
+    });
+    report(
+        cx,
+        "canvas-aggregate",
+        main,
+        Some(child),
+        "aggregate counts and card click center the aggregate target",
+    );
+
+    search(child, cx, "selectmatch");
+    read_canvas(child, cx, |canvas| {
+        assert_eq!(canvas.search.visible_results().len(), 12);
+        assert_eq!(canvas.search.results.len(), 13);
+        assert_eq!(canvas.search.results[12], branch);
+    });
+    key(child.into(), cx, "up");
+    read_canvas(child, cx, |canvas| assert_eq!(canvas.search.selected, 12));
+    key(child.into(), cx, "enter");
+    frame(child, cx);
+    assert_closed(main, child, cx);
+    wait_graph(main, cx, |view| {
+        (view.focused.as_deref() == Some(branch.as_str())
+            && view.level_focus() == Some(branch.as_str())
+            && view.level_parent() == Some(root))
+        .then_some(())
+    })
+    .await;
+    report(
+        cx,
+        "canvas-search-enter",
+        main,
+        None,
+        "the unrendered thirteenth match is selected in the main carousel",
+    );
+}
+
+fn search(child: WindowHandle<DagWindow>, cx: &mut AsyncApp, query: &str) {
+    key(child.into(), cx, "ctrl-f");
+    key(child.into(), cx, "cmd-a");
+    for character in query.chars() {
+        key(child.into(), cx, &character.to_string());
+    }
+}
+
+fn read_canvas<T>(
+    child: WindowHandle<DagWindow>,
+    cx: &mut AsyncApp,
+    read: impl FnOnce(&DagCanvas) -> T,
+) -> T {
+    child
+        .read_with(cx, |child, cx| {
+            read(child.probe_canvas().1.read(cx).canvas())
+        })
+        .unwrap()
+}
+
+fn frame(child: WindowHandle<DagWindow>, cx: &mut AsyncApp) {
+    let view = AnyWindowHandle::from(child)
+        .update(cx, |_, window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+            appkit_view(window)
+        })
+        .unwrap();
+    // Hidden windows have no display link. Deliver the frame through the
+    // same GPUI AppKit callback that normally drains on_next_frame.
+    unsafe {
+        let _: () = msg_send![view, displayLayer: nil];
+    }
 }
 
 async fn wait_graph<T>(
@@ -290,7 +654,11 @@ fn click_graph(main: WindowHandle<Workspace>, cx: &mut AsyncApp) {
 }
 
 fn click(handle: AnyWindowHandle, cx: &mut AsyncApp, right: f64, top: f64) {
-    let (view, number, location) = handle
+    pointer(handle, cx, (right, top), None);
+}
+
+fn pointer(handle: AnyWindowHandle, cx: &mut AsyncApp, from: (f64, f64), to: Option<(f64, f64)>) {
+    let (view, number, size) = handle
         .update(cx, |_, window, cx| {
             window.refresh();
             window.draw(cx).clear();
@@ -299,26 +667,25 @@ fn click(handle: AnyWindowHandle, cx: &mut AsyncApp, right: f64, top: f64) {
                 let native: id = msg_send![view, window];
                 msg_send![native, windowNumber]
             };
-            let size = window.viewport_size();
-            let location = NSPoint::new(
-                f64::from(f32::from(size.width)) - right,
-                f64::from(f32::from(size.height)) - top,
-            );
-            (view, number, location)
+            (view, number, window.viewport_size())
         })
         .unwrap();
+    let event = |kind, (right, top)| unsafe {
+        let location = NSPoint::new(f64::from(size.width) - right, f64::from(size.height) - top);
+        NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure_(
+            nil, kind, location, NSEventModifierFlags::empty(), 0., number, nil, 0, 1, 1.,
+        )
+    };
     // Deliver only to the hidden view, outside the GPUI borrow and desktop event queue.
     unsafe {
-        for kind in [NSEventType::NSLeftMouseDown, NSEventType::NSLeftMouseUp] {
-            let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure_(
-                nil, kind, location, NSEventModifierFlags::empty(), 0., number, nil, 0, 1, 1.,
-            );
-            if kind == NSEventType::NSLeftMouseDown {
-                let _: () = msg_send![view, mouseDown: event];
-            } else {
-                let _: () = msg_send![view, mouseUp: event];
-            }
+        let down = event(NSEventType::NSLeftMouseDown, from);
+        let _: () = msg_send![view, mouseDown: down];
+        if let Some(to) = to {
+            let moved = event(NSEventType::NSLeftMouseDragged, to);
+            let _: () = msg_send![view, mouseDragged: moved];
         }
+        let up = event(NSEventType::NSLeftMouseUp, to.unwrap_or(from));
+        let _: () = msg_send![view, mouseUp: up];
     }
 }
 
@@ -372,13 +739,15 @@ fn assert_graph(
         })
         .unwrap();
     let child_graph = child
-        .update(cx, |view, window, _| {
+        .update(cx, |view, window, cx| {
             assert!(!crate::macos::is_window_visible(window).unwrap());
             assert!(!window.is_window_active());
-            let (graph, focus, rendered_nodes, rendered_edges) = view.probe_state();
-            assert!(focus.is_focused(window));
+            let (graph, canvas) = view.probe_canvas();
+            let canvas = canvas.read(cx);
+            let layout = &canvas.canvas().layout;
+            assert!(canvas.canvas_focus().is_focused(window));
             assert_eq!(
-                (rendered_nodes, rendered_edges),
+                (layout.nodes.len(), layout.edges.len()),
                 (edge_count + 1, edge_count)
             );
             graph.clone()
