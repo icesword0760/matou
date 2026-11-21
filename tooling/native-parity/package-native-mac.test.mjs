@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
 import {
-  chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile
+  chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile
 } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -111,6 +111,43 @@ test('copies custom entitlements and audits the requested bundle ID', { skip }, 
   assert.equal(success(cli(['--verify', app, '--bundle-id', bundleId])).info.CFBundleIdentifier, bundleId)
 })
 
+test('assembles and verifies the separately named beta app and Finder workflow', { skip }, async () => {
+  const out = join(root, 'beta')
+  const name = '码头测试版'
+  const bundleId = 'com.matou.desktop.beta'
+  const app = join(out, `${name}.app`)
+  const identity = ['--app-name', name, '--bundle-id', bundleId]
+  const result = success(assemble(out, { extra: identity }))
+  assert.equal(result.path, await realpath(app))
+  assert.equal(result.bundleId, bundleId)
+  assert.deepEqual(await readdir(out), [`${name}.app`])
+  assert.deepEqual((await readdir(join(app, 'Contents/MacOS'))).sort(), ['matou-native-runtime', name])
+  assert.equal((await lstat(join(app, 'Contents/MacOS', name))).mode & 0o7777, 0o755)
+
+  const verified = success(cli(['--verify', app, ...identity]))
+  assert.equal(verified.info.CFBundleIdentifier, bundleId)
+  for (const field of ['CFBundleName', 'CFBundleDisplayName', 'CFBundleExecutable']) {
+    assert.equal(verified.info[field], name, field)
+  }
+  assert.deepEqual(success(cli(['--verify', app, '--bundle-id', bundleId])).info, verified.info)
+  failure(cli(['--verify', app, '--app-name', '码头', '--bundle-id', bundleId]), /CFBundleExecutable|CFBundleName/)
+  failure(cli(['--verify', app, '--app-name', name]), /CFBundleIdentifier/)
+  failure(cli(['--verify', app, ...identity, '--require-release-signature']), /Developer ID signature .*unsigned/)
+
+  const workflow = join(app, 'Contents/Resources/finder-quick-action', `进入${name}.workflow`)
+  const plist = JSON.parse(execFileSync('/usr/bin/plutil', [
+    '-convert', 'json', '-o', '-', '--', join(workflow, infoPath)
+  ], { encoding: 'utf8' }))
+  assert.equal(plist.CFBundleIdentifier, `${bundleId}.finder-open-workspace`)
+  assert.equal(plist.CFBundleName, `进入${name}`)
+  assert.equal(plist.NSServices[0].NSMenuItem.default, `进入${name}`)
+  const document = join(workflow, 'Contents/Resources/document.wflow')
+  const original = await readFile(document, 'utf8')
+  assert.ok(original.includes(`/usr/bin/open -b ${bundleId} "$target"`))
+  await writeFile(document, original.replace(bundleId, 'com.matou.desktop'))
+  failure(cli(['--verify', app, ...identity]), /Invalid Finder workflow name or bundle ID/)
+})
+
 test('rejects missing input files and removes bundles that fail staged validation', { skip }, async () => {
   const out = join(root, 'failed')
   const missing = join(root, 'absent')
@@ -123,6 +160,7 @@ test('rejects missing input files and removes bundles that fail staged validatio
   await writeFile(badPlist, 'not a plist')
 
   for (const [options, error] of [
+    [{ extra: ['--app-name', '../escape'] }, /Invalid --app-name/],
     [{ desktop: missing }, /Missing desktop binary/],
     [{ runtime: missing }, /Missing runtime binary/],
     [{ extra: ['--entitlements', missing] }, /Missing entitlements resource/],
