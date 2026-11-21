@@ -524,10 +524,9 @@ mod probe {
         });
         let select_dispatch = |cx: &mut AsyncApp| {
             draw(window, cx);
-            update_shell(window, cx, |shell, window, _| {
-                shell.probe_settings_nav_focus(SettingsPage::Dispatch, window);
+            update_shell(window, cx, |shell, window, cx| {
+                shell.select_dispatch_for_probe(window, cx)
             });
-            press(window, "enter", cx);
             draw(window, cx);
         };
         select_dispatch(cx);
@@ -546,12 +545,12 @@ mod probe {
 
         // Navigate the actual dispatch panel, including its number-input and
         // Save handlers, without touching the native desktop or reading HOME.
-        update_shell(window, cx, |shell, window, _| {
-            shell.probe_settings_nav_focus(SettingsPage::Dispatch, window);
-        });
-        for _ in 0..7 {
-            press(window, "tab", cx);
-        }
+        let focus_number = |index, cx: &mut AsyncApp| {
+            update_shell(window, cx, |shell, window, cx| {
+                shell.probe_dispatch_focus(Some(index), window, cx)
+            });
+        };
+        focus_number(0, cx);
         let edit_number = |cx: &mut AsyncApp, digits: &[&str]| {
             draw(window, cx);
             press(window, "cmd-a", cx);
@@ -561,9 +560,10 @@ mod probe {
             draw(window, cx);
         };
         let save = |cx: &mut AsyncApp| {
-            for _ in 0..5 {
-                press(window, "tab", cx);
-            }
+            update_shell(window, cx, |shell, window, cx| {
+                shell.probe_dispatch_focus(None, window, cx)
+            });
+            draw(window, cx);
             press(window, "enter", cx);
             draw(window, cx);
         };
@@ -573,6 +573,7 @@ mod probe {
             !config.path().exists(),
             "invalid input wrote the configuration"
         );
+        focus_number(0, cx);
         edit_number(cx, &["1", "3"]);
         std::fs::create_dir(config.path()).unwrap();
         save(cx);
@@ -589,14 +590,9 @@ mod probe {
         select_dispatch(cx);
         // The freshly mounted form should still show 13. Changing a different
         // number and saving verifies that 13 was restored into the draft.
-        for _ in 0..8 {
-            press(window, "tab", cx);
-        }
+        focus_number(1, cx);
         edit_number(cx, &["4", "9"]);
-        for _ in 0..4 {
-            press(window, "tab", cx);
-        }
-        press(window, "enter", cx);
+        save(cx);
         let saved = config.snapshot().unwrap().defaults;
         assert_eq!((saved.idle_min, saved.max_min), (13., 49.));
         window
@@ -739,6 +735,14 @@ mod probe {
                 })
                 .unwrap();
         };
+        let open_context_editor = |cx: &mut AsyncApp| {
+            draw(window, cx);
+            update_shell(window, cx, |shell, window, _| {
+                shell.diagnostics_focus_provider_edit(id, window)
+            });
+            press(window, "enter", cx);
+            draw(window, cx);
+        };
         let status = |cx: &mut AsyncApp| {
             window
                 .update(cx, |view, _, cx| {
@@ -784,6 +788,7 @@ mod probe {
                 .iter()
                 .any(|label| label.starts_with("所有 Claude Code 会话跟随全局供应商"))
         );
+        open_context_editor(cx);
         assert_eq!(status(cx).0, "默认窗口");
         edit(cx, &["9"]);
         assert!(status(cx).1.unwrap().contains("100,000"));
@@ -820,6 +825,8 @@ mod probe {
         );
         assert_eq!(status(cx), ("默认窗口".into(), None, false));
 
+        press(window, "escape", cx);
+        draw(window, cx);
         update_shell(window, cx, |shell, window, cx| {
             shell.probe_language_page(window, cx)
         });
@@ -842,6 +849,7 @@ mod probe {
         assert!(english.labels.iter().any(|label| {
             label.starts_with("All Claude Code sessions follow the global provider.")
         }));
+        open_context_editor(cx);
         assert_eq!(status(cx), ("Default window".into(), None, false));
         window
             .update(cx, |_, window, _| window.remove_window())
@@ -929,7 +937,7 @@ mod probe {
         window
             .update(cx, |view, window, _| view.arm_settings_entry(window))
             .unwrap();
-        // The navigation tabs run Claude Code, Dispatch, Language, then Diagnostics.
+        // The visible navigation tabs are Claude Code and Language.
         // Group labels never enter the tab order.
         press(window, "tab", cx);
         press(window, "enter", cx);
@@ -941,7 +949,6 @@ mod probe {
             Err(std::sync::mpsc::TryRecvError::Empty)
         ));
         press(window, "tab", cx);
-        press(window, "tab", cx);
         press(window, "enter", cx);
         draw(window, cx);
         check_shell(window, cx, |shell, _| {
@@ -951,7 +958,6 @@ mod probe {
             sink.try_recv(),
             Ok(Command::GetTimeZoneSettings { .. })
         ));
-        press(window, "shift-tab", cx);
         press(window, "shift-tab", cx);
         press(window, "enter", cx);
         let reentry = request_id(&sink);
@@ -973,7 +979,7 @@ mod probe {
         window
             .update(cx, |view, window, _| view.arm_settings_entry(window))
             .unwrap();
-        for _ in 0..7 {
+        for _ in 0..5 {
             press(window, "tab", cx);
         }
         press(window, "enter", cx);

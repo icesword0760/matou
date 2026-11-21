@@ -359,7 +359,6 @@ mod workspace {
             expected_cwd: Option<(&str, &str)>,
             expected_git: Option<(&str, bool)>,
             expected_environment: Option<&str>,
-            account: bool,
         ) {
             let fields = self.footer_fields().expect("focused footer fields");
             assert_eq!(fields.name.as_deref(), expected_name);
@@ -384,7 +383,10 @@ mod workspace {
                     .map(|environment| environment.label),
                 expected_environment,
             );
-            assert_eq!(fields.account, account);
+        }
+
+        pub(super) fn assert_account_overlay(&self) {
+            assert_eq!(self.wiring_overlay_for_probe(), Some("accounts"));
         }
 
         pub(super) fn assert_footer_empty(&self) {
@@ -5746,7 +5748,6 @@ mod probe {
                         Some((&long_cwd, &short_cwd)),
                         None,
                         Some("Local"),
-                        true,
                     );
                     view.assert_permission_chip(None);
                 })
@@ -5773,7 +5774,6 @@ mod probe {
                         Some(("/fixture/alpha", "~/alpha")),
                         None,
                         Some("Local"),
-                        true,
                     );
                 })
                 .unwrap();
@@ -5781,11 +5781,17 @@ mod probe {
             let egress = footer_bounds(window, cx, "egress").unwrap().center();
             let account = footer_bounds(window, cx, "account").unwrap().center();
             click(window, cx, egress);
+            press(window, cx, "escape");
+            draw(window, cx);
             click(window, cx, account);
+            window
+                .update(cx, |view, _, _| {
+                    view.assert_account_overlay();
+                })
+                .unwrap();
+            press(window, cx, "escape");
             assert!(fixture.process(window, cx, &sink).is_empty());
-            println!(
-                "footer {width} | offline exit and account clicks did not dispatch Runtime commands"
-            );
+            println!("footer {width} | account opens and closes without a mutation command");
 
             window
                 .update(cx, |view, window, cx| {
@@ -5807,7 +5813,7 @@ mod probe {
                         "· 4 个会话",
                         CHILD,
                     );
-                    view.assert_footer_fields(Some("Sonnet"), None, None, Some("待处理"), true);
+                    view.assert_footer_fields(Some("Sonnet"), None, None, Some("待处理"));
                 })
                 .unwrap();
             for key in [
@@ -5924,19 +5930,18 @@ mod probe {
                             None,
                             Some(("Git 不可用", false)),
                             Some("Local"),
-                            false,
                         );
                     })
                     .unwrap();
                 assert!(footer_bounds(window, cx, "name").is_none());
                 assert!(footer_bounds(window, cx, "cwd").is_none());
-                assert!(footer_bounds(window, cx, "account").is_none());
+                assert!(footer_bounds(window, cx, "account").is_some());
                 assert_footer_text(window, cx, "git", "Git 不可用", false);
                 let git = footer_bounds(window, cx, "git").unwrap().center();
                 click(window, cx, git);
                 assert!(fixture.process(window, cx, &sink).is_empty());
                 println!(
-                    "footer {width} | Codex with no model and root-only cwd: both omitted, Git 不可用 inert, account omitted"
+                    "footer {width} | Codex with no model and root-only cwd: both omitted, Git 不可用 inert, account available"
                 );
             }
 
@@ -6073,6 +6078,7 @@ mod probe {
                 ("context", show_context),
                 ("tools", true),
                 ("egress", true),
+                ("account", true),
             ] {
                 if !active {
                     continue;
@@ -6087,7 +6093,6 @@ mod probe {
             }
             assert_eq!(previous.right(), px(width - 20.));
             for hidden in [
-                "account",
                 "quota",
                 "todos",
                 "team",
@@ -6158,7 +6163,7 @@ mod probe {
 
             deliver(window, cx, update(&fixture, None));
             draw(window, cx);
-            for field in ["name", "context", "tools", "account"] {
+            for field in ["name", "context", "tools"] {
                 assert!(
                     footer_bounds(window, cx, field).is_none(),
                     "{field} leaked from former run"

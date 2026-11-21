@@ -134,7 +134,7 @@ mod workspace {
             view.recovery.insert(id.into(), RecoveryState::Ready);
         }
         view.sync_terminal_input(window, cx);
-        window.focus(&view.control_focus["board"]);
+        window.focus(&view.control_focus["sidebar-board"]);
     }
 
     type Handle = WindowHandle<Workspace>;
@@ -423,7 +423,7 @@ mod workspace {
                 assert_eq!(
                     colors,
                     [
-                        rgba(0xfbfdff17), // Over the original AppKit sidebar material.
+                        rgb(0xf2f2f5), // Over the original AppKit sidebar material.
                         rgb(0xffffff),
                         rgb(0xffffff),
                         rgb(0xfcfcfd),
@@ -616,7 +616,7 @@ mod workspace {
     async fn verify(cx: &mut AsyncApp, fixture_root: &std::path::Path) {
         let (window, sink) = open_probe_at(cx, 1260.);
         draw(window.into(), cx);
-        for key in ["cmd-/", "ctrl-/"] {
+        for key in ["cmd-/", "cmd-?"] {
             press(window, cx, key);
             overlay(window, cx, Some("shortcuts"));
             draw(window.into(), cx);
@@ -624,7 +624,7 @@ mod workspace {
             overlay(window, cx, None);
             window
                 .update(cx, |view, window, _| {
-                    assert!(view.control_focus["board"].is_focused(window))
+                    assert!(view.control_focus["sidebar-board"].is_focused(window))
                 })
                 .unwrap();
             draw(window.into(), cx);
@@ -639,71 +639,64 @@ mod workspace {
         press(window, cx, "/");
         overlay(window, cx, None);
         verify_theme_shortcut(window, &sink, cx, &fixture_root.join("theme-shortcut"));
-        let help = draw(window.into(), cx)["shortcut-help"].center();
-        for via_mouse in [true, false] {
-            if via_mouse {
-                click(window.into(), cx, MouseButton::Left, help);
-            } else {
-                press(window, cx, "cmd-/");
-            }
+        assert!(!draw(window.into(), cx).contains_key("shortcut-help"));
+        press(window, cx, "cmd-/");
+        overlay(window, cx, Some("shortcuts"));
+        draw(window.into(), cx);
+        press(window, cx, "escape");
+        overlay(window, cx, None);
+        assert_terminal_input(window, &sink, cx, A);
+
+        for outside in [true, false] {
+            press(window, cx, "cmd-/");
             overlay(window, cx, Some("shortcuts"));
             draw(window.into(), cx);
-            press(window, cx, "escape");
+            cx.background_executor()
+                .timer(Duration::from_millis(220))
+                .await;
+            draw(window.into(), cx);
+            let point = if outside {
+                point(px(14.), px(80.))
+            } else {
+                point(px(998.), px(87.))
+            };
+            click(window.into(), cx, MouseButton::Left, point);
             overlay(window, cx, None);
-            assert_terminal_input(window, &sink, cx, A);
         }
         println!(
-            "shortcuts: mouse help and Cmd+/ return Esc focus and typing to the original shell"
+            "shortcuts: Mod+/ and Mod+?, close button, Escape, backdrop and restored terminal focus"
         );
-        window
-            .update(cx, |view, window, _| {
-                window.focus(&view.control_focus["shortcut-help"])
+
+        let account = draw(window.into(), cx)["footer-account"].center();
+        click(window.into(), cx, MouseButton::Left, account);
+        overlay(window, cx, Some("accounts"));
+        let request_id = std::iter::from_fn(|| sink.try_recv().ok())
+            .find_map(|command| match command {
+                Command::GetAccountSummary { request_id } => Some(request_id),
+                _ => None,
             })
-            .unwrap();
+            .expect("accounts opens the runtime summary");
+        window.update(cx, |view, window, cx| {
+            view.receive_wiring_reply("accountSummaryResult", request_id,
+                &json!({"result":{"accountSummary":{"currentId":"probe","accounts":[{"id":"probe","email":"gm•••@example.invalid","name":"fixture","plan":"Pro","status":"active"}]}}}),
+                window, cx);
+        }).unwrap();
         draw(window.into(), cx);
-        press(window, cx, "enter");
-        overlay(window, cx, Some("shortcuts"));
-        draw(window.into(), cx);
-        click(
-            window.into(),
-            cx,
-            MouseButton::Left,
-            point(px(14.), px(80.)),
-        );
+        press(window, cx, "escape");
         overlay(window, cx, None);
-        window
-            .update(cx, |view, window, _| {
-                window.focus(&view.control_focus["shortcut-help"])
-            })
-            .unwrap();
-        draw(window.into(), cx);
-        press(window, cx, "enter");
-        overlay(window, cx, Some("shortcuts"));
-        draw(window.into(), cx);
-        cx.background_executor()
-            .timer(Duration::from_millis(220))
-            .await;
-        draw(window.into(), cx);
-        click(
-            window.into(),
-            cx,
-            MouseButton::Left,
-            point(px(998.), px(87.)),
-        );
-        overlay(window, cx, None);
-        println!(
-            "shortcuts: Cmd/Ctrl+/, explicit help, close button, Escape, backdrop, restored focus, terminal-input guard"
-        );
+        assert_terminal_input(window, &sink, cx, A);
+        println!("accounts: click, isolated account summary, Escape and restored terminal focus");
 
         window
             .update(cx, |view, window, cx| {
                 view.open_search(window, cx);
                 view.search.as_mut().unwrap().query = "keep this query".into();
-                window.focus(&view.control_focus["board"]);
+                window.focus(&view.control_focus["sidebar-board"]);
             })
             .unwrap();
         draw(window.into(), cx);
-        press(window, cx, "enter");
+        let board_toggle = draw(window.into(), cx)["sidebar-board"].center();
+        click(window.into(), cx, MouseButton::Left, board_toggle);
         let board = draw(window.into(), cx);
         assert!(board.contains_key("board-session-shell-a"));
         click(
@@ -730,7 +723,7 @@ mod workspace {
                 view.level_focus_request = None;
                 view.focused = Some(A.into());
                 view.refresh_level(cx);
-                window.focus(&view.control_focus["board"]);
+                window.focus(&view.control_focus["sidebar-board"]);
             })
             .unwrap();
         draw(window.into(), cx);
@@ -767,17 +760,12 @@ mod workspace {
         overlay(window, cx, None);
         window
             .update(cx, |view, window, _| {
-                assert!(view.control_focus["board"].is_focused(window))
+                assert!(view.control_focus["sidebar-board"].is_focused(window))
             })
             .unwrap();
         draw(window.into(), cx);
-        let bounds = card_bounds(window, cx, A);
-        click(
-            window.into(),
-            cx,
-            MouseButton::Left,
-            point(bounds.right() - px(58.), bounds.top() + px(21.)),
-        );
+        let header = card_header(window, cx, A);
+        click(window.into(), cx, MouseButton::Right, header);
         overlay(window, cx, Some("card menu"));
         draw(window.into(), cx);
         click(
@@ -799,7 +787,7 @@ mod workspace {
             .update(cx, |view, _, _| view.pending_card_action = None)
             .unwrap();
         println!(
-            "card menu: right-click and more button, Shell actions, Escape and outside dismissal, focus, rename and close"
+            "card menu: right-click, Shell actions, Escape and outside dismissal, focus, rename and close"
         );
 
         card_action(window, cx, A, CardMenuAction::OpenDetached);
@@ -1013,7 +1001,7 @@ mod workspace {
                             view.locale = locale;
                             view.theme.set_preference(theme);
                             view.apply_theme_palette(cx);
-                            window.focus(&view.control_focus["board"]);
+                            window.focus(&view.control_focus["sidebar-board"]);
                         })
                         .unwrap();
                     draw(window.into(), cx);
@@ -1367,6 +1355,182 @@ mod workspace {
             .unwrap();
         println!(
             "horizontal divider: 35 painted steps each way (±180 pt), scrollback terminals bypassed in capture, buttonless move recovered after repaint, releases ended the drag"
+        );
+    }
+
+    fn scroll_to_zoom(window: AnyWindowHandle, cx: &mut AsyncApp, position: Point<Pixels>) {
+        use cocoa::{appkit::NSEvent, base::nil};
+        use core_foundation::base::CFRelease;
+        use core_graphics::{
+            display::CGDisplay,
+            event::{CGEventFlags, CGScrollEventUnit, ScrollEventUnit},
+            geometry::CGPoint,
+        };
+        use objc::{msg_send, sel, sel_impl};
+        use std::ffi::c_void;
+
+        unsafe extern "C" {
+            fn CGEventCreateScrollWheelEvent2(
+                source: *const c_void,
+                units: CGScrollEventUnit,
+                wheel_count: u32,
+                wheel1: i32,
+                wheel2: i32,
+                wheel3: i32,
+            ) -> *mut c_void;
+            fn CGEventSetLocation(event: *mut c_void, location: CGPoint);
+            fn CGEventSetFlags(event: *mut c_void, flags: CGEventFlags);
+        }
+        let (view, size) = native_view(window, cx);
+        unsafe {
+            let event = CGEventCreateScrollWheelEvent2(
+                std::ptr::null(),
+                ScrollEventUnit::PIXEL,
+                1,
+                32,
+                0,
+                0,
+            );
+            assert!(!event.is_null());
+            CGEventSetLocation(
+                event,
+                CGPoint::new(
+                    f64::from(position.x),
+                    CGDisplay::main().bounds().size.height - f64::from(size.height - position.y),
+                ),
+            );
+            CGEventSetFlags(event, CGEventFlags::CGEventFlagCommand);
+            let native = NSEvent::eventWithCGEvent_(nil, event);
+            CFRelease(event);
+            assert_eq!(native.locationInWindow().x, f64::from(position.x));
+            assert_eq!(
+                native.locationInWindow().y,
+                f64::from(size.height - position.y)
+            );
+            let _: () = msg_send![view, scrollWheel: native];
+        }
+    }
+
+    fn alt_tap(window: AnyWindowHandle, cx: &mut AsyncApp) {
+        use cocoa::{
+            appkit::{NSEvent, NSEventModifierFlags, NSEventType},
+            base::{NO, id, nil},
+            foundation::{NSInteger, NSPoint, NSString},
+        };
+        use objc::{msg_send, sel, sel_impl};
+        let (view, _) = native_view(window, cx);
+        unsafe {
+            let native: id = msg_send![view, window];
+            let number: NSInteger = msg_send![native, windowNumber];
+            let empty = NSString::alloc(nil).init_str("");
+            for flags in [
+                NSEventModifierFlags::NSAlternateKeyMask,
+                NSEventModifierFlags::empty(),
+            ] {
+                let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode_(
+                    nil, NSEventType::NSFlagsChanged, NSPoint::new(0., 0.), flags, 0., number, nil,
+                    empty, empty, NO, 58,
+                );
+                assert_ne!(event, nil);
+                let _: () = msg_send![view, flagsChanged: event];
+            }
+            let _: () = msg_send![empty, release];
+        }
+    }
+
+    async fn verify_carousel_and_zoom(cx: &mut AsyncApp, root: &std::path::Path) {
+        let (window, sink) = open_probe_at(cx, 1260.);
+        let toolbar = draw(window.into(), cx)["create-shell"].center();
+        click(window.into(), cx, MouseButton::Left, toolbar);
+        assert!(std::iter::from_fn(|| sink.try_recv().ok()).any(|command|
+            matches!(command, Command::CreateShellSibling { scene_id, source_session_id, parent_session_id: None }
+                if scene_id == "main" && source_session_id == A)));
+        publish_shell(window, cx, "new-float");
+        let bounds = draw(window.into(), cx);
+        assert!(!bounds.contains_key("split-canvas"));
+        assert!(card_bounds(window, cx, "new-float").size.width > px(0.));
+        window
+            .update(cx, |view, window, cx| {
+                view.data_root = Some(root.to_owned());
+                window.focus(&view.terminals["new-float"].read(cx).focus);
+            })
+            .unwrap();
+        let metrics = |cx: &mut AsyncApp| {
+            draw(window.into(), cx);
+            window
+                .update(cx, |view, _, cx| {
+                    view.terminals["new-float"]
+                        .read(cx)
+                        .target_dimensions()
+                        .unwrap()
+                })
+                .unwrap()
+        };
+        let initial = metrics(cx);
+        press(window, cx, "cmd-=");
+        let zoomed = metrics(cx);
+        assert!(
+            zoomed.0 < initial.0 && zoomed.1 < initial.1,
+            "{initial:?} -> {zoomed:?}"
+        );
+        assert_eq!(read_terminal_font_size(root), 12);
+        let mut minus = Keystroke::parse("cmd-x").unwrap();
+        minus.key = "-".into();
+        let native_window: AnyWindowHandle = window.into();
+        native_window
+            .update(cx, |_, window, cx| window.dispatch_keystroke(minus, cx))
+            .unwrap();
+        assert_eq!(metrics(cx), initial);
+        press(window, cx, "cmd-shift-+");
+        assert_eq!(metrics(cx), zoomed);
+        press(window, cx, "cmd-shift-_");
+        assert_eq!(metrics(cx), initial);
+        let card = card_bounds(window, cx, "new-float");
+        let visible_left = card.left().max(px(262.));
+        let visible_right = card.right().min(px(1258.));
+        assert!(
+            visible_right - visible_left > px(20.),
+            "floating card must intersect the viewport: {card:?}"
+        );
+        let position = point((visible_left + visible_right) / 2., card.center().y);
+        dispatch_mouse(
+            window,
+            cx,
+            MouseMoveEvent {
+                position,
+                modifiers: Modifiers::default(),
+                pressed_button: None,
+            },
+        );
+        scroll_to_zoom(native_window, cx, position);
+        assert_eq!(metrics(cx), zoomed);
+        cx.background_executor()
+            .timer(Duration::from_millis(100))
+            .await;
+        assert!(std::iter::from_fn(|| sink.try_recv().ok()).any(
+            |command| matches!(command, Command::Resize { session_id, cols, rows, .. }
+                if session_id == "new-float" && cols == zoomed.0 && rows == zoomed.1)
+        ));
+        press(window, cx, "cmd-0");
+        assert_eq!(metrics(cx), initial);
+        assert_eq!(read_terminal_font_size(root), 11);
+        alt_tap(native_window, cx);
+        alt_tap(native_window, cx);
+        overlay(window, cx, Some("shortcuts"));
+        press(window, cx, "escape");
+        overlay(window, cx, None);
+        press(window, cx, "cmd-shift-?");
+        overlay(window, cx, Some("shortcuts"));
+        press(window, cx, "escape");
+        std::iter::from_fn(|| sink.try_recv().ok()).for_each(drop);
+        press(window, cx, "cmd-w");
+        assert!(std::iter::from_fn(|| sink.try_recv().ok()).any(|command|
+            matches!(command, Command::CloseSessionCard { session_id, .. } if session_id == "new-float")));
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        println!(
+            "carousel: toolbar creates a floating sibling; Mod+W closes it; Alt double-tap, Mod+?, font keys and wheel update the hidden terminal"
         );
     }
 
@@ -1841,6 +2005,7 @@ mod workspace {
                 verify(cx, &fixture_root).await;
                 verify_horizontal_divider_drag(cx);
                 verify_splits(cx);
+                verify_carousel_and_zoom(cx, &fixture_root.join("font-zoom")).await;
                 verify_links(cx).await;
                 live_wiring::verify(cx, fixture_root.clone()).await;
                 live_wiring::verify_board(cx, fixture_root.join("board")).await;

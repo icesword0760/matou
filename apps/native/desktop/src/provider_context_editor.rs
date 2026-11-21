@@ -300,6 +300,10 @@ impl ProviderContextEditorRow {
         cx.notify();
     }
 
+    pub fn focus_order(&self, cx: &App) -> [FocusHandle; 2] {
+        [self.input.read(cx).focus.clone(), self.save_focus.clone()]
+    }
+
     #[cfg(debug_assertions)]
     pub fn probe_focus_input(&self, window: &mut Window, cx: &App) {
         window.focus(&self.input.read(cx).focus);
@@ -460,6 +464,10 @@ impl Render for ProviderContextEditorRow {
 /// Badge shared by the editor and provider cards. Frozen `provider-setup.css:159`
 /// applies the same colors in both themes.
 pub fn provider_context_window_badge(tokens: Option<u64>, locale: InterfaceLocale) -> Div {
+    context_window_badge_view(context_window_badge(tokens, locale))
+}
+
+pub fn context_window_badge_view(label: String) -> Div {
     div()
         .flex_none()
         .h(px(18.))
@@ -474,9 +482,7 @@ pub fn provider_context_window_badge(tokens: Option<u64>, locale: InterfaceLocal
         .font_weight(FontWeight(600.))
         .text_color(rgb(0x276cc0))
         .whitespace_nowrap()
-        .child(crate::ui_text::ui_text(context_window_badge(
-            tokens, locale,
-        )))
+        .child(crate::ui_text::ui_text(label))
 }
 
 /// Provider-switch note with inline emphasis, as in `hierarchy.css:1162–1163,

@@ -46,8 +46,15 @@ def run(binary, log_path, root):
                 process.wait(timeout=5)
             print(log_path.read_text(), end='')
     assert not endpoint.exists(), 'clean exit left a socket'
+    output = log_path.read_text()
+    assert not any(
+        'sequence' in line.lower() and any(marker in line.lower() for marker in (
+            'diagnostic', 'acknowledgement exceeds', 'sequence gap',
+        ))
+        for line in output.splitlines()
+    ), output
     prefix = '[dag-window-probe] '
-    cases = [line[len(prefix):].split()[0] for line in log_path.read_text().splitlines()
+    cases = [line[len(prefix):].split()[0] for line in output.splitlines()
              if line.startswith(prefix)]
     assert cases == [
         'open-icon', 'repeat', 'live-update', 'main-switch', 'main-switch-back',
