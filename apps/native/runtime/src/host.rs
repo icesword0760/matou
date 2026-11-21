@@ -26,7 +26,7 @@ use crate::{
     codex_permissions,
     codex_resume::{self, Resume as CodexResume},
     dsh_catalog::{self, DshSessionCatalog},
-    egress_probe::{self, EgressMonitor, EgressSample, Family, RuleMode},
+    egress_probe::{self, EgressMonitor, EgressSample, Family, LiveEgressSampler, RuleMode},
     environment_runtime::{self, EnvironmentTarget, WorktreeExpectation},
     history_worker::{HistoryReply, HistoryRequest, HistoryWorker},
     host_control::ControlServer,
@@ -1308,6 +1308,113 @@ struct RuntimeWiring {
     antigravity: AntigravityCatalog,
     update: update_download::UpdateManager,
     next_egress_attempt: u64,
+    live_egress: Option<LiveEgress>,
+}
+
+struct LiveEgress {
+    sampler: LiveEgressSampler,
+    next_check: Instant,
+    in_flight: bool,
+    first_sample: bool,
+    status_requests: Vec<u64>,
+    recheck_requests: Vec<u64>,
+}
+
+impl LiveEgress {
+    fn start() -> Result<Option<Self>> {
+        let Some(sampler) = LiveEgressSampler::start()? else {
+            return Ok(None);
+        };
+        let mut live = Self {
+            sampler,
+            next_check: Instant::now() + egress_probe::LIVE_RECHECK_INTERVAL,
+            in_flight: false,
+            first_sample: true,
+            status_requests: Vec::new(),
+            recheck_requests: Vec::new(),
+        };
+        live.request_check()?;
+        Ok(Some(live))
+    }
+
+    fn request_check(&mut self) -> Result<()> {
+        if !self.in_flight {
+            self.sampler.request()?;
+            self.in_flight = true;
+        }
+        Ok(())
+    }
+
+    fn handle(&mut self, command: &Command) -> bool {
+        match command {
+            // Desktop asks once when Ready arrives. Keep that request pending
+            // until the first sample so the existing reply updates its footer.
+            Command::GetEgressStatus { request_id } if self.first_sample => {
+                self.status_requests.push(*request_id);
+            }
+            Command::RecheckEgress { request_id } => {
+                self.recheck_requests.push(*request_id);
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    fn poll(&mut self, owner: &mut ShellOwner) -> Result<Option<Result<Value>>> {
+        match self.sampler.samples.try_recv() {
+            Ok(sample) => {
+                self.in_flight = false;
+                self.first_sample = false;
+                return Ok(Some(
+                    owner
+                        .apply_egress_sample(sample)
+                        .map(|()| egress_projection(owner.egress().status())),
+                ));
+            }
+            Err(mpsc::TryRecvError::Disconnected) => bail!("Egress sampling worker stopped"),
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+        let time = Instant::now();
+        let periodic = self.next_check <= time;
+        if periodic {
+            self.next_check = time + egress_probe::LIVE_RECHECK_INTERVAL;
+        }
+        if periodic
+            || !self.recheck_requests.is_empty()
+            || owner
+                .egress()
+                .recovery_deadline()
+                .is_some_and(|due| due <= now() as u64)
+        {
+            self.request_check()?;
+        }
+        Ok(None)
+    }
+
+    fn replies(&mut self, result: Result<Value>) -> Vec<Event> {
+        let reply = |kind, request_id| {
+            wiring_result(
+                kind,
+                request_id,
+                result
+                    .as_ref()
+                    .cloned()
+                    .map_err(|error| anyhow!("{error:#}")),
+            )
+        };
+        let mut replies = vec![reply("egressStatusChanged", 0)];
+        replies.extend(
+            self.status_requests
+                .drain(..)
+                .map(|id| reply("egressStatusResult", id)),
+        );
+        replies.extend(
+            self.recheck_requests
+                .drain(..)
+                .map(|id| reply("egressRecheckResult", id)),
+        );
+        replies
+    }
 }
 
 fn wiring_result(kind: &str, request_id: u64, result: Result<Value>) -> Event {
@@ -1377,6 +1484,7 @@ impl RuntimeWiring {
             antigravity,
             update,
             next_egress_attempt: 0,
+            live_egress: None,
         })
     }
 
@@ -1897,12 +2005,20 @@ pub struct RuntimeHost {
 
 impl RuntimeHost {
     pub fn start(options: LaunchOptions) -> Result<Self> {
-        Self::start_with_offline_fixtures(options, OfflineFixtures::default())
+        Self::start_inner(options, OfflineFixtures::default(), true)
     }
 
     pub fn start_with_offline_fixtures(
         options: LaunchOptions,
         fixtures: OfflineFixtures,
+    ) -> Result<Self> {
+        Self::start_inner(options, fixtures, false)
+    }
+
+    fn start_inner(
+        options: LaunchOptions,
+        fixtures: OfflineFixtures,
+        live_egress: bool,
     ) -> Result<Self> {
         LazyLock::force(&PERMISSION_STARTUP_WINDOW);
         let (commands, incoming) = mpsc::channel();
@@ -1912,7 +2028,14 @@ impl RuntimeHost {
         let thread = thread::Builder::new()
             .name("matou-domain-owner".into())
             .spawn(move || {
-                let result = run(options, incoming, &send, &domain_shutdown, fixtures);
+                let result = run(
+                    options,
+                    incoming,
+                    &send,
+                    &domain_shutdown,
+                    fixtures,
+                    live_egress,
+                );
                 if let Err(error) = &result {
                     let _ = send.send_blocking(Event::Diagnostic(format!("{error:#}")));
                 }
@@ -2393,6 +2516,7 @@ fn run(
     send: &async_channel::Sender<Event>,
     shutdown_requested: &OnceLock<bool>,
     fixtures: OfflineFixtures,
+    live_egress: bool,
 ) -> Result<()> {
     let mut wiring = RuntimeWiring::new(fixtures, &options.shell_home)?;
     let generation = id();
@@ -2455,6 +2579,7 @@ fn run(
         &mut recovery_request,
         &generation,
         &mut wiring,
+        live_egress,
     );
     if let (Some(request_id), Err(error)) = (recovery_request, &result) {
         recovery_result(
@@ -2826,6 +2951,7 @@ fn run_writable(
     recovery_request: &mut Option<String>,
     generation: &str,
     wiring: &mut RuntimeWiring,
+    live_egress: bool,
 ) -> Result<()> {
     for path in [&options.workspace, &options.shell_home] {
         if let Err(error) = std::fs::create_dir_all(path) {
@@ -3137,6 +3263,14 @@ fn run_writable(
     } else {
         None
     };
+    if live_egress {
+        match LiveEgress::start() {
+            Ok(live) => wiring.live_egress = live,
+            Err(error) => send.send_blocking(Event::Diagnostic(format!(
+                "Start egress sampler: {error:#}"
+            )))?,
+        }
+    }
     send.send_blocking(ready_event)?;
     if let Some(request_id) = recovery_request.take() {
         recovery_result(
@@ -3618,6 +3752,23 @@ fn run_writable(
         if let Err(error) = wiring.poll_egress(&mut owner) {
             send.send_blocking(Event::Diagnostic(format!("Egress recheck: {error:#}")))?;
         }
+        if let Some(live) = &mut wiring.live_egress {
+            let (replies, stopped) = match live.poll(&mut owner) {
+                Ok(Some(result)) => (live.replies(result), false),
+                Ok(None) => (Vec::new(), false),
+                Err(error) => (live.replies(Err(error)), true),
+            };
+            if !replies.is_empty() {
+                let graph =
+                    active_graph(&owner, scene_id.as_deref(), window_id, &startup_deferred)?;
+                for reply in replies {
+                    send.send_blocking(with_graph_projection(reply, graph.clone()))?;
+                }
+            }
+            if stopped {
+                wiring.live_egress = None;
+            }
+        }
         for _ in 0..128 {
             // Resolve Ctrl+C before a subsequent focus/shutdown can overtake its
             // control interaction. Ordinary copy does not hold this queue.
@@ -3638,6 +3789,13 @@ fn run_writable(
                     "RECOVERY_NOT_PENDING",
                     DATABASE_RECOVERY_NOT_PENDING,
                 ))?;
+                continue;
+            }
+            if wiring
+                .live_egress
+                .as_mut()
+                .is_some_and(|live| live.handle(&command))
+            {
                 continue;
             }
             if let Some(reply) = wiring.handle(&command, &data_root, Some(&mut owner)) {
@@ -3746,24 +3904,6 @@ fn run_writable(
                             }
                             None => (None, None),
                         };
-                        if let Some(action) = &card_action
-                            && action["outcome"] == "hide-window"
-                        {
-                            let mut graph = active_graph(
-                                &owner,
-                                scene_id.as_deref(),
-                                window_id,
-                                &startup_deferred,
-                            )?;
-                            graph["sessionCardAction"] = action.clone();
-                            let event = Event::Graph(graph);
-                            if navigation_publications.is_empty() {
-                                send.send_blocking(event)?;
-                            } else {
-                                navigation_publications.push_back((Vec::new(), false, event));
-                            }
-                            continue;
-                        }
                         let wait_for_workers = card_action.is_some();
                         let defer_publication =
                             wait_for_workers || !navigation_publications.is_empty();
@@ -6063,6 +6203,7 @@ fn run_writable(
             dirty.remove(&session_id);
         }
     };
+    drop(wiring.live_egress.take());
     drop(control);
     shell_promotions.retain(|id, promotion| !promotion.started_at_shutdown(&mut owner, id));
     for (id, change) in permission_changes {
@@ -8214,7 +8355,7 @@ fn navigate(
                 time,
             )?;
             let disposed = serde_json::from_value(result["disposedSessionIds"].clone())?;
-            let mut action = json!({
+            let action = json!({
                 "action": "close-session-card",
                 "sceneId": input.scene_id,
                 "sessionId": input.session_id,
@@ -8222,12 +8363,6 @@ fn navigate(
                 "rebuildCanvas": result["rebuildCanvas"],
                 "disposedSessionIds": disposed,
             });
-            if action["outcome"] == "hide-window" {
-                action["notice"] = json!({
-                    "body": "当前已是最后一个事项下的最后一个标签，这里点击关闭不会删除该事项。\n\n如需删除该工作区，请在左侧事项面板的下拉菜单中执行删除。",
-                    "confirmLabel": "我知道了",
-                });
-            }
             return Ok((
                 owner.hierarchy(window_id)?,
                 disposed,
@@ -8434,12 +8569,15 @@ mod tests {
             home.join(".zshrc"),
             "/bin/stty raw -echo\nprintf 'MATOU_RAW_SHELL_READY\\r\\n'\nexec /bin/cat > \"$HOME/bytes\"\n",
         )?;
-        let runtime = RuntimeHost::start(LaunchOptions {
-            data_root: root.join("data"),
-            workspace: root.join("workspace"),
-            shell_home: home,
-            shell: "/bin/zsh".into(),
-        })?;
+        let runtime = RuntimeHost::start_with_offline_fixtures(
+            LaunchOptions {
+                data_root: root.join("data"),
+                workspace: root.join("workspace"),
+                shell_home: home,
+                shell: "/bin/zsh".into(),
+            },
+            OfflineFixtures::default(),
+        )?;
         let deadline = Instant::now() + Duration::from_secs(8);
         loop {
             match next_test_event(&runtime, deadline)? {
@@ -8952,7 +9090,7 @@ mod tests {
             )
         };
 
-        let bridge = RuntimeHost::start(options)?;
+        let bridge = RuntimeHost::start_with_offline_fixtures(options, OfflineFixtures::default())?;
         let mut ready = HashSet::new();
         let deadline = Instant::now() + Duration::from_secs(8);
         while !ready.contains(&first) || !ready.contains(&second) {

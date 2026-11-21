@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process'
 import { constants } from 'node:fs'
 import {
-  access, chmod, copyFile, lstat, mkdir, mkdtemp, open, readFile, realpath, rename, rm, writeFile
+  access, chmod, copyFile, cp, lstat, mkdir, mkdtemp, open, readFile, realpath, rename, rm, writeFile
 } from 'node:fs/promises'
 import { basename, dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -10,6 +10,8 @@ import { isDeepStrictEqual, parseArgs, promisify } from 'node:util'
 import { verifyInstallSource } from '../install-macos-app.mjs'
 
 const desktopProject = fileURLToPath(new URL('../../apps/desktop/', import.meta.url))
+const claudePlugin = 'control-assets/providers/claude-plugin'
+const runtimeProject = fileURLToPath(new URL('../../apps/runtime/', import.meta.url))
 const desktopName = 'matou-native-desktop'
 const runtimeName = 'matou-native-runtime'
 const iconName = 'icon.icns'
@@ -351,6 +353,7 @@ async function assemble(options, config, bundleId, workflow) {
       await chmod(path, 0o755)
     }
     await copyFile(icon, join(resources, iconName))
+    await cp(join(runtimeProject, claudePlugin), join(resources, claudePlugin), { recursive: true })
     await copyFile(entitlements, join(resources, entitlementsName))
     const bundledWorkflow = workflowPath(resources, workflow, appName)
     for (const [index, file] of workflowFiles.entries()) {

@@ -15,7 +15,9 @@ use matou_native_core::{
 };
 use matou_native_runtime::{
     SessionEvent, SessionOptions,
-    host::{Command as HostCommand, Event as HostEvent, LaunchOptions, RuntimeHost},
+    host::{
+        Command as HostCommand, Event as HostEvent, LaunchOptions, OfflineFixtures, RuntimeHost,
+    },
     worker::{SessionWorker, WorkerCommand, WorkerEvent},
 };
 use matou_native_terminal::{Screen, SelectionAction, SelectionMode, Terminal, TerminalOptions};
@@ -466,12 +468,15 @@ fn capture_host_frames(grid: &Grid, case: FrameCase) -> Result<Value> {
         home.join(".zshrc"),
         "/bin/stty raw -echo\nprintf 'SCROLL_FRAME_READY'\nread -k 1\nprintf '\\033[2J\\033[H'\n/bin/cat \"$HOME/seed\"\nexec /bin/cat >/dev/null\n",
     )?;
-    let mut host = RuntimeHost::start(LaunchOptions {
-        data_root: data_root.clone(),
-        workspace: root.path().join("workspace"),
-        shell_home: home,
-        shell: "/bin/zsh".into(),
-    })?;
+    let mut host = RuntimeHost::start_with_offline_fixtures(
+        LaunchOptions {
+            data_root: data_root.clone(),
+            workspace: root.path().join("workspace"),
+            shell_home: home,
+            shell: "/bin/zsh".into(),
+        },
+        OfflineFixtures::default(),
+    )?;
     let (id, _, ready_sequence, _) = wait_host_frame(&host, |_, screen, _| {
         screen_rows(screen).any(|row| row.starts_with("SCROLL_FRAME_READY"))
     })?;

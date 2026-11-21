@@ -198,6 +198,8 @@ pub struct AgentHudProjection {
     active_tools: Vec<(String, RunningTool)>,
     completed_tools: Vec<(String, String)>,
     hook_counts: Vec<ToolCount>,
+    claude_hook_tools: std::collections::BTreeMap<String, String>,
+    live_claude: Option<ClaudeTranscript>,
     failed_mcp_servers: Vec<String>,
     optimistic_agents: Vec<(String, AgentActivity)>,
     transcript_agents: Vec<(AgentActivity, Option<f64>)>,
@@ -245,6 +247,8 @@ impl AgentHudProjection {
             active_tools: Vec::new(),
             completed_tools: Vec::new(),
             hook_counts: Vec::new(),
+            claude_hook_tools: Default::default(),
+            live_claude: None,
             failed_mcp_servers: Vec::new(),
             optimistic_agents: Vec::new(),
             transcript_agents: Vec::new(),
@@ -304,8 +308,33 @@ impl AgentHudProjection {
         self.context_tokens
     }
 
+    pub(crate) fn cwd(&self) -> Option<&str> {
+        self.hud.cwd.as_deref()
+    }
+
     pub fn snapshot(&self, now_ms: f64) -> HudSnapshot {
         let mut hud = self.hud.clone();
+        if hud.provider == HudProvider::ClaudeCode
+            && let Some(history) = &self.live_claude
+        {
+            let mut tools = history.tool_counts.clone();
+            for (id, name) in &self.claude_hook_tools {
+                if !history.completed_tools.contains(id) {
+                    increment(&mut tools, name);
+                }
+            }
+            hud.tool_counts = Some(tools);
+            if !self.session_ended {
+                let mut running = history.active_tools.clone();
+                for (id, tool) in &self.active_tools {
+                    if !history.completed_tools.contains(id) {
+                        upsert(&mut running, id.clone(), tool.clone());
+                    }
+                }
+                running.retain(|(id, _)| !self.claude_hook_tools.contains_key(id));
+                hud.running_tools = Some(running.into_iter().map(|(_, tool)| tool).collect());
+            }
+        }
         if hud.agents.is_some() {
             let mut agents = Vec::new();
             if !self.session_ended {
@@ -315,7 +344,21 @@ impl AgentHudProjection {
                     }
                 }
                 for (id, agent) in &self.optimistic_agents {
-                    upsert(&mut agents, id.clone(), agent.clone());
+                    if self.live_claude.as_ref().is_none_or(|history| {
+                        !history
+                            .observed_agents
+                            .iter()
+                            .any(|(observed, _)| observed == id)
+                    }) {
+                        upsert(&mut agents, id.clone(), agent.clone());
+                    }
+                }
+                if let Some(history) = &self.live_claude {
+                    for (id, (agent, failed_at)) in &history.agents {
+                        if failed_at.is_none_or(|time| now_ms - time < 300_000.) {
+                            upsert(&mut agents, id.clone(), agent.clone());
+                        }
+                    }
                 }
             }
             let mut agents: Vec<_> = agents.into_iter().map(|(_, agent)| agent).collect();
@@ -621,6 +664,14 @@ impl AgentHudProjection {
             };
             if codex {
                 upsert(&mut self.completed_tools, id.clone(), name.to_owned());
+            } else if self.hud.provider == HudProvider::ClaudeCode {
+                if self
+                    .claude_hook_tools
+                    .insert(id.clone(), name.to_owned())
+                    .is_none()
+                {
+                    increment(&mut self.hook_counts, name);
+                }
             } else {
                 increment(&mut self.hook_counts, name);
             }
@@ -914,6 +965,17 @@ fn new_agent(id: &str, input: &Value, ordinal: usize, started_at: Option<f64>) -
 }
 
 impl AgentHudProjection {
+    pub(crate) fn ingest_live_claude_row(&mut self, row: Option<&Value>) {
+        if let Some(row) = row {
+            let history = self
+                .live_claude
+                .get_or_insert_with(ClaudeTranscript::default);
+            history.ingest(row);
+        } else {
+            self.live_claude = None;
+        }
+    }
+
     /// Refresh from the complete sequence of decoded transcript rows for this run.
     pub fn refresh_transcript(&mut self, rows: &[Value]) {
         match self.hud.provider {
@@ -1444,6 +1506,35 @@ pub fn project_teammates(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn claude_live_counts_move_tools_from_running_to_completed_once() {
+        let mut projection = AgentHudProjection::new("claude", HudProvider::ClaudeCode, 1.);
+        projection.ingest_provider(
+            &json!({"hook_event_name":"PreToolUse", "tool_use_id":"read", "tool_name":"Read"}),
+            2.,
+        );
+        let uses = json!({"type":"assistant", "message":{"content":[
+            {"type":"tool_use", "id":"read", "name":"Read"},
+            {"type":"tool_use", "id":"grep", "name":"Grep"}
+        ]}});
+        projection.ingest_live_claude_row(Some(&uses));
+        assert_eq!(projection.snapshot(2.).running_tools.unwrap().len(), 2);
+        let result = json!({"type":"user", "message":{"content":[
+            {"type":"tool_result", "tool_use_id":"read"}
+        ]}});
+        projection.ingest_live_claude_row(Some(&result));
+        projection.ingest_provider(
+            &json!({"hook_event_name":"PostToolUse", "tool_use_id":"grep", "tool_name":"Grep"}),
+            3.,
+        );
+        let hud = projection.snapshot(3.);
+        assert!(hud.running_tools.unwrap().is_empty());
+        assert_eq!(
+            json!(hud.tool_counts),
+            json!([{"name":"Read","count":1},{"name":"Grep","count":1}])
+        );
+    }
 
     #[test]
     fn agent_hud_projection_context_preserves_zero_and_clears_only_explicit_null() {
