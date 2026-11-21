@@ -3,12 +3,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use matou_native_core::git_repo::{
-    ChangeCounts, ForkBranchError, Head, Removal, Repository, WorktreeBranch, WorktreeScope,
-    current_branch,
+    ChangeCounts, ForkBranchError, GitActionError, Head, Removal, Repository, WorktreeBranch,
+    WorktreeScope, current_branch, git_checkout, git_commit, git_create_branch, git_push,
+    git_status_detail, git_worktree_create, git_worktree_remove,
 };
 use tempfile::TempDir;
 
-fn git(path: &Path, args: &[&str]) {
+fn git(path: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
         .current_dir(path)
         .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -21,6 +22,10 @@ fn git(path: &Path, args: &[&str]) {
         "{args:?}: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .trim_end()
+        .to_owned()
 }
 
 fn init(path: &Path) {
@@ -453,4 +458,261 @@ fn removal_retains_an_ignored_nested_registered_worktree() {
     assert!(scope.remove(&parent).is_err());
     assert!(nested.join("tracked.txt").is_file());
     assert_eq!(repo.worktrees().unwrap().len(), 3);
+}
+
+fn isolated_git_writes(name: &str, test: impl FnOnce()) {
+    if std::env::var_os("MATOU_GIT_WRITE_FIXTURE").is_some() {
+        test();
+        return;
+    }
+    let config = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let result = Command::new(std::env::current_exe().unwrap())
+        .env("MATOU_GIT_WRITE_FIXTURE", "1")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", config.path().join("no-global-config"))
+        .env("GIT_ALLOW_PROTOCOL", "file")
+        .args(["--exact", name, "--test-threads=1"])
+        .status()
+        .unwrap();
+    assert!(result.success());
+}
+
+fn issue(error: anyhow::Error) -> &'static str {
+    error
+        .downcast_ref::<GitActionError>()
+        .unwrap_or_else(|| panic!("expected a Git issue, got {error:#}"))
+        .0
+}
+
+#[test]
+fn git_menu_status_checkout_and_branch_creation() {
+    isolated_git_writes("git_menu_status_checkout_and_branch_creation", || {
+        let (_temp, cwd, repo) = fixture();
+        let initial = repo.resolve_commit("HEAD").unwrap();
+        git(&cwd, &["branch", "base"]);
+        fs::write(cwd.join("tracked.txt"), "line two\nline three\n").unwrap();
+        git(&cwd, &["add", "tracked.txt"]);
+        fs::write(cwd.join("tracked.txt"), "line two\nline three\nline four\n").unwrap();
+        fs::write(cwd.join("untracked.txt"), "untracked\n").unwrap();
+        let status = git_status_detail(&cwd).unwrap();
+        assert_eq!(status.current_branch.as_deref(), Some("main"));
+        assert_eq!(status.dirty_file_count, 2);
+        assert_eq!(status.staged_count, 1);
+        assert_eq!((status.additions, status.deletions), (3, 1));
+        assert!(status.dirty && status.worktrees[0].main && status.worktrees[0].current);
+
+        let committed = git_commit(&cwd, "update tracked", false).unwrap();
+        assert_eq!(committed.dirty_file_count, 2);
+        assert_eq!(committed.staged_count, 0);
+        assert_eq!(
+            issue(git_checkout(&cwd, "base").unwrap_err()),
+            "GIT_CHECKOUT_CONFLICT"
+        );
+        assert_eq!(
+            fs::read_to_string(cwd.join("tracked.txt")).unwrap(),
+            "line two\nline three\nline four\n"
+        );
+        git(&cwd, &["restore", "tracked.txt"]);
+        let switched = git_checkout(&cwd, "base").unwrap();
+        assert_eq!(switched.current_branch.as_deref(), Some("base"));
+        assert_eq!(switched.dirty_file_count, 1);
+        assert!(
+            switched
+                .branches
+                .iter()
+                .any(|branch| branch.current && branch.name == "base")
+        );
+
+        for invalid in ["feature//new", "-b", "@{-1}", "HEAD", "new branch"] {
+            assert_eq!(
+                issue(git_create_branch(&cwd, invalid, None).unwrap_err()),
+                "GIT_INVALID_BRANCH"
+            );
+        }
+        assert_eq!(
+            issue(git_create_branch(&cwd, "base", None).unwrap_err()),
+            "GIT_BRANCH_EXISTS"
+        );
+        assert_eq!(
+            issue(git_create_branch(&cwd, "uncreated", Some("--help")).unwrap_err()),
+            "GIT_INVALID_START_POINT"
+        );
+        let created = git_create_branch(&cwd, "feature/菜单", Some("main")).unwrap();
+        assert_eq!(created.current_branch.as_deref(), Some("feature/菜单"));
+        assert_eq!(
+            repo.resolve_commit("HEAD").unwrap(),
+            repo.resolve_commit("main").unwrap()
+        );
+        git(&cwd, &["checkout", "--detach", &initial]);
+        let detached = git_status_detail(&cwd).unwrap();
+        assert_eq!(detached.detached_head.as_deref(), Some(initial.as_str()));
+        assert_eq!(issue(git_push(&cwd).unwrap_err()), "GIT_DETACHED_HEAD");
+    });
+}
+
+#[test]
+fn git_menu_push_sets_upstream_and_pushes_only_current_branch_offline() {
+    isolated_git_writes(
+        "git_menu_push_sets_upstream_and_pushes_only_current_branch_offline",
+        || {
+            let (temp, cwd, repo) = fixture();
+            let origin = temp.path().join("bare origin.git");
+            fs::create_dir(&origin).unwrap();
+            git(&origin, &["init", "--bare", "--initial-branch=main"]);
+            assert_eq!(issue(git_push(&cwd).unwrap_err()), "GIT_NO_REMOTE");
+            git(&cwd, &["remote", "add", "origin", origin.to_str().unwrap()]);
+            git(&cwd, &["config", "push.default", "matching"]);
+            git(&cwd, &["branch", "keep-local"]);
+            let before = git_status_detail(&cwd).unwrap();
+            assert!(before.has_remote && before.can_push && before.upstream.is_none());
+            let pushed = git_push(&cwd).unwrap();
+            assert_eq!(pushed.upstream.as_deref(), Some("refs/remotes/origin/main"));
+            assert_eq!((pushed.ahead, pushed.behind), (0, 0));
+            assert_eq!(
+                git(
+                    &origin,
+                    &["for-each-ref", "--format=%(refname)", "refs/heads"]
+                ),
+                "refs/heads/main"
+            );
+            assert!(!pushed.can_push);
+            assert_eq!(
+                issue(git_commit(&cwd, "   ", true).unwrap_err()),
+                "GIT_COMMIT_MESSAGE_REQUIRED"
+            );
+            assert_eq!(
+                issue(git_commit(&cwd, "no changes", true).unwrap_err()),
+                "GIT_NOTHING_TO_COMMIT"
+            );
+
+            fs::write(cwd.join("added.txt"), "offline push\n").unwrap();
+            let committed = git_commit(&cwd, "push me", true).unwrap();
+            assert!(committed.can_push && !committed.dirty);
+            assert_eq!(committed.ahead, 1);
+            let pushed = git_push(&cwd).unwrap();
+            assert_eq!(pushed.ahead, 0);
+            assert_eq!(
+                git(&origin, &["rev-parse", "refs/heads/main"]),
+                repo.resolve_commit("HEAD").unwrap()
+            );
+
+            // Move the fixture remote ahead with a conflicting commit.
+            let other = temp.path().join("other checkout");
+            git(
+                temp.path(),
+                &["clone", origin.to_str().unwrap(), other.to_str().unwrap()],
+            );
+            git(&other, &["config", "user.name", "Fixture"]);
+            git(&other, &["config", "user.email", "fixture@example.invalid"]);
+            fs::write(other.join("tracked.txt"), "from remote\n").unwrap();
+            git_commit(&other, "remote change", true).unwrap();
+            git_push(&other).unwrap();
+            git(&cwd, &["fetch", "origin"]);
+            fs::write(cwd.join("tracked.txt"), "local change\n").unwrap();
+            let diverged = git_commit(&cwd, "local change", true).unwrap();
+            assert_eq!((diverged.ahead, diverged.behind), (1, 1));
+            assert_eq!(issue(git_push(&cwd).unwrap_err()), "GIT_PUSH_REJECTED");
+            assert_eq!(git(&origin, &["show", "main:tracked.txt"]), "from remote");
+        },
+    );
+}
+
+#[test]
+fn git_menu_worktree_creation_and_safe_removal() {
+    isolated_git_writes("git_menu_worktree_creation_and_safe_removal", || {
+        let (temp, cwd, _repo) = fixture();
+        let target = temp.path().join("linked checkout");
+        let status = git_worktree_create(&cwd, "feature/wt", Some(&target)).unwrap();
+        let target = target.canonicalize().unwrap();
+        assert_eq!(status.worktrees.len(), 2);
+        let linked = &status.worktrees[1];
+        assert_eq!(linked.path, target);
+        assert_eq!(linked.branch.as_deref(), Some("feature/wt"));
+        assert!(!linked.main && !linked.current);
+        assert_eq!(
+            issue(git_checkout(&cwd, "feature/wt").unwrap_err()),
+            "GIT_BRANCH_IN_WORKTREE"
+        );
+        assert_eq!(
+            issue(git_worktree_remove(&cwd, &cwd).unwrap_err()),
+            "GIT_WORKTREE_PROTECTED"
+        );
+        assert_eq!(
+            issue(git_worktree_remove(&target, &cwd).unwrap_err()),
+            "GIT_WORKTREE_PROTECTED"
+        );
+        assert_eq!(
+            issue(git_worktree_remove(&target, &target).unwrap_err()),
+            "GIT_WORKTREE_PROTECTED"
+        );
+
+        git(&cwd, &["worktree", "lock", target.to_str().unwrap()]);
+        assert_eq!(
+            issue(git_worktree_remove(&cwd, &target).unwrap_err()),
+            "GIT_WORKTREE_PROTECTED"
+        );
+        git(&cwd, &["worktree", "unlock", target.to_str().unwrap()]);
+        fs::write(target.join("dirty.txt"), "must survive\n").unwrap();
+        assert!(git_status_detail(&cwd).unwrap().worktrees[1].dirty);
+        assert_eq!(
+            issue(git_worktree_remove(&cwd, &target).unwrap_err()),
+            "GIT_WORKTREE_DIRTY"
+        );
+        assert!(target.join("dirty.txt").is_file());
+        fs::remove_file(target.join("dirty.txt")).unwrap();
+
+        let clean = git_worktree_remove(&cwd, &target).unwrap();
+        assert_eq!(clean.worktrees.len(), 1);
+        assert!(!target.exists());
+        let recreated = git_worktree_create(&cwd, "feature/wt", None).unwrap();
+        assert_eq!(recreated.worktrees[1].branch.as_deref(), Some("feature/wt"));
+        assert!(recreated.worktrees[1].path.is_dir());
+        assert_eq!(
+            git_worktree_remove(&cwd, &recreated.worktrees[1].path)
+                .unwrap()
+                .worktrees
+                .len(),
+            1
+        );
+    });
+}
+
+#[test]
+fn git_menu_status_and_commit_support_unborn_and_merged_conflict_states() {
+    isolated_git_writes(
+        "git_menu_status_and_commit_support_unborn_and_merged_conflict_states",
+        || {
+            let dir = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+            let cwd = dir.path().join("unborn");
+            init(&cwd);
+            let status = git_status_detail(&cwd).unwrap();
+            assert_eq!(status.current_branch.as_deref(), Some("main"));
+            assert!(!status.dirty && status.branches.is_empty());
+            fs::write(cwd.join("tracked.txt"), "initial\n").unwrap();
+            git(&cwd, &["add", "tracked.txt"]);
+            assert_eq!(git_status_detail(&cwd).unwrap().additions, 1);
+            git_commit(&cwd, "initial", true).unwrap();
+            git_create_branch(&cwd, "side", None).unwrap();
+            fs::write(cwd.join("tracked.txt"), "side\n").unwrap();
+            git_commit(&cwd, "side", true).unwrap();
+            git_checkout(&cwd, "main").unwrap();
+            fs::write(cwd.join("tracked.txt"), "main\n").unwrap();
+            git_commit(&cwd, "main", true).unwrap();
+            let merge = Command::new("git")
+                .current_dir(&cwd)
+                .args(["merge", "side"])
+                .output()
+                .unwrap();
+            assert!(!merge.status.success());
+            assert!(git_status_detail(&cwd).unwrap().dirty);
+            assert_eq!(
+                issue(git_commit(&cwd, "resolve", true).unwrap_err()),
+                "GIT_UNMERGED"
+            );
+            assert_eq!(
+                git(&cwd, &["diff", "--name-only", "--diff-filter=U"]),
+                "tracked.txt"
+            );
+        },
+    );
 }
