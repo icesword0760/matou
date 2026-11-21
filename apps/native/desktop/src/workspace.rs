@@ -3073,7 +3073,7 @@ impl Workspace {
         self.fail_pending_permission_modes(&reason, cx);
         self.permission_identities.clear();
         self.runtime_generation = generation;
-        self.retire_wiring_commands();
+        self.retire_wiring_commands(cx);
         self.transport_connected = false;
         self.domain_ready = false;
         self.session_frames.clear();
@@ -3356,7 +3356,7 @@ impl Workspace {
                 self.fail_pending_permission_modes(&message, cx);
                 self.reconcile_permission_overlay(window, cx);
                 self.fail_pending_loader_commands(message.clone());
-                self.retire_wiring_commands();
+                self.retire_wiring_commands(cx);
                 self.transport_fault = Some((generation, message));
                 cx.notify();
                 return;
@@ -3406,7 +3406,7 @@ impl Workspace {
                 }
                 self.transport_connected = matches!(phase, ConnectionPhase::Ready);
                 if !self.transport_connected {
-                    self.retire_wiring_commands();
+                    self.retire_wiring_commands(cx);
                     let message = match &phase {
                         ConnectionPhase::Blocked(block) => block.message.clone(),
                         _ => crate::runtime_bridge::SendError::NotReady.to_string(),
