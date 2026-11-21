@@ -27,8 +27,22 @@ mod macos {
 #[path = "../src/carousel_motion.rs"]
 mod carousel_motion;
 #[cfg(target_os = "macos")]
-#[path = "../src/history_view.rs"]
-mod history_view;
+mod history_view {
+    include!("../src/history_view.rs");
+
+    impl HistoryView {
+        pub(super) fn probe_offline_labels(&self) -> Vec<&str> {
+            assert!(self.is_offline());
+            self.entries
+                .iter()
+                .map(|entry| entry.source.as_str())
+                .collect()
+        }
+    }
+}
+#[cfg(target_os = "macos")]
+#[path = "../src/ui_text.rs"]
+mod product_ui_text;
 #[cfg(target_os = "macos")]
 #[path = "support/runtime_probe.rs"]
 mod runtime_bridge;
@@ -45,9 +59,51 @@ mod terminal_scrollbar;
 #[path = "../src/terminal_surface.rs"]
 #[allow(dead_code)]
 mod terminal_surface;
+
 #[cfg(target_os = "macos")]
-#[path = "../src/ui_text.rs"]
-mod ui_text;
+mod ui_text {
+    use gpui::SharedString;
+    use std::cell::RefCell;
+
+    pub(crate) use crate::product_ui_text::*;
+
+    thread_local! {
+        static TEXT: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
+        static WORKSPACE_LABEL: TextGeometryHandle = TextGeometryHandle::default();
+    }
+
+    pub(crate) fn ui_text(text: impl Into<SharedString>) -> UiText {
+        let text = text.into();
+        let track_workspace = TEXT.with_borrow_mut(|labels| {
+            if let Some(labels) = labels {
+                labels.push(text.to_string());
+                return matches!(text.as_ref(), "新增工作空间" | "New workspace");
+            }
+            false
+        });
+        let element = crate::product_ui_text::ui_text(text);
+        if track_workspace {
+            element.track_geometry(WORKSPACE_LABEL.with(Clone::clone))
+        } else {
+            element
+        }
+    }
+
+    pub(super) fn capture(draw: impl FnOnce()) -> Vec<String> {
+        TEXT.set(Some(Vec::new()));
+        draw();
+        TEXT.take().unwrap()
+    }
+
+    pub(super) fn assert_workspace_title_fits(title: &str) {
+        WORKSPACE_LABEL.with(|geometry| {
+            let geometry = geometry.borrow();
+            let geometry = geometry.as_ref().expect("workspace label painted");
+            assert_eq!(geometry.layout.len, title.len());
+            assert!(geometry.layout.width <= geometry.bounds.size.width);
+        });
+    }
+}
 
 #[cfg(target_os = "macos")]
 #[path = "../src/provider_settings.rs"]
@@ -118,6 +174,75 @@ mod workspace {
     }
 
     impl Workspace {
+        pub(super) fn probe_locale(&mut self, locale: InterfaceLocale, cx: &mut Context<Self>) {
+            self.locale = locale;
+            if let Some(history) = &self.history_view {
+                history.update(cx, |view, cx| view.set_offline_locale(locale, cx));
+            }
+            cx.notify();
+        }
+
+        pub(super) fn probe_canvas_name(&self, title: &str, pinned: bool) -> String {
+            let mut scene = self.scenes[0].clone();
+            scene.name = title.into();
+            scene.title_pinned = pinned;
+            self.scene_title(&scene)
+        }
+
+        pub(super) fn localized_card_action(
+            &mut self,
+            action: &str,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            match action {
+                "loader" => {
+                    self.open_session_loader(PEER, window, cx);
+                    assert!(matches!(&self.dialog, Some(TabDialog::SessionLoader(_))));
+                }
+                "remove" => {
+                    self.open_remove_session(PEER, window, cx);
+                    assert!(matches!(
+                        &self.dialog,
+                        Some(TabDialog::RemoveSession { .. })
+                    ));
+                }
+                "close" => self.close_dialog(window, cx),
+                _ => unreachable!(),
+            }
+        }
+
+        pub(super) fn verify_remove_locale(&self, title: &str, confirm: &str) {
+            let text = self
+                .removal_dialog_text(PEER, RemoveScope::NodeOnly)
+                .unwrap();
+            assert_eq!(text.title, title);
+            assert_eq!(text.confirm, confirm);
+        }
+
+        pub(super) fn probe_read_only(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+            self.read_only = Some(ReadOnlyState::default());
+            self.ensure_history_view(window, cx);
+            self.sync_read_only_history(cx);
+            cx.notify();
+        }
+
+        pub(super) fn probe_card_read_only_reason(&self) -> Option<&'static str> {
+            self.session_loader_blocked_reason(PEER, self.graph_node(PEER).unwrap())
+        }
+
+        pub(super) fn probe_loader_tooltip(&self) -> (&'static str, bool) {
+            self.session_loader_tooltip(PEER, self.graph_node(PEER).unwrap())
+        }
+
+        pub(super) fn probe_offline_labels<'a>(&self, cx: &'a App) -> Vec<&'a str> {
+            self.history_view
+                .as_ref()
+                .unwrap()
+                .read(cx)
+                .probe_offline_labels()
+        }
+
         pub(super) fn title_probe_projection(&self) -> (String, Bounds<Pixels>, String) {
             let scene = self.hierarchy.as_ref().unwrap().scene.as_ref().unwrap();
             let tab_index = self
@@ -1036,7 +1161,8 @@ mod workspace {
                         .map(|event| loader_event_label(
                             &event.kind,
                             event.tool_name.as_deref(),
-                            "Claude"
+                            "Claude",
+                            self.locale,
                         ))
                         .collect::<Vec<_>>(),
                     ["你", "Claude", "工具 · Read", "系统"]
@@ -1191,7 +1317,8 @@ mod workspace {
             assert_eq!(style.background, Some(white().alpha(0.06).into()));
             assert_eq!(
                 RemoveNodeTooltip {
-                    blocked_reason: None
+                    blocked_reason: None,
+                    action: REMOVE_NODE_ACTION,
                 }
                 .text(),
                 "移除节点…"
@@ -2937,6 +3064,163 @@ mod probe {
 
     fn open_hidden(cx: &mut AsyncApp, width: f32) -> (WindowHandle<Workspace>, ProbeReceiver) {
         open_probe_window(cx, width, false)
+    }
+
+    fn verify_workspace_locale(cx: &mut AsyncApp) {
+        use matou_native_core::sessions::InterfaceLocale;
+
+        fn has(labels: &[String], expected: &str) {
+            assert!(
+                labels.iter().any(|text| text == expected),
+                "missing {expected:?}: {labels:?}"
+            );
+        }
+
+        let fixture = Fixture::new();
+        fixture.set_provider_restore("none", None, 3);
+        let Some(BootstrapResult::Writable { connection, .. }) = &fixture.db else {
+            unreachable!()
+        };
+        connection
+            .execute(
+                "UPDATE sessions SET title = 'Fixture card' WHERE id = ?1",
+                [PEER],
+            )
+            .unwrap();
+        let (window, sink) = open_hidden(cx, 720.);
+        deliver(window, cx, fixture.event(true));
+        draw(window, cx);
+        window
+            .update(cx, |view, window, cx| view.qualify(PEER, window, cx))
+            .unwrap();
+
+        for locale in [InterfaceLocale::Chinese, InterfaceLocale::English] {
+            let text = |zh, en| locale.text(zh, en);
+            window
+                .update(cx, |view, _, cx| {
+                    view.probe_locale(locale, cx);
+                    assert_eq!(
+                        view.probe_canvas_name("新画布", false),
+                        text("新画布", "New canvas")
+                    );
+                    assert_eq!(
+                        view.probe_canvas_name("新画布 2", false),
+                        text("新画布 2", "New canvas 2")
+                    );
+                    assert_eq!(view.probe_canvas_name("新画布", true), "新画布");
+                    view.assert_remove_tooltip(PEER, text("移除节点…", "Remove node"), true);
+                    assert_eq!(
+                        view.probe_loader_tooltip(),
+                        (
+                            text("载入 Claude Code 会话", "Load a Claude Code session"),
+                            true
+                        )
+                    );
+                })
+                .unwrap();
+            let labels = crate::ui_text::capture(|| draw(window, cx));
+            has(&labels, text("根会话", "Root sessions"));
+            has(&labels, text("· 2 个会话", "· 2 sessions"));
+            has(&labels, text("出口", "Exit"));
+            has(&labels, text("Claude 账户", "Claude accounts"));
+            has(&labels, text("新增工作空间", "New workspace"));
+            crate::ui_text::assert_workspace_title_fits(text("新增工作空间", "New workspace"));
+
+            window
+                .update(cx, |view, window, cx| {
+                    view.localized_card_action("loader", window, cx)
+                })
+                .unwrap();
+            let labels = crate::ui_text::capture(|| draw(window, cx));
+            has(
+                &labels,
+                text("载入 Claude Code 会话", "Load Claude Code session"),
+            );
+            has(
+                &labels,
+                text("载入到“Fixture card”", "Load into \"Fixture card\""),
+            );
+
+            window
+                .update(cx, |view, window, cx| {
+                    view.localized_card_action("close", window, cx);
+                    view.localized_card_action("remove", window, cx);
+                    view.verify_remove_locale(
+                        text("移除节点“Fixture card”？", "Remove node \"Fixture card\"?"),
+                        text("移除", "Remove"),
+                    );
+                    view.localized_card_action("close", window, cx);
+                })
+                .unwrap();
+        }
+
+        deliver(
+            window,
+            cx,
+            Event::Recovery {
+                session_id: PEER.into(),
+                state: RecoveryState::Deferred,
+            },
+        );
+        for locale in [InterfaceLocale::Chinese, InterfaceLocale::English] {
+            let text = |zh, en| locale.text(zh, en);
+            window
+                .update(cx, |view, _, cx| view.probe_locale(locale, cx))
+                .unwrap();
+            let labels = crate::ui_text::capture(|| draw(window, cx));
+            has(&labels, text("会话尚未启动", "Session not started"));
+            has(&labels, text("点击恢复", "Restore session"));
+        }
+
+        sink.read_only_mode(1);
+        window
+            .update(cx, |view, window, cx| view.probe_read_only(window, cx))
+            .unwrap();
+        for locale in [InterfaceLocale::Chinese, InterfaceLocale::English] {
+            let title = locale.text(
+                "数据库处于只读恢复模式",
+                "The database is in read-only recovery mode",
+            );
+            window
+                .update(cx, |view, _, cx| {
+                    view.probe_locale(locale, cx);
+                    assert_eq!(view.probe_card_read_only_reason(), Some(title));
+                    assert_eq!(
+                        view.probe_offline_labels(cx),
+                        [
+                            locale.text("历史记录", "History"),
+                            locale.text("只读", "Read-only"),
+                            locale.text("加载更早记录", "Earlier"),
+                            locale.text("暂无历史记录", "No history yet"),
+                        ]
+                    );
+                })
+                .unwrap();
+            #[cfg(debug_assertions)]
+            let labels = {
+                let (labels, probe) = crate::workspace::database_recovery_page::probe_draw(|| {
+                    crate::ui_text::capture(|| draw(window, cx))
+                });
+                let explanation = probe.bounds["read-only-message"][1];
+                assert!(explanation.size.width >= px(240.), "{explanation:?}");
+                assert!(explanation.size.height <= px(80.), "{explanation:?}");
+                labels
+            };
+            #[cfg(not(debug_assertions))]
+            let labels = crate::ui_text::capture(|| draw(window, cx));
+            has(&labels, title);
+            has(&labels, locale.text("搜索当前终端", "Search this terminal"));
+            has(
+                &labels,
+                locale.text("导出数据库资料", "Export recovery bundle"),
+            );
+        }
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        println!(
+            "Hidden GPUI 720pt: bilingual workspace, footer, loader, remove confirmation, new canvas, deferred card and read-only banner"
+        );
     }
 
     fn open_probe_window(
@@ -7278,6 +7562,7 @@ mod probe {
     }
 
     pub(super) fn run() {
+        let locale_only = std::env::args().any(|arg| arg == "--locale-layout");
         let footer_only = std::env::args().any(|arg| arg == "--footer-base");
         let instructions_only = std::env::args().any(|arg| arg == "--project-instructions");
         let codex_hud_only = std::env::args().any(|arg| arg == "--codex-hud");
@@ -7293,6 +7578,13 @@ mod probe {
         let codex_loader_only = std::env::args().any(|arg| arg == "--codex-loader");
         let codex_history_only = std::env::args().any(|arg| arg == "--codex-history");
         Application::new().with_assets(NativeAssets).run(move |cx| {
+            if locale_only {
+                cx.spawn(async |cx| {
+                    verify_workspace_locale(cx);
+                    cx.update(|cx| cx.quit()).unwrap();
+                }).detach();
+                return;
+            }
             if instructions_only {
                 cx.spawn(async |cx| {
                     verify_project_instructions(cx).await;

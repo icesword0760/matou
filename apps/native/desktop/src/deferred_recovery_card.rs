@@ -171,7 +171,10 @@ impl super::Workspace {
                     .text_color(rgb(colors.badge_text))
                     .font_weight(FontWeight::SEMIBOLD)
                     .whitespace_nowrap()
-                    .child(ui_text(DEFERRED_BADGE).normal_line_height()),
+                    .child(
+                        ui_text(self.locale.text(DEFERRED_BADGE, "Session not started"))
+                            .normal_line_height(),
+                    ),
             );
         if let Some(agent) = agent {
             meta = meta.child(
@@ -329,7 +332,10 @@ impl super::Workspace {
                             .line_height(relative(1.2))
                             .font_weight(FontWeight::SEMIBOLD)
                             .whitespace_nowrap()
-                            .child(ui_text(DEFERRED_REPLIES).normal_line_height()),
+                            .child(
+                                ui_text(self.locale.text(DEFERRED_REPLIES, "Recent messages"))
+                                    .normal_line_height(),
+                            ),
                     )
                     .child(list),
             );
@@ -340,7 +346,13 @@ impl super::Workspace {
                     .text_color(rgb(colors.note))
                     .text_size(px(11.))
                     .line_height(relative(1.5))
-                    .child(ui_text(DEFERRED_LOADING).normal_line_height()),
+                    .child(
+                        ui_text(
+                            self.locale
+                                .text(DEFERRED_LOADING, "Loading recent messages…"),
+                        )
+                        .normal_line_height(),
+                    ),
             );
         }
 
@@ -351,7 +363,10 @@ impl super::Workspace {
                 .text_color(rgb(colors.note))
                 .text_size(px(11.))
                 .line_height(relative(1.5))
-                .child(ui_text(DEFERRED_BODY)),
+                .child(ui_text(self.locale.text(
+                    DEFERRED_BODY,
+                    "Only the 16 most recently used sessions restore automatically at startup. This session’s history is saved.",
+                ))),
         );
 
         // `__actions` + `button.__secondary` / `button.__primary`; all input
@@ -375,7 +390,10 @@ impl super::Workspace {
                 .line_height(relative(1.2))
                 .whitespace_nowrap()
                 .cursor_pointer()
-                .child(ui_text(DEFERRED_HISTORY).normal_line_height());
+                .child(
+                    ui_text(self.locale.text(DEFERRED_HISTORY, "Session history"))
+                        .normal_line_height(),
+                );
             let history_id = id.to_owned();
             self.button(
                 button,
@@ -402,7 +420,9 @@ impl super::Workspace {
             .font_weight(FontWeight::SEMIBOLD)
             .line_height(relative(1.2))
             .whitespace_nowrap()
-            .child(ui_text(DEFERRED_RESTORE).normal_line_height());
+            .child(
+                ui_text(self.locale.text(DEFERRED_RESTORE, "Restore session")).normal_line_height(),
+            );
         let restore = if can_restore {
             let restore_id = id.to_owned();
             self.button(

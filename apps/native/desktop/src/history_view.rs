@@ -1,6 +1,7 @@
 use std::{cell::Cell, ops::Range, rc::Rc};
 
 use gpui::{prelude::*, *};
+use matou_native_core::sessions::InterfaceLocale;
 use matou_native_runtime::history::{HistoryCursor as HistoryPageCursor, HistoryPage};
 
 use unicode_segmentation::UnicodeSegmentation;
@@ -88,6 +89,8 @@ const RETURN_LABEL: usize = 3;
 
 const OFFLINE_OLDER_LABEL: usize = 2;
 const OFFLINE_LATEST_LABEL: usize = 3;
+const OFFLINE_TITLE: &str = "历史记录";
+const OFFLINE_READ_ONLY: &str = "只读";
 const OFFLINE_EMPTY: &str = "暂无历史记录";
 const OFFLINE_LOADING: &str = "正在读取历史记录…";
 const OFFLINE_OLDER: &str = "加载更早记录";
@@ -125,6 +128,7 @@ pub struct HistoryView {
     scroll: ScrollHandle,
     center_on_anchor: bool,
     font_family: SharedString,
+    locale: InterfaceLocale,
 }
 
 impl EventEmitter<HistoryViewEvent> for HistoryView {}
@@ -163,7 +167,82 @@ impl HistoryView {
             scroll: ScrollHandle::new(),
             center_on_anchor: false,
             font_family: font_family.into(),
+            locale: InterfaceLocale::Chinese,
         }
+    }
+
+    /// Update the copy of an already-open Offline view without rebuilding its
+    /// history rows, selection, scroll offset or drag state. The caller invokes
+    /// this when the interface locale changes; `sync_read_only_history` also
+    /// seeds the current locale when the read-only view is first mounted.
+    pub(crate) fn set_offline_locale(&mut self, locale: InterfaceLocale, cx: &mut Context<Self>) {
+        if self.locale == locale {
+            return;
+        }
+        self.locale = locale;
+        if !self.is_offline() || self.entries.len() < 4 {
+            return;
+        }
+        let (show_latest, pending, error, gaps, has_lines) = match &self.state {
+            Some(HistoryViewState::Offline {
+                page,
+                pending,
+                show_latest,
+                error,
+            }) => (
+                *show_latest,
+                *pending,
+                error.clone(),
+                page.as_ref().map_or(0, |page| page.gaps.len()),
+                page.as_ref().is_some_and(|page| !page.lines.is_empty()),
+            ),
+            _ => return,
+        };
+        let body_start = if show_latest { 4 } else { 3 };
+        if body_start > self.entries.len() {
+            return;
+        }
+        self.entries[0].source = self.locale.text(OFFLINE_TITLE, "History").to_owned();
+        self.entries[1].source = self.locale.text(OFFLINE_READ_ONLY, "Read-only").to_owned();
+        self.entries[2].source = self.locale.text(OFFLINE_OLDER, "Earlier").to_owned();
+        if show_latest {
+            self.entries[3].source = self.locale.text(OFFLINE_LATEST, "Latest").to_owned();
+        }
+        let mut status_changed = false;
+        if !has_lines && body_start < self.body_entries.end {
+            if pending {
+                self.entries[body_start].source = self
+                    .locale
+                    .text(OFFLINE_LOADING, "Loading history…")
+                    .to_owned();
+                status_changed = true;
+            } else if error.is_none() {
+                self.entries[body_start].source =
+                    self.locale.text(OFFLINE_EMPTY, "No history yet").to_owned();
+                status_changed = true;
+            }
+        }
+        if gaps > 0 && self.body_entries.end < self.entries.len() {
+            self.entries[self.body_entries.end].source = match self.locale {
+                InterfaceLocale::Chinese => format!("{gaps} 处历史缺口"),
+                InterfaceLocale::English if gaps == 1 => "1 history gap".to_owned(),
+                InterfaceLocale::English => format!("{gaps} history gaps"),
+            };
+        }
+        // Preserve a selection that lives wholly inside the history body. A
+        // selection that touched a relabelled control/status/gap row cannot be
+        // mapped across languages safely, so drop only that selection.
+        if let Some(selection) = self.selection {
+            let ordered = selection.ordered();
+            let touches_header = ordered.start.row < body_start;
+            let touches_gap = gaps > 0 && ordered.end.row >= self.body_entries.end;
+            let touches_status =
+                status_changed && ordered.start.row <= body_start && body_start <= ordered.end.row;
+            if touches_header || touches_gap || touches_status {
+                self.selection = None;
+            }
+        }
+        cx.notify();
     }
 
     pub fn set_state(&mut self, state: HistoryViewState, cx: &mut Context<Self>) {
@@ -251,13 +330,15 @@ impl HistoryView {
         let previous_entries = std::mem::replace(
             &mut self.entries,
             vec![
-                SelectableText::new("历史记录"),
-                SelectableText::new("只读"),
-                SelectableText::new(OFFLINE_OLDER),
+                SelectableText::new(self.locale.text(OFFLINE_TITLE, "History")),
+                SelectableText::new(self.locale.text(OFFLINE_READ_ONLY, "Read-only")),
+                SelectableText::new(self.locale.text(OFFLINE_OLDER, "Earlier")),
             ],
         );
         if *show_latest {
-            self.entries.push(SelectableText::new(OFFLINE_LATEST));
+            self.entries.push(SelectableText::new(
+                self.locale.text(OFFLINE_LATEST, "Latest"),
+            ));
         }
         let body_start = self.entries.len();
         if let Some(page) = page.as_ref().filter(|page| !page.lines.is_empty()) {
@@ -270,21 +351,23 @@ impl HistoryView {
             }));
         } else {
             let status = if *pending {
-                OFFLINE_LOADING
+                self.locale.text(OFFLINE_LOADING, "Loading history…")
             } else if let Some(error) = error {
                 error.as_str()
             } else {
-                OFFLINE_EMPTY
+                self.locale.text(OFFLINE_EMPTY, "No history yet")
             };
             self.entries.push(SelectableText::new(status));
         }
         self.body_entries = body_start..self.entries.len();
         if let Some(page) = page {
             if !page.gaps.is_empty() {
-                self.entries.push(SelectableText::new(format!(
-                    "{} 处历史缺口",
-                    page.gaps.len()
-                )));
+                let gaps = page.gaps.len();
+                self.entries.push(SelectableText::new(match self.locale {
+                    InterfaceLocale::Chinese => format!("{gaps} 处历史缺口"),
+                    InterfaceLocale::English if gaps == 1 => "1 history gap".to_owned(),
+                    InterfaceLocale::English => format!("{gaps} history gaps"),
+                }));
             }
             if !page.lines.is_empty() {
                 if let Some(error) = error {

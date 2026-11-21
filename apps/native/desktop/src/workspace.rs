@@ -707,11 +707,12 @@ struct CardTooltip(SharedString);
 #[derive(Clone, Copy)]
 struct RemoveNodeTooltip {
     blocked_reason: Option<&'static str>,
+    action: &'static str,
 }
 
 impl RemoveNodeTooltip {
     fn text(self) -> &'static str {
-        self.blocked_reason.unwrap_or(REMOVE_NODE_ACTION)
+        self.blocked_reason.unwrap_or(self.action)
     }
 }
 
@@ -785,25 +786,66 @@ impl RemovalImpact {
         }
     }
 
-    fn activity(&self) -> String {
-        [
-            (self.running > 0).then(|| format!("{} 个运行中", self.running)),
-            (self.needs_input > 0).then(|| format!("{} 个待输入", self.needs_input)),
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join("、")
+    fn activity(&self, locale: InterfaceLocale) -> String {
+        let running = (self.running > 0).then(|| match locale {
+            InterfaceLocale::Chinese => format!("{} 个运行中", self.running),
+            InterfaceLocale::English => {
+                if self.running == 1 {
+                    "1 running session".to_owned()
+                } else {
+                    format!("{} running sessions", self.running)
+                }
+            }
+        });
+        let needs_input = (self.needs_input > 0).then(|| match locale {
+            InterfaceLocale::Chinese => format!("{} 个待输入", self.needs_input),
+            InterfaceLocale::English => {
+                if self.needs_input == 1 {
+                    "1 session waiting for input".to_owned()
+                } else {
+                    format!("{} sessions waiting for input", self.needs_input)
+                }
+            }
+        });
+        let join = locale.text("、", " and ");
+        [running, needs_input]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(join)
     }
 
-    fn label(&self) -> String {
-        let mut label = format!("影响 {} 个会话", self.sessions);
+    fn label(&self, locale: InterfaceLocale) -> String {
+        let mut label = match locale {
+            InterfaceLocale::Chinese => format!("影响 {} 个会话", self.sessions),
+            InterfaceLocale::English => {
+                if self.sessions == 1 {
+                    "Affects 1 session".to_owned()
+                } else {
+                    format!("Affects {} sessions", self.sessions)
+                }
+            }
+        };
         if let Some(count) = self.owned_worktrees {
-            label.push_str(&format!("、{count} 个自有 Worktree"));
+            match locale {
+                InterfaceLocale::Chinese => {
+                    label.push_str(&format!("、{count} 个自有 Worktree"));
+                }
+                InterfaceLocale::English => {
+                    if count == 1 {
+                        label.push_str(", 1 owned worktree");
+                    } else {
+                        label.push_str(&format!(", {count} owned worktrees"));
+                    }
+                }
+            }
         }
-        let activity = self.activity();
+        let activity = self.activity(locale);
         if !activity.is_empty() {
-            label.push_str(&format!("；其中 {activity}"));
+            match locale {
+                InterfaceLocale::Chinese => label.push_str(&format!("；其中 {activity}")),
+                InterfaceLocale::English => label.push_str(&format!(", including {activity}")),
+            }
         }
         label
     }
@@ -1545,7 +1587,11 @@ impl Workspace {
                 show_latest: history.show_latest,
                 error: history.error.clone(),
             };
-            view.update(cx, |view, cx| view.set_state(state, cx));
+            let locale = self.locale;
+            view.update(cx, |view, cx| {
+                view.set_offline_locale(locale, cx);
+                view.set_state(state, cx);
+            });
         }
     }
 
@@ -2445,6 +2491,9 @@ impl Workspace {
                         Ok(locale) => {
                             this.locale_preference = preference;
                             this.locale = locale;
+                            if let Some(history) = &this.history_view {
+                                history.update(cx, |view, cx| view.set_offline_locale(locale, cx));
+                            }
                             if let Some((current, _)) = &this.settings {
                                 let is_saving_view = settings
                                     .as_ref()
@@ -4908,15 +4957,15 @@ impl Workspace {
             .flat_map(|preview| &preview.events)
             .map(|event| {
                 let label = match event.kind.as_str() {
-                    "user" => "你",
+                    "user" => self.locale.text("你", "You"),
                     "assistant" => agent_short,
                     "tool" => event
                         .tool_name
                         .as_deref()
                         .map(str::trim)
                         .filter(|name| !name.is_empty())
-                        .unwrap_or("工具"),
-                    _ => "系统",
+                        .unwrap_or(self.locale.text("工具", "Tool")),
+                    _ => self.locale.text("系统", "System"),
                 };
                 DeferredReply {
                     kind: event.kind.clone(),
@@ -5712,13 +5761,17 @@ impl Workspace {
     }
 
     fn sidebar(&self, window: &Window, cx: &mut Context<Self>) -> Div {
+        // At 720 the English title must stay whole. Reclaim only the button's
+        // own padding/gap and a little of the traffic-light reserve on the
+        // left; the bell keeps its existing rect and click target.
         let new_workspace = div()
             .id("new-workspace-btn")
             .min_w_0()
             .flex()
             .items_center()
-            .gap(px(10.))
-            .px(px(8.))
+            .gap(px(4.))
+            .pl(px(4.))
+            .pr(px(1.))
             .py(px(7.))
             .rounded(px(7.))
             .text_color(rgb(0x2f3547))
@@ -5735,11 +5788,11 @@ impl Workspace {
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
-                    .child(if self.creating_workspace {
+                    .child(ui_text(if self.creating_workspace {
                         self.locale.text("正在添加…", "Adding…")
                     } else {
                         self.locale.text("新增工作空间", "New workspace")
-                    }),
+                    })),
             );
         let new_workspace = if self.creating_workspace {
             self.focus_control(new_workspace, &self.control_focus["new-workspace"])
@@ -5766,11 +5819,11 @@ impl Workspace {
                     .flex_none()
                     .flex()
                     .items_center()
-                    .pl(px(78.))
+                    .justify_between()
+                    .pl(px(74.))
                     .pr(px(NOTIFICATION_UI_SIDEBAR_RIGHT_PADDING))
-                    .gap(px(8.))
+                    .gap(px(4.))
                     .child(new_workspace)
-                    .child(div().flex_1())
                     .child(self.notification_bell(cx)),
             )
             .child(
@@ -6159,8 +6212,29 @@ impl Workspace {
                 return format!("Shell · {cwd}");
             }
         }
-        scene.name.clone()
+        // `新画布` / `新画布 2` are generated by the runtime for unpinned
+        // default canvases. Translate them at display time only; a pinned or
+        // manually named scene keeps its exact stored title.
+        let name = scene.name.clone();
+        if self.locale != InterfaceLocale::English || scene.title_pinned {
+            return name;
+        }
+        let Some(rest) = name.strip_prefix("新画布") else {
+            return name;
+        };
+        if rest.is_empty() {
+            return "New canvas".to_owned();
+        }
+        let Some(suffix) = rest.strip_prefix(' ') else {
+            return name;
+        };
+        if !suffix.is_empty() && suffix.chars().all(|character| character.is_ascii_digit()) {
+            format!("New canvas {suffix}")
+        } else {
+            name
+        }
     }
+
     fn close_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let dialog = self.dialog.take();
         if let Some(TabDialog::SessionLoader(state)) = &dialog
@@ -6491,9 +6565,15 @@ impl Workspace {
         if self.read_only.is_some()
             || matches!(&phase, ConnectionPhase::Blocked(block) if block.kind == StartupBlockKind::ReadOnly)
         {
-            Some(STORAGE_READ_ONLY_TITLE)
+            Some(self.locale.text(
+                STORAGE_READ_ONLY_TITLE,
+                "The database is in read-only recovery mode",
+            ))
         } else if self.storage_fault_sessions.contains(id) {
-            Some("终端存储异常，请先恢复或结束当前会话")
+            Some(self.locale.text(
+                "终端存储异常，请先恢复或结束当前会话",
+                "Terminal storage failed. Recover or end the current session first.",
+            ))
         } else if self.recovery_blocked(id)
             || (node["currentMode"] == "codex"
                 && matches!(node["workStatus"].as_str(), Some("starting" | "exited")))
@@ -6504,7 +6584,10 @@ impl Workspace {
                 Some("restoring" | "failed")
             )
         {
-            Some("当前终端需要先完成恢复")
+            Some(self.locale.text(
+                "当前终端需要先完成恢复",
+                "This terminal must finish recovering first.",
+            ))
         } else {
             self.card_mutation_blocked_reason(id, node)
         }
@@ -6793,11 +6876,20 @@ impl Workspace {
             {
                 None
             }
-            (_, ConnectionPhase::ReadOnly { .. }) => Some(STORAGE_READ_ONLY_TITLE),
+            (_, ConnectionPhase::ReadOnly { .. }) => Some(self.locale.text(
+                STORAGE_READ_ONLY_TITLE,
+                "The database is in read-only recovery mode",
+            )),
             (_, ConnectionPhase::Blocked(block)) if block.kind == StartupBlockKind::ReadOnly => {
-                Some(STORAGE_READ_ONLY_TITLE)
+                Some(self.locale.text(
+                    STORAGE_READ_ONLY_TITLE,
+                    "The database is in read-only recovery mode",
+                ))
             }
-            _ => Some("当前连接不可用"),
+            _ => Some(
+                self.locale
+                    .text("当前连接不可用", "The connection is unavailable"),
+            ),
         }
     }
 
@@ -6829,22 +6921,35 @@ impl Workspace {
     }
 
     fn card_action_blocked_reason(&self, id: &str, node: &Value) -> Option<&'static str> {
-        self.card_mutation_blocked_reason(id, node)
-            .or_else(|| self.recovery_blocked(id).then_some("当前终端仍在恢复"))
+        self.card_mutation_blocked_reason(id, node).or_else(|| {
+            self.recovery_blocked(id).then_some(
+                self.locale
+                    .text("当前终端仍在恢复", "This terminal is still recovering."),
+            )
+        })
     }
 
     fn card_mutation_blocked_reason(&self, id: &str, node: &Value) -> Option<&'static str> {
         if self.read_only.is_some() {
-            Some(STORAGE_READ_ONLY_TITLE)
+            Some(self.locale.text(
+                STORAGE_READ_ONLY_TITLE,
+                "The database is in read-only recovery mode",
+            ))
         } else if !self.active_path_valid() {
             Some(self.workspace_path_unavailable())
         } else if self.storage_fault_sessions.contains(id) {
-            Some("终端存储异常，请先恢复或结束当前会话")
+            Some(self.locale.text(
+                "终端存储异常，请先恢复或结束当前会话",
+                "Terminal storage failed. Recover or end the current session first.",
+            ))
         } else if node["environment"]["state"]
             .as_str()
             .is_some_and(|state| state != "ready")
         {
-            Some("当前运行环境需要先恢复或交接")
+            Some(self.locale.text(
+                "当前运行环境需要先恢复或交接",
+                "The current environment must be recovered or handed off first.",
+            ))
         } else {
             None
         }
@@ -6853,19 +6958,43 @@ impl Workspace {
     fn remove_node_tooltip(&self, id: &str, node: &Value) -> RemoveNodeTooltip {
         RemoveNodeTooltip {
             blocked_reason: self.card_action_blocked_reason(id, node),
+            action: self.locale.text(REMOVE_NODE_ACTION, "Remove node"),
         }
     }
 
     fn session_loader_blocked_reason(&self, id: &str, node: &Value) -> Option<&'static str> {
-        self.launch_action_blocked_reason(id, node)
-            .or_else(|| self.recovery_blocked(id).then_some("当前终端仍在恢复"))
+        self.launch_action_blocked_reason(id, node).or_else(|| {
+            self.recovery_blocked(id).then_some(
+                self.locale
+                    .text("当前终端仍在恢复", "This terminal is still recovering."),
+            )
+        })
+    }
+
+    fn session_loader_tooltip(&self, id: &str, node: &Value) -> (&'static str, bool) {
+        if let Some(reason) = self.session_loader_blocked_reason(id, node) {
+            return (reason, false);
+        }
+        let label = if node["currentMode"] == "codex" {
+            self.locale.text("载入 Codex 会话", "Load a Codex session")
+        } else {
+            self.locale
+                .text(SESSION_LOADER_TITLE, "Load a Claude Code session")
+        };
+        (label, true)
     }
 
     fn fork_connection_blocked_reason(&self) -> Option<&'static str> {
         match self.commands.connection() {
-            (_, ConnectionPhase::ReadOnly { .. }) => Some(STORAGE_READ_ONLY_TITLE),
+            (_, ConnectionPhase::ReadOnly { .. }) => Some(self.locale.text(
+                STORAGE_READ_ONLY_TITLE,
+                "The database is in read-only recovery mode",
+            )),
             (_, ConnectionPhase::Blocked(block)) if block.kind == StartupBlockKind::ReadOnly => {
-                Some(STORAGE_READ_ONLY_TITLE)
+                Some(self.locale.text(
+                    STORAGE_READ_ONLY_TITLE,
+                    "The database is in read-only recovery mode",
+                ))
             }
             (generation, ConnectionPhase::Ready)
                 if generation == self.runtime_generation
@@ -6874,7 +7003,10 @@ impl Workspace {
             {
                 None
             }
-            _ => Some("当前终端仍在恢复"),
+            _ => Some(
+                self.locale
+                    .text("当前终端仍在恢复", "This terminal is still recovering."),
+            ),
         }
     }
 
@@ -7284,9 +7416,14 @@ impl Workspace {
             .map(str::to_owned);
         let scene_id = scene_id.to_owned();
         let cwd = cwd.to_owned();
-        let input =
-            cx.new(|cx| RenameInput::session_loader_search(SESSION_LOADER_FILTER_PLACEHOLDER, cx));
-        let content_input = cx.new(|cx| RenameInput::session_loader_search("查找右侧内容", cx));
+        let filter_placeholder = self.locale.text(
+            SESSION_LOADER_FILTER_PLACEHOLDER,
+            "Filter by title, path, model or session ID",
+        );
+        let input = cx.new(|cx| RenameInput::session_loader_search(filter_placeholder, cx));
+        let content_placeholder = self.locale.text("查找右侧内容", "Search content");
+        let content_input =
+            cx.new(|cx| RenameInput::session_loader_search(content_placeholder, cx));
         self.dialog_subscription =
             Some(cx.subscribe_in(&input, window, |this, _, event, _, cx| {
                 if matches!(event, RenameInputEvent::Changed) {
@@ -8089,9 +8226,15 @@ impl Workspace {
 
     fn launch_action_blocked_reason(&self, id: &str, node: &Value) -> Option<&'static str> {
         match self.commands.connection() {
-            (_, ConnectionPhase::ReadOnly { .. }) => Some(STORAGE_READ_ONLY_TITLE),
+            (_, ConnectionPhase::ReadOnly { .. }) => Some(self.locale.text(
+                STORAGE_READ_ONLY_TITLE,
+                "The database is in read-only recovery mode",
+            )),
             (_, ConnectionPhase::Blocked(block)) if block.kind == StartupBlockKind::ReadOnly => {
-                Some(STORAGE_READ_ONLY_TITLE)
+                Some(self.locale.text(
+                    STORAGE_READ_ONLY_TITLE,
+                    "The database is in read-only recovery mode",
+                ))
             }
             (generation, ConnectionPhase::Ready)
                 if generation == self.runtime_generation
@@ -8100,7 +8243,10 @@ impl Workspace {
             {
                 self.card_mutation_blocked_reason(id, node)
             }
-            _ => Some("当前终端仍在恢复"),
+            _ => Some(
+                self.locale
+                    .text("当前终端仍在恢复", "This terminal is still recovering."),
+            ),
         }
     }
 
@@ -8518,55 +8664,108 @@ impl Workspace {
 
     fn removal_dialog_text(&self, id: &str, scope: RemoveScope) -> Option<RemovalDialogText> {
         let current = self.graph_node(id)?;
-        let title = format!("移除节点“{}”？", current["title"].as_str()?);
+        let title = match self.locale {
+            InterfaceLocale::Chinese => format!("移除节点“{}”？", current["title"].as_str()?),
+            InterfaceLocale::English => format!("Remove node \"{}\"?", current["title"].as_str()?),
+        };
         let mut node_only = RemovalImpact::default();
         node_only.add(current);
         let branch = self.removal_branch_impact(current);
         if branch.sessions == 1 {
+            let body = match self.locale {
+                InterfaceLocale::Chinese => format!(
+                    "{}。移除后，该会话会从会话列表和 DAG 中消失。",
+                    node_only.label(self.locale)
+                ),
+                InterfaceLocale::English => format!(
+                    "{}. Once removed, the session disappears from the session list and the DAG.",
+                    node_only.label(self.locale)
+                ),
+            };
             return Some(RemovalDialogText {
                 title,
-                body: format!(
-                    "{}。移除后，该会话会从会话列表和 DAG 中消失。",
-                    node_only.label()
-                ),
-                files_unchanged: Some("项目文件和自有 Worktree 保持原样。"),
+                body,
+                files_unchanged: Some(self.locale.text(
+                    "项目文件和自有 Worktree 保持原样。",
+                    "Project files and owned worktrees stay as they are.",
+                )),
                 choices: None,
                 warning: None,
-                confirm: "移除".into(),
+                confirm: self.locale.text("移除", "Remove").into(),
             });
         }
         let description = if session_levels::parent_id(current).is_some() {
-            "后代会话将重连到当前节点的父级。"
+            self.locale.text(
+                "后代会话将重连到当前节点的父级。",
+                "Descendant sessions reattach to the parent of this node.",
+            )
         } else {
-            "直接后代会话将成为根节点。"
+            self.locale.text(
+                "直接后代会话将成为根节点。",
+                "Direct descendant sessions become root nodes.",
+            )
         };
-        let (activity, confirm) = match scope {
-            RemoveScope::NodeOnly => (node_only.activity(), "移除当前节点".into()),
-            RemoveScope::NodeAndDescendants => (
-                branch.activity(),
+        let (activity, confirm) = match (self.locale, scope) {
+            (InterfaceLocale::Chinese, RemoveScope::NodeOnly) => {
+                (node_only.activity(self.locale), "移除当前节点".into())
+            }
+            (InterfaceLocale::Chinese, RemoveScope::NodeAndDescendants) => (
+                branch.activity(self.locale),
                 format!("移除 {} 个会话", branch.sessions),
             ),
+            (InterfaceLocale::English, RemoveScope::NodeOnly) => {
+                (node_only.activity(self.locale), "Remove this node".into())
+            }
+            (InterfaceLocale::English, RemoveScope::NodeAndDescendants) => (
+                branch.activity(self.locale),
+                if branch.sessions == 1 {
+                    "Remove 1 session".to_owned()
+                } else {
+                    format!("Remove {} sessions", branch.sessions)
+                },
+            ),
+        };
+        let body = self
+            .locale
+            .text(
+                "请选择移除范围。项目文件和自有 Worktree 保持原样。",
+                "Choose what to remove. Project files and owned worktrees stay as they are.",
+            )
+            .to_owned();
+        let warning = (!activity.is_empty()).then(|| match self.locale {
+            InterfaceLocale::Chinese => format!("其中 {activity}的会话将先停止。"),
+            InterfaceLocale::English => format!("{activity} will stop first."),
+        });
+        let descendants = branch.sessions - 1;
+        let descendants_removed = match self.locale {
+            InterfaceLocale::Chinese => format!("当前节点与 {descendants} 个后代会话会全部移除。"),
+            InterfaceLocale::English if descendants == 1 => {
+                "This node and its 1 descendant session will be removed.".to_owned()
+            }
+            InterfaceLocale::English => {
+                format!("This node and its {descendants} descendant sessions will be removed.")
+            }
         };
         Some(RemovalDialogText {
             title,
-            body: "请选择移除范围。项目文件和自有 Worktree 保持原样。".into(),
+            body,
             files_unchanged: None,
             choices: Some([
                 RemovalChoiceText {
-                    title: "仅移除当前节点",
-                    impact: node_only.label(),
+                    title: self.locale.text("仅移除当前节点", "Remove this node only"),
+                    impact: node_only.label(self.locale),
                     description: description.into(),
                 },
                 RemovalChoiceText {
-                    title: "移除当前节点及全部后代",
-                    impact: branch.label(),
-                    description: format!(
-                        "当前节点与 {} 个后代会话会全部移除。",
-                        branch.sessions - 1
+                    title: self.locale.text(
+                        "移除当前节点及全部后代",
+                        "Remove this node and all descendants",
                     ),
+                    impact: branch.label(self.locale),
+                    description: descendants_removed,
                 },
             ]),
-            warning: (!activity.is_empty()).then(|| format!("其中 {activity}的会话将先停止。")),
+            warning,
             confirm,
         })
     }
@@ -8606,13 +8805,31 @@ impl Workspace {
     }
 
     fn breadcrumb_labels(&self) -> (String, String) {
-        let label = self
+        let title = self
             .level_parent()
             .and_then(|id| self.graph_node(id))
             .and_then(|node| node["title"].as_str())
-            .filter(|title| !title.is_empty())
-            .map_or_else(|| "根会话".into(), |title| format!("{title} 的子会话"));
-        (label, format!("· {} 个会话", self.order.len()))
+            .filter(|title| !title.is_empty());
+        let count = self.order.len();
+        match self.locale {
+            InterfaceLocale::Chinese => {
+                let label =
+                    title.map_or_else(|| "根会话".into(), |title| format!("{title} 的子会话"));
+                (label, format!("· {count} 个会话"))
+            }
+            InterfaceLocale::English => {
+                let label = title.map_or_else(
+                    || "Root sessions".to_owned(),
+                    |title| format!("Child sessions of {title}"),
+                );
+                let sessions = if count == 1 {
+                    "1 session".to_owned()
+                } else {
+                    format!("{count} sessions")
+                };
+                (label, format!("· {sessions}"))
+            }
+        }
     }
 
     fn refresh_project_instructions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -9437,13 +9654,14 @@ impl Workspace {
     }
 
     fn read_only_disabled<E: StatefulInteractiveElement + Styled>(&self, element: E) -> E {
+        let read_only = self.locale.text(
+            STORAGE_READ_ONLY_TITLE,
+            "The database is in read-only recovery mode",
+        );
         element
             .opacity(0.55)
             .cursor(CursorStyle::OperationNotAllowed)
-            .tooltip(|_, cx| {
-                cx.new(|_| CardTooltip(STORAGE_READ_ONLY_TITLE.into()))
-                    .into()
-            })
+            .tooltip(move |_, cx| cx.new(|_| CardTooltip(read_only.into())).into())
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
     }
 
@@ -10002,7 +10220,10 @@ impl Workspace {
         let title = node["title"].as_str().unwrap_or("Shell");
         let remove = self.stopped_remove_visible(node).then(|| {
             let blocked_reason = self.stopped_remove_blocked_reason();
-            let tooltip = RemoveNodeTooltip { blocked_reason };
+            let tooltip = RemoveNodeTooltip {
+                blocked_reason,
+                action: self.locale.text(REMOVE_NODE_ACTION, "Remove node…"),
+            };
             let button_id = SharedString::from(format!("remove-session-{id}"));
             let session_id = id.to_owned();
             let glyph = svg()
@@ -10140,22 +10361,14 @@ impl Workspace {
         node: &Value,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let blocked = self.session_loader_blocked_reason(id, node);
-        let tooltip: SharedString = blocked
-            .unwrap_or(if node["currentMode"] == "codex" {
-                "载入 Codex 会话"
-            } else {
-                SESSION_LOADER_TITLE
-            })
-            .to_owned()
-            .into();
+        let (tooltip, enabled) = self.session_loader_tooltip(id, node);
         let button_id = SharedString::from(format!("session-loader-open-{id}"));
         let glyph = svg()
             .path("icons/folder-input.svg")
             .size(px(16.))
             .flex_none()
             .text_color(rgba(0x00000085))
-            .when(blocked.is_none(), |glyph| {
+            .when(enabled, |glyph| {
                 glyph.group_hover(button_id.clone(), |style| {
                     style.text_color(rgba(0x000000d1))
                 })
@@ -10170,8 +10383,8 @@ impl Workspace {
             .justify_center()
             .rounded(px(5.))
             .child(glyph)
-            .tooltip(move |_, cx| cx.new(|_| CardTooltip(tooltip.clone())).into());
-        if blocked.is_none() {
+            .tooltip(move |_, cx| cx.new(|_| CardTooltip(tooltip.into())).into());
+        if enabled {
             let session_id = id.to_owned();
             self.button(
                 button
@@ -10577,19 +10790,32 @@ impl Workspace {
                 .as_deref()
                 .filter(|model| !model.is_empty())
                 .unwrap_or(provider_name);
-            let meta = format!("{} · {}", loader_relative_time(session.updated_at), model);
+            let meta = format!(
+                "{} · {}",
+                loader_relative_time(session.updated_at, self.locale),
+                model
+            );
             let detail = (!is_codex).then(|| {
+                let entries = if session.message_count == 1 {
+                    "1 entry".to_owned()
+                } else {
+                    format!("{} entries", session.message_count)
+                };
                 format!(
-                    "{} · {} 条内容",
-                    loader_permission_label(&session.permission_mode),
-                    session.message_count
+                    "{} · {entries}",
+                    loader_permission_label(&session.permission_mode, self.locale)
                 )
             });
             let loaded = session.loaded_by.as_ref().map(|owner| {
                 if owner.session_id == state.session_id {
-                    "已载入当前卡片".to_owned()
+                    self.locale
+                        .text("已载入当前卡片", "Loaded in this card")
+                        .to_owned()
                 } else {
-                    format!("已载入“{}”", owner.title)
+                    match self.locale {
+                        InterfaceLocale::Chinese => format!("已载入“{}”", owner.title),
+                        InterfaceLocale::English => format!("Loaded in \"{}\"", owner.title),
+                    }
                 }
             });
             rows.push(
@@ -10729,7 +10955,13 @@ impl Workspace {
                     .text_center()
                     .text_size(px(9.))
                     .text_color(rgb(0x8490a0))
-                    .child(ui_text(SESSION_LOADER_LOADING_MORE).normal_line_height()),
+                    .child(
+                        ui_text(
+                            self.locale
+                                .text(SESSION_LOADER_LOADING_MORE, "Loading more sessions…"),
+                        )
+                        .normal_line_height(),
+                    ),
             )
         } else if sessions.is_empty() {
             list_results.child(
@@ -10744,12 +10976,19 @@ impl Workspace {
                     .text_color(rgb(0x77818e))
                     .child(ui_text(if filter_empty {
                         if is_codex {
-                            "当前工作空间内没有 Codex 会话"
+                            self.locale.text(
+                                "当前工作空间内没有 Codex 会话",
+                                "No Codex sessions in this workspace",
+                            )
                         } else {
-                            SESSION_LOADER_NO_SESSIONS
+                            self.locale.text(
+                                SESSION_LOADER_NO_SESSIONS,
+                                "No Claude Code sessions in this workspace",
+                            )
                         }
                     } else {
-                        SESSION_LOADER_NO_MATCHES
+                        self.locale
+                            .text(SESSION_LOADER_NO_MATCHES, "No matching sessions")
                     })),
             )
         } else if state.has_more_sessions {
@@ -10776,7 +11015,7 @@ impl Workspace {
                                 .text_color(rgb(0xb5c0cd))
                                 .bg(rgba(0xffffff0f))
                         })
-                        .child("载入更多会话"),
+                        .child(self.locale.text("载入更多会话", "Load more sessions")),
                     &self.dialog_controls[6],
                     |this, _, cx| this.load_more_loader_sessions(cx),
                     cx,
@@ -10808,8 +11047,22 @@ impl Workspace {
                     .text_size(px(9.))
                     .text_color(rgb(0x747e8c))
                     .child(
-                        ui_text(format!("{} / {} 个会话", sessions.len(), state.list_total))
-                            .normal_line_height(),
+                        ui_text(match self.locale {
+                            InterfaceLocale::Chinese => {
+                                format!("{} / {} 个会话", sessions.len(), state.list_total)
+                            }
+                            InterfaceLocale::English => format!(
+                                "{} / {} {}",
+                                sessions.len(),
+                                state.list_total,
+                                if state.list_total == 1 {
+                                    "session"
+                                } else {
+                                    "sessions"
+                                }
+                            ),
+                        })
+                        .normal_line_height(),
                     ),
             )
             .child(list_results);
@@ -10817,17 +11070,33 @@ impl Workspace {
         let preview_title = if state.history && is_codex {
             provider_name.to_owned()
         } else if state.history {
-            "包含压缩前的消息，不影响当前会话".to_owned()
+            self.locale
+                .text(
+                    "包含压缩前的消息，不影响当前会话",
+                    "Includes messages from before compaction and does not affect the current session",
+                )
+                .to_owned()
         } else {
             selected
                 .map(|session| session.title.clone())
-                .unwrap_or_else(|| SESSION_LOADER_SELECT_SESSION.to_owned())
+                .unwrap_or_else(|| {
+                    self.locale
+                        .text(
+                            SESSION_LOADER_SELECT_SESSION,
+                            "Select a session to see its content",
+                        )
+                        .to_owned()
+                })
         };
         // Keep the Codex list compact while preserving permission in its preview.
         let preview_meta = if !is_codex || state.history {
-            state
-                .first_event
-                .map(|_| format!("{} 条内容", state.total_events))
+            state.first_event.map(|_| {
+                if state.total_events == 1 {
+                    "1 entry".to_owned()
+                } else {
+                    format!("{} entries", state.total_events)
+                }
+            })
         } else {
             selected.map(|session| {
                 let model = state
@@ -10843,7 +11112,8 @@ impl Workspace {
                         state
                             .detail_permission
                             .as_deref()
-                            .unwrap_or(&session.permission_mode)
+                            .unwrap_or(&session.permission_mode),
+                        self.locale,
                     )
                 )
             })
@@ -10910,7 +11180,13 @@ impl Workspace {
                 .bg(rgba(0x181b20eb))
                 .text_size(px(9.))
                 .text_color(rgb(0x8490a0))
-                .child(ui_text(SESSION_LOADER_LOADING_EARLIER).normal_line_height());
+                .child(
+                    ui_text(
+                        self.locale
+                            .text(SESSION_LOADER_LOADING_EARLIER, "Loading earlier content…"),
+                    )
+                    .normal_line_height(),
+                );
             let pill = if state.loading_earlier {
                 pill.opacity(0.6)
             } else {
@@ -10947,7 +11223,12 @@ impl Workspace {
                 _ => (0x343b46, 0x20242a),
             };
             let assistant = if is_codex { "Codex" } else { "Claude" };
-            let label = loader_event_label(&event.kind, event.tool_name.as_deref(), assistant);
+            let label = loader_event_label(
+                &event.kind,
+                event.tool_name.as_deref(),
+                assistant,
+                self.locale,
+            );
             let is_user = event.kind == "user";
             events = events.child(
                 div()
@@ -11008,12 +11289,20 @@ impl Workspace {
             );
         }
         if let Some(message) = if state.loading_detail {
-            Some(SESSION_LOADER_LOADING_PREVIEW)
+            Some(
+                self.locale
+                    .text(SESSION_LOADER_LOADING_PREVIEW, "Loading the preview…"),
+            )
         } else if state.history && state.error.is_none() && state.events.is_empty() {
-            Some("当前会话还没有可显示的历史内容")
+            Some(self.locale.text(
+                "当前会话还没有可显示的历史内容",
+                "This session has no history to show yet",
+            ))
         } else {
-            (state.first_event.is_some() && state.events.is_empty())
-                .then_some(SESSION_LOADER_NO_HISTORY)
+            (state.first_event.is_some() && state.events.is_empty()).then_some(self.locale.text(
+                SESSION_LOADER_NO_HISTORY,
+                "This session has no history to show yet",
+            ))
         } {
             events = events.child(
                 div()
@@ -11056,11 +11345,13 @@ impl Workspace {
             );
         }
         let hit_status = if state.pending_search.is_some() {
-            "正在查找…".to_owned()
+            self.locale.text("正在查找…", "Searching…").to_owned()
         } else if state.search_hits.is_empty() {
-            "0 条命中".to_owned()
+            self.locale.text("0 条命中", "0 matches").to_owned()
+        } else if state.search_hits.len() == 1 {
+            self.locale.text("1 条命中", "1 match").to_owned()
         } else {
-            format!("{} 条命中", state.search_hits.len())
+            format!("{} matches", state.search_hits.len())
         };
         let hits_panel = div()
             .id("session-loader-hits")
@@ -11098,7 +11389,7 @@ impl Workspace {
                                 .text_color(rgb(0x9aa4b1))
                                 .cursor_pointer()
                                 .hover(|style| style.text_color(rgb(0xb5c0cd)).bg(rgba(0xffffff0f)))
-                                .child("载入更多命中"),
+                                .child(self.locale.text("载入更多命中", "Load more matches")),
                             &self.dialog_controls[7],
                             |this, _, cx| this.load_more_loader_hits(cx),
                             cx,
@@ -11130,11 +11421,18 @@ impl Workspace {
             .child(preview);
 
         let primary_label = if self.pending_loader_loads.contains_key(&state.session_id) {
-            SESSION_LOADER_LOADING.to_owned()
+            self.locale
+                .text(SESSION_LOADER_LOADING, "Loading…")
+                .to_owned()
         } else if is_codex && state.confirm_running {
-            "结束当前进程并载入".to_owned()
+            self.locale
+                .text("结束当前进程并载入", "End the current run and load")
+                .to_owned()
         } else {
-            format!("载入到“{target_title}”")
+            match self.locale {
+                InterfaceLocale::Chinese => format!("载入到“{target_title}”"),
+                InterfaceLocale::English => format!("Load into \"{target_title}\""),
+            }
         };
         let primary = div()
             .id("session-loader-submit")
@@ -11208,7 +11506,11 @@ impl Workspace {
                                 .text_size(px(10.))
                                 .text_color(rgb(0xe5af52))
                                 .child(
-                                    ui_text(SESSION_LOADER_RUNNING_WARNING).normal_line_height(),
+                                    ui_text(self.locale.text(
+                                        SESSION_LOADER_RUNNING_WARNING,
+                                        "This card is running. Continuing ends the current process.",
+                                    ))
+                                    .normal_line_height(),
                                 ),
                         )
                     }),
@@ -11224,7 +11526,10 @@ impl Workspace {
                                 .px(px(8.))
                                 .py(px(5.))
                                 .cursor_pointer()
-                                .child("重试读取会话历史"),
+                                .child(self.locale.text(
+                                    "重试读取会话历史",
+                                    "Retry loading session history",
+                                )),
                             &self.dialog_controls[2],
                             |this, _, cx| {
                                 if let Some(TabDialog::SessionLoader(state)) = &mut this.dialog {
@@ -11244,7 +11549,10 @@ impl Workspace {
                             .px(px(8.))
                             .py(px(5.))
                             .cursor_pointer()
-                            .child("关闭会话历史"),
+                            .child(self.locale.text(
+                                "关闭会话历史",
+                                "Close session history",
+                            )),
                         &self.dialog_controls[3],
                         |this, window, cx| this.close_dialog(window, cx),
                         cx,
@@ -11337,11 +11645,12 @@ impl Workspace {
                             .font_weight(FontWeight::BOLD)
                             .child(
                                 ui_text(if state.history {
-                                    "会话历史"
+                                    self.locale.text("会话历史", "Session history")
                                 } else if is_codex {
-                                    "载入 Codex 会话"
+                                    self.locale.text("载入 Codex 会话", "Load Codex session")
                                 } else {
-                                    SESSION_LOADER_TITLE
+                                    self.locale
+                                        .text(SESSION_LOADER_TITLE, "Load Claude Code session")
                                 })
                                 .normal_line_height(),
                             ),
@@ -11839,8 +12148,13 @@ impl Workspace {
             let n = self.dialog_controls.len();
             let mut footer = tabs_ui::dialog_footer();
             if show_cancel {
+                let cancel = if matches!(dialog, TabDialog::RemoveSession { .. }) {
+                    self.locale.text("取消", "Cancel")
+                } else {
+                    "取消"
+                };
                 footer = footer.child(self.button(
-                    tabs_ui::dialog_button("dialog-cancel", "取消", false, false),
+                    tabs_ui::dialog_button("dialog-cancel", cancel, false, false),
                     &self.dialog_controls[n - 2],
                     |this, window, cx| this.close_dialog(window, cx),
                     cx,
@@ -12393,6 +12707,7 @@ impl Workspace {
         } else {
             0.
         };
+        let locale = self.locale;
         let fields = self.footer_fields();
         let chip = self.permission_chip();
         let menu_open =
@@ -12678,9 +12993,9 @@ impl Workspace {
                     );
                 }
             }
-            fixed = fixed.child(footer_egress());
+            fixed = fixed.child(footer_egress(locale));
             if fields.account {
-                fixed = fixed.child(footer_account());
+                fixed = fixed.child(footer_account(locale));
             }
         }
 
@@ -13521,7 +13836,9 @@ impl Render for Workspace {
                                 .text_color(rgb(0x29364a))
                                 .text_size(px(11.))
                                 .line_height(px(16.5))
-                                .child(div().font_weight(FontWeight::BOLD).child("终端恢复失败"))
+                                .child(div().font_weight(FontWeight::BOLD).child(
+                                    self.locale.text("终端恢复失败", "Terminal recovery failed"),
+                                ))
                                 .child(
                                     div()
                                         .w_full()
@@ -13542,7 +13859,7 @@ impl Render for Workspace {
                                             .text_size(px(11.))
                                             .line_height(px(15.))
                                             .cursor_pointer()
-                                            .child("重试"),
+                                            .child(self.locale.text("重试", "Retry")),
                                         &self.recovery_controls[id],
                                         move |this, _, cx| {
                                             this.send(
@@ -14807,9 +15124,9 @@ fn loader_catalog_revision(graph: &Value) -> Vec<(String, String, String, String
         .collect()
 }
 
-fn loader_relative_time(updated_at: i64) -> String {
+fn loader_relative_time(updated_at: i64, locale: InterfaceLocale) -> String {
     if updated_at == 0 {
-        return "时间未知".into();
+        return locale.text("时间未知", "Time unknown").to_owned();
     }
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -14817,12 +15134,21 @@ fn loader_relative_time(updated_at: i64) -> String {
     let hours = (now - updated_at).max(0) / 3_600_000;
     if hours < 24 {
         if hours <= 0 {
-            "刚刚".into()
+            locale.text("刚刚", "Just now").to_owned()
         } else {
-            format!("{hours} 小时前")
+            match locale {
+                InterfaceLocale::Chinese => format!("{hours} 小时前"),
+                InterfaceLocale::English if hours == 1 => "1 hour ago".to_owned(),
+                InterfaceLocale::English => format!("{hours} hours ago"),
+            }
         }
     } else {
-        format!("{} 天前", hours / 24)
+        let days = hours / 24;
+        match locale {
+            InterfaceLocale::Chinese => format!("{days} 天前"),
+            InterfaceLocale::English if days == 1 => "1 day ago".to_owned(),
+            InterfaceLocale::English => format!("{days} days ago"),
+        }
     }
 }
 
@@ -15106,7 +15432,7 @@ fn footer_text_estimate(text: &str) -> f32 {
 
 /// Neutral, non-interactive egress slot: frozen 5px dot, 10px label, 5px gap,
 /// 2px/7px padding and 5px radius. It never reports health or egress state.
-fn footer_egress() -> Stateful<Div> {
+fn footer_egress(locale: InterfaceLocale) -> Stateful<Div> {
     div()
         .children(footer_bounds_probe("egress"))
         .id("footer-egress")
@@ -15133,19 +15459,17 @@ fn footer_egress() -> Stateful<Div> {
                         .rounded_full()
                         .bg(rgb(0x606572)),
                 )
-                .child(
-                    div()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .child(footer_text("egress", FOOTER_EGRESS_LABEL)),
-                ),
+                .child(div().overflow_hidden().text_ellipsis().child(footer_text(
+                    "egress",
+                    locale.text(FOOTER_EGRESS_LABEL, "Exit"),
+                ))),
         )
 }
 
 /// Frozen `.ca-trigger` without an account name: 14px line user icon, "Claude
 /// 账户", and the upward chevron. Non-interactive until the accounts gate
 /// supplies real state.
-fn footer_account() -> Stateful<Div> {
+fn footer_account(locale: InterfaceLocale) -> Stateful<Div> {
     div()
         .children(footer_bounds_probe("account"))
         .id("footer-account")
@@ -15167,7 +15491,10 @@ fn footer_account() -> Stateful<Div> {
                         .min_w_0()
                         .overflow_hidden()
                         .text_ellipsis()
-                        .child(footer_text("account", FOOTER_ACCOUNT_LABEL)),
+                        .child(footer_text(
+                            "account",
+                            locale.text(FOOTER_ACCOUNT_LABEL, "Claude accounts"),
+                        )),
                 )
                 .child(
                     div()
@@ -15342,14 +15669,14 @@ fn footer_shell_name(shell: &str) -> Option<&str> {
     )
 }
 
-fn loader_permission_label(mode: &str) -> &str {
+fn loader_permission_label(mode: &str, locale: InterfaceLocale) -> &str {
     match mode {
-        "" | "default" => "默认权限",
-        "auto" => "自动模式",
-        "acceptEdits" => "自动接受编辑",
-        "plan" => "计划模式",
-        "bypassPermissions" => "开放所有权限",
-        "ask" => "逐项确认",
+        "" | "default" => locale.text("默认权限", "Default"),
+        "auto" => locale.text("自动模式", "Auto"),
+        "acceptEdits" => locale.text("自动接受编辑", "Accept Edits"),
+        "plan" => locale.text("计划模式", "Plan Mode"),
+        "bypassPermissions" => locale.text("开放所有权限", "Bypass Permissions"),
+        "ask" => locale.text("逐项确认", "Ask every step"),
         other => other,
     }
 }
@@ -15368,14 +15695,16 @@ fn loader_event_label(
     kind: &str,
     tool_name: Option<&str>,
     assistant: &'static str,
+    locale: InterfaceLocale,
 ) -> SharedString {
     match kind {
-        "user" => "你".into(),
+        "user" => locale.text("你", "You").into(),
         "assistant" => assistant.into(),
-        "tool" => tool_name
-            .filter(|name| !name.is_empty())
-            .map_or_else(|| "工具".into(), |name| format!("工具 · {name}").into()),
-        _ => "系统".into(),
+        "tool" => tool_name.filter(|name| !name.is_empty()).map_or_else(
+            || locale.text("工具", "Tool").into(),
+            |name| format!("{} · {name}", locale.text("工具", "Tool")).into(),
+        ),
+        _ => locale.text("系统", "System").into(),
     }
 }
 

@@ -37,7 +37,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::provider_settings::{DELETE_FAILED, ProviderDraft, ProviderSettings, ProviderUpdate};
 use crate::rename_input::{RenameInput, RenameInputEvent};
-use crate::runtime_bridge::{Command, RuntimeCommands};
+use crate::runtime_bridge::{Command, ConnectionPhase, RuntimeCommands};
 use crate::terminal_input::read_clipboard_text;
 
 // The desktop probes compile the settings shell directly alongside a test transport.
@@ -1317,7 +1317,6 @@ pub struct SettingsShell {
     commands: RuntimeCommands,
     locale: InterfaceLocale,
     language: LocalePreference,
-    language_draft: LocalePreference,
     language_block: LanguageZoneBlock,
     forced_locale: Option<InterfaceLocale>,
     time_zone: Option<TimeZoneSettingsSnapshot>,
@@ -1358,7 +1357,6 @@ impl SettingsShell {
             commands: commands.clone(),
             locale: InterfaceLocale::default(),
             language: LocalePreference::default(),
-            language_draft: LocalePreference::default(),
             language_block: LanguageZoneBlock {
                 available: true,
                 ..Default::default()
@@ -1402,7 +1400,6 @@ impl SettingsShell {
     ) {
         self.locale = locale;
         self.language = preference;
-        self.language_draft = preference;
         self.language_block.busy = saving;
     }
 
@@ -1414,7 +1411,6 @@ impl SettingsShell {
         cx: &mut Context<Self>,
     ) {
         self.configure_locale(preference, locale, false);
-        self.language_block.saved = from_this_view;
         self.language_block.error = LanguageZoneError::None;
         self.forced_locale = (from_this_view
             && preference != LocalePreference::System
@@ -1430,10 +1426,12 @@ impl SettingsShell {
     }
 
     fn request_time_zone(&mut self, save: bool, cx: &mut Context<Self>) {
-        if self.time_zone_request.is_some() {
+        let (generation, phase) = self.commands.connection();
+        if self.time_zone_request.is_some()
+            || (save && matches!(phase, ConnectionPhase::ReadOnly { .. }))
+        {
             return;
         }
-        let generation = self.commands.connection().0;
         let request_id = NEXT_TIME_ZONE_REQUEST.fetch_add(1, Ordering::Relaxed);
         let command = if save {
             Command::SetTimeZoneSettings {
@@ -1514,14 +1512,13 @@ impl SettingsShell {
         use LanguageZoneAction::*;
 
         match action {
-            SelectLanguage(_) | SaveLanguage | CancelLanguage | ResetLanguage | RetryLanguage
-                if self.language_block.busy =>
-            {
+            SelectLanguage(_) if self.language_block.busy => {
                 return;
             }
-            SelectTimeZone(_) | SaveTimeZone | CancelTimeZone | ResetTimeZone | RetryTimeZone
+            RetryTimeZone if self.time_zone_block.busy => return,
+            SelectTimeZone(_) | SaveTimeZone | CancelTimeZone | ResetTimeZone
             | ToggleTimeZoneMenu
-                if self.time_zone_block.busy =>
+                if self.time_zone_block.busy || self.time_zone_read_only() =>
             {
                 return;
             }
@@ -1529,28 +1526,13 @@ impl SettingsShell {
                 let Some(preference) = LocalePreference::from_value(&preference) else {
                     return;
                 };
-                self.language_draft = preference;
-                self.language_block.saved = false;
-                self.language_block.error = LanguageZoneError::None;
-                self.forced_locale = None;
-            }
-            SaveLanguage if self.language_draft != self.language => {
+                if preference == self.language {
+                    return;
+                }
                 self.language_block.busy = true;
-                self.language_block.saved = false;
                 self.language_block.error = LanguageZoneError::None;
-                cx.emit(SettingsShellEvent::SaveLocale(self.language_draft));
+                cx.emit(SettingsShellEvent::SaveLocale(preference));
             }
-            CancelLanguage | ResetLanguage => {
-                self.language_draft = if action == ResetLanguage {
-                    LocalePreference::System
-                } else {
-                    self.language
-                };
-                self.language_block.saved = false;
-                self.language_block.error = LanguageZoneError::None;
-                self.forced_locale = None;
-            }
-            RetryLanguage => self.language_block.error = LanguageZoneError::None,
             SelectTimeZone(value) if self.time_zone_block.available => {
                 self.time_zone_draft = value;
                 self.time_zone_menu_open = false;
@@ -1586,6 +1568,13 @@ impl SettingsShell {
                 .is_some_and(|zone| zone.time_zone != self.time_zone_draft)
     }
 
+    fn time_zone_read_only(&self) -> bool {
+        matches!(
+            self.commands.connection().1,
+            ConnectionPhase::ReadOnly { .. }
+        )
+    }
+
     fn render_language_zone(&self, window: &Window, cx: &Context<Self>) -> Div {
         let snapshot = self
             .time_zone
@@ -1593,22 +1582,20 @@ impl SettingsShell {
             .filter(|_| self.time_zone_block.available);
         let mut view = LanguageZoneView {
             english: self.locale == InterfaceLocale::English,
-            language: self.language_draft.value(),
+            language: self.language.value(),
             time_zone: &self.time_zone_draft,
             system_time_zone: snapshot.map_or("", |zone| zone.system_time_zone.as_str()),
             auto_time_zone: snapshot.and_then(|zone| zone.auto_time_zone.as_deref()),
             zones: snapshot.map_or(&[], |zone| zone.zones.as_slice()),
             preview: None,
             forced_locale: self.forced_locale.map(InterfaceLocale::value),
-            language_block: LanguageZoneBlock {
-                dirty: self.language_draft != self.language,
-                ..self.language_block
-            },
+            language_block: self.language_block,
             time_zone_block: LanguageZoneBlock {
                 dirty: self.time_zone_dirty(),
                 ..self.time_zone_block
             },
             time_zone_menu_open: self.time_zone_menu_open,
+            time_zone_read_only: self.time_zone_read_only(),
             keyboard_focus: self.keyboard_focus,
             focus: &self.language_zone_focus,
         };
@@ -1787,11 +1774,15 @@ impl SettingsShell {
         self.load_assignment_catalog(false, cx);
         if self.page == SettingsPage::Language {
             let (generation, phase) = self.commands.connection();
-            if self
-                .time_zone_request
-                .is_none_or(|(_, request_generation, _)| request_generation != generation)
-                || !matches!(phase, crate::runtime_bridge::ConnectionPhase::Ready)
-            {
+            let ready = matches!(phase, ConnectionPhase::Ready);
+            let read_only = matches!(phase, ConnectionPhase::ReadOnly { .. });
+            if !ready {
+                self.time_zone_menu_open = false;
+            }
+            let current = self.time_zone_request.is_some_and(|(_, requested, save)| {
+                requested == generation && (ready || (read_only && !save))
+            });
+            if !current {
                 self.time_zone_request = None;
                 self.request_time_zone(false, cx);
             }
@@ -2124,9 +2115,7 @@ impl SettingsShell {
         let focus = &self.language_zone_focus;
         window.focus(match control {
             "english" => &focus.language_options[2],
-            "language-save" => &focus.language_save,
-            "language-reset" => &focus.language_reset,
-            "language-cancel" => &focus.language_cancel,
+            "chinese" => &focus.language_options[1],
             "zone" => &focus.time_zone_trigger,
             "zone-reset" => &focus.time_zone_reset,
             "zone-cancel" => &focus.time_zone_cancel,
@@ -2516,7 +2505,18 @@ impl SettingsShell {
                     .child("Claude Code"),
                 SettingsPage::Language => row
                     .child(globe_icon(15., if active { ACCENT } else { NAV_TEXT }))
-                    .child(language_zone_label(page.title(self.locale))),
+                    .child(
+                        // At 720 the frozen English label wraps onto two lines
+                        // inside the same 33pt row; the Chinese label stays on
+                        // one. Let the text column shrink and wrap instead of
+                        // pushing past the nav edge.
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .line_height(px(14.))
+                            .whitespace_normal()
+                            .child(language_zone_label(page.title(self.locale))),
+                    ),
             };
             nav = nav.child(row);
             if page == SettingsPage::ClaudeCode {
@@ -5049,9 +5049,9 @@ impl Render for SettingsShell {
 //
 // This block is a projection only. The settings host owns the drafts, the
 // saved baselines, the preference reads/writes, and the effective locale.
-// `LanguageZoneView::english` is the language currently applied by the shell,
-// not the language draft: choosing another radio updates the draft, and the
-// shell switches its copy only after the host confirms a save.
+// `LanguageZoneView::english` is the language currently applied by the shell.
+// Choosing a language radio emits `SelectLanguage`; the host saves it and feeds
+// the saved value back, so this view has no language Save/Cancel/Restore row.
 //
 // The two blocks are independent. Each carries its own availability, busy,
 // dirty, saved, and error state; a language save must not disable the time zone
@@ -5067,9 +5067,7 @@ impl Render for SettingsShell {
 // Frozen copy is transcribed verbatim from
 // `apps/desktop/src/renderer/src/hierarchy/ModelSwitchSettings.tsx`,
 // `ClaudeTimeZoneSettings.tsx`, `hierarchyShell.ts`, `common.ts`, and
-// `claude-time-zone-settings.css`. The only non-frozen labels are the two
-// neutral save-state chips below (`已保存` / `Saved`), which reuse the frozen
-// word that opens the time zone confirmation sentence.
+// `claude-time-zone-settings.css`.
 
 /// One block's status. `available` is false while the first read is pending or
 /// the preference service is disconnected; `dirty` means the draft differs
@@ -5090,12 +5088,9 @@ pub enum LanguageZoneError {
     None,
     /// Settings service disconnected. Controls are disabled and Retry is shown.
     Unavailable,
-    /// The saved value could not be read. Controls are disabled and Retry is
-    /// shown. The time zone block uses its own frozen read sentence; the
-    /// language block has no frozen read-error sentence, so it reuses the
-    /// generic disconnected sentence instead of inventing new copy.
+    /// The saved time zone could not be read. Retry remains available.
     Read,
-    /// The last write was not confirmed. The draft is kept and Save can retry.
+    /// The last write was not confirmed. The saved preference is unchanged.
     Save,
 }
 
@@ -5104,10 +5099,6 @@ pub enum LanguageZoneError {
 pub enum LanguageZoneAction {
     SelectLanguage(String),
     SelectTimeZone(String),
-    SaveLanguage,
-    CancelLanguage,
-    ResetLanguage,
-    RetryLanguage,
     SaveTimeZone,
     CancelTimeZone,
     ResetTimeZone,
@@ -5122,10 +5113,6 @@ pub enum LanguageZoneAction {
 /// projection is rebuilt from host state.
 pub struct LanguageZoneFocus {
     language_options: [FocusHandle; 3],
-    language_save: FocusHandle,
-    language_cancel: FocusHandle,
-    language_reset: FocusHandle,
-    language_retry: FocusHandle,
     time_zone_trigger: FocusHandle,
     time_zone_save: FocusHandle,
     time_zone_cancel: FocusHandle,
@@ -5142,10 +5129,6 @@ impl LanguageZoneFocus {
         let handle = || cx.focus_handle().tab_stop(true);
         Self {
             language_options: std::array::from_fn(|_| handle()),
-            language_save: handle(),
-            language_cancel: handle(),
-            language_reset: handle(),
-            language_retry: handle(),
             time_zone_trigger: handle(),
             time_zone_save: handle(),
             time_zone_cancel: handle(),
@@ -5161,7 +5144,7 @@ impl LanguageZoneFocus {
 
 /// One frame of the language and time zone blocks.
 ///
-/// - `language` is the language draft (`system`, `zh-CN`, `en`).
+/// - `language` is the saved language preference (`system`, `zh-CN`, `en`).
 /// - `time_zone` is the time zone draft (`auto`, `system`, or an IANA name).
 /// - `system_time_zone` is the host zone used for `system` and as the fallback
 ///   effective zone for `auto`.
@@ -5186,6 +5169,7 @@ pub struct LanguageZoneView<'a> {
     pub language_block: LanguageZoneBlock,
     pub time_zone_block: LanguageZoneBlock,
     pub time_zone_menu_open: bool,
+    pub time_zone_read_only: bool,
     pub keyboard_focus: bool,
     pub focus: &'a LanguageZoneFocus,
 }
@@ -5238,8 +5222,6 @@ const VIEW_RESTORE: &str = "恢复默认";
 const VIEW_RESTORE_EN: &str = "Restore defaults";
 const VIEW_RETRY: &str = "重试";
 const VIEW_RETRY_EN: &str = "Retry";
-const VIEW_SAVED: &str = "已保存";
-const VIEW_SAVED_EN: &str = "Saved";
 const VIEW_TIME_ZONE_SAVED: &str = "已保存，下次启动 Claude Code 时自动生效。";
 const VIEW_TIME_ZONE_SAVED_EN: &str =
     "Saved. Applies automatically on the next Claude Code launch.";
@@ -5249,6 +5231,8 @@ const VIEW_TIME_ZONE_READ: &str = "无法读取时区设置，请重试。";
 const VIEW_TIME_ZONE_READ_EN: &str = "Could not load the time zone. Please retry.";
 const VIEW_SAVE_UNCONFIRMED: &str = "保存未确认，请重试。";
 const VIEW_SAVE_UNCONFIRMED_EN: &str = "Save was not confirmed. Please retry.";
+const VIEW_TIME_ZONE_READ_ONLY: &str = "数据库只读";
+const VIEW_TIME_ZONE_READ_ONLY_EN: &str = "The database is read-only.";
 const VIEW_ERROR_COLOR: u32 = 0xb34d47;
 const VIEW_RADIO_BORDER: u32 = 0x9aa3ae;
 const VIEW_ROW_TEXT: u32 = 0x414a57;
@@ -5272,11 +5256,7 @@ fn language_zone_locale_label(locale: &str) -> &str {
     }
 }
 
-fn language_zone_error_text(
-    error: LanguageZoneError,
-    english: bool,
-    time_zone: bool,
-) -> Option<&'static str> {
+fn language_zone_error_text(error: LanguageZoneError, english: bool) -> Option<&'static str> {
     match error {
         LanguageZoneError::None => None,
         LanguageZoneError::Unavailable => Some(language_zone_text(
@@ -5284,13 +5264,11 @@ fn language_zone_error_text(
             VIEW_DISCONNECTED,
             VIEW_DISCONNECTED_EN,
         )),
-        LanguageZoneError::Read => Some(if time_zone {
-            language_zone_text(english, VIEW_TIME_ZONE_READ, VIEW_TIME_ZONE_READ_EN)
-        } else {
-            // No frozen language read-error sentence exists. Reuse the generic
-            // disconnected sentence rather than inventing copy.
-            language_zone_text(english, VIEW_DISCONNECTED, VIEW_DISCONNECTED_EN)
-        }),
+        LanguageZoneError::Read => Some(language_zone_text(
+            english,
+            VIEW_TIME_ZONE_READ,
+            VIEW_TIME_ZONE_READ_EN,
+        )),
         LanguageZoneError::Save => Some(language_zone_text(
             english,
             VIEW_SAVE_UNCONFIRMED,
@@ -5310,6 +5288,7 @@ pub(crate) struct LanguageZoneProbe {
     pub labels: Vec<String>,
     pub bounds: Vec<Bounds<Pixels>>,
     pub enabled: HashMap<&'static str, bool>,
+    pub selected_language: String,
 }
 
 #[cfg(debug_assertions)]
@@ -5697,6 +5676,12 @@ fn language_zone_language_section(
     let english = view.english;
     let block = view.language_block;
     let enabled = block.available && !block.busy;
+    #[cfg(debug_assertions)]
+    LANGUAGE_ZONE_PROBE.with_borrow_mut(|probe| {
+        if let Some(probe) = probe {
+            probe.selected_language = view.language.to_owned();
+        }
+    });
     let options: [(&'static str, &'static str); 3] = [
         (
             "system",
@@ -5766,75 +5751,13 @@ fn language_zone_language_section(
         );
     }
 
-    let dirty = block.dirty;
-    let can_save = enabled && dirty;
-    let can_cancel = enabled && dirty;
-    let can_reset = enabled && (view.language != "system" || dirty);
-    let mut actions = div()
-        .flex()
-        .items_center()
-        .flex_wrap()
-        .gap(px(12.))
-        .mt(px(18.))
-        .child(language_zone_action_button(
-            "settings-language-reset",
-            language_zone_text(english, VIEW_RESTORE, VIEW_RESTORE_EN),
-            false,
-            can_reset,
-            view.focus.language_reset.clone(),
-            view.keyboard_focus,
-            on_action.clone(),
-            LanguageZoneAction::ResetLanguage,
-        ))
-        .child(language_zone_action_button(
-            "settings-language-cancel",
-            language_zone_text(english, VIEW_CANCEL, VIEW_CANCEL_EN),
-            false,
-            can_cancel,
-            view.focus.language_cancel.clone(),
-            view.keyboard_focus,
-            on_action.clone(),
-            LanguageZoneAction::CancelLanguage,
-        ))
-        .child(language_zone_action_button(
-            "settings-language-save",
-            if block.busy {
-                language_zone_text(english, VIEW_SAVING, VIEW_SAVING_EN)
-            } else {
-                language_zone_text(english, VIEW_SAVE, VIEW_SAVE_EN)
-            },
-            true,
-            can_save,
-            view.focus.language_save.clone(),
-            view.keyboard_focus,
-            on_action.clone(),
-            LanguageZoneAction::SaveLanguage,
-        ));
-    if block.available && block.saved && !dirty && !block.busy {
-        actions = actions.child(language_zone_status(
-            "settings-language-status",
-            language_zone_text(english, VIEW_SAVED, VIEW_SAVED_EN),
-        ));
-    }
-    section = section.child(actions);
-
-    if let Some(text) = language_zone_error_text(block.error, english, false) {
-        let retryable = matches!(
-            block.error,
-            LanguageZoneError::Unavailable | LanguageZoneError::Read
-        );
-        let retry = retryable.then(|| {
-            (
-                view.focus.language_retry.clone(),
-                LanguageZoneAction::RetryLanguage,
-            )
-        });
+    if block.error == LanguageZoneError::Save {
         section = section.child(language_zone_error_line(
             "settings-language-error",
             "settings-language-retry",
-            text,
+            language_zone_text(english, VIEW_SAVE_UNCONFIRMED, VIEW_SAVE_UNCONFIRMED_EN),
             english,
-            retry,
+            None,
             !block.busy,
             view.keyboard_focus,
             on_action,
@@ -5851,11 +5774,19 @@ fn language_zone_time_zone_section(
 ) -> Div {
     let english = view.english;
     let block = view.time_zone_block;
-    let enabled = block.available && !block.busy;
+    // Read-only recovery has a saved zone to show but no writable preference
+    // service behind it. Keep the value, preview and controls on screen, while
+    // every write path (menu, save, cancel, restore defaults) is disabled and
+    // explained by the frozen read-only sentence below.
+    let read_only = view.time_zone_read_only;
+    let enabled = block.available && !block.busy && !read_only;
     #[cfg(debug_assertions)]
     LANGUAGE_ZONE_PROBE.with_borrow_mut(|probe| {
         if let Some(probe) = probe {
             probe.enabled.insert("settings-time-zone-trigger", enabled);
+            probe
+                .enabled
+                .insert("settings-time-zone-read-only", read_only);
         }
     });
     let trigger_label = language_zone_trigger_label(&view, choices);
@@ -5864,6 +5795,7 @@ fn language_zone_time_zone_section(
     let bounds_cell = view.focus.trigger_bounds.clone();
     let mut trigger = div()
         .id("settings-time-zone-trigger")
+        .mt(px(12.))
         .w_full()
         .h(px(36.))
         .flex()
@@ -5925,7 +5857,7 @@ fn language_zone_time_zone_section(
     section = section.child(
         div()
             .id("settings-time-zone-help")
-            .mt(px(6.))
+            .mt(px(10.))
             .text_size(px(11.))
             .line_height(relative(1.7))
             .text_color(rgb(MUTED))
@@ -6130,7 +6062,25 @@ fn language_zone_time_zone_section(
     }
     section = section.child(actions);
 
-    if let Some(text) = language_zone_error_text(block.error, english, true) {
+    if read_only {
+        // The host may still carry the read failure that produced the read-only
+        // state. Show the actual cause (database read-only) instead of the
+        // misleading disconnected sentence.
+        section = section.child(
+            language_zone_status(
+                "settings-time-zone-read-only",
+                language_zone_text(
+                    english,
+                    VIEW_TIME_ZONE_READ_ONLY,
+                    VIEW_TIME_ZONE_READ_ONLY_EN,
+                ),
+            )
+            .mt(px(14.)),
+        );
+    }
+    if (!read_only || block.error == LanguageZoneError::Read)
+        && let Some(text) = language_zone_error_text(block.error, english)
+    {
         let retryable = matches!(
             block.error,
             LanguageZoneError::Unavailable | LanguageZoneError::Read
@@ -6288,8 +6238,10 @@ pub fn language_zone_content(
     on_action: Rc<dyn Fn(LanguageZoneAction, &mut Window, &mut App)>,
 ) -> Div {
     let choices = language_zone_choices(&view);
-    let menu_open =
-        view.time_zone_menu_open && view.time_zone_block.available && !view.time_zone_block.busy;
+    let menu_open = view.time_zone_menu_open
+        && view.time_zone_block.available
+        && !view.time_zone_block.busy
+        && !view.time_zone_read_only;
     let active = if menu_open {
         if !view.focus.menu_open_seen.replace(true) {
             let index = language_zone_selected_index(&choices, view.time_zone);
