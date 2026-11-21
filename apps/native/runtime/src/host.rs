@@ -4,7 +4,7 @@
 //! vertical slice hosts the owner in a background thread; standalone runtime
 //! transport and additional windows remain separate migration work.
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     ffi::OsString,
     path::{Component, Path, PathBuf},
     sync::{
@@ -16,13 +16,16 @@ use std::{
 };
 
 use crate::{
-    SessionEvent, SessionOptions, claude_model_catalog, codex_catalog,
+    SessionEvent, SessionOptions, browser_integration, claude_model_catalog, codex_catalog,
     codex_launch::{self, CodexLaunch},
     codex_permissions,
     codex_resume::{self, Resume as CodexResume},
+    dsh_catalog::{self, DshSessionCatalog},
+    egress_probe::{self, EgressMonitor, EgressSample, Family},
+    environment_runtime::{self, EnvironmentTarget, WorktreeExpectation},
     history_worker::{HistoryReply, HistoryRequest, HistoryWorker},
     host_control::ControlServer,
-    owner::{OwnerEvent, ShellOwner},
+    owner::{DshLaunch, OwnerEvent, ShellOwner},
     protocol::{
         ClaudeModelCatalogReply, ClaudeModelCatalogResult, ClaudeModelPreferencesReply,
         ClaudeRoleAssignmentsReply, ProviderSettingsReply, ProviderSettingsResult,
@@ -31,15 +34,19 @@ use crate::{
     },
     provider_catalog,
     provider_hook::HookSetup,
+    retention_policy::{self, IndexedCheckpoint, IndexedSession, RetentionQuota, SessionRetention},
     search::{SearchRequest, SearchResult},
     shell_input::{InteractiveLaunch, ShellInput},
+    subscription_launch, update_download,
     worker::{SelectionCopy, ShellSubmission, WorkerCommand},
     workspace_paths::WorkspacePathChecks,
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use matou_native_core::{
+    account_store::AccountStore,
     backup::{BackupReason, BackupService, DEFAULT_MAX_BACKUPS},
     database_recovery::{OpeningAction, RECOVERY_ID_CHANGED, RecoveryActionError, RecoveryActions},
+    git_repo::{Head, Repository, WorktreeScope},
     hierarchy::{
         self, BootstrapWindowInput, HierarchyIds, HierarchyResult, Scene, Task, WindowNavigation,
         Workspace,
@@ -52,6 +59,7 @@ use matou_native_core::{
         tasks, workspaces,
     },
     journal::JournalOptions,
+    link_routing::{self, LinkSource},
     provider_config::{ProviderConfigLocale, ProviderConfigStore},
     provider_launch::{
         CLAUDE_PERMISSION_MODES, ClaudeLaunch, automatic_time_zone, available_time_zones,
@@ -70,6 +78,9 @@ use matou_native_core::{
     },
     startup::{self, BootstrapResult, ReadOnlyReason, RecoveryError, RecoveryRequired},
     storage::{CommandMetadata, configure_connection},
+    update_policy::{
+        self, Architecture, CurrentVersion, FeedConfiguration, InstallMode, Platform, UpdateLocale,
+    },
     workspace_paths::WorkspacePathState,
 };
 use matou_native_terminal::{
@@ -337,6 +348,83 @@ pub enum Command {
         session_id: String,
         provider_session_id: String,
     },
+    ListDshSessions {
+        request_id: u64,
+        cwd: String,
+        query: String,
+        full_text: bool,
+        offset: Option<i64>,
+        limit: Option<i64>,
+    },
+    GetDshSession {
+        request_id: u64,
+        cwd: String,
+        provider_session_id: String,
+        before_event_index: Option<i64>,
+        around_event_index: Option<i64>,
+        limit: Option<i64>,
+    },
+    SearchDshSession {
+        request_id: u64,
+        cwd: String,
+        provider_session_id: String,
+        query: String,
+        offset: Option<i64>,
+        limit: Option<i64>,
+    },
+    LoadDshSession {
+        request_id: u64,
+        session_id: String,
+        provider_session_id: String,
+    },
+    GetEnvironmentDiagnostics {
+        request_id: u64,
+        cwd: PathBuf,
+        #[serde(default)]
+        repair: Option<crate::protocol::WorktreeRepairQuery>,
+    },
+    CheckGitRepo {
+        request_id: u64,
+        cwd: PathBuf,
+    },
+    GetEgressStatus {
+        request_id: u64,
+    },
+    RecheckEgress {
+        request_id: u64,
+    },
+    SetEgressExemption {
+        request_id: u64,
+        family: Family,
+    },
+    GetBrowserDiagnostics {
+        request_id: u64,
+    },
+    EvaluateExternalLink {
+        request_id: u64,
+        url: Option<String>,
+        #[serde(default)]
+        sign_in: bool,
+    },
+    GetUpdateStatus {
+        request_id: u64,
+    },
+    CheckForUpdate {
+        request_id: u64,
+    },
+    DownloadUpdate {
+        request_id: u64,
+    },
+    RunRetentionCleanup {
+        request_id: u64,
+    },
+    GetAccountSummary {
+        request_id: u64,
+    },
+    GetAgentHud {
+        request_id: u64,
+        session_id: String,
+    },
     ForkSession {
         scene_id: String,
         source_session_id: String,
@@ -525,7 +613,18 @@ impl StoragePhase {
                 Self::ReadOnly,
                 Command::ReadOnlyQuery { .. }
                 | Command::History(_)
-                | Command::GetTimeZoneSettings { .. },
+                | Command::GetTimeZoneSettings { .. }
+                | Command::ListDshSessions { .. }
+                | Command::GetDshSession { .. }
+                | Command::SearchDshSession { .. }
+                | Command::GetEnvironmentDiagnostics { .. }
+                | Command::CheckGitRepo { .. }
+                | Command::GetEgressStatus { .. }
+                | Command::GetBrowserDiagnostics { .. }
+                | Command::EvaluateExternalLink { .. }
+                | Command::GetUpdateStatus { .. }
+                | Command::GetAccountSummary { .. }
+                | Command::GetAgentHud { .. },
             ) => true,
             (
                 Self::ReadOnly,
@@ -824,6 +923,536 @@ pub enum Event {
     Closed,
 }
 
+/// Offline adapters supplied by the host's caller, never by IPC.
+#[derive(Default)]
+pub struct OfflineFixtures {
+    pub egress_sample: Option<Box<dyn FnMut() -> Result<EgressSample> + Send>>,
+    pub dsh_session_root: Option<PathBuf>,
+    pub provider_environment: Option<BTreeMap<OsString, OsString>>,
+    pub fork_worktree_root: Option<PathBuf>,
+    pub fork_setup: Option<Box<dyn Fn(&Path) -> Result<()> + Send>>,
+    pub browser_executable: Option<PathBuf>,
+    pub update: Option<OfflineUpdate>,
+    pub retention: Option<OfflineRetention>,
+}
+
+pub struct OfflineUpdate {
+    pub directory: tempfile::TempDir,
+    pub manifest: update_download::Manifest,
+    pub artifact: Vec<u8>,
+}
+
+pub struct OfflineRetention {
+    pub directory: tempfile::TempDir,
+    pub sessions: Vec<(String, SessionRetention, Vec<IndexedCheckpoint>)>,
+}
+
+impl update_download::UpdateFetcher for OfflineUpdate {
+    fn check(
+        &self,
+        _: &url::Url,
+    ) -> std::result::Result<update_download::Manifest, update_download::UpdateError> {
+        Ok(self.manifest.clone())
+    }
+
+    fn fetch(
+        &self,
+        _: &update_download::ManualDownload,
+    ) -> std::io::Result<update_download::DownloadResponse> {
+        Ok(update_download::DownloadResponse {
+            status: 200,
+            content_length: Some(self.artifact.len() as u64),
+            body: Some(Box::new(std::io::Cursor::new(self.artifact.clone()))),
+        })
+    }
+
+    fn download_automatic(
+        &self,
+        _: &update_download::Release,
+        _: &mut dyn FnMut(update_download::Progress),
+    ) -> std::result::Result<(), update_download::DownloadError> {
+        Err(update_download::DownloadError::Rejected(
+            "Offline updates use manual verification".into(),
+        ))
+    }
+}
+
+struct RuntimeWiring {
+    fixtures: OfflineFixtures,
+    dsh: Option<DshSessionCatalog>,
+    update: update_download::UpdateManager,
+    next_egress_attempt: u64,
+}
+
+fn wiring_result(kind: &str, request_id: u64, result: Result<Value>) -> Event {
+    Event::Graph(match result {
+        Ok(result) => json!({"type": kind, "requestId": request_id, "result": result}),
+        Err(error) => json!({"type": kind, "requestId": request_id, "error": format!("{error:#}")}),
+    })
+}
+
+// Desktop treats any Graph event as a replacement for its active scene.
+fn with_graph_projection(reply: Event, mut projection: Value) -> Event {
+    match reply {
+        Event::Graph(Value::Object(fields)) => {
+            if let Some(graph) = projection.as_object_mut() {
+                graph.extend(fields);
+                Event::Graph(projection)
+            } else {
+                Event::Graph(Value::Object(fields))
+            }
+        }
+        other => other,
+    }
+}
+
+impl RuntimeWiring {
+    fn new(fixtures: OfflineFixtures) -> Result<Self> {
+        let dsh = fixtures
+            .dsh_session_root
+            .clone()
+            .or_else(dsh_catalog::default_session_root)
+            .map(DshSessionCatalog::new);
+        let update = update_download::UpdateManager::new(
+            CurrentVersion::parse(env!("CARGO_PKG_VERSION"))?,
+            update_download::UpdateOptions {
+                feed: FeedConfiguration::resolve(None, None, None),
+                platform: if cfg!(target_os = "macos") {
+                    Platform::Darwin
+                } else if cfg!(windows) {
+                    Platform::Win32
+                } else {
+                    Platform::Linux
+                },
+                arch: if cfg!(target_arch = "aarch64") {
+                    Architecture::Arm64
+                } else {
+                    Architecture::X64
+                },
+                enabled: update_policy::update_checks_enabled(fixtures.update.is_some(), None),
+                install_mode: InstallMode::Manual,
+                locale: UpdateLocale::default(),
+            },
+        )?;
+        Ok(Self {
+            fixtures,
+            dsh,
+            update,
+            next_egress_attempt: 0,
+        })
+    }
+
+    fn catalog(&mut self) -> Result<&mut DshSessionCatalog> {
+        self.dsh
+            .as_mut()
+            .context("DSH session directory is unavailable")
+    }
+
+    fn poll_egress(&mut self, owner: &mut ShellOwner) -> Result<()> {
+        let time = now() as u64;
+        if time >= self.next_egress_attempt
+            && owner
+                .egress()
+                .recovery_deadline()
+                .is_some_and(|deadline| deadline <= time)
+            && let Some(sampler) = &mut self.fixtures.egress_sample
+        {
+            self.next_egress_attempt = time.saturating_add(egress_probe::RECOVERY_CONFIRM_MS);
+            owner.apply_egress_sample(sampler()?)?;
+        }
+        Ok(())
+    }
+
+    fn handle(
+        &mut self,
+        command: &Command,
+        data_root: &Path,
+        owner: Option<&mut ShellOwner>,
+    ) -> Option<Event> {
+        let (kind, request_id, result) = match command {
+            Command::ListDshSessions {
+                request_id,
+                cwd,
+                query,
+                full_text,
+                offset,
+                limit,
+            } => (
+                "dshSessionListResult",
+                *request_id,
+                (|| {
+                    Ok(serde_json::to_value(self.catalog()?.list(
+                        Path::new(cwd),
+                        dsh_catalog::ListOptions {
+                            query,
+                            scope: if *full_text {
+                                dsh_catalog::SearchScope::All
+                            } else {
+                                dsh_catalog::SearchScope::Metadata
+                            },
+                            offset: *offset,
+                            limit: *limit,
+                            ..Default::default()
+                        },
+                    )?)?)
+                })(),
+            ),
+            Command::GetDshSession {
+                request_id,
+                cwd,
+                provider_session_id,
+                before_event_index,
+                around_event_index,
+                limit,
+            } => (
+                "dshSessionDetailResult",
+                *request_id,
+                (|| {
+                    Ok(serde_json::to_value(self.catalog()?.detail(
+                        Path::new(cwd),
+                        provider_session_id,
+                        dsh_catalog::DetailOptions {
+                            before_event_index: *before_event_index,
+                            around_event_index: *around_event_index,
+                            limit: *limit,
+                            ..Default::default()
+                        },
+                    )?)?)
+                })(),
+            ),
+            Command::SearchDshSession {
+                request_id,
+                cwd,
+                provider_session_id,
+                query,
+                offset,
+                limit,
+            } => (
+                "dshSessionSearchResult",
+                *request_id,
+                (|| {
+                    Ok(serde_json::to_value(self.catalog()?.search(
+                        Path::new(cwd),
+                        provider_session_id,
+                        query,
+                        *offset,
+                        *limit,
+                    )?)?)
+                })(),
+            ),
+            Command::GetEnvironmentDiagnostics {
+                request_id,
+                cwd,
+                repair,
+            } => (
+                "environmentDiagnosticsResult",
+                *request_id,
+                environment_diagnostics(cwd, repair.as_ref()),
+            ),
+            Command::CheckGitRepo { request_id, cwd } => (
+                "gitRepoResult",
+                *request_id,
+                Repository::discover(cwd).map(git_projection),
+            ),
+            Command::GetEgressStatus { request_id } => {
+                let status = owner.map_or_else(
+                    || EgressMonitor::default().status(),
+                    |owner| owner.egress().status(),
+                );
+                (
+                    "egressStatusResult",
+                    *request_id,
+                    Ok(egress_projection(status)),
+                )
+            }
+            Command::RecheckEgress { request_id } => {
+                let result = (|| {
+                    let owner = owner.context("Runtime is read-only")?;
+                    let sample = self
+                        .fixtures
+                        .egress_sample
+                        .as_mut()
+                        .context("Offline egress sample unavailable")?(
+                    )?;
+                    owner.apply_egress_sample(sample)?;
+                    Ok(egress_projection(owner.egress().status()))
+                })();
+                ("egressRecheckResult", *request_id, result)
+            }
+            Command::SetEgressExemption { request_id, family } => {
+                let result = (|| {
+                    let owner = owner.context("Runtime is read-only")?;
+                    owner.exempt_egress(*family)?;
+                    Ok(egress_projection(owner.egress().status()))
+                })();
+                ("egressExemptionResult", *request_id, result)
+            }
+            Command::GetBrowserDiagnostics { request_id } => (
+                "browserDiagnosticsResult",
+                *request_id,
+                Ok(browser_diagnostics(
+                    data_root,
+                    self.fixtures.browser_executable.as_deref(),
+                )),
+            ),
+            Command::EvaluateExternalLink {
+                request_id,
+                url,
+                sign_in,
+            } => {
+                let source = if *sign_in {
+                    LinkSource::SignIn
+                } else {
+                    LinkSource::External
+                };
+                let result = match link_routing::route_link(url.as_deref(), source) {
+                    Ok(link) => {
+                        json!({"allowed": true, "url": link.url(), "route": "controlled-browser"})
+                    }
+                    Err(reason) => json!({"allowed": false, "reason": format!("{reason:?}")}),
+                };
+                ("externalLinkResult", *request_id, Ok(result))
+            }
+            Command::GetUpdateStatus { request_id } => (
+                "updateStatusResult",
+                *request_id,
+                Ok(json!(self.update.state())),
+            ),
+            Command::CheckForUpdate { request_id } => {
+                let result = (|| {
+                    let fixture = self
+                        .fixtures
+                        .update
+                        .as_ref()
+                        .context("Offline update fixture unavailable")?;
+                    self.update.check(fixture, || now() as u64, |_| {}, |_| {});
+                    Ok(json!(self.update.state()))
+                })();
+                ("updateCheckResult", *request_id, result)
+            }
+            Command::DownloadUpdate { request_id } => {
+                let result = (|| {
+                    let fixture = self
+                        .fixtures
+                        .update
+                        .as_ref()
+                        .context("Offline update fixture unavailable")?;
+                    let files = update_download::LocalUpdateFiles::new(
+                        fixture.directory.path().join("downloads"),
+                    );
+                    self.update
+                        .download(fixture, &files, || now() as u64, |_| {});
+                    Ok(json!(self.update.state()))
+                })();
+                ("updateDownloadResult", *request_id, result)
+            }
+            Command::RunRetentionCleanup { request_id } => {
+                ("retentionCleanupResult", *request_id, self.cleanup())
+            }
+            Command::GetAccountSummary { request_id } => (
+                "accountSummaryResult",
+                *request_id,
+                account_summary(data_root),
+            ),
+            Command::GetAgentHud {
+                request_id,
+                session_id,
+            } => (
+                "agentHudResult",
+                *request_id,
+                owner.map_or_else(
+                    || Ok(Value::Null),
+                    |owner| owner.agent_hud(session_id, data_root),
+                ),
+            ),
+            _ => return None,
+        };
+        Some(wiring_result(kind, request_id, result))
+    }
+
+    fn cleanup(&self) -> Result<Value> {
+        let fixture = self
+            .fixtures
+            .retention
+            .as_ref()
+            .context("Detached retention fixture unavailable")?;
+        let sessions = fixture
+            .sessions
+            .iter()
+            .map(|(id, retention, checkpoints)| IndexedSession {
+                id,
+                retention: *retention,
+                checkpoints,
+            })
+            .collect::<Vec<_>>();
+        let quota = RetentionQuota::default();
+        let plan = retention_policy::cleanup_isolated(fixture.directory.path(), quota, &sessions)?;
+        let actions = plan
+            .actions
+            .iter()
+            .map(|action| {
+                json!({
+                    "sessionId": action.session_id, "generation": action.generation,
+                    "relativePath": action.relative_path, "bytes": action.bytes,
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(json!({
+            "globalQuotaBytes": quota.global_bytes, "sessionQuotaBytes": quota.per_session_bytes,
+            "beforeBytes": plan.before_bytes, "reclaimedBytes": plan.reclaimed_bytes,
+            "remainingGlobalOverage": plan.remaining_global_overage,
+            "remainingSessionOverages": plan.remaining_session_overages, "actions": actions,
+        }))
+    }
+}
+
+fn browser_diagnostics(data_root: &Path, executable: Option<&Path>) -> Value {
+    let executable = browser_integration::browser_executable(executable.map(Path::as_os_str));
+    let status = browser_integration::detect_browser(
+        &executable,
+        browser_integration::inspect_executable,
+        |path| {
+            #[cfg(target_os = "macos")]
+            {
+                let output = std::process::Command::new("/usr/bin/plutil")
+                    .args(["-extract", "CFBundleShortVersionString", "raw", "-o", "-"])
+                    .arg(path)
+                    .output()?;
+                if output.status.success() {
+                    return String::from_utf8(output.stdout).map_err(std::io::Error::other);
+                }
+            }
+            let _ = path;
+            Err(std::io::Error::other("Browser version unavailable"))
+        },
+    );
+    let label = status.label(current_interface_locale(read_locale_preference(data_root)));
+    let details = match status {
+        browser_integration::BrowserStatus::Installed { version } => {
+            json!({"installed": true, "version": version})
+        }
+        browser_integration::BrowserStatus::Unavailable(diagnostic) => {
+            json!({"installed": false, "diagnostic": format!("{diagnostic:?}")})
+        }
+    };
+    json!({"executable": executable, "label": label, "status": details})
+}
+
+fn account_summary(data_root: &Path) -> Result<Value> {
+    let (accounts, state) = AccountStore::load(&data_root.join("accounts.json"))
+        .map_err(|_| anyhow!("Could not read the account snapshot"))?;
+    #[cfg(target_os = "macos")]
+    let macos_major = std::process::Command::new("/usr/bin/sw_vers")
+        .arg("-productVersion")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .and_then(|version| version.trim().split('.').next()?.parse().ok());
+    #[cfg(not(target_os = "macos"))]
+    let macos_major = None;
+    Ok(json!({
+        "accountSummary": accounts.project(now() as u64),
+        "loadState": match state {
+            matou_native_core::account_store::LoadState::Loaded => "loaded",
+            matou_native_core::account_store::LoadState::Missing => "missing",
+            matou_native_core::account_store::LoadState::Corrupt => "corrupt",
+        },
+        "subscriptionSupported": subscription_launch::subscription_supported(cfg!(target_os = "macos"), macos_major),
+    }))
+}
+
+fn egress_projection(status: egress_probe::Status) -> Value {
+    let mut frozen = BTreeSet::new();
+    let families = status
+        .families
+        .iter()
+        .map(|family| {
+            frozen.extend(family.frozen_session_ids.iter().cloned());
+            json!({
+                "family": family.evaluation.family, "state": family.evaluation.state,
+                "exit": family.evaluation.exit, "violation": family.evaluation.violation,
+                "hosts": family.hosts, "baseline": family.baseline, "overridden": family.overridden,
+                "frozenSessionIds": family.frozen_session_ids, "recovering": family.recovering,
+            })
+        })
+        .collect::<Vec<_>>();
+    let transition = status.last_transition.map(|transition| {
+        json!({
+            "id": transition.id, "kind": match transition.kind {
+                egress_probe::TransitionKind::Frozen => "frozen",
+                egress_probe::TransitionKind::Resumed => "resumed",
+            },
+            "family": transition.family, "sessionCount": transition.session_count,
+            "at": transition.at, "reason": transition.reason,
+        })
+    });
+    json!({
+        "state": status.state, "families": families, "frozenSessionIds": frozen,
+        "checks": status.checks, "ruleMode": status.rule_mode, "checkedAt": status.checked_at,
+        "protectionEnabled": status.protection_enabled, "sessionFamilies": status.session_families,
+        "lastTransition": transition,
+    })
+}
+
+fn git_projection(repository: Option<Repository>) -> Value {
+    match repository {
+        Some(repo) => {
+            json!({"isRepository": true, "root": repo.root(), "linkedWorktree": repo.is_linked_worktree()})
+        }
+        None => json!({"isRepository": false}),
+    }
+}
+
+fn environment_diagnostics(
+    cwd: &Path,
+    repair: Option<&crate::protocol::WorktreeRepairQuery>,
+) -> Result<Value> {
+    let ready = if let Some(repair) = repair {
+        let repo = Repository::discover(&repair.repository_root)?
+            .context("Worktree repository unavailable")?;
+        let scope = WorktreeScope::new(&repair.isolation_root, &repo)?;
+        let head = Head::Branch(repair.branch.clone());
+        let expectation = WorktreeExpectation {
+            repository_root: repo.root(),
+            path: cwd,
+            head: &head,
+        };
+        match environment_runtime::check_repair(&scope, expectation, &repair.candidate) {
+            Ok(environment_runtime::RepairReadiness::Ready(ready)) => Ok(ready),
+            Ok(environment_runtime::RepairReadiness::RepairableMoved { cwd }) => {
+                return Ok(json!({"state": "repairable-moved", "cwd": cwd}));
+            }
+            Err(problem) => Err(problem),
+        }
+    } else {
+        environment_runtime::probe_environment(EnvironmentTarget::Local(cwd))
+    };
+    Ok(match ready {
+        Ok(ready) => {
+            let git = ready.git.map(|git| {
+                let mut value = git_projection(Some(git.repository));
+                value["head"] = match git.head {
+                    Head::Branch(branch) => json!({"branch": branch}),
+                    Head::Detached(revision) => json!({"revision": revision}),
+                };
+                value["changes"] = json!({
+                    "staged": git.changes.staged, "unstaged": git.changes.unstaged,
+                    "untracked": git.changes.untracked,
+                });
+                value
+            });
+            json!({"state": "ready", "cwd": ready.cwd, "git": git})
+        }
+        Err(environment_runtime::EnvironmentProblem::Missing(reason)) => {
+            json!({"state": "missing", "reason": format!("{reason:?}")})
+        }
+        Err(environment_runtime::EnvironmentProblem::Unavailable(reason)) => {
+            json!({"state": "unavailable", "reason": format!("{reason:?}")})
+        }
+    })
+}
+
 pub struct RuntimeHost {
     pub commands: Sender<Command>,
     pub events: async_channel::Receiver<Event>,
@@ -833,6 +1462,13 @@ pub struct RuntimeHost {
 
 impl RuntimeHost {
     pub fn start(options: LaunchOptions) -> Result<Self> {
+        Self::start_with_offline_fixtures(options, OfflineFixtures::default())
+    }
+
+    pub fn start_with_offline_fixtures(
+        options: LaunchOptions,
+        fixtures: OfflineFixtures,
+    ) -> Result<Self> {
         LazyLock::force(&PERMISSION_STARTUP_WINDOW);
         let (commands, incoming) = mpsc::channel();
         let (send, events) = async_channel::unbounded();
@@ -841,7 +1477,7 @@ impl RuntimeHost {
         let thread = thread::Builder::new()
             .name("matou-domain-owner".into())
             .spawn(move || {
-                let result = run(options, incoming, &send, &domain_shutdown);
+                let result = run(options, incoming, &send, &domain_shutdown, fixtures);
                 if let Err(error) = &result {
                     let _ = send.send_blocking(Event::Diagnostic(format!("{error:#}")));
                 }
@@ -1064,6 +1700,24 @@ pub fn storage_command_rejected(command: Command, code: &str, message: &str) -> 
     }
     if let Command::History(request) = command {
         return Event::History(request.failed(message.into()));
+    }
+    let wiring_request = match &command {
+        Command::LoadDshSession { request_id, .. } => Some(("dshSessionLoadResult", *request_id)),
+        Command::RecheckEgress { request_id } => Some(("egressRecheckResult", *request_id)),
+        Command::SetEgressExemption { request_id, .. } => {
+            Some(("egressExemptionResult", *request_id))
+        }
+        Command::CheckForUpdate { request_id } => Some(("updateCheckResult", *request_id)),
+        Command::DownloadUpdate { request_id } => Some(("updateDownloadResult", *request_id)),
+        Command::RunRetentionCleanup { request_id } => {
+            Some(("retentionCleanupResult", *request_id))
+        }
+        _ => None,
+    };
+    if let Some((kind, request_id)) = wiring_request {
+        return Event::Graph(
+            json!({"type": kind, "requestId": request_id, "code": code, "error": message}),
+        );
     }
     let request_id = match &command {
         Command::GetClaudeModelCatalog { request_id }
@@ -1290,7 +1944,9 @@ fn run(
     incoming: Receiver<Command>,
     send: &async_channel::Sender<Event>,
     shutdown_requested: &OnceLock<bool>,
+    fixtures: OfflineFixtures,
 ) -> Result<()> {
+    let mut wiring = RuntimeWiring::new(fixtures)?;
     let generation = id();
     let bootstrap = match startup::open(&options.data_root, &generation) {
         Ok(value) => value,
@@ -1332,7 +1988,7 @@ fn run(
             connection,
             data_root,
             reason,
-        } => return run_read_only(connection, data_root, reason, incoming, send),
+        } => return run_read_only(connection, data_root, reason, incoming, send, &mut wiring),
         BootstrapResult::RecoveryRequired(recovery) => {
             let Some((database, request_id)) =
                 await_database_recovery(recovery, &generation, &incoming, send)?
@@ -1350,6 +2006,7 @@ fn run(
         database,
         &mut recovery_request,
         &generation,
+        &mut wiring,
     );
     if let (Some(request_id), Err(error)) = (recovery_request, &result) {
         recovery_result(
@@ -1370,6 +2027,7 @@ fn run_read_only(
     reason: ReadOnlyReason,
     incoming: Receiver<Command>,
     send: &async_channel::Sender<Event>,
+    wiring: &mut RuntimeWiring,
 ) -> Result<()> {
     let history = HistoryWorker::new(data_root.clone())?;
     let (workspace, projection) = match ReadOnlyWorkspace::new(&connection) {
@@ -1386,6 +2044,10 @@ fn run_read_only(
             (Err(message.clone()), Err(message))
         }
     };
+    let mut current_graph = projection
+        .as_ref()
+        .map(|projection| projection.active.graph.clone())
+        .unwrap_or(Value::Null);
     send.send_blocking(Event::ReadOnlyReady { reason, projection })?;
     thread::scope(|scope| -> Result<()> {
         let mut export: Option<(String, thread::ScopedJoinHandle<'_, Result<PathBuf>>)> = None;
@@ -1429,11 +2091,13 @@ fn run_read_only(
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
             };
             if !StoragePhase::ReadOnly.accepts(&command) {
-                send.send_blocking(storage_command_rejected(
-                    command,
-                    STORAGE_READ_ONLY,
-                    STORAGE_READ_ONLY_MESSAGE,
-                ))?;
+                let event =
+                    storage_command_rejected(command, STORAGE_READ_ONLY, STORAGE_READ_ONLY_MESSAGE);
+                send.send_blocking(with_graph_projection(event, current_graph.clone()))?;
+                continue;
+            }
+            if let Some(reply) = wiring.handle(&command, &data_root, None) {
+                send.send_blocking(with_graph_projection(reply, current_graph.clone()))?;
                 continue;
             }
             match command {
@@ -1453,6 +2117,9 @@ fn run_read_only(
                             .map_err(|error| format!("{error:#}")),
                         Err(error) => Err(error.clone()),
                     };
+                    if let Ok(navigation) = &result {
+                        current_graph = navigation.graph.clone();
+                    }
                     send.send_blocking(Event::ReadOnlyQueryResult { request_id, result })?;
                 }
                 Command::History(request) => {
@@ -1709,6 +2376,7 @@ fn run_writable(
     (mut connection, ownership, data_root): WritableDatabase,
     recovery_request: &mut Option<String>,
     generation: &str,
+    wiring: &mut RuntimeWiring,
 ) -> Result<()> {
     for path in [&options.workspace, &options.shell_home] {
         if let Err(error) = std::fs::create_dir_all(path) {
@@ -1757,6 +2425,14 @@ fn run_writable(
     let mut scene_id = hierarchy.scene.as_ref().map(|scene| scene.id.clone());
     let mut active_task = hierarchy.task.as_ref().map(|task| task.id.clone());
     let mut owner = ShellOwner::new(connection, ownership, id)?;
+    owner.provider_environment = wiring.fixtures.provider_environment.take();
+    owner.dsh_session_root = wiring
+        .fixtures
+        .dsh_session_root
+        .clone()
+        .or_else(dsh_catalog::default_session_root);
+    owner.fork_worktree_root = wiring.fixtures.fork_worktree_root.take();
+    owner.fork_setup = wiring.fixtures.fork_setup.take();
     // Declared after the lease-owning host state so early returns also join the worker first.
     let mut provider_settings = ProviderSettingsWorker::new(data_root.clone())?;
     let mut sessions = HashSet::new();
@@ -1860,7 +2536,8 @@ fn run_writable(
     let mut claude_launch_targets = HashMap::new();
     let mut permission_changes = HashMap::<String, PermissionChange>::new();
     let mut permission_results = Vec::new();
-    let (catalog_requests, catalog_replies) = start_provider_catalog()?;
+    let (catalog_requests, catalog_replies) =
+        start_provider_catalog(owner.dsh_session_root.clone(), owner.codex_session_root())?;
     let (model_catalog_requests, model_catalog_commands) = mpsc::channel();
     let (model_catalog_results, model_catalog_replies) = mpsc::channel();
     let worker_results = model_catalog_results.clone();
@@ -2305,6 +2982,28 @@ fn run_writable(
                     }
                     owner.launch_claude(session_id.clone(), terminal, launch, binding.as_ref())
                 }
+                PreparedLaunch::Dsh(launch) => {
+                    waits_for_identity = launch.plan.mode.expected_session_id().is_some();
+                    uses_recovery_slot = waits_for_identity;
+                    if waits_for_identity && let Some(binding) = owner.dsh_binding(&session_id)? {
+                        owner.change_dsh_restore(&session_id, ClaudeRestore::Begin(&binding.id))?;
+                    }
+                    let terminal = terminal_layouts
+                        .get(&session_id)
+                        .copied()
+                        .unwrap_or_else(default_terminal_options);
+                    owner
+                        .launch_dsh(&session_id, terminal, &data_root, launch, false)
+                        .map(|_| ())
+                }
+                PreparedLaunch::CodexFork => {
+                    waits_for_identity = true;
+                    let terminal = terminal_layouts
+                        .get(&session_id)
+                        .copied()
+                        .unwrap_or_else(default_terminal_options);
+                    owner.launch_codex_fork(&session_id, terminal, &data_root)
+                }
                 PreparedLaunch::Codex(launch, resume) => {
                     waits_for_identity = resume.is_some();
                     uses_recovery_slot = waits_for_identity;
@@ -2439,6 +3138,9 @@ fn run_writable(
                 }
             }
         }
+        if let Err(error) = wiring.poll_egress(&mut owner) {
+            send.send_blocking(Event::Diagnostic(format!("Egress recheck: {error:#}")))?;
+        }
         for _ in 0..128 {
             // Resolve Ctrl+C before a subsequent focus/shutdown can overtake its
             // control interaction. Ordinary copy does not hold this queue.
@@ -2459,6 +3161,12 @@ fn run_writable(
                     "RECOVERY_NOT_PENDING",
                     DATABASE_RECOVERY_NOT_PENDING,
                 ))?;
+                continue;
+            }
+            if let Some(reply) = wiring.handle(&command, &data_root, Some(&mut owner)) {
+                let projection =
+                    active_graph(&owner, scene_id.as_deref(), window_id, &startup_deferred)?;
+                send.send_blocking(with_graph_projection(reply, projection))?;
                 continue;
             }
             if let Command::Input { session_id, .. } | Command::CopySelection { session_id, .. } =
@@ -3372,12 +4080,13 @@ fn run_writable(
                     continue;
                 }
                 command @ (Command::LoadProviderSession { .. }
-                | Command::LoadCodexSession { .. }) => {
-                    let (provider, session_id, provider_session_id) = match command {
+                | Command::LoadCodexSession { .. }
+                | Command::LoadDshSession { .. }) => {
+                    let (provider, session_id, provider_session_id, request_id) = match command {
                         Command::LoadProviderSession {
                             session_id,
                             provider_session_id,
-                        } => ("claude-code", session_id, provider_session_id),
+                        } => ("claude-code", session_id, provider_session_id, None),
                         Command::LoadCodexSession {
                             session_id,
                             provider_session_id,
@@ -3385,7 +4094,13 @@ fn run_writable(
                             "codex",
                             session_id,
                             provider_session_id.to_ascii_lowercase(),
+                            None,
                         ),
+                        Command::LoadDshSession {
+                            request_id,
+                            session_id,
+                            provider_session_id,
+                        } => ("dsh", session_id, provider_session_id, Some(request_id)),
                         _ => unreachable!(),
                     };
                     let attempt = (|| -> Result<()> {
@@ -3463,7 +4178,7 @@ fn run_writable(
                                 session.archived_at.is_none()
                                     && matches!(
                                         session.kind.as_str(),
-                                        "shell" | "claude-code" | "codex"
+                                        "shell" | "claude-code" | "codex" | "dsh"
                                     )
                             })
                             .context("Card is no longer available")?;
@@ -3495,6 +4210,24 @@ fn run_writable(
                         );
                         Ok(())
                     })();
+                    if let Some(request_id) = request_id {
+                        let result = match &attempt {
+                            Ok(()) => Ok(json!({
+                                "sessionId": session_id, "providerSessionId": provider_session_id, "status": "queued",
+                            })),
+                            Err(error) => Err(anyhow!("{error:#}")),
+                        };
+                        let projection = active_graph(
+                            &owner,
+                            scene_id.as_deref(),
+                            window_id,
+                            &startup_deferred,
+                        )?;
+                        send.send_blocking(with_graph_projection(
+                            wiring_result("dshSessionLoadResult", request_id, result),
+                            projection,
+                        ))?;
+                    }
                     if let Err(error) = attempt {
                         catalog_load_errors.push(catalog_load_error(
                             &session_id,
@@ -3553,6 +4286,8 @@ fn run_writable(
                         false
                     } else if codex {
                         owner.change_codex_restore(session_id, change)?
+                    } else if stored.kind == "dsh" {
+                        owner.change_dsh_restore(session_id, change)?
                     } else {
                         stored.kind == "claude-code"
                             && owner.change_claude_restore(session_id, change)?
@@ -3798,6 +4533,24 @@ fn run_writable(
                 } => {
                     owner.send(&session_id, WorkerCommand::TestPause { paused, resume })?;
                     continue;
+                }
+                Command::ListDshSessions { .. }
+                | Command::GetDshSession { .. }
+                | Command::SearchDshSession { .. }
+                | Command::GetEnvironmentDiagnostics { .. }
+                | Command::CheckGitRepo { .. }
+                | Command::GetEgressStatus { .. }
+                | Command::RecheckEgress { .. }
+                | Command::SetEgressExemption { .. }
+                | Command::GetBrowserDiagnostics { .. }
+                | Command::EvaluateExternalLink { .. }
+                | Command::GetUpdateStatus { .. }
+                | Command::CheckForUpdate { .. }
+                | Command::DownloadUpdate { .. }
+                | Command::RunRetentionCleanup { .. }
+                | Command::GetAccountSummary { .. }
+                | Command::GetAgentHud { .. } => {
+                    unreachable!("Runtime wiring command handled above")
                 }
                 #[cfg(all(test, target_os = "macos"))]
                 Command::TestFreezeShellWrites {
@@ -4711,6 +5464,9 @@ impl ShellPromotion {
                             .insert(session_id.to_owned(), claude_target_metadata(&launch));
                         owner.launch_promoted_claude(session_id, terminal, launch)?
                     }
+                    PreparedLaunch::Dsh(launch) => {
+                        owner.launch_dsh(session_id, terminal, &options.data_root, launch, true)?
+                    }
                     PreparedLaunch::Codex(launch, None) => {
                         owner.launch_codex(session_id, terminal, launch, None, true)?
                     }
@@ -4726,8 +5482,10 @@ impl ShellPromotion {
                 let has_output = owner.check_provider_startup(session_id, run_id)?;
                 let elapsed = started_at.elapsed();
                 let ready = codex_launch::first_screen_ready(elapsed, has_output)
-                    || (self.launch.profile == LaunchProfile::ClaudeCode
-                        && elapsed >= SHELL_PROMOTION_SILENT_STARTUP_WINDOW);
+                    || (matches!(
+                        self.launch.profile,
+                        LaunchProfile::ClaudeCode | LaunchProfile::Dsh
+                    ) && elapsed >= SHELL_PROMOTION_SILENT_STARTUP_WINDOW);
                 if !ready {
                     return Ok(ShellPromotionProgress::Pending);
                 }
@@ -5181,15 +5939,18 @@ fn codex_catalog_result(request_id: u64, cwd: &str, result: Result<Value, &'stat
     result
 }
 
-fn start_provider_catalog() -> Result<(mpsc::SyncSender<CatalogRequest>, Receiver<CatalogReply>)> {
+fn start_provider_catalog(
+    dsh_root: Option<PathBuf>,
+    codex_root: Option<PathBuf>,
+) -> Result<(mpsc::SyncSender<CatalogRequest>, Receiver<CatalogReply>)> {
     let (requests, incoming) = mpsc::sync_channel::<CatalogRequest>(16);
     let (outgoing, replies) = mpsc::channel();
     let root = provider_catalog::projects_root();
-    let codex_root = codex_catalog::root();
     thread::Builder::new()
         .name("provider-catalog".into())
         .spawn(move || {
             let mut codex = codex_catalog::Catalog::new(codex_root);
+            let mut dsh = dsh_root.map(DshSessionCatalog::new);
             for request in incoming {
                 let reply = match request {
                     CatalogRequest::Index { cwd, load: None } => {
@@ -5208,6 +5969,18 @@ fn start_provider_catalog() -> Result<(mpsc::SyncSender<CatalogRequest>, Receive
                                 model: entry.model,
                                 permission_mode: entry.permission_mode.to_owned(),
                                 completed_turn: entry.has_completed_turn,
+                            })
+                        } else if target.provider == "dsh" {
+                            dsh.as_mut().ok_or("DSH session directory is unavailable").and_then(|catalog| {
+                                catalog.detail(Path::new(&cwd), id, dsh_catalog::DetailOptions {limit: Some(1), ..Default::default()})
+                                    .map_err(|_| "DSH session is unreadable or belongs to another working directory")
+                                    .map(|detail| CatalogSelection {
+                                        provider_session_id: detail.summary.provider_session_id,
+                                        title: detail.summary.title,
+                                        model: detail.summary.model,
+                                        permission_mode: detail.summary.permission_mode.to_owned(),
+                                        completed_turn: false,
+                                    })
                             })
                         } else {
                             provider_catalog::read(root.as_deref(), &cwd, Some(id))
@@ -5315,6 +6088,24 @@ fn report_session_launch_failure(
     fresh_codex: bool,
     message: String,
 ) -> Result<RecoveryState> {
+    if owner.pending_codex_fork(session_id)?.is_some() {
+        let reason = format!("Fork CLI could not start: {message}");
+        owner.fail_claude_fork(session_id, &reason)?;
+        return report_launch_failure(send, session_id, true, reason);
+    }
+    if let Some(binding) = owner
+        .dsh_binding(session_id)?
+        .filter(|binding| binding.resumable)
+    {
+        owner.change_dsh_restore(
+            session_id,
+            ClaudeRestore::Fail {
+                binding_id: &binding.id,
+                error: &message,
+            },
+        )?;
+        return report_launch_failure(send, session_id, true, message);
+    }
     if owner
         .session(session_id)?
         .is_some_and(|session| session.kind == "codex")
@@ -5487,7 +6278,7 @@ fn launchable_nodes(graph: &Value) -> impl Iterator<Item = &Value> {
         .filter(|node| {
             matches!(
                 node["currentMode"].as_str(),
-                Some("shell" | "claude-code" | "codex")
+                Some("shell" | "claude-code" | "codex" | "dsh")
             ) && node.get("archivedAt").is_none()
         })
 }
@@ -5513,11 +6304,21 @@ fn unstarted_sessions(
             pending.insert(id.to_owned());
             continue;
         }
+        if node["currentMode"] == "dsh" {
+            if owner
+                .dsh_binding(id)?
+                .is_some_and(|binding| binding.resumable)
+            {
+                pending.insert(id.to_owned());
+            }
+            continue;
+        }
         if node["currentMode"] == "codex" {
-            if node["providerRestoreState"] != "failed"
-                && owner
-                    .codex_binding(id)?
-                    .is_some_and(|binding| binding.resumable)
+            if owner.pending_codex_fork(id)?.is_some()
+                || node["providerRestoreState"] != "failed"
+                    && owner
+                        .codex_binding(id)?
+                        .is_some_and(|binding| binding.resumable)
             {
                 pending.insert(id.to_owned());
             }
@@ -5561,6 +6362,8 @@ enum PreparedLaunch {
         fork_source: Option<String>,
     },
     Codex(CodexLaunch, Option<CodexResume>),
+    Dsh(DshLaunch),
+    CodexFork,
 }
 
 // A binding may be missing or stale before SessionStart confirms this launch.
@@ -5811,12 +6614,12 @@ fn prepare_launch(
                 }
             );
             let data_root = options.data_root.clone();
+            let environment = owner.launch_environment();
             thread::Builder::new()
                 .name("claude-launch".into())
                 .spawn(move || {
                     let terminal = default_terminal_options();
                     let cwd = Path::new(&session.cwd);
-                    let environment = std::env::vars_os().collect();
                     let result = (|| {
                         let preferences = role_preferences.recv()?;
                         let mut launch = if let Some(fork) = &fork {
@@ -5875,7 +6678,49 @@ fn prepare_launch(
                     let _ = send.send(result);
                 })?;
         }
+        "dsh" => {
+            let catalog_root = owner.dsh_session_root.clone();
+            let mut environment = owner.launch_environment();
+            if let Some(root) = &catalog_root {
+                environment.insert("DSH_TUI_SESSION_ROOT".into(), root.as_os_str().to_owned());
+            }
+            let data_root = options.data_root.clone();
+            let binding = if matches!(intent, LaunchIntent::ShellPromotion(_)) {
+                None
+            } else {
+                owner
+                    .dsh_binding(session_id)?
+                    .filter(|binding| binding.resumable)
+            };
+            thread::Builder::new()
+                .name("dsh-launch".into())
+                .spawn(move || {
+                    let result = (|| {
+                        let plan = crate::dsh_launch::prepare(crate::dsh_launch::DshLaunchInput {
+                            cwd: Path::new(&session.cwd),
+                            patch_path: None,
+                            resume_session_id: binding
+                                .as_ref()
+                                .map(|binding| binding.provider_session_id.as_str()),
+                            inherited_environment: environment,
+                            run_environment: Default::default(),
+                        })?;
+                        let config_dump = dump_dsh_config(&plan, &data_root)?;
+                        Ok(PreparedLaunch::Dsh(DshLaunch {
+                            plan,
+                            config_dump,
+                            catalog_root,
+                        }))
+                    })();
+                    let _ = send.send(result);
+                })?;
+        }
         "codex" => {
+            if owner.pending_codex_fork(session_id)?.is_some() {
+                let _ = send.send(Ok(PreparedLaunch::CodexFork));
+                return Ok(receive);
+            }
+            let env = owner.launch_environment();
             let data_root = options.data_root.clone();
             let promotion = match intent {
                 LaunchIntent::ShellPromotion(InteractiveLaunch {
@@ -5900,7 +6745,6 @@ fn prepare_launch(
                 .spawn(move || {
                     let terminal = default_terminal_options();
                     let cwd = Path::new(&session.cwd);
-                    let env = std::env::vars_os().collect();
                     let result = if let Some(mode) = promotion {
                         codex_launch::prepare(
                             &data_root,
@@ -5945,6 +6789,52 @@ fn prepare_launch(
         _ => bail!("unsupported session launch kind"),
     }
     Ok(receive)
+}
+
+fn dump_dsh_config(plan: &crate::dsh_launch::DshLaunchPlan, data_root: &Path) -> Result<String> {
+    use std::io::Read;
+    const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
+    let mut output = tempfile::tempfile_in(data_root)?;
+    let mut child = std::process::Command::new(&plan.executable)
+        .args(crate::dsh_launch::DUMP_CONFIG_ARGS)
+        .current_dir(&plan.cwd)
+        .env_clear()
+        .envs(&plan.environment)
+        .stdin(std::process::Stdio::null())
+        .stdout(output.try_clone()?)
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .context("Start the DSH configuration probe")?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None)
+                if Instant::now() < deadline
+                    && output
+                        .metadata()
+                        .is_ok_and(|info| info.len() <= MAX_CONFIG_BYTES) =>
+            {
+                thread::sleep(Duration::from_millis(20))
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                bail!("DSH configuration probe exceeded its time or output limit");
+            }
+        }
+    };
+    ensure!(status.success(), "DSH configuration probe failed");
+    ensure!(
+        output.metadata()?.len() <= MAX_CONFIG_BYTES,
+        "DSH configuration probe returned too much data"
+    );
+    std::io::Seek::rewind(&mut output)?;
+    let mut contents = String::new();
+    output
+        .take(MAX_CONFIG_BYTES + 1)
+        .read_to_string(&mut contents)?;
+    Ok(contents)
 }
 
 fn launch_shell(

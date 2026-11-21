@@ -520,6 +520,7 @@ pub fn promote_shell_to_agent(
     let title = match profile {
         LaunchProfile::ClaudeCode => "Claude",
         LaunchProfile::Codex => "Codex",
+        LaunchProfile::Dsh => "DSH",
         LaunchProfile::Shell => anyhow::bail!("Shell is not an agent profile"),
     };
     execute(db, command, now, |tx, events| {
@@ -655,6 +656,7 @@ pub fn start_run(
                  work_status = CASE kind
                      WHEN 'claude-code' THEN work_status
                      WHEN 'codex' THEN 'starting'
+                     WHEN 'dsh' THEN 'starting'
                      ELSE 'idle'
                  END,
                  updated_at = ?, last_activity_at = ?,
@@ -751,7 +753,7 @@ pub fn pending_claude_fork(db: &Connection, session_id: &str) -> Result<Option<C
            AND binding.provider = fork.source_provider
            AND binding.provider_session_id = fork.source_provider_session_id
          WHERE fork.session_id = ? AND fork.operation_id = ? || fork.session_id
-           AND fork.state = 'pending'",
+           AND fork.state = 'pending' AND fork.source_provider = 'claude-code'",
             params![session_id, NATIVE_FORK_PREFIX],
             |row| {
                 let permission: String = row.get(1)?;
@@ -806,7 +808,7 @@ pub fn fail_claude_fork(
             || tx.execute(
                 "UPDATE session_fork_intents
              SET state = 'failed', stage = 'failed', error_message = ?,
-                 completed_at = ?, updated_at = ?
+                 completed_at = ?, updated_at = ?, lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL
              WHERE session_id = ? AND operation_id = ? || session_id
                AND state IN ('pending', 'starting')",
                 params![error, now, now, session_id, NATIVE_FORK_PREFIX],
@@ -821,7 +823,7 @@ pub fn fail_claude_fork(
         )?;
         let payload = json!({
             "result": "fork-failed", "sessionId": session_id,
-            "provider": "claude-code", "forkError": error,
+            "provider": session.kind, "forkError": error,
         });
         events.push(session_event(
             command,
@@ -863,14 +865,26 @@ pub fn claude_binding(db: &Connection, session_id: &str) -> Result<Option<Claude
 }
 
 pub fn codex_binding(db: &Connection, session_id: &str) -> Result<Option<ProviderBinding>> {
+    runtime_provider_binding(db, session_id, "codex")
+}
+
+pub fn dsh_binding(db: &Connection, session_id: &str) -> Result<Option<ProviderBinding>> {
+    runtime_provider_binding(db, session_id, "dsh")
+}
+
+fn runtime_provider_binding(
+    db: &Connection,
+    session_id: &str,
+    provider: &str,
+) -> Result<Option<ProviderBinding>> {
     Ok(db
         .query_row(
             "SELECT id, provider_session_id, metadata_json, restore_state,
                 (resume_state IN ('available', 'resumed') AND validated_at IS NOT NULL
                     AND invalidated_at IS NULL AND user_exited_at IS NULL
                     AND restore_state <> 'failed') AS resumable
-             FROM provider_bindings WHERE session_id = ? AND provider = 'codex'
-               AND EXISTS (SELECT 1 FROM sessions WHERE id = session_id AND kind = 'codex')
+             FROM provider_bindings WHERE session_id = ?1 AND provider = ?2
+               AND EXISTS (SELECT 1 FROM sessions WHERE id = ?1 AND kind = ?2)
              ORDER BY CASE WHEN restore_state IN ('restoring', 'failed') THEN 0
                            WHEN resume_state IN ('available', 'resumed')
                              AND validated_at IS NOT NULL AND invalidated_at IS NULL
@@ -878,7 +892,7 @@ pub fn codex_binding(db: &Connection, session_id: &str) -> Result<Option<Provide
                       CASE WHEN resume_state IN ('available', 'resumed')
                              AND invalidated_at IS NULL THEN validated_at END DESC,
                       updated_at DESC, id DESC LIMIT 1",
-            [session_id],
+            params![session_id, provider],
             |row| {
                 let metadata: String = row.get("metadata_json")?;
                 Ok(ProviderBinding {
@@ -924,7 +938,7 @@ pub fn write_provider_permission(
         let session = require_session(tx, session_id)?;
         let provider = session.kind.as_str();
         ensure!(
-            matches!(provider, "claude-code" | "codex"),
+            matches!(provider, "claude-code" | "codex" | "dsh"),
             "Unsupported permission provider"
         );
         let raw: String = tx.query_row(
@@ -1037,7 +1051,7 @@ pub fn load_provider_catalog_binding(
     now: i64,
 ) -> Result<DomainCommit> {
     ensure!(
-        matches!(provider, "claude-code" | "codex"),
+        matches!(provider, "claude-code" | "codex" | "dsh"),
         "Unsupported catalog provider"
     );
     execute(db, command, now, |tx, events| {
@@ -1053,7 +1067,10 @@ pub fn load_provider_catalog_binding(
         ensure!(
             in_scene
                 && session.cwd == input.cwd
-                && matches!(session.kind.as_str(), "shell" | "claude-code" | "codex"),
+                && matches!(
+                    session.kind.as_str(),
+                    "shell" | "claude-code" | "codex" | "dsh"
+                ),
             "Card is no longer available in this scene and working directory"
         );
         let workspace_id: String = tx
@@ -1114,7 +1131,7 @@ pub fn load_provider_catalog_binding(
             ),
             (
                 "canFork".into(),
-                json!(provider == "claude-code" || completed_turn),
+                json!(provider == "claude-code" || (provider == "codex" && completed_turn)),
             ),
         ]);
         tx.execute(
@@ -1286,9 +1303,31 @@ pub fn change_codex_restore(
     failure_title: &str,
     now: i64,
 ) -> Result<Option<DomainCommit>> {
-    let binding = codex_binding(db, session_id)?;
+    change_runtime_provider_restore(db, command, session_id, "codex", change, failure_title, now)
+}
+
+pub fn change_dsh_restore(
+    db: &mut Connection,
+    command: &CommandMetadata,
+    session_id: &str,
+    change: ClaudeRestore<'_>,
+    now: i64,
+) -> Result<Option<DomainCommit>> {
+    change_runtime_provider_restore(db, command, session_id, "dsh", change, "DSH", now)
+}
+
+fn change_runtime_provider_restore(
+    db: &mut Connection,
+    command: &CommandMetadata,
+    session_id: &str,
+    provider: &str,
+    change: ClaudeRestore<'_>,
+    failure_title: &str,
+    now: i64,
+) -> Result<Option<DomainCommit>> {
+    let binding = runtime_provider_binding(db, session_id, provider)?;
     let target = binding.as_ref().map(|binding| binding.id.as_str());
-    let unbound = if binding.is_none() {
+    let unbound = if binding.is_none() && provider == "codex" {
         unbound_codex_restore(db, session_id)?
     } else {
         None
@@ -1348,15 +1387,19 @@ pub fn change_codex_restore(
     execute(db, command, now, |tx, events| {
         let session = require_session(tx, session_id)?;
         ensure!(
-            session.archived_at.is_none() && session.kind == "codex",
-            "Codex restore requires an active Codex card"
+            session.archived_at.is_none() && session.kind == provider,
+            if provider == "codex" {
+                "Codex restore requires an active Codex card"
+            } else {
+                "DSH restore requires an active DSH card"
+            }
         );
         if matches!(change, ClaudeRestore::Fresh) {
             tx.execute(
                 "UPDATE provider_bindings SET resume_state = 'expired', restore_state = 'none',
                      restore_error = NULL, invalidated_at = COALESCE(invalidated_at, ?)
-                 WHERE session_id = ? AND provider = 'codex' AND id <> ?",
-                params![now, session_id, target.unwrap_or_default()],
+                 WHERE session_id = ? AND provider = ? AND id <> ?",
+                params![now, session_id, provider, target.unwrap_or_default()],
             )?;
         }
         if let Some(id) = target {
@@ -1374,7 +1417,7 @@ pub fn change_codex_restore(
             params![work, now, session_id],
         )?;
         let mut payload = json!({
-            "sessionId": session_id, "provider": "codex", "bindingId": target,
+            "sessionId": session_id, "provider": provider, "bindingId": target,
             "providerSessionId": binding.as_ref().map(|binding| &binding.provider_session_id),
             "restoreState": restore, "restoreError": error, "spawnRevision": revision,
         });
@@ -1394,7 +1437,7 @@ pub fn change_codex_restore(
         };
         if let Some(notification) = notification {
             let mut event = session_event(command, "agent.notification", &session, now, json!({
-                "targetSessionId": session_id, "provider": "codex",
+                "targetSessionId": session_id, "provider": provider,
                 "runId": format!("restore:{}", target.unwrap_or(session_id)), "event": notification,
             }));
             event.event_id.push_str(":agent.notification");
@@ -1429,7 +1472,7 @@ pub fn record_claude_identity(
     input: &ClaudeIdentity<'_>,
     now: i64,
 ) -> Result<DomainCommit> {
-    record_provider_identity(db, command, input, "claude-code", now)
+    record_provider_identity(db, command, input, "claude-code", None, now)
 }
 
 pub fn record_codex_identity(
@@ -1442,7 +1485,88 @@ pub fn record_codex_identity(
         input.event_name == "SessionStart" && input.first_for_run,
         "Codex identity requires SessionStart on its current run"
     );
-    record_provider_identity(db, command, input, "codex", now)
+    record_provider_identity(db, command, input, "codex", None, now)
+}
+
+pub fn record_codex_fork_readiness(
+    db: &mut Connection,
+    command: &CommandMetadata,
+    input: &ProviderIdentity<'_>,
+    now: i64,
+) -> Result<DomainCommit> {
+    ensure!(
+        !input.first_for_run
+            && input.expected_id.is_some()
+            && matches!(input.event_name, "UserPromptSubmit" | "Stop"),
+        "Codex Fork readiness requires a normal turn on the confirmed run"
+    );
+    record_provider_identity(db, command, input, "codex", None, now)
+}
+
+pub fn project_dsh_status(
+    db: &mut Connection,
+    command: &CommandMetadata,
+    session_id: &str,
+    run_id: &str,
+    status: &str,
+    title: Option<&str>,
+    now: i64,
+) -> Result<DomainCommit> {
+    execute(db, command, now, |tx, events| {
+        let session = require_session(tx, session_id)?;
+        ensure!(
+            session.kind == "dsh" && session.archived_at.is_none(),
+            "DSH status requires an active DSH session"
+        );
+        let run = require_run(tx, run_id)?;
+        ensure!(
+            run.session_id == session_id && run.status == "running",
+            "DSH run is no longer active"
+        );
+        tx.execute(
+            "UPDATE sessions SET work_status = ?, provider_title = COALESCE(?, provider_title),
+                 title = CASE WHEN ? IS NOT NULL AND title_source <> 'manual' THEN ? ELSE title END,
+                 title_source = CASE WHEN ? IS NOT NULL AND title_source <> 'manual' THEN 'auto' ELSE title_source END,
+                 updated_at = ?, version = version + 1 WHERE id = ?",
+            params![status, title, title, title, title, now, session_id],
+        )?;
+        let payload = json!({"sessionId": session_id, "runId": run_id, "workStatus": status});
+        events.push(session_event(
+            command,
+            "session.work-status-changed",
+            &session,
+            now,
+            payload.clone(),
+        ));
+        Ok(payload)
+    })
+}
+
+pub fn record_dsh_identity(
+    db: &mut Connection,
+    command: &CommandMetadata,
+    input: &ProviderIdentity<'_>,
+    now: i64,
+) -> Result<DomainCommit> {
+    ensure!(
+        input.event_name == "ready",
+        "DSH identity requires a persistent ready observation"
+    );
+    record_provider_identity(db, command, input, "dsh", None, now)
+}
+
+pub fn record_codex_fork_identity(
+    db: &mut Connection,
+    command: &CommandMetadata,
+    input: &ProviderIdentity<'_>,
+    lease: &crate::hierarchy::canvas::NativeForkLease<'_>,
+    now: i64,
+) -> Result<DomainCommit> {
+    ensure!(
+        input.event_name == "SessionStart" && input.first_for_run,
+        "Codex Fork requires SessionStart on its current run"
+    );
+    record_provider_identity(db, command, input, "codex", Some(lease), now)
 }
 
 fn record_provider_identity(
@@ -1450,6 +1574,7 @@ fn record_provider_identity(
     command: &CommandMetadata,
     input: &ProviderIdentity<'_>,
     provider: &str,
+    lease: Option<&crate::hierarchy::canvas::NativeForkLease<'_>>,
     now: i64,
 ) -> Result<DomainCommit> {
     let provider_session_id = if let Some(expected) = input.expected_id {
@@ -1499,18 +1624,43 @@ fn record_provider_identity(
                     }),
             "Provider hook no longer owns its SessionRun"
         );
-        let fork: Option<(String, String)> = if provider == "claude-code" {
+        let fork: Option<(String, String)> = if matches!(provider, "claude-code" | "codex") {
             tx.query_row(
                 "SELECT state, source_provider_session_id FROM session_fork_intents
-             WHERE session_id = ? AND operation_id = ? || session_id
+             WHERE session_id = ? AND operation_id = ? || session_id AND source_provider = ?
                AND state <> 'succeeded'",
-                params![input.session_id, NATIVE_FORK_PREFIX],
+                params![input.session_id, NATIVE_FORK_PREFIX, provider],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?
         } else {
             None
         };
+        if provider == "codex" && fork.is_some() {
+            let lease = lease.context("Codex Fork identity requires the current lease")?;
+            ensure!(
+                lease.owner == input.generation
+                    && tx.query_row(
+                        "SELECT EXISTS (SELECT 1 FROM session_fork_intents WHERE session_id = ?
+                   AND operation_id = ? AND lease_owner = ? AND lease_token = ? AND lease_fence = ?
+                   AND state = 'starting' AND stage = 'starting-window')",
+                        params![
+                            input.session_id,
+                            lease.operation_id,
+                            lease.owner,
+                            lease.token,
+                            lease.fence
+                        ],
+                        |row| row.get::<_, bool>(0),
+                    )?,
+                "Codex Fork lease is stale"
+            );
+        } else {
+            ensure!(
+                lease.is_none(),
+                "Codex Fork intent no longer owns the child"
+            );
+        }
         if let Some((state, source_id)) = &fork {
             ensure!(
                 state == "starting"
@@ -1532,25 +1682,30 @@ fn record_provider_identity(
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        if provider == "codex" && input.expected_id.is_none() {
+        if matches!(provider, "codex" | "dsh") && input.expected_id.is_none() {
             let expired: bool = tx.query_row(
                 "SELECT EXISTS (SELECT 1 FROM provider_bindings
-                   WHERE session_id = ? AND provider = 'codex' AND resume_state = 'expired'
-                     AND lower(trim(provider_session_id)) = ?)",
-                params![input.session_id, provider_session_id],
+                   WHERE session_id = ? AND provider = ? AND resume_state = 'expired'
+                     AND CASE WHEN provider = 'codex' THEN lower(trim(provider_session_id))
+                              ELSE provider_session_id END = ?)",
+                params![input.session_id, provider, provider_session_id],
                 |row| row.get(0),
             )?;
             ensure!(
                 !expired,
-                "Fresh Codex run returned an expired conversation identity"
+                if provider == "codex" {
+                    "Fresh Codex run returned an expired conversation identity"
+                } else {
+                    "Fresh DSH run returned an expired conversation identity"
+                }
             );
         }
         if input.expected_id.is_some() {
             ensure!(
-                (if provider == "codex" {
-                    codex_binding(tx, input.session_id)?
-                } else {
+                (if provider == "claude-code" {
                     claude_binding(tx, input.session_id)?
+                } else {
+                    runtime_provider_binding(tx, input.session_id, provider)?
                 })
                 .is_some_and(|binding| binding.resumable
                     && binding.provider_session_id == provider_session_id),
@@ -1580,7 +1735,7 @@ fn record_provider_identity(
         metadata.remove("invalidationReason");
         metadata.remove("provisional");
         metadata.insert("lastHookEvent".into(), json!(input.event_name));
-        if provider == "claude-code" {
+        if matches!(provider, "claude-code" | "codex") {
             for (key, observed) in [
                 ("observedUserPrompt", input.event_name == "UserPromptSubmit"),
                 ("observedNormalStop", input.event_name == "Stop"),
@@ -1616,18 +1771,19 @@ fn record_provider_identity(
                 now
             ],
         )?;
-        if provider == "codex" {
+        if matches!(provider, "codex" | "dsh") {
             tx.execute(
                 "UPDATE provider_bindings SET resume_state = 'expired', restore_state = 'none',
                      restore_error = NULL, invalidated_at = COALESCE(invalidated_at, ?)
-                 WHERE session_id = ? AND provider = 'codex' AND id <> ?",
-                params![now, input.session_id, binding_id],
+                 WHERE session_id = ? AND provider = ? AND id <> ?",
+                params![now, input.session_id, provider, binding_id],
             )?;
         }
         if fork.is_some() {
             tx.execute(
                 "UPDATE session_fork_intents SET state = 'succeeded', stage = 'succeeded',
-                     completed_steps = total_steps, completed_at = ?, updated_at = ?
+                     completed_steps = total_steps, completed_at = ?, updated_at = ?,
+                     lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL
                  WHERE session_id = ?",
                 params![now, now, input.session_id],
             )?;
@@ -1637,7 +1793,7 @@ fn record_provider_identity(
                 params![now, input.session_id],
             )?;
         }
-        if provider == "codex" {
+        if matches!(provider, "codex" | "dsh") && input.first_for_run {
             tx.execute(
                 "UPDATE sessions SET work_status = 'idle', updated_at = ?, version = version + 1
                  WHERE id = ?",

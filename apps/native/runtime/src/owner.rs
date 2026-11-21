@@ -28,11 +28,22 @@ use uuid::Uuid;
 
 use crate::{
     SessionEvent, SessionOptions,
+    agent_hud_projection::{AgentHudProjection, HudProvider, project_teammates},
     claude_request_gateway::Gateway,
     codex_events::{self, title as codex_title},
+    codex_fork::{
+        CodexForkAuthority, CodexForkCandidate, CodexForkHook, CodexForkSettings, CodexForkSource,
+        CodexForkTarget, CodexForks,
+    },
     codex_launch::CodexLaunch,
     codex_resume::{self, Resume as CodexResume},
     derived::{CwdTracker, WorkStatusTracker, terminal_summary_lines, utf16_tail},
+    dsh_catalog::DshSessionCatalog,
+    dsh_events::{DshEventOutcome, DshEvents, DshWorkStatus},
+    dsh_launch::{self, DshLaunchInput, DshLaunchPlan},
+    dsh_resume::{BeginOutcome, DshResume, ResumeFailure},
+    egress_probe::{self, EgressMonitor, EgressSample, Family, SessionEffect},
+    fork_worktree::{ForkIdentity, ForkLease, ForkStage, NewWorktree, WorktreeBinding},
     host_control::{RunControl, clear_control_environment},
     provider_hook::{
         HOOK_QUEUE_CAPACITY, HookMessage, HookSetup, IDENTITY_TIMEOUT, Observation,
@@ -42,6 +53,38 @@ use crate::{
     shell_input::ShellInput,
     worker::{SessionWorker, WorkerCommand, WorkerEvent},
 };
+
+pub(crate) struct DshLaunch {
+    pub plan: DshLaunchPlan,
+    pub config_dump: String,
+    pub catalog_root: Option<PathBuf>,
+}
+
+enum DshObservation {
+    Fresh(DshEvents),
+    Resume(DshResume, String),
+}
+
+impl DshObservation {
+    fn observe<'a>(&mut self, run: &str, payload: &'a Value) -> DshEventOutcome<'a> {
+        match self {
+            Self::Fresh(events) => events.ingest(payload),
+            Self::Resume(resume, _) => resume.observe(run, payload),
+        }
+    }
+}
+
+enum SpecialLaunch {
+    Dsh {
+        config_dump: String,
+        catalog_root: Option<PathBuf>,
+        binding: Option<ProviderBinding>,
+    },
+    CodexFork {
+        key: String,
+        authority: CodexForkAuthority,
+    },
+}
 
 struct RunningShell {
     worker: SessionWorker,
@@ -86,6 +129,14 @@ struct RunHook {
     resume: Option<ResumeMonitor>,
     reported_missing: bool,
     pending_startup_observations: Vec<(Scope, Observation)>,
+    hud: AgentHudProjection,
+    dsh: Option<DshObservation>,
+    dsh_pending: Vec<(Scope, Value)>,
+    fork: Option<(String, CodexForkAuthority)>,
+    codex_fork_ready: bool,
+    dsh_status: Option<DshWorkStatus>,
+    claude_projects: Option<PathBuf>,
+    claude_transcript: Option<PathBuf>,
     permission_identity_error: Option<String>,
 }
 
@@ -132,6 +183,13 @@ pub struct ShellOwner {
     run_control: Option<RunControl>,
     control_bin: Option<PathBuf>,
     closing: bool,
+    egress: EgressMonitor,
+    pub(crate) provider_environment:
+        Option<std::collections::BTreeMap<std::ffi::OsString, std::ffi::OsString>>,
+    pub(crate) dsh_session_root: Option<PathBuf>,
+    pub(crate) fork_worktree_root: Option<PathBuf>,
+    pub(crate) fork_setup: Option<Box<dyn Fn(&Path) -> Result<()> + Send>>,
+    codex_forks: CodexForks,
 }
 
 impl ShellOwner {
@@ -164,6 +222,12 @@ impl ShellOwner {
             run_control: None,
             control_bin: None,
             closing: false,
+            egress: EgressMonitor::default(),
+            provider_environment: None,
+            dsh_session_root: None,
+            fork_worktree_root: None,
+            fork_setup: None,
+            codex_forks: CodexForks::default(),
         };
         let runs = {
             let mut query = owner.connection.prepare("SELECT id FROM session_runs WHERE status IN ('starting','running') AND runtime_generation <> ? ORDER BY started_at")?;
@@ -198,6 +262,306 @@ impl ShellOwner {
     pub(crate) fn set_run_control(&mut self, control: RunControl, bin: Option<PathBuf>) {
         self.run_control = Some(control);
         self.control_bin = bin;
+    }
+
+    pub(crate) fn launch_environment(
+        &self,
+    ) -> std::collections::BTreeMap<std::ffi::OsString, std::ffi::OsString> {
+        self.provider_environment
+            .clone()
+            .unwrap_or_else(|| std::env::vars_os().collect())
+    }
+
+    pub(crate) fn codex_session_root(&self) -> Option<PathBuf> {
+        let Some(env) = &self.provider_environment else {
+            return crate::codex_catalog::root();
+        };
+        env.get(std::ffi::OsStr::new("CODEX_HOME"))
+            .map(PathBuf::from)
+            .or_else(|| {
+                let key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+                env.get(std::ffi::OsStr::new(key))
+                    .map(|home| Path::new(home).join(".codex"))
+            })
+    }
+
+    pub(crate) fn pending_codex_fork(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<canvas::NativeFork>> {
+        canvas::native_codex_fork(&self.connection, session_id)
+    }
+
+    pub(crate) fn launch_codex_fork(
+        &mut self,
+        session_id: &str,
+        terminal: matou_native_terminal::TerminalOptions,
+        data_root: &Path,
+    ) -> Result<()> {
+        let record = self
+            .pending_codex_fork(session_id)?
+            .context("Codex Fork intent unavailable")?;
+        let identity = ForkIdentity {
+            operation_id: record.operation_id,
+            submission_key: record.submission_key.clone(),
+            source_session_id: record.source_session_id.clone(),
+            session_id: session_id.to_owned(),
+        };
+        let continuing = self.codex_forks.get_mut(&record.submission_key).is_some();
+        if !continuing {
+            let source = self
+                .session(&record.source_session_id)?
+                .context("Codex Fork source unavailable")?;
+            let home = self
+                .codex_session_root()
+                .context("Codex history directory unavailable")?;
+            let mut binding = self
+                .codex_binding(&source.id)?
+                .filter(|binding| binding.provider_session_id == record.source_provider_session_id)
+                .context("Codex Fork source identity changed")?;
+            // A restored lease already accepted this exact saved source. Its
+            // separate foreground PTY can be restoring the same identity.
+            if record.lease_fence > 0 && binding.resumable && binding.restore_state == "restoring" {
+                binding.restore_state = "none".into();
+            }
+            let bound = record.worktree.map(|binding| WorktreeBinding {
+                identity: identity.clone(),
+                worktree_id: binding.id,
+                execution_context_id: binding.execution_context_id,
+                repository_root: binding.repository_root.into(),
+                cwd: binding.cwd.into(),
+                branch: binding.branch,
+                base_revision: binding.base_revision,
+            });
+            let target = if record.worktree_mode == "new" && bound.is_none() {
+                let root = self
+                    .fork_worktree_root
+                    .as_ref()
+                    .context("An isolated worktree root is required")?;
+                CodexForkTarget::NewWorktree(NewWorktree {
+                    path: root.join(format!("fork-{session_id}")),
+                    isolation_root: root.clone(),
+                    branch: matou_native_core::git_repo::create_git_branch_name(
+                        &record.display_name,
+                        session_id,
+                    ),
+                    worktree_id: format!("fork-{session_id}"),
+                    execution_context_id: format!("fork-context-{session_id}"),
+                })
+            } else {
+                CodexForkTarget::Current
+            };
+            self.codex_forks
+                .accept(
+                    identity,
+                    CodexForkSource {
+                        provider: &source.kind,
+                        cwd: Path::new(&source.cwd),
+                        codex_home: &home,
+                        binding: &binding,
+                    },
+                    target,
+                    &[],
+                )?
+                .resume_persisted(record.lease_fence.try_into()?, bound)?;
+        }
+
+        let environment = self.launch_environment();
+        let commit = std::cell::RefCell::new((&mut self.connection, &mut self.pending));
+        let save = |stage, lease: &ForkLease, binding: Option<&WorktreeBinding>| -> Result<()> {
+            let stage = match stage {
+                ForkStage::CreatingWorktree => "creating-worktree",
+                ForkStage::ApplyingSetup => "applying-setup",
+                ForkStage::BindingSession => "binding-session",
+                ForkStage::RestoringProvider => "restoring-provider",
+                ForkStage::StartingWindow => "starting-window",
+                _ => anyhow::bail!("Invalid Codex Fork checkpoint"),
+            };
+            let token = lease.token.to_string();
+            let lease = native_fork_lease(lease, &token, &self.generation)?;
+            let binding = binding.map(core_worktree).transpose()?;
+            let cmd = format!("fork-{token}-{stage}");
+            let mut state = commit.borrow_mut();
+            let result = canvas::checkpoint_codex_fork(
+                state.0,
+                &command(cmd.clone(), "session.fork-progress", cmd),
+                session_id,
+                &lease,
+                stage,
+                binding.as_ref(),
+                now(),
+            )?;
+            state.1.push(OwnerEvent::Domain(result));
+            Ok(())
+        };
+        let prepared = self
+            .codex_forks
+            .get_mut(&record.submission_key)
+            .context("Codex Fork intent lost")?
+            .begin(
+                continuing,
+                CodexForkSettings {
+                    data_root,
+                    environment,
+                    cols: terminal.cols,
+                    rows: terminal.rows,
+                },
+                |stage, lease| save(stage, lease, None),
+                |binding, _| {
+                    self.fork_setup
+                        .as_ref()
+                        .map_or(Ok(()), |setup| setup(&binding.cwd))
+                },
+                |binding, lease| save(ForkStage::RestoringProvider, lease, Some(binding)),
+            )?;
+        let mut launch = prepared.launch;
+        let stored = self
+            .session(session_id)?
+            .context("Codex Fork child unavailable")?;
+        ensure!(
+            Path::new(&stored.cwd).canonicalize()? == launch.cwd.canonicalize()?,
+            "Codex Fork checkout differs from the persisted environment"
+        );
+        launch.cwd = PathBuf::from(&stored.cwd);
+        let metadata = json!({"provider": "codex", "cwd": launch.cwd});
+        let secrets = launch
+            .env
+            .get(std::ffi::OsStr::new("OPENAI_API_KEY"))
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .into_iter()
+            .collect();
+        let authority = prepared.authority;
+        let key = record.submission_key;
+        let result = self.launch_run(
+            SessionOptions {
+                session_id: session_id.to_owned(),
+                terminal,
+                launch,
+                journal: Default::default(),
+                restored_history: Vec::new(),
+                collect_history: false,
+            },
+            false,
+            "",
+            Some((metadata, secrets, None, None)),
+            None,
+            Some(SpecialLaunch::CodexFork {
+                key: key.clone(),
+                authority: authority.clone(),
+            }),
+        );
+        if let Err(error) = &result
+            && let Some(intent) = self.codex_forks.get_mut(&key)
+        {
+            intent.fail(&authority, error, |_| Ok(()))?;
+        }
+        if let Some(warning) = prepared.permission_warning {
+            diagnostic(&mut self.pending, session_id, warning.into());
+        }
+        result
+    }
+
+    pub(crate) fn dsh_binding(&self, session_id: &str) -> Result<Option<ProviderBinding>> {
+        sessions::dsh_binding(&self.connection, session_id)
+    }
+
+    pub(crate) fn change_dsh_restore(
+        &mut self,
+        session_id: &str,
+        change: ClaudeRestore<'_>,
+    ) -> Result<bool> {
+        let id = (self.next_id)();
+        let Some(commit) = sessions::change_dsh_restore(
+            &mut self.connection,
+            &command(id.clone(), "session.dsh-restore", id),
+            session_id,
+            change,
+            now(),
+        )?
+        else {
+            return Ok(false);
+        };
+        if commit.result["restoreState"] == "failed" {
+            let mut result = commit.result.clone();
+            result["result"] = json!("restore-failed");
+            self.pending.push(OwnerEvent::ProviderIdentity(result));
+        }
+        self.pending.push(OwnerEvent::Domain(commit));
+        Ok(true)
+    }
+
+    pub(crate) fn egress(&self) -> &EgressMonitor {
+        &self.egress
+    }
+
+    pub(crate) fn apply_egress_sample(&mut self, sample: EgressSample) -> Result<()> {
+        let effects = self.egress.apply_full_sample(sample, now() as u64);
+        self.apply_egress_effects(effects)
+    }
+
+    pub(crate) fn exempt_egress(&mut self, family: Family) -> Result<()> {
+        let effects = self
+            .egress
+            .override_family(family, now() as u64)
+            .map_err(anyhow::Error::msg)?;
+        self.apply_egress_effects(effects)
+    }
+
+    fn apply_egress_effects(&self, effects: Vec<SessionEffect>) -> Result<()> {
+        let mut first_error = None;
+        for effect in effects {
+            let (id, frozen) = match effect {
+                SessionEffect::Freeze(id) => (id, true),
+                SessionEffect::Thaw(id) => (id, false),
+            };
+            if let Some(shell) = self
+                .shells
+                .get(&id)
+                .filter(|shell| !shell.ended && !shell.retiring)
+                && let Err(error) = shell.worker.set_egress_frozen(frozen)
+            {
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+
+    pub(crate) fn agent_hud(&self, session_id: &str, data_root: &Path) -> Result<Value> {
+        let Some(shell) = self
+            .shells
+            .get(session_id)
+            .filter(|shell| !shell.ended && !shell.retiring)
+        else {
+            return Ok(Value::Null);
+        };
+        let Some(hook) = shell.hook.as_ref() else {
+            return Ok(Value::Null);
+        };
+        let rows = hook
+            .claude_projects
+            .as_deref()
+            .zip(hook.claude_transcript.as_deref())
+            .and_then(|(root, transcript)| read_hud_transcript(root, transcript))
+            .unwrap_or_default();
+        let locale =
+            sessions::current_interface_locale(sessions::read_locale_preference(data_root));
+        let teammates = project_teammates(&shell.run_id, session_id, &rows, locale);
+        let mut hud = json!(hook.hud.snapshot(now() as f64));
+        if let Some(codex) = &hook.codex {
+            let transcript =
+                codex.hud_projection(|value| safe_hook_text(value, &hook.secrets).is_some());
+            if let (Some(hud), Value::Object(fields)) = (hud.as_object_mut(), transcript) {
+                hud.extend(fields);
+            }
+        }
+        let mut projection = json!({
+            "hud": hud,
+            "teammates": teammates,
+        });
+        redact_hud(&mut projection, &hook.secrets);
+        Ok(projection)
     }
 
     pub fn session(&self, id: &str) -> Result<Option<StoredSession>> {
@@ -684,6 +1048,7 @@ impl ShellOwner {
     /// Stop runs without blocking the other sessions. The stable sessions remain in storage.
     pub fn retire_sessions(&mut self, disposed: &[String]) {
         for id in disposed {
+            self.egress.unregister_session(id, now() as u64);
             self.summaries.remove(id);
             if let Some(shell) = self.shells.get_mut(id)
                 && !shell.retiring
@@ -756,8 +1121,10 @@ impl ShellOwner {
                 .get(session_id)
                 .is_none_or(|shell| shell.ended && !shell.retiring)
             && self.session(session_id)?.is_some_and(|session| {
-                matches!(session.kind.as_str(), "shell" | "claude-code" | "codex")
-                    && session.archived_at.is_none()
+                matches!(
+                    session.kind.as_str(),
+                    "shell" | "claude-code" | "codex" | "dsh"
+                ) && session.archived_at.is_none()
                     && (start_failed || session.status == "exited")
             })
             && !sessions::has_unconfirmed_claude_fork(&self.connection, session_id)?
@@ -845,7 +1212,7 @@ impl ShellOwner {
              FROM sessions
              JOIN tasks ON tasks.id = sessions.task_id AND tasks.archived_at IS NULL
              JOIN workspaces ON workspaces.id = tasks.workspace_id AND workspaces.archived_at IS NULL
-             WHERE sessions.kind IN ('shell', 'claude-code', 'codex') AND sessions.archived_at IS NULL
+             WHERE sessions.kind IN ('shell', 'claude-code', 'codex', 'dsh') AND sessions.archived_at IS NULL
                AND EXISTS (
                    SELECT 1 FROM session_mounts JOIN scenes ON scenes.id = session_mounts.scene_id
                    WHERE session_mounts.session_id = sessions.id AND scenes.archived_at IS NULL
@@ -878,7 +1245,19 @@ impl ShellOwner {
                 }
                 continue;
             }
+            if kind == "dsh" {
+                if self
+                    .dsh_binding(&id)?
+                    .is_some_and(|binding| binding.resumable)
+                {
+                    candidates.push((id, workspace, true));
+                }
+                continue;
+            }
             if kind == "codex" {
+                if sessions::has_unconfirmed_claude_fork(&self.connection, &id)? {
+                    continue;
+                }
                 let binding = self.codex_binding(&id)?;
                 let failed = binding
                     .as_ref()
@@ -1067,7 +1446,11 @@ impl ShellOwner {
             .get(session_id)
             .and_then(|shell| shell.hook.as_ref())
             .is_some_and(|hook| {
-                (hook.resume.is_some() || hook.codex_resume.is_some()) && hook.deadline.is_some()
+                (hook.resume.is_some()
+                    || hook.codex_resume.is_some()
+                    || hook.dsh.is_some()
+                    || hook.fork.is_some())
+                    && hook.deadline.is_some()
             })
     }
 
@@ -1362,8 +1745,12 @@ impl ShellOwner {
         shell.provider_startup_pending = false;
         if let Some(hook) = &mut shell.hook {
             let observations = std::mem::take(&mut hook.pending_startup_observations);
+            let dsh = std::mem::take(&mut hook.dsh_pending);
             for (scope, observation) in observations {
                 self.apply_hook(scope, observation, events);
+            }
+            for (scope, payload) in dsh {
+                self.apply_dsh_hook(scope, &payload, events);
             }
         }
     }
@@ -1479,7 +1866,7 @@ impl ShellOwner {
             options.launch.profile == LaunchProfile::Shell,
             "Provider launch requires a hook registration"
         );
-        self.launch_run(options, restore_history, divider, None, None)
+        self.launch_run(options, restore_history, divider, None, None, None)
     }
 
     pub(crate) fn launch_claude(
@@ -1552,6 +1939,7 @@ impl ShellOwner {
             "",
             Some((metadata, secrets, None, None)),
             resume,
+            None,
         )?;
         if let Some(warning) = plan.permission_warning {
             diagnostic(&mut self.pending, session_id, warning.into());
@@ -1647,7 +2035,64 @@ impl ShellOwner {
             "",
             Some((metadata, secrets, resume, gateway)),
             None,
+            None,
         )
+    }
+
+    pub(crate) fn launch_dsh(
+        &mut self,
+        session_id: &str,
+        terminal: matou_native_terminal::TerminalOptions,
+        data_root: &Path,
+        prepared: DshLaunch,
+        promotion: bool,
+    ) -> Result<String> {
+        let DshLaunch {
+            plan,
+            config_dump,
+            catalog_root,
+        } = prepared;
+        let binding = if plan.mode.expected_session_id().is_some() {
+            self.dsh_binding(session_id)?
+        } else {
+            None
+        };
+        let metadata = json!({
+            "provider": "dsh", "cwd": plan.cwd,
+            "spawnRevision": binding.as_ref().and_then(|binding| binding.metadata.get("spawnRevision")),
+        });
+        self.launch_run(
+            SessionOptions {
+                session_id: session_id.to_owned(),
+                terminal,
+                journal: Default::default(),
+                restored_history: Vec::new(),
+                collect_history: false,
+                launch: matou_native_core::pty::ShellLaunch {
+                    profile: LaunchProfile::Dsh,
+                    executable: plan.executable,
+                    argv: os_arguments(plan.argv)?,
+                    cwd: plan.cwd,
+                    data_root: data_root.to_owned(),
+                    inherited_env: Default::default(),
+                    env: plan.environment,
+                    cols: terminal.cols,
+                    rows: terminal.rows,
+                },
+            },
+            false,
+            "",
+            Some((metadata, Vec::new(), None, None)),
+            None,
+            Some(SpecialLaunch::Dsh {
+                config_dump,
+                catalog_root,
+                binding,
+            }),
+        )?;
+        let shell = self.shells.get_mut(session_id).unwrap();
+        shell.provider_startup_pending = promotion;
+        Ok(shell.run_id.clone())
     }
 
     fn launch_run(
@@ -1662,8 +2107,23 @@ impl ShellOwner {
             Option<ClaudeGatewayProjection>,
         )>,
         codex_resume: Option<CodexResume>,
+        special: Option<SpecialLaunch>,
     ) -> Result<()> {
         ensure!(!self.closing, "Runtime is shutting down");
+        let profile = options.launch.profile;
+        // Classify the upstream before a managed gateway replaces its endpoint
+        // with our own loopback URL.
+        let launch_environment = options
+            .launch
+            .env
+            .iter()
+            .filter_map(|(key, value)| Some((key.to_str()?.to_owned(), value.to_str()?.to_owned())))
+            .collect();
+        let egress_family =
+            egress_probe::launch_plan(profile.kind(), &launch_environment, None).family;
+        self.egress
+            .assert_target_allowed(egress_family)
+            .map_err(anyhow::Error::msg)?;
         if let Some(previous) = self.shells.get(&options.session_id) {
             ensure!(
                 previous.ended && !previous.retiring,
@@ -1680,7 +2140,6 @@ impl ShellOwner {
         let stored = self
             .session(&options.session_id)?
             .context("read the authoritative session")?;
-        let profile = options.launch.profile;
         ensure!(
             stored.kind == profile.kind(),
             "launch profile differs from its stored session"
@@ -1710,7 +2169,10 @@ impl ShellOwner {
         let session_id = options.session_id.clone();
         let cols = options.launch.cols.into();
         let rows = options.launch.rows.into();
-        let run_id = (self.next_id)();
+        let run_id = match &special {
+            Some(SpecialLaunch::CodexFork { authority, .. }) => authority.run_id.to_string(),
+            _ => (self.next_id)(),
+        };
         let mut permission_starting = false;
         let mut gateway = None;
         let hook = if let Some((launch_metadata, mut secrets, resume, gateway_plan)) = provider {
@@ -1739,7 +2201,12 @@ impl ShellOwner {
             } else {
                 None
             };
-            let registration = self
+            // Configure hooks before the provider subcommand, as for Codex resume.
+            let fork_argv = matches!(&special, Some(SpecialLaunch::CodexFork { .. })).then(|| {
+                let end = options.launch.argv.len();
+                options.launch.argv.split_off(end - 2)
+            });
+            let mut registration = self
                 .register_hook(
                     &mut options,
                     &run_id,
@@ -1748,6 +2215,51 @@ impl ShellOwner {
                     permission_starting,
                 )
                 .context(HookSetup)?;
+            if let Some(argv) = fork_argv {
+                options.launch.argv.extend(argv);
+            }
+            let mut dsh = None;
+            let mut fork = None;
+            match special {
+                Some(SpecialLaunch::Dsh {
+                    config_dump,
+                    catalog_root,
+                    binding,
+                }) => {
+                    let patch = registration.attach_dsh(&config_dump, &run_id)?;
+                    let expected = binding
+                        .as_ref()
+                        .map(|binding| binding.provider_session_id.as_str());
+                    if let Some(binding) = &binding {
+                        let mut resume = DshResume::new(&binding.provider_session_id);
+                        let mut catalog = DshSessionCatalog::new(
+                            catalog_root.context("DSH history directory unavailable")?,
+                        );
+                        ensure!(
+                            matches!(
+                                resume.start(&run_id, &mut catalog, &options.launch.cwd),
+                                BeginOutcome::Launch(_)
+                            ),
+                            "DSH history could not be restored: {:?}",
+                            resume.state()
+                        );
+                        dsh = Some(DshObservation::Resume(resume, binding.id.clone()));
+                    } else {
+                        dsh = Some(DshObservation::Fresh(DshEvents::new(&run_id, None)));
+                    }
+                    let plan = dsh_launch::prepare(DshLaunchInput {
+                        cwd: &options.launch.cwd,
+                        patch_path: Some(&patch),
+                        resume_session_id: expected,
+                        inherited_environment: std::mem::take(&mut options.launch.env),
+                        run_environment: Default::default(),
+                    })?;
+                    options.launch.argv = os_arguments(plan.argv)?;
+                    options.launch.env = plan.environment;
+                }
+                Some(SpecialLaunch::CodexFork { key, authority }) => fork = Some((key, authority)),
+                None => {}
+            }
             if let Some((env, model_picker)) = gateway_settings {
                 let path = &registration.settings_path;
                 let mut settings: Value = serde_json::from_slice(&std::fs::read(path)?)
@@ -1770,8 +2282,45 @@ impl ShellOwner {
                     .argv
                     .extend(["resume".into(), resume.identity.to_string()]);
             }
-            let deadline = (profile == LaunchProfile::ClaudeCode || codex_resume.is_some())
-                .then(|| Instant::now() + identity_wait);
+            let deadline = (profile == LaunchProfile::ClaudeCode
+                || codex_resume.is_some()
+                || matches!(dsh, Some(DshObservation::Resume(..)))
+                || fork.is_some())
+            .then(|| {
+                Instant::now()
+                    + if fork.is_some() {
+                        FORK_IDENTITY_WAIT
+                    } else {
+                        identity_wait
+                    }
+            });
+            let mut hud = AgentHudProjection::new(
+                &session_id,
+                match profile {
+                    LaunchProfile::ClaudeCode => HudProvider::ClaudeCode,
+                    LaunchProfile::Codex => HudProvider::Codex,
+                    LaunchProfile::Dsh => HudProvider::Dsh,
+                    LaunchProfile::Shell => unreachable!(),
+                },
+                now() as f64,
+            );
+            hud.seed_settings(
+                options.launch.cwd.to_str(),
+                launch_metadata["permissionMode"].as_str(),
+                None,
+                launch_metadata["model"].as_str(),
+                false,
+            );
+            let claude_projects = (profile == LaunchProfile::ClaudeCode)
+                .then(|| {
+                    options
+                        .launch
+                        .env
+                        .get(std::ffi::OsStr::new("CLAUDE_CONFIG_DIR"))
+                        .map(|path| Path::new(path).join("projects"))
+                        .or_else(crate::provider_catalog::projects_root)
+                })
+                .flatten();
             Some(RunHook {
                 _registration: registration,
                 codex_resume,
@@ -1786,6 +2335,14 @@ impl ShellOwner {
                 resume,
                 reported_missing: false,
                 pending_startup_observations: Vec::new(),
+                hud,
+                claude_projects,
+                claude_transcript: None,
+                dsh,
+                dsh_pending: Vec::new(),
+                fork,
+                codex_fork_ready: false,
+                dsh_status: None,
                 permission_identity_error: None,
             })
         } else {
@@ -1854,6 +2411,10 @@ impl ShellOwner {
                 return Err(error);
             }
         };
+        if let Some(family) = egress_family {
+            self.egress
+                .register_session(session_id.clone(), &[family], now() as u64);
+        }
         if hook.is_some() {
             self.summaries.remove(&session_id);
         }
@@ -1908,7 +2469,7 @@ impl ShellOwner {
         )?;
         if options.launch.profile == LaunchProfile::Codex {
             registration.attach_codex(&mut options.launch)?;
-        } else {
+        } else if options.launch.profile == LaunchProfile::ClaudeCode {
             attach_claude_settings(&mut options.launch, &registration.settings_path)?;
         }
         Ok(registration)
@@ -2070,6 +2631,11 @@ impl ShellOwner {
                         self.apply_hook(scope, observation, events);
                     }
                 }
+                HookMessage::DshObserved(scope, payload, received_at) => {
+                    if accepts(self, &scope, received_at) {
+                        self.apply_dsh_hook(scope, &payload, events);
+                    }
+                }
                 HookMessage::Retired(scope) => reject_identity(events, &scope, "retired-run"),
             }
         }
@@ -2077,6 +2643,30 @@ impl ShellOwner {
 
     fn poll_provider_hooks(&mut self, events: &mut Vec<OwnerEvent>) {
         self.poll_provider_hook_messages(events, 64, |_, _, _| true);
+        let dsh_timeouts = self
+            .shells
+            .iter_mut()
+            .filter_map(|(id, shell)| {
+                let hook = shell.hook.as_mut()?;
+                if shell.ended
+                    || shell.retiring
+                    || !hook
+                        .deadline
+                        .is_some_and(|deadline| deadline <= Instant::now())
+                {
+                    return None;
+                }
+                if let Some(DshObservation::Resume(resume, _)) = &mut hook.dsh
+                    && resume.timeout(&shell.run_id)
+                {
+                    return Some(id.clone());
+                }
+                None
+            })
+            .collect::<Vec<_>>();
+        for id in dsh_timeouts {
+            self.park_dsh_run(&id, "DSH restore identity timed out", events);
+        }
         let mut codex_effects = Vec::new();
         if !self.closing {
             for (id, shell) in &mut self.shells {
@@ -2094,6 +2684,27 @@ impl ShellOwner {
             self.apply_codex_effect(&id, &run_id, effect, None, events);
         }
         self.poll_codex_titles(events);
+        let expired_codex_forks = self
+            .shells
+            .iter()
+            .filter_map(|(id, shell)| {
+                let hook = shell.hook.as_ref()?;
+                (!shell.ended
+                    && !shell.retiring
+                    && hook
+                        .deadline
+                        .is_some_and(|deadline| deadline <= Instant::now()))
+                .then(|| {
+                    hook.fork
+                        .clone()
+                        .map(|(key, authority)| (id.clone(), key, authority))
+                })
+                .flatten()
+            })
+            .collect::<Vec<_>>();
+        for (id, key, authority) in expired_codex_forks {
+            self.fail_codex_fork_run(&id, &key, &authority, FORK_IDENTITY_TIMEOUT, events);
+        }
         let mut expired_forks = Vec::new();
         let mut expired_permission_restores = Vec::new();
         for (session_id, shell) in &mut self.shells {
@@ -2174,6 +2785,173 @@ impl ShellOwner {
         }
     }
 
+    fn apply_dsh_hook(&mut self, scope: Scope, payload: &Value, events: &mut Vec<OwnerEvent>) {
+        let Some(shell) = self.shells.get_mut(&scope.session_id).filter(|shell| {
+            !self.closing
+                && !shell.ended
+                && !shell.retiring
+                && shell.run_id == scope.run_id
+                && scope.generation == self.generation
+        }) else {
+            return;
+        };
+        let Some(hook) = &mut shell.hook else {
+            return;
+        };
+        if shell.provider_startup_pending {
+            if hook.dsh_pending.len() < HOOK_QUEUE_CAPACITY {
+                hook.dsh_pending.push((scope, payload.clone()));
+            }
+            return;
+        }
+        let Some(observer) = &mut hook.dsh else {
+            return;
+        };
+        let update = match observer.observe(&scope.run_id, payload) {
+            DshEventOutcome::Observed(update) => update,
+            DshEventOutcome::Ignored => return,
+            DshEventOutcome::IdentityMismatch { .. } => {
+                self.park_dsh_run(
+                    &scope.session_id,
+                    "DSH restore returned a different session identity",
+                    events,
+                );
+                return;
+            }
+        };
+        if let Some(identity) = update.identity
+            && identity.persisted
+        {
+            let expected = match observer {
+                DshObservation::Resume(resume, _) if hook.deadline.is_some() => {
+                    Some(resume.original_binding().0)
+                }
+                _ => None,
+            };
+            if identity.cwd.is_some_and(|cwd| {
+                Path::new(cwd).canonicalize().ok() != Path::new(&shell.cwd).canonicalize().ok()
+            }) {
+                self.park_dsh_run(
+                    &scope.session_id,
+                    "DSH restore returned a different working directory",
+                    events,
+                );
+                return;
+            }
+            let id = (self.next_id)();
+            match sessions::record_dsh_identity(
+                &mut self.connection,
+                &command(id.clone(), "provider-hook.dsh-identity", id.clone()),
+                &sessions::ProviderIdentity {
+                    binding_id: &id,
+                    session_id: &scope.session_id,
+                    run_id: &scope.run_id,
+                    generation: &scope.generation,
+                    provider_session_id: identity.session_id,
+                    expected_id: expected,
+                    launch_metadata: &hook.launch_metadata,
+                    observed_metadata: &Value::Null,
+                    event_name: "ready",
+                    first_for_run: hook.deadline.is_some(),
+                },
+                now(),
+            ) {
+                Ok(commit) => {
+                    let mut confirmed = commit.result.clone();
+                    confirmed["result"] = json!("confirmed");
+                    events.push(OwnerEvent::ProviderIdentity(confirmed));
+                    events.push(OwnerEvent::Domain(commit));
+                    hook.deadline = None;
+                    hook.hud.set_resumable(true);
+                }
+                Err(_) => {
+                    self.park_dsh_run(&scope.session_id, "Could not save the DSH identity", events);
+                    return;
+                }
+            }
+        }
+        hook.hud.ingest_provider(
+            &json!({
+                "dsh_session_id": update.session_id,
+                "dsh_hud": update.hud,
+                "dsh_work_status": update.work_status,
+            }),
+            now() as f64,
+        );
+        let title = update
+            .title
+            .filter(|title| safe_hook_text(title, &hook.secrets).is_some());
+        if hook.dsh_status != Some(update.work_status) || title.is_some() {
+            let status = match update.work_status {
+                DshWorkStatus::Idle => "idle",
+                DshWorkStatus::Running => "running",
+                DshWorkStatus::NeedsInput => "needs-input",
+                DshWorkStatus::Error => "error",
+            };
+            let id = (self.next_id)();
+            match sessions::project_dsh_status(
+                &mut self.connection,
+                &command(id.clone(), "provider-hook.dsh-status", id),
+                &scope.session_id,
+                &scope.run_id,
+                status,
+                title,
+                now(),
+            ) {
+                Ok(commit) => {
+                    hook.dsh_status = Some(update.work_status);
+                    events.push(OwnerEvent::Domain(commit));
+                }
+                Err(error) => diagnostic(events, &scope.session_id, format!("{error:#}")),
+            }
+        }
+        if let Some(notification) = update.notification {
+            let mut payload = json!(notification);
+            redact_hud(&mut payload, &hook.secrets);
+            payload["operation"] = json!("upsert");
+            let id = (self.next_id)();
+            match sessions::publish_provider_notification(
+                &mut self.connection,
+                &command(id.clone(), "agent.notification", id),
+                &scope.session_id,
+                &scope.run_id,
+                &scope.generation,
+                "dsh",
+                payload,
+                now(),
+            ) {
+                Ok(commit) => events.push(OwnerEvent::Domain(commit)),
+                Err(error) => diagnostic(events, &scope.session_id, format!("{error:#}")),
+            }
+        }
+    }
+
+    fn park_dsh_run(&mut self, session_id: &str, error: &str, events: &mut Vec<OwnerEvent>) {
+        let binding = self
+            .shells
+            .get_mut(session_id)
+            .and_then(|shell| shell.hook.as_mut())
+            .and_then(|hook| {
+                hook.deadline = None;
+                match hook.dsh.take() {
+                    Some(DshObservation::Resume(_, binding)) => Some(binding),
+                    _ => None,
+                }
+            });
+        if let Some(binding_id) = binding
+            && let Err(failure) = self.change_dsh_restore(
+                session_id,
+                ClaudeRestore::Fail {
+                    binding_id: &binding_id,
+                    error,
+                },
+            )
+        {
+            diagnostic(events, session_id, format!("{failure:#}"));
+        }
+        self.retire_sessions(&[session_id.to_owned()]);
+    }
+
     fn apply_hook(
         &mut self,
         scope: Scope,
@@ -2199,6 +2977,23 @@ impl ShellOwner {
             return;
         }
         if hook.permission_identity_error.is_some() {
+            return;
+        }
+        if observation.statusline {
+            if !shell.provider_startup_pending
+                && hook
+                    .last_observation
+                    .as_ref()
+                    .and_then(|last| last.identity.as_ref())
+                    .is_some_and(|identity| observation.identity.as_ref() == Some(identity))
+                && let Some(mut payload) = observation.hud_payload.take()
+            {
+                if let Some(payload) = payload.as_object_mut() {
+                    payload.remove("hook_event_name");
+                    payload.remove("hookEventName");
+                }
+                hook.hud.ingest_provider(&payload, now() as f64);
+            }
             return;
         }
         if matches!(observation.event, "unknown" | "SessionEnd") {
@@ -2292,6 +3087,7 @@ impl ShellOwner {
         };
         observation.cwd = safe(observation.cwd)
             .filter(|cwd| Path::new(cwd).is_absolute() && Path::new(cwd).is_dir());
+        let hud_payload = observation.hud_payload.take();
         // Hook status is independent of whether the identity metadata changed.
         let notification = observation.notification.take();
         let confirms = hook
@@ -2359,6 +3155,29 @@ impl ShellOwner {
             }
             events.push(OwnerEvent::Domain(commit));
         }
+        if let Some(payload) = hud_payload {
+            let identity = hook
+                .last_observation
+                .as_ref()
+                .and_then(|last| last.identity.as_deref());
+            if let Some(identity) = identity {
+                hook.hud.set_resumable(true);
+                let transcript = ["transcript_path", "transcriptPath"]
+                    .iter()
+                    .find_map(|key| payload[*key].as_str());
+                if let Some(path) = transcript.map(Path::new) {
+                    let expected = format!("{identity}.jsonl");
+                    if path.is_absolute()
+                        && path
+                            .file_name()
+                            .is_some_and(|name| name == std::ffi::OsStr::new(&expected))
+                    {
+                        hook.claude_transcript = Some(path.to_owned());
+                    }
+                }
+            }
+            hook.hud.ingest_provider(&payload, now() as f64);
+        }
         let permission_confirmed = confirms
             && hook
                 .resume
@@ -2422,6 +3241,20 @@ impl ShellOwner {
         }
     }
 
+    fn fail_codex_fork_run(
+        &mut self,
+        id: &str,
+        key: &str,
+        authority: &CodexForkAuthority,
+        error: &str,
+        events: &mut Vec<OwnerEvent>,
+    ) {
+        if let Some(intent) = self.codex_forks.get_mut(key) {
+            let _ = intent.fail(authority, &anyhow::anyhow!("{error}"), |_| Ok(()));
+        }
+        self.park_fork_run(id, &authority.run_id.to_string(), error, events);
+    }
+
     fn apply_codex_hook(
         &mut self,
         scope: Scope,
@@ -2459,9 +3292,45 @@ impl ShellOwner {
             {
                 return;
             }
+            if let Some(raw) = observation.hud_payload.take() {
+                hook.hud.ingest_provider(&raw, now() as f64);
+            }
             let Some(effect) = codex.apply_admitted(observation.event, payload, &shell.cwd) else {
                 return;
             };
+            if !hook.codex_fork_ready
+                && effect.error.is_none()
+                && matches!(observation.event, "UserPromptSubmit" | "Stop")
+            {
+                let id = (self.next_id)();
+                match sessions::record_codex_fork_readiness(
+                    &mut self.connection,
+                    &command(id.clone(), "provider-hook.codex-fork-readiness", id.clone()),
+                    &sessions::ProviderIdentity {
+                        binding_id: &id,
+                        session_id: &scope.session_id,
+                        run_id: &scope.run_id,
+                        generation: &scope.generation,
+                        provider_session_id: &identity_text,
+                        expected_id: Some(&identity_text),
+                        launch_metadata: &Value::Null,
+                        observed_metadata: &Value::Null,
+                        event_name: observation.event,
+                        first_for_run: false,
+                    },
+                    now(),
+                ) {
+                    Ok(commit) => {
+                        hook.codex_fork_ready = commit.result["metadata"]["canFork"] == true;
+                        events.push(OwnerEvent::Domain(commit));
+                    }
+                    Err(error) => diagnostic(
+                        events,
+                        &scope.session_id,
+                        format!("Record Codex Fork readiness: {error:#}"),
+                    ),
+                }
+            }
             let notification = observation.notification.map(|(notice, _)| notice.payload());
             self.apply_codex_effect(
                 &scope.session_id,
@@ -2478,6 +3347,91 @@ impl ShellOwner {
         let Some(rollout) = codex.start_rollout(&payload, identity) else {
             return;
         };
+        if let Some((key, authority)) = hook.fork.clone() {
+            let Some(intent) = self.codex_forks.get_mut(&key) else {
+                return;
+            };
+            let cwd = observation
+                .cwd
+                .as_deref()
+                .map(Path::new)
+                .unwrap_or_else(|| Path::new(""));
+            let header = codex_fork_header(&rollout.1);
+            if let Some(header) = &header {
+                let candidate = CodexForkCandidate {
+                    provider_session_id: header["id"].as_str().unwrap_or_default(),
+                    forked_from_id: header["forked_from_id"].as_str().unwrap_or_default(),
+                    cwd: Path::new(header["cwd"].as_str().unwrap_or_default()),
+                    created_at_ms: header["created_at_ms"].as_u64().unwrap_or_default(),
+                };
+                intent.discover_candidate(&authority, &[candidate]);
+            }
+            let id = (self.next_id)();
+            let mut commit = None;
+            let result = intent.observe_hook(
+                &authority,
+                CodexForkHook {
+                    event_name: observation.event,
+                    provider_session_id: &identity_text,
+                    cwd,
+                },
+                |binding, authority| {
+                    let token = authority.lease.token.to_string();
+                    let lease = native_fork_lease(&authority.lease, &token, &scope.generation)?;
+                    let metadata = json!({
+                        "providerConfigId": binding.provider_config_id, "model": binding.model,
+                        "permissionMode": binding.permission_mode, "cwd": binding.cwd,
+                    });
+                    commit = Some(sessions::record_codex_fork_identity(
+                        &mut self.connection,
+                        &command(id.clone(), "provider-hook.codex-fork", id.clone()),
+                        &sessions::ProviderIdentity {
+                            binding_id: &id,
+                            session_id: &scope.session_id,
+                            run_id: &scope.run_id,
+                            generation: &scope.generation,
+                            provider_session_id: &identity_text,
+                            expected_id: None,
+                            launch_metadata: &metadata,
+                            observed_metadata: &Value::Null,
+                            event_name: observation.event,
+                            first_for_run: true,
+                        },
+                        &lease,
+                        now(),
+                    )?);
+                    Ok(())
+                },
+                |_| Ok(()),
+            );
+            match result {
+                Ok(Some(_)) => {
+                    let commit = commit.expect("Codex Fork committed its identity");
+                    let mut confirmed = commit.result.clone();
+                    confirmed["result"] = json!("confirmed");
+                    codex.confirm(rollout, identity_text.clone());
+                    hook.deadline = None;
+                    hook.fork = None;
+                    observation.identity = Some(identity_text);
+                    if let Some(raw) = observation.hud_payload.take() {
+                        hook.hud.ingest_provider(&raw, now() as f64);
+                    }
+                    hook.hud.set_resumable(true);
+                    hook.last_observation = Some(observation);
+                    events.push(OwnerEvent::ProviderIdentity(confirmed));
+                    events.push(OwnerEvent::Domain(commit));
+                }
+                Ok(None) => {}
+                Err(error) => self.fail_codex_fork_run(
+                    &scope.session_id,
+                    &key,
+                    &authority,
+                    &format!("{error:#}"),
+                    events,
+                ),
+            }
+            return;
+        }
         if let Some(resume) = &hook.codex_resume
             && resume.identity != identity
         {
@@ -2530,6 +3484,11 @@ impl ShellOwner {
             })));
             return;
         };
+        if let Some(raw) = observation.hud_payload.take() {
+            hook.hud.ingest_provider(&raw, now() as f64);
+        }
+        hook.hud.set_resumable(true);
+        hook.codex_fork_ready = commit.result["metadata"]["canFork"] == true;
         codex.confirm(rollout, expected.unwrap_or(&identity_text).to_owned());
         hook.deadline = None;
         hook.codex_resume = None;
@@ -3130,8 +4089,18 @@ impl ShellOwner {
             return Ok(());
         }
         shell.ended = true;
+        self.egress.unregister_session(id, now() as u64);
         shell.gateway.take();
         let mut hook = shell.hook.take();
+        let pending_dsh = hook.as_mut().and_then(|hook| {
+            if let Some(DshObservation::Resume(resume, binding)) = &mut hook.dsh
+                && resume.fail_start(&shell.run_id, ResumeFailure::ProcessExited)
+            {
+                return Some(binding.clone());
+            }
+            None
+        });
+        let pending_codex_fork = hook.as_mut().and_then(|hook| hook.fork.take());
         let pending_codex = hook.as_mut().and_then(|hook| hook.codex_resume.take());
         let had_identity = hook
             .as_ref()
@@ -3177,6 +4146,28 @@ impl ShellOwner {
             time,
         )?;
         events.push(OwnerEvent::Domain(commit));
+        if let Some((key, authority)) = pending_codex_fork {
+            let reason = "Codex Fork exited before confirming its child identity";
+            if let Some(intent) = self.codex_forks.get_mut(&key) {
+                intent.fail(&authority, &anyhow::anyhow!("{reason}"), |_| Ok(()))?;
+            }
+            self.commit_fork_failure(id, Some(&run), reason, events)?;
+            return Ok(());
+        }
+        if let Some(binding_id) = pending_dsh
+            && !retiring
+            && !disposed
+            && !self.closing
+        {
+            self.change_dsh_restore(
+                id,
+                ClaudeRestore::Fail {
+                    binding_id: &binding_id,
+                    error: "DSH exited before confirming the restored session",
+                },
+            )?;
+            return Ok(());
+        }
         if let Some(resume) = pending_codex
             && !retiring
             && !disposed
@@ -3451,6 +4442,106 @@ fn command(command_id: String, kind: &str, request_hash: String) -> CommandMetad
         correlation_id: None,
     }
 }
+fn native_fork_lease<'a>(
+    lease: &'a ForkLease,
+    token: &'a str,
+    owner: &'a str,
+) -> Result<canvas::NativeForkLease<'a>> {
+    Ok(canvas::NativeForkLease {
+        operation_id: &lease.operation_id,
+        token,
+        fence: lease.fence.try_into()?,
+        owner,
+    })
+}
+
+fn core_worktree(binding: &WorktreeBinding) -> Result<canvas::NativeForkWorktree> {
+    Ok(canvas::NativeForkWorktree {
+        id: binding.worktree_id.clone(),
+        execution_context_id: binding.execution_context_id.clone(),
+        repository_root: binding
+            .repository_root
+            .to_str()
+            .context("Worktree repository is not UTF-8")?
+            .to_owned(),
+        cwd: binding
+            .cwd
+            .to_str()
+            .context("Worktree path is not UTF-8")?
+            .to_owned(),
+        branch: binding.branch.clone(),
+        base_revision: binding.base_revision.clone(),
+    })
+}
+
+fn codex_fork_header(file: &std::fs::File) -> Option<Value> {
+    use std::io::{BufRead, Read};
+    let mut line = String::new();
+    std::io::BufReader::new(file.try_clone().ok()?.take(64 * 1024))
+        .read_line(&mut line)
+        .ok()?;
+    let row: Value = serde_json::from_str(&line).ok()?;
+    (row["type"] == "session_meta").then(|| row["payload"].clone())
+}
+
+fn os_arguments(argv: Vec<std::ffi::OsString>) -> Result<Vec<String>> {
+    argv.into_iter()
+        .map(|arg| {
+            arg.into_string()
+                .map_err(|_| anyhow::anyhow!("DSH argument is not UTF-8"))
+        })
+        .collect()
+}
+
+fn read_hud_transcript(root: &Path, transcript: &Path) -> Option<Vec<Value>> {
+    use std::io::{BufRead, Read, Seek, SeekFrom};
+    const TAIL_BYTES: u64 = 256 * 1024;
+    let root = root.canonicalize().ok()?;
+    let path = transcript.canonicalize().ok()?;
+    if !path.starts_with(&root) || path.file_name() != transcript.file_name() || !path.is_file() {
+        return None;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let mut file = options.open(&path).ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    let offset = metadata.len().saturating_sub(TAIL_BYTES);
+    file.seek(SeekFrom::Start(offset.saturating_sub(1))).ok()?;
+    let mut reader = std::io::BufReader::new(file.take(TAIL_BYTES + 1));
+    if offset > 0 {
+        reader.read_until(b'\n', &mut Vec::new()).ok()?;
+    }
+    Some(
+        reader
+            .split(b'\n')
+            .filter_map(|row| serde_json::from_slice(&row.ok()?).ok())
+            .collect(),
+    )
+}
+
+fn redact_hud(value: &mut Value, secrets: &[String]) {
+    match value {
+        Value::String(text) if safe_hook_text(text, secrets).is_none() => {
+            *text = "[redacted]".into()
+        }
+        Value::Array(items) => items
+            .iter_mut()
+            .for_each(|value| redact_hud(value, secrets)),
+        Value::Object(fields) => fields
+            .values_mut()
+            .for_each(|value| redact_hud(value, secrets)),
+        _ => {}
+    }
+}
+
 fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

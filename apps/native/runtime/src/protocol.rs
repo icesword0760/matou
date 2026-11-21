@@ -11,6 +11,16 @@ use serde_json::Value;
 
 use crate::host::{Command, Event};
 
+/// Read-only inputs to verify a moved worktree's Git registration.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeRepairQuery {
+    pub repository_root: std::path::PathBuf,
+    pub isolation_root: std::path::PathBuf,
+    pub branch: String,
+    pub candidate: std::path::PathBuf,
+}
+
 pub const VERSION: u32 = 3;
 
 #[derive(Serialize, Deserialize)]
