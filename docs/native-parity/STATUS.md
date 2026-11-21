@@ -1757,3 +1757,9 @@ On 2026-11-16 the user explicitly chose `保持原样` after the concrete scenar
 - **`G-mt-navigation` merged (`4630fab2`)**: Added `navigation.focus.session`, `navigation.switch.workspace`, `navigation.switch.task`, and `navigation.switch.canvas` (`mt focus` / `mt switch workspace|task|canvas`) to `host_control.rs`, `host.rs`, and `mt_cli.rs` (23 real Unix-socket/RuntimeHost/CLI tests pass; temporary worktree removed).
 - **Full serial regression on `codex/native-parity`**: **101 Rust suites, 708 passed, 0 failed, 32 ignored**, plus `package-native-mac.test.mjs` + `package-native-win.test.mjs` **62 passed, 0 failed** (**770 automated checks green**), `cargo fmt --all --check`, `cargo check --offline --locked --all-targets`, `pnpm check:identifiers` and `git diff --check` all green.
 - **Remaining scope**: minor detached-window `Cmd+W` close; pending user product decisions (tab-strip horizontal wheel, remove-dialog across tab switch, `mt` write scopes/token inheritance); live external network/OAuth/real-provider turns & subscription router; real Developer ID (`JAKX72KQ6X`) signing + Finder `public.folder` drag + TCC continuity audit; Windows host compilation & live acceptance.
+
+### Product decisions recorded (2026-11-21)
+
+- **Tab-strip horizontal wheel**: User chose **keep native horizontal scrolling** (approved intentional deviation from reference no-op).
+- **Remove confirmation across tab switch**: User chose **keep native auto-dismiss on tab switch** (approved safer deviation from reference stale dialog).
+- **`mt` control-plane write commands**: User authorized implementing the full frozen write/input/structure command set (`terminal.send-text`/`send-key`, `structure.create.*`/`fork.*`/`remove.*`/`canvas-close.*`, `task.*`) strictly following frozen host-control contracts and isolated test roots.
