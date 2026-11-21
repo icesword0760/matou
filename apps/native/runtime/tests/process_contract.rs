@@ -1732,6 +1732,20 @@ fn configured_cc_alias_promotes_only_claude_with_its_permission_mode() -> Result
         db.busy_timeout(TIMEOUT)?;
         if let Some(bypass) = bypass {
             child.frame(|_, screen, _| screen_has_line(screen, "CC_PROMOTED"))?;
+            child.send(Command::GetEgressStatus { request_id: 90 })?;
+            let deadline = Instant::now() + TIMEOUT;
+            loop {
+                if let Event::Graph(reply) = child.event(deadline, true)?
+                    && reply["type"] == "egressStatusResult"
+                    && reply["requestId"] == 90
+                {
+                    assert_eq!(
+                        reply["result"]["sessionFamilies"][&child.session],
+                        serde_json::json!(["anthropic"])
+                    );
+                    break;
+                }
+            }
             let argv = fs::read_to_string(stub.with_extension("argv"))?;
             assert_eq!(
                 argv.contains("--dangerously-skip-permissions"),

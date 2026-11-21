@@ -2026,6 +2026,122 @@ mod workspace {
         panic!("HUD did not render {element}");
     }
 
+    fn verify_card_headers(cx: &mut AsyncApp) {
+        let (window, sink) = open_probe_at(cx, 1200.);
+        let handle = window.into();
+        let actions = |id: &str| {
+            [
+                format!("session-history-open-{id}"),
+                format!("session-loader-open-{id}"),
+                format!("fork-child-{id}"),
+                format!("fork-sibling-{id}"),
+                format!("remove-session-{id}"),
+            ]
+        };
+        let count = |bounds: &HashMap<String, Bounds<Pixels>>, id: &str| {
+            actions(id)
+                .iter()
+                .filter(|id| bounds.contains_key(*id))
+                .count()
+        };
+
+        let shell = draw(handle, cx);
+        assert_eq!(count(&shell, A), 2);
+        let scene_bar = shell["scene-bar"];
+        assert_eq!(scene_bar.size.height, px(48.));
+        assert_eq!(shell["session-header-shell-a"].size.height, px(42.));
+        assert_eq!(
+            shell["session-header-shell-a"].top() - scene_bar.bottom(),
+            px(6.)
+        );
+        assert_eq!(
+            shell["session-header-shell-b"].top() - scene_bar.bottom(),
+            px(10.)
+        );
+        window
+            .update(cx, |view, _, cx| {
+                view.graph["nodes"].as_array_mut().unwrap().truncate(1);
+                view.refresh_level(cx);
+                cx.notify();
+            })
+            .unwrap();
+        assert_eq!(count(&draw(handle, cx), A), 1);
+
+        for provider in ["claude-code", "codex", "antigravity"] {
+            window
+                .update(cx, |view, window, cx| {
+                    let mut graph = graph();
+                    for node in graph["nodes"].as_array_mut().unwrap().iter_mut().take(2) {
+                        node["currentMode"] = json!(provider);
+                        node["canFork"] = json!(true);
+                        node["cwd"] = json!(".");
+                    }
+                    graph["nodes"][1]["parentSessionId"] = json!(A);
+                    view.level_parent_by_scene.remove("main");
+                    view.focused = Some(A.into());
+                    view.replace_fork_graph(graph, window, cx);
+                    view.refresh_terminals(window, cx);
+                    cx.notify();
+                })
+                .unwrap();
+            let root = draw(handle, cx);
+            assert_eq!(count(&root, A), 4, "{provider} root");
+            click(handle, cx, MouseButton::Left, root[&actions(A)[0]].center());
+            window
+                .update(cx, |view, window, cx| {
+                    let Some(TabDialog::SessionLoader(loader)) = &view.dialog else {
+                        panic!("{provider} history did not open");
+                    };
+                    assert_eq!(loader.provider, provider);
+                    view.close_dialog(window, cx);
+                })
+                .unwrap();
+            if provider != "claude-code" {
+                assert!(
+                    std::iter::from_fn(|| sink.try_recv().ok()).any(|command| matches!(
+                        (provider, command),
+                        ("codex", Command::ListCodexSessions { .. })
+                            | ("antigravity", Command::ListAntigravitySessions { .. }),
+                    ))
+                );
+            }
+            let root = draw(handle, cx);
+            click(handle, cx, MouseButton::Left, root[&actions(A)[2]].center());
+            window.update(cx, |view, window, cx| {
+                assert!(matches!(
+                    &view.dialog,
+                    Some(TabDialog::Branch(state)) if state.placement == ForkPlacement::Child
+                ), "{provider} child fork");
+                view.close_dialog(window, cx);
+                view.level_parent_by_scene.insert("main".into(), Some(A.into()));
+                view.focused = Some(B.into());
+                view.refresh_level(cx);
+                cx.notify();
+            }).unwrap();
+            let child = draw(handle, cx);
+            assert_eq!(count(&child, B), 5, "{provider} child");
+            click(
+                handle,
+                cx,
+                MouseButton::Left,
+                child[&actions(B)[3]].center(),
+            );
+            window.update(cx, |view, window, cx| {
+                assert!(matches!(
+                    &view.dialog,
+                    Some(TabDialog::Branch(state)) if state.placement == ForkPlacement::Sibling
+                ), "{provider} sibling fork");
+                view.close_dialog(window, cx);
+            }).unwrap();
+        }
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        println!(
+            "card headers: provider history and fork buttons, four root and five child actions, one/two Shell actions"
+        );
+    }
+
     async fn verify_footer_hud(cx: &mut AsyncApp, root: &std::path::Path) {
         let cwd = root.join("footer-hud");
         std::fs::create_dir(&cwd).unwrap();
@@ -2058,12 +2174,13 @@ mod workspace {
             "gitBranch":"review/live","gitDirty":true
         });
         window
-            .update(cx, |view, _, cx| {
+            .update(cx, |view, window, cx| {
                 let node = &mut view.graph["nodes"][0];
                 node["currentMode"] = json!("antigravity");
                 node["cwd"] = json!(cwd);
                 node["environment"] = json!({"kind":"worktree","state":"ready","path":cwd});
                 node["git"] = json!({"state":"ready","branch":"legacy","dirty":false});
+                view.refresh_terminals(window, cx);
                 view.refresh_live_wiring(cx);
                 cx.notify();
             })
@@ -2359,6 +2476,7 @@ mod workspace {
         Application::new().with_assets(NativeAssets).run(move |cx| {
             cx.spawn(async move |cx| {
                 verify(cx, &fixture_root).await;
+                verify_card_headers(cx);
                 verify_footer_hud(cx, &fixture_root).await;
                 verify_horizontal_divider_drag(cx);
                 verify_splits(cx);
