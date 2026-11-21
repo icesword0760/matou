@@ -68,6 +68,9 @@ const requiredRuntimeResources = [
   'control-assets/providers/host-control.md',
   'control-assets/providers/claude-plugin/.claude-plugin/plugin.json',
   'control-assets/providers/claude-plugin/skills/mt-terminal/SKILL.md',
+  'control-assets/providers/claude-plugin/skills/agent-foreman/SKILL.md',
+  'control-assets/providers/claude-plugin/skills/agent-foreman/scripts/foreman.mjs',
+  'control-assets/providers/claude-plugin/skills/agent-foreman/scripts/foreman-statusline.mjs',
   'control-assets/providers/codex-developer-instructions.md'
 ]
 await Promise.all(requiredRuntimeResources.map((path) => access(join(destination, path))))

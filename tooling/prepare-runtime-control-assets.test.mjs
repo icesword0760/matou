@@ -24,6 +24,23 @@ test('copies executable mt wrappers and complete provider guidance', async () =>
   const claudeSkill = await readFile(
     join(destination, 'providers/claude-plugin/skills/mt-terminal/SKILL.md'), 'utf8'
   )
+  const foremanSkill = await readFile(
+    join(destination, 'providers/claude-plugin/skills/agent-foreman/SKILL.md'), 'utf8'
+  )
+  const foremanScript = await readFile(
+    join(destination, 'providers/claude-plugin/skills/agent-foreman/scripts/foreman.mjs'), 'utf8'
+  )
+  for (const rel of ['brief-template.md', 'parallel.md', 'reference.md', 'scripts/foreman-statusline.mjs']) {
+    const copied = await readFile(join(destination, 'providers/claude-plugin/skills/agent-foreman', rel), 'utf8')
+    const original = await readFile(join(source, 'providers/claude-plugin/skills/agent-foreman', rel), 'utf8')
+    assert.equal(copied, original)
+  }
+  assert.equal(
+    foremanSkill,
+    await readFile(join(source, 'providers/claude-plugin/skills/agent-foreman/SKILL.md'), 'utf8')
+  )
+  assert.match(foremanSkill, /name:\s*agent-foreman/)
+  assert.match(foremanScript, /config\.json/)
   const targetRules = await readFile(
     join(destination, 'providers/claude-plugin/skills/mt-terminal/references/target-resolution.md'),
     'utf8'
