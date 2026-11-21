@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     host::{
-        Command, DatabaseRecoveryAction, Event, LaunchOptions, RuntimeHost,
+        Command, DatabaseRecoveryAction, Event, LaunchOptions, OfflineFixtures, RuntimeHost,
         database_recovery_request_id,
     },
     owner::ShellOwner,
@@ -1236,12 +1236,15 @@ while [[ ! -f "$HOME/exit" ]]; do /bin/sleep 0.02; done
 exit 0
 "#,
     )?;
-    let mut host = RuntimeHost::start(LaunchOptions {
-        data_root: data.clone(),
-        workspace,
-        shell_home: home.clone(),
-        shell: "/bin/zsh".into(),
-    })?;
+    let mut host = RuntimeHost::start_with_offline_fixtures(
+        LaunchOptions {
+            data_root: data.clone(),
+            workspace,
+            shell_home: home.clone(),
+            shell: "/bin/zsh".into(),
+        },
+        OfflineFixtures::default(),
+    )?;
     let until = Instant::now() + Duration::from_secs(8);
     let capture = loop {
         ensure!(Instant::now() < until, "managed Shell failed to start");
@@ -1419,7 +1422,10 @@ fn readonly_and_in_process_recovery_never_bind() -> Result<()> {
         shell_home: root.join("home"),
         shell: "/bin/zsh".into(),
     };
-    let mut readonly_host = RuntimeHost::start(launch(readonly.path()))?;
+    let mut readonly_host = RuntimeHost::start_with_offline_fixtures(
+        launch(readonly.path()),
+        OfflineFixtures::default(),
+    )?;
     await_runtime_event(&readonly_host, |event| {
         matches!(event, Event::ReadOnlyReady { .. })
     })?;
@@ -1437,7 +1443,10 @@ fn readonly_and_in_process_recovery_never_bind() -> Result<()> {
     damaged.resize(3 * 4096, 0);
     fs::write(&path, damaged)?;
 
-    let mut recovering = RuntimeHost::start(launch(recovery.path()))?;
+    let mut recovering = RuntimeHost::start_with_offline_fixtures(
+        launch(recovery.path()),
+        OfflineFixtures::default(),
+    )?;
     let Event::DatabaseRecoveryRequired(details) = await_runtime_event(&recovering, |event| {
         matches!(event, Event::DatabaseRecoveryRequired(_))
     })?
