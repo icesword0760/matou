@@ -4526,10 +4526,16 @@ fn run_writable(
                     )
                 }
                 Command::SetProviderPermissionMode { session_id, mode } => {
-                    let codex = owner
+                    let profile = match owner
                         .session(&session_id)?
-                        .is_some_and(|session| session.kind == "codex");
-                    let modes: &[&str] = if codex {
+                        .as_ref()
+                        .map(|session| session.kind.as_str())
+                    {
+                        Some("antigravity") => LaunchProfile::Antigravity,
+                        Some("codex") => LaunchProfile::Codex,
+                        _ => LaunchProfile::ClaudeCode,
+                    };
+                    let modes: &[&str] = if profile == LaunchProfile::Codex {
                         &codex_permissions::MODES
                     } else {
                         &CLAUDE_PERMISSION_MODES
@@ -4564,12 +4570,16 @@ fn run_writable(
                         let binding = owner.permission_binding(&session_id)?;
                         if binding.as_ref().is_some_and(|binding| {
                             let permission = binding.metadata.get("permissionMode");
-                            let current = if codex {
+                            let current = if profile == LaunchProfile::Codex {
                                 codex_permissions::selected_mode(permission)
                             } else {
                                 permission
                                     .and_then(Value::as_str)
-                                    .filter(|mode| CLAUDE_PERMISSION_MODES.contains(mode))
+                                    .filter(|mode| {
+                                        CLAUDE_PERMISSION_MODES.contains(mode)
+                                            || profile == LaunchProfile::Antigravity
+                                                && *mode == "ask"
+                                    })
                                     .unwrap_or("default")
                             };
                             current == mode
@@ -4578,7 +4588,7 @@ fn run_writable(
                         }
                         let stopped = owner.stop_for_permission_change(&session_id)?;
                         Ok(Some(PermissionChange {
-                            codex,
+                            profile,
                             mode: mode.clone(),
                             binding,
                             phase: PermissionPhase::Stopping(stopped),
@@ -5786,7 +5796,16 @@ fn run_writable(
                     })?;
                     None
                 }
-                Ok(PermissionProgress::RestoreFailed(error)) => Some(error),
+                Ok(PermissionProgress::RestoreFailed(error)) => {
+                    if change.profile == LaunchProfile::Antigravity
+                        && let Err(rollback) = change.rollback_if_pending(&mut owner, &id)
+                    {
+                        send.send_blocking(Event::Diagnostic(format!(
+                            "rollback permission mode: {rollback:#}"
+                        )))?;
+                    }
+                    Some(error)
+                }
                 Err(error) => {
                     claude_launch_targets.remove(&id);
                     if let Err(rollback) = change.rollback_if_pending(&mut owner, &id) {
@@ -5801,7 +5820,7 @@ fn run_writable(
                     views.remove(&id);
                     awaiting_ui.remove(&id);
                     let message = format!("{error:#}");
-                    let failure = if change.codex {
+                    let failure = if change.profile == LaunchProfile::Codex {
                         report_session_launch_failure(
                             &mut owner,
                             send,
@@ -6473,7 +6492,7 @@ fn poll_promotion_result<T>(result: &Receiver<Result<T>>) -> Result<Option<T>> {
 }
 
 struct PermissionChange {
-    codex: bool,
+    profile: LaunchProfile,
     mode: String,
     binding: Option<ProviderBinding>,
     phase: PermissionPhase,
@@ -6554,7 +6573,7 @@ impl PermissionChange {
                 };
                 if let PreparedLaunch::Codex(plan, Some(mut resume)) = launch {
                     ensure!(
-                        self.codex
+                        self.profile == LaunchProfile::Codex
                             && plan.permission_mode == self.mode
                             && self.binding.as_ref().is_some_and(|binding| {
                                 resume.binding_id == binding.id
@@ -6572,6 +6591,35 @@ impl PermissionChange {
                     resume.permission_respawn = true;
                     let run_id =
                         owner.launch_codex(session_id, terminal, plan, Some(resume), false)?;
+                    self.phase = PermissionPhase::AwaitingIdentity {
+                        run_id,
+                        startup_until: None,
+                        consent_shown: false,
+                        outcome: None,
+                    };
+                    return Ok(PermissionProgress::Launched);
+                }
+                if let PreparedLaunch::Antigravity(plan, permission) = launch {
+                    ensure!(
+                        self.profile == LaunchProfile::Antigravity
+                            && permission.as_str() == self.mode
+                            && matches!(&plan.mode, AntigravityMode::Resume(identity)
+                                if self.binding.as_ref().is_some_and(|binding| binding.provider_session_id == *identity))
+                            && owner.antigravity_binding(session_id)?.as_ref().is_some_and(
+                                |current| self
+                                    .binding
+                                    .as_ref()
+                                    .is_some_and(|binding| binding.id == current.id)
+                            ),
+                        "AI Session permission respawn lost its binding"
+                    );
+                    let run_id = owner.launch_antigravity_permission(
+                        session_id,
+                        terminal,
+                        &options.data_root,
+                        plan,
+                        permission,
+                    )?;
                     self.phase = PermissionPhase::AwaitingIdentity {
                         run_id,
                         startup_until: None,
@@ -6623,8 +6671,8 @@ impl PermissionChange {
                 if let Some(Err(error)) = outcome {
                     return Ok(PermissionProgress::RestoreFailed(std::mem::take(error)));
                 }
-                if self.codex {
-                    // Codex's owner settles the restore on the matching hook, exit or timeout.
+                if self.profile != LaunchProfile::ClaudeCode {
+                    // The owner settles the restore on the matching hook, exit or timeout.
                     return Ok(if outcome.is_some() {
                         PermissionProgress::Confirmed
                     } else {
@@ -6686,16 +6734,25 @@ impl PermissionChange {
     }
 
     fn rollback_if_pending(&self, owner: &mut ShellOwner, session_id: &str) -> Result<()> {
-        if !self.codex
-            && let Some(binding) = &self.binding
+        let pending = matches!(
+            self.phase,
+            PermissionPhase::Preparing(_)
+                | PermissionPhase::AwaitingIdentity {
+                    outcome: None | Some(Ok(())),
+                    ..
+                }
+        );
+        let antigravity_failed = self.profile == LaunchProfile::Antigravity
             && matches!(
                 self.phase,
-                PermissionPhase::Preparing(_)
-                    | PermissionPhase::AwaitingIdentity {
-                        outcome: None | Some(Ok(())),
-                        ..
-                    }
-            )
+                PermissionPhase::AwaitingIdentity {
+                    outcome: Some(Err(_)),
+                    ..
+                }
+            );
+        if self.profile != LaunchProfile::Codex
+            && (pending || antigravity_failed)
+            && let Some(binding) = &self.binding
         {
             owner.write_provider_permission(
                 session_id,
@@ -8522,7 +8579,7 @@ mod tests {
         );
         let (role_requests, requests) = mpsc::channel();
         let mut change = PermissionChange {
-            codex: false,
+            profile: LaunchProfile::ClaudeCode,
             mode: "plan".into(),
             binding: None,
             phase: PermissionPhase::Stopping(None),

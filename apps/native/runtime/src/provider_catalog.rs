@@ -233,6 +233,24 @@ fn project_names(cwd: &Path, workspace: &Path) -> [String; 2] {
     [encode(cwd), encode(&display_path(workspace))]
 }
 
+pub(crate) fn resume_transcript(root: &Path, cwd: &Path, id: &str) -> Option<PathBuf> {
+    if !valid_id(id) {
+        return None;
+    }
+    let root = root.canonicalize().ok()?;
+    let canonical_cwd = cwd.canonicalize().ok()?;
+    project_names(cwd, &canonical_cwd)
+        .into_iter()
+        .rev()
+        .find_map(|project| {
+            let candidate = root.join(project).join(format!("{id}.jsonl"));
+            open_transcript(&root, &candidate, &mut Skipped::default())
+                .ok()
+                .flatten()?;
+            Some(candidate)
+        })
+}
+
 pub(crate) fn detail(
     root: Option<&Path>,
     cwd: &str,

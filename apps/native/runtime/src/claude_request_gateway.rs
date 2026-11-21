@@ -60,6 +60,8 @@ const SOURCE_ERROR: &str =
 
 type BodyError = Box<dyn std::error::Error + Send + Sync>;
 type GatewayBody = UnsyncBoxBody<Bytes, BodyError>;
+pub(crate) type ReadContextUsage =
+    Arc<dyn Fn() -> Option<(Option<u64>, Option<u64>)> + Send + Sync>;
 
 pub(crate) struct Gateway {
     base_url: String,
@@ -68,6 +70,7 @@ pub(crate) struct Gateway {
 }
 
 impl Gateway {
+    #[cfg(test)]
     pub(crate) fn start(projection: Arc<ClaudeGatewayProjection>) -> Result<Self> {
         Self::start_inner(
             projection,
@@ -76,21 +79,40 @@ impl Gateway {
         )
     }
 
+    #[cfg(test)]
     fn start_inner(
         projection: Arc<ClaudeGatewayProjection>,
         #[cfg(test)] loopback: Option<std::net::SocketAddr>,
     ) -> Result<Self> {
-        Self::start_with_interval(
+        Self::start_with_interval(projection, gemini_sse_keepalive::INTERVAL, loopback)
+    }
+
+    pub(crate) fn start_with_context(
+        projection: Arc<ClaudeGatewayProjection>,
+        read_context_usage: Option<ReadContextUsage>,
+    ) -> Result<Self> {
+        Self::start_gateway(
             projection,
             gemini_sse_keepalive::INTERVAL,
+            read_context_usage,
             #[cfg(test)]
-            loopback,
+            None,
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn start_with_interval(
         projection: Arc<ClaudeGatewayProjection>,
         keep_alive_interval: Duration,
+        loopback: Option<std::net::SocketAddr>,
+    ) -> Result<Self> {
+        Self::start_gateway(projection, keep_alive_interval, None, loopback)
+    }
+
+    fn start_gateway(
+        projection: Arc<ClaudeGatewayProjection>,
+        keep_alive_interval: Duration,
+        read_context_usage: Option<ReadContextUsage>,
         #[cfg(test)] loopback: Option<std::net::SocketAddr>,
     ) -> Result<Self> {
         let mut random = [0u8; 32];
@@ -107,6 +129,7 @@ impl Gateway {
             lazy_compaction: OnceCell::new(),
             stopped: Arc::clone(&stopped),
             token_usage: Arc::default(),
+            read_context_usage,
             keep_alive_interval,
             #[cfg(test)]
             loopback,
@@ -177,6 +200,7 @@ struct State {
     lazy_compaction: OnceCell<ClaudeGatewayRole>,
     stopped: Arc<AtomicBool>,
     token_usage: Arc<Mutex<deepseek_token_usage::Tracker>>,
+    read_context_usage: Option<ReadContextUsage>,
     keep_alive_interval: Duration,
     #[cfg(test)]
     loopback: Option<std::net::SocketAddr>,
@@ -426,6 +450,15 @@ impl State {
             .ok_or(Fault::bad_gateway(SOURCE_ERROR))?;
         let literal_effort = model.and_then(|model| self.projection.literal_effort(model));
         let literal_model = model.and_then(|model| self.projection.literal_model_override(model));
+        let keep_alive = target.is_some_and(|target| target.stream_keep_alive)
+            || target.is_none()
+                && model.is_some_and(|model| self.projection.literal_stream_keep_alive(model));
+        let target_window = target.and_then(|target| target.context_window).or_else(|| {
+            target
+                .is_none()
+                .then(|| model.and_then(|model| self.projection.literal_context_window(model)))
+                .flatten()
+        });
         let mut rewritten = false;
         if let (Some(target), Some(message)) = (target, message.as_mut()) {
             message.insert("model".into(), json!(target.model));
@@ -497,13 +530,20 @@ impl State {
             rewritten |= deepseek_tools::convert(message)
                 .map_err(|message| Fault::new(StatusCode::BAD_REQUEST, message))?;
             if is_message && !marked {
-                // The native launch projection does not yet provide HUD usage
-                // or the selected context window to this gateway.
-                rewritten |= self
-                    .token_usage
-                    .lock()
-                    .unwrap()
-                    .attach(message, deepseek_token_usage::ContextUsage::default());
+                let (hud_tokens, hud_window) = self
+                    .read_context_usage
+                    .as_ref()
+                    .and_then(|read| read())
+                    .unwrap_or_default();
+                rewritten |= self.token_usage.lock().unwrap().attach(
+                    message,
+                    deepseek_token_usage::ContextUsage {
+                        session_window: self.projection.context_window,
+                        hud_tokens,
+                        hud_window,
+                        target_window,
+                    },
+                );
             }
         }
         let message_response = MessageResponse {
@@ -511,10 +551,11 @@ impl State {
             gemini_stream: is_message
                 && message.as_ref().is_some_and(|message| {
                     message.get("stream").and_then(Value::as_bool) == Some(true)
-                        && message
-                            .get("model")
-                            .and_then(Value::as_str)
-                            .is_some_and(gemini_sse_keepalive::is_gemini_model)
+                        && (keep_alive
+                            || message
+                                .get("model")
+                                .and_then(Value::as_str)
+                                .is_some_and(gemini_sse_keepalive::is_gemini_model))
                 }),
         };
         if rewritten {

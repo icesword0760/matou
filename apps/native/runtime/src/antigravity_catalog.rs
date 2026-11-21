@@ -241,6 +241,14 @@ pub fn catalog_root(home: &Path, environment: &BTreeMap<OsString, OsString>) -> 
         .unwrap_or_else(|| home.join(".gemini/antigravity-cli"))
 }
 
+pub(crate) fn transcript_path(id: &str) -> Option<PathBuf> {
+    valid_conversation_id(id).then(|| {
+        Path::new("brain")
+            .join(id)
+            .join(".system_generated/logs/transcript.jsonl")
+    })
+}
+
 impl Catalog {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         let root = root.into();
@@ -497,9 +505,9 @@ impl Catalog {
     }
 
     fn transcript(&mut self, id: &str) -> Result<Option<(File, &Index)>> {
-        let path = Path::new("brain")
-            .join(id)
-            .join(".system_generated/logs/transcript.jsonl");
+        let Some(path) = transcript_path(id) else {
+            return Ok(None);
+        };
         let Some((mut file, version)) = open_contained(&self.root, &path)? else {
             self.indexes.remove(id);
             return Ok(None);

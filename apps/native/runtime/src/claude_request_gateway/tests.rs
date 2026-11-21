@@ -2220,3 +2220,36 @@ fn compaction_deepseek_conversion_uses_final_destination_in_both_paths() -> Resu
     assert_no_request(&work)?;
     Ok(())
 }
+
+#[test]
+fn deepseek_gateway_reads_resumed_usage_from_hud_before_any_upstream_response() -> Result<()> {
+    let server = listener()?;
+    let address = server.local_addr()?;
+    let mut plan = projection(address, address)?;
+    plan.source.as_mut().unwrap().endpoint = url::Url::parse("https://api.deepseek.com/anthropic")?;
+    let usage = Arc::new(Mutex::new((Some(186_500), Some(512_000))));
+    let observed = Arc::clone(&usage);
+    let gateway = Gateway::start_gateway(
+        Arc::new(plan),
+        Duration::from_secs(15),
+        Some(Arc::new(move || observed.lock().ok().map(|usage| *usage))),
+        Some(address),
+    )?;
+    let (requests, workers) = record(server, 2, "200 OK", "", b"ok");
+    let send = || -> Result<Value> {
+        let body = json!({"model":"deepseek-fixture","max_tokens":1000,"tools":[{"name":"Bash"}],
+            "messages":[{"role":"assistant","content":"earlier answer"},{"role":"user","content":"resume"}]}).to_string();
+        assert_eq!(exchange(&gateway, MESSAGES, body.as_bytes(), "")?.0, 200);
+        Ok(serde_json::from_slice(&requests.recv_timeout(TIMEOUT)?.2)?)
+    };
+    assert_eq!(
+        send()?["messages"][1]["content"][1]["text"],
+        "<system-reminder>\nToken usage: 186500/511000; 324500 remaining\n</system-reminder>"
+    );
+    usage.lock().unwrap().0 = None;
+    assert_eq!(send()?["messages"][1]["content"], "resume");
+    for worker in workers {
+        worker.join().unwrap()?;
+    }
+    Ok(())
+}

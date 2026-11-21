@@ -1447,3 +1447,91 @@ fn settings_precede_existing_flags_and_bypass_only_loopback() -> Result<()> {
     }));
     Ok(())
 }
+
+#[test]
+fn direct_gemini_model_and_mapping_enable_gateway_for_fresh_and_resumed_launches() -> Result<()> {
+    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR"))?;
+    let environment = BTreeMap::from([(
+        "MATOU_CLAUDE_COMMAND".into(),
+        std::env::current_exe()?.into_os_string(),
+    )]);
+    for (model, mapping, effective_model) in [
+        (
+            "publisher/GeMiNi-fixture",
+            json!({}),
+            "publisher/GeMiNi-fixture",
+        ),
+        (
+            "claude-opus-fixture",
+            json!({"sonnet":"publisher/GEMINI-fixture"}),
+            "claude-sonnet-fixture",
+        ),
+    ] {
+        fs::write(
+            root.path().join("provider-config.json"),
+            config(
+                json!([{
+                    "id": "source", "model": model, "modelMapping": mapping,
+                    "endpoint": "https://fixture.invalid", "apiKey": "fixture-key",
+                }]),
+                "source",
+            )
+            .to_string(),
+        )?;
+        for resume in [None, Some("history-id")] {
+            let launch = prepare_claude_launch(
+                root.path(),
+                root.path(),
+                &Value::Null,
+                resume,
+                environment.clone(),
+                80,
+                24,
+            )?;
+            let gateway = launch
+                .gateway
+                .context("Gemini launch must use the gateway")?;
+            assert!(gateway.stream_keep_alive);
+            assert!(gateway.literal_stream_keep_alive(effective_model));
+            if model.starts_with("claude-") {
+                assert!(!gateway.literal_stream_keep_alive(model));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn direct_deepseek_resume_retains_real_context_window() -> Result<()> {
+    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR"))?;
+    let path = root.path().join("provider-config.json");
+    fs::write(&path, config(json!([{
+        "id":"source", "model":"deepseek-fixture", "endpoint":"https://api.deepseek.com/anthropic",
+        "apiKey":"fixture-key", "contextWindow":512_000,
+        "modelMetadata":[{"id":"deepseek-fixture","contextWindow":900_000}],
+    },{
+        "id":"active", "model":"claude-fixture", "endpoint":"https://fixture.invalid", "apiKey":"active-key",
+    }]), "active").to_string())?;
+    let mut plan = prepare_claude_launch(
+        root.path(),
+        root.path(),
+        &json!({"providerConfigId": "source", "model": "deepseek-fixture"}),
+        Some("history-id"),
+        BTreeMap::from([(
+            "MATOU_CLAUDE_COMMAND".into(),
+            std::env::current_exe()?.into_os_string(),
+        )]),
+        80,
+        24,
+    )?;
+    plan.capture_restart_gateway(&Default::default(), &Vec::new)?;
+    let gateway = plan
+        .gateway
+        .context("DeepSeek resume must use the gateway")?;
+    assert_eq!(gateway.context_window, Some(512_000));
+    assert_eq!(
+        gateway.literal_context_window("deepseek-fixture"),
+        Some(900_000)
+    );
+    Ok(())
+}

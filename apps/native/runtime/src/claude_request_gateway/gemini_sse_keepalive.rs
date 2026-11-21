@@ -11,12 +11,7 @@ pub(super) const INTERVAL: Duration = Duration::from_secs(15);
 const MAX_CONSECUTIVE_PINGS: u8 = 30;
 pub(super) const PING: &[u8] = b"event: ping\ndata: {\"type\":\"ping\"}\n\n";
 
-pub(super) fn is_gemini_model(model: &str) -> bool {
-    model.trim().split('/').any(|part| {
-        part.get(..7)
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("gemini-"))
-    })
-}
+pub(super) use matou_native_core::provider_launch::is_gemini_model;
 
 pub(super) struct KeepAlive {
     interval: Duration,

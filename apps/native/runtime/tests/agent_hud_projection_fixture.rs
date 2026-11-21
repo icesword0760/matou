@@ -237,3 +237,103 @@ fn teammate_transcript_projects_full_rows_and_deduplicates_repeat_observations()
     expected[0]["latestLines"][3] = json!("队友已完成当前任务");
     assert_eq!(project(&rows, InterfaceLocale::Chinese), expected);
 }
+
+#[test]
+fn antigravity_hud_projects_model_quota_hook_and_transcript_activity() {
+    let now = 1_795_262_400_000.;
+    let mut projection = AgentHudProjection::new("agy", HudProvider::Antigravity, now);
+    assert!(projection.snapshot(now).usage_windows.is_none());
+    projection.ingest_provider(
+        &json!({
+            "model":{"display_name":"Gemini Pro", "id":"gemini-pro"}, "cycle_mode":"ask",
+            "quota":{
+                "gemini-5h":{"remaining_fraction":0.75,"reset_time":(now + 3_600_000.) / 1000.},
+                "gemini-weekly":{"remainingFraction":1.0},
+                "pro-weekly":{"remainingFraction":0.6},
+                "3p-5h":{"remaining_fraction":0.5},
+                "invalid":{"reset_time":"bad"}
+            }
+        }),
+        now,
+    );
+    let hud = serde_json::to_value(projection.snapshot(now)).unwrap();
+    assert_eq!(hud["permissionMode"], "ask");
+    assert_eq!(
+        hud["usageWindows"],
+        json!([
+            {"id":"gemini-5h","label":"5h","usedPercent":25.0,"resetText":"1h 0m"},
+            {"id":"pro-weekly","label":"Weekly","usedPercent":40.0,"resetText":null}
+        ])
+    );
+    assert_eq!(hud["allUsageWindows"].as_array().unwrap().len(), 4);
+    projection.ingest_provider(
+        &json!({"model":{"id":"claude-sonnet"},"cycle_mode":"plan"}),
+        now,
+    );
+    let hud = projection.snapshot(now);
+    assert_eq!(hud.usage_windows.unwrap()[0].id, "3p-5h");
+    assert_eq!(hud.all_usage_windows.unwrap().len(), 4);
+
+    projection.refresh_transcript(&[json!({
+        "created_at": now, "type":"PLANNER_RESPONSE","source":"MODEL","tool_calls":[
+            {"id":"plan","name":"update_plan","arguments":"{\"plan\":[{\"step\":\"Collect evidence\",\"status\":\"completed\"}]}"},
+            {"id":"task","name":"TaskCreate","arguments":{"subject":"Review"}},
+            {"id":"task-update","name":"TaskUpdate","arguments":{"taskId":"2","status":"in_progress"}},
+            {"id":"agent","name":"spawn_agent","arguments":{"description":"Reviewer"}}
+        ]
+    })]);
+    let hud = serde_json::to_value(projection.snapshot(now)).unwrap();
+    assert_eq!(
+        hud["todos"],
+        json!([
+            {"content":"Collect evidence","status":"completed"},
+            {"content":"Review","status":"in_progress"}
+        ])
+    );
+    assert_eq!(hud["agents"][0]["label"], "Reviewer");
+    projection.ingest_provider(&json!({
+        "hookEventName":"PostToolUseFailure","toolCall":{"name":"spawn_agent","id":"agent"},"error":"unavailable"
+    }), now + 1.);
+    let hud = serde_json::to_value(projection.snapshot(now + 1.)).unwrap();
+    assert_eq!(hud["agents"][0]["state"], "error");
+    projection.ingest_provider(
+        &json!({
+            "hookEventName":"PreToolUse","toolCall":{"id":"todos","name":"TodoWrite","args":{
+                "todos":[{"content":"Replacement","status":"pending"}]
+            }}
+        }),
+        now + 2.,
+    );
+    let hud = serde_json::to_value(projection.snapshot(now + 2.)).unwrap();
+    assert_eq!(hud["todos"][0]["content"], "Replacement");
+}
+
+#[test]
+fn claude_status_line_accepts_rate_limits_and_explicit_usage_windows() {
+    let mut projection = AgentHudProjection::new("claude", HudProvider::ClaudeCode, 0.);
+    projection.ingest_provider(
+        &json!({"rateLimits":{
+            "fiveHour":{"usedPercentage":0},
+            "seven_day":{"used_percentage":25},
+            "modelScoped":[{"displayName":"Opus","utilization":58}]
+        }}),
+        0.,
+    );
+    let windows = projection.snapshot(0.).usage_windows.unwrap();
+    assert_eq!(
+        windows
+            .iter()
+            .map(|window| window.used_percent)
+            .collect::<Vec<_>>(),
+        [0., 25., 58.]
+    );
+    projection.ingest_provider(
+        &json!({"usageWindows":[
+            {"id":"id","label":"Provider window","usedPercent":12,"resetText":"7m"}
+        ]}),
+        0.,
+    );
+    let windows = projection.snapshot(0.).usage_windows.unwrap();
+    assert_eq!(windows[0].id, "id");
+    assert_eq!(windows[0].reset_text.as_deref(), Some("7m"));
+}
