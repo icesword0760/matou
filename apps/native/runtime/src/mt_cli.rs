@@ -1,4 +1,4 @@
-//! The native read-only client for the local control endpoint.
+//! The native client for local control discovery, terminal reads, and navigation.
 
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -94,10 +94,7 @@ pub(crate) fn run_with(
             1
         };
     };
-    let json_output = args[1..]
-        .iter()
-        .take_while(|arg| arg.as_str() != "--")
-        .any(|arg| arg == "--json");
+    let json_output = wants_json(&args[1..]);
     let (endpoint, token) = identity();
     let result = request(command, &args[1..], endpoint, token);
     match result {
@@ -147,8 +144,96 @@ fn request(
         params["target"] = client.terminal_selector(target)?;
         return client.request(method, params);
     }
+    if matches!(command, "focus" | "switch") {
+        let (method, entity, target) = navigation_request(command, args)?;
+        let client = Client::new(Path::new(&endpoint), &token)?;
+        let selector = if target == "current" {
+            json!({"kind": "current", "entity": entity})
+        } else {
+            client.selector(target, true)?
+        };
+        let result = client.request(method, json!({"target": selector}))?;
+        if wants_json(args) {
+            return Ok(result);
+        }
+        return Ok(Some(
+            json!({"text": client.format_navigation(result.as_ref())}),
+        ));
+    }
     let (method, params) = discovery_request(command, args)?;
     Client::new(Path::new(&endpoint), &token)?.request(method, params)
+}
+
+fn wants_json(args: &[String]) -> bool {
+    args.iter()
+        .take_while(|arg| arg.as_str() != "--")
+        .any(|arg| arg == "--json")
+}
+
+fn navigation_request<'a>(
+    command: &str,
+    args: &'a [String],
+) -> Result<(&'static str, &'static str, &'a str), CliError> {
+    let (method, entity, args) = if command == "focus" {
+        ("navigation.focus.session", "session", args)
+    } else {
+        match args.first().map(String::as_str) {
+            Some("workspace") => ("navigation.switch.workspace", "workspace", &args[1..]),
+            Some("task") => ("navigation.switch.task", "task", &args[1..]),
+            Some("canvas") => ("navigation.switch.canvas", "canvas", &args[1..]),
+            _ => {
+                return Err(CliError::new(
+                    "INVALID_REQUEST",
+                    "switch 需要 workspace、task 或 canvas",
+                ));
+            }
+        }
+    };
+    let target = args
+        .first()
+        .filter(|arg| !arg.is_empty() && !arg.starts_with("--"))
+        .ok_or_else(|| {
+            CliError::new(
+                "INVALID_REQUEST",
+                if command == "focus" {
+                    "focus 需要会话目标".into()
+                } else {
+                    format!("switch {entity} 需要目标")
+                },
+            )
+        })?;
+    let mut flags = args[1..].iter();
+    let mut json = false;
+    while let Some(flag) = flags.next() {
+        match flag.as_str() {
+            "--json" if json => {
+                return Err(CliError::new("INVALID_REQUEST", "--json 不得重复"));
+            }
+            "--json" => json = true,
+            "--" => {
+                if let Some(extra) = flags.next() {
+                    return Err(CliError::new(
+                        "INVALID_REQUEST",
+                        format!("-- 之后存在多余参数：{extra}"),
+                    ));
+                }
+                break;
+            }
+            flag if flag.starts_with("--") => {
+                return Err(CliError::new(
+                    "INVALID_REQUEST",
+                    format!("未知选项：{flag}"),
+                ));
+            }
+            extra => {
+                return Err(CliError::new(
+                    "INVALID_REQUEST",
+                    format!("多余参数：{extra}"),
+                ));
+            }
+        }
+    }
+    Ok((method, entity, target))
 }
 
 fn discovery_request(command: &str, args: &[String]) -> Result<(&'static str, Value), CliError> {
@@ -408,6 +493,10 @@ fn format_identity(result: &Value) -> String {
     if target.is_null() {
         return "已识别当前 Matou 会话".into();
     }
+    format_target_path(target)
+}
+
+fn format_target_path(target: &Value) -> String {
     format!(
         "窗口 {} / 工作空间 {} / 事项 {} / 画布 {} / 会话 {}（{}）",
         display(&target["window"]["ordinal"]),
@@ -537,10 +626,25 @@ impl<'a> Client<'a> {
     /// Encode a terminal target for a later action, obtaining its projection
     /// revision when the wire selector requires one.
     pub fn terminal_selector(&self, target: &str) -> Result<Value, CliError> {
+        self.selector(target, false)
+    }
+
+    fn selector(&self, target: &str, navigation: bool) -> Result<Value, CliError> {
         match target {
             "self" => return Ok(json!({ "kind": "self" })),
-            "left" | "right" => return Ok(json!({ "kind": "relative", "direction": target })),
-            "parent" | "child" => return Ok(json!({ "kind": "relation", "relation": target })),
+            "left" | "right" => {
+                return self.positional_selector(
+                    json!({"kind": "relative", "direction": target}),
+                    navigation,
+                );
+            }
+            "parent" => {
+                return self.positional_selector(
+                    json!({"kind": "relation", "relation": target}),
+                    navigation,
+                );
+            }
+            "child" if !navigation => return Ok(json!({ "kind": "relation", "relation": target })),
             _ => {}
         }
         for kind in ["child", "sibling"] {
@@ -558,28 +662,60 @@ impl<'a> Client<'a> {
                         CliError::new("INVALID_REQUEST", format!("{kind} ordinal 需要正整数"))
                     })?;
                 if kind == "child" {
-                    return Ok(
+                    return self.positional_selector(
                         json!({ "kind": "relation", "relation": "child", "ordinal": ordinal }),
+                        navigation,
                     );
                 }
-                let (_, revision) =
-                    listing(self.request("host.list", json!({ "scope": "current-level" }))?)?;
-                return Ok(
-                    json!({ "kind": "sibling", "ordinal": ordinal, "projectionRevision": revision }),
-                );
+                return self
+                    .positional_selector(json!({"kind": "sibling", "ordinal": ordinal}), true);
             }
         }
-        if uuid::Uuid::parse_str(target).is_ok() {
+        if !navigation && uuid::Uuid::parse_str(target).is_ok() {
             return Ok(json!({ "sessionId": target }));
         }
         let (targets, revision) = listing(self.request("host.list", json!({ "scope": "all" }))?)?;
-        if !targets.iter().any(|entry| entry["ref"] == target) {
+        if !navigation && !targets.iter().any(|entry| entry["ref"] == target) {
             return Err(CliError::new(
                 "TARGET_NOT_FOUND",
                 format!("目标 {target} 不在当前 Matou 拓扑中"),
             ));
         }
         Ok(json!({ "kind": "ref", "ref": target, "projectionRevision": revision }))
+    }
+
+    fn positional_selector(
+        &self,
+        mut selector: Value,
+        needs_revision: bool,
+    ) -> Result<Value, CliError> {
+        if needs_revision {
+            let (_, revision) =
+                listing(self.request("host.list", json!({ "scope": "current-level" }))?)?;
+            selector["projectionRevision"] = json!(revision);
+        }
+        Ok(selector)
+    }
+
+    fn format_navigation(&self, result: Option<&Value>) -> String {
+        let Some(result) = result.filter(|value| value["kind"] == "navigated") else {
+            return "操作已完成".into();
+        };
+        let path = &result["finalPath"];
+        if let Ok((targets, _)) = self
+            .request("host.list", json!({"scope": "all"}))
+            .and_then(listing)
+            && let Some(target) = targets.iter().find(|target| {
+                target["window"]["id"] == path["targetWindowId"]
+                    && target["workspaceId"] == path["workspaceId"]
+                    && target["taskId"] == path["taskId"]
+                    && target["canvas"]["id"] == path["sceneId"]
+                    && target["sessionId"] == path["sessionId"]
+            })
+        {
+            return format!("已切换到：{}", format_target_path(target));
+        }
+        "已切换到目标位置并完成聚焦".into()
     }
 }
 
