@@ -499,7 +499,7 @@ impl ProviderHookServer {
         &self,
         data_root: &Path,
         scope: Scope,
-        permission_respawn: bool,
+        command_session_start: bool,
     ) -> Result<Registration> {
         let token = new_token();
         let url = format!("http://127.0.0.1:{}/hooks/{token}", self.port);
@@ -536,7 +536,7 @@ impl ProviderHookServer {
             )?;
             fs::rename(&files.temporary, &files.settings)?;
         } else if !matches!(scope.profile, LaunchProfile::Dsh | LaunchProfile::Codex) {
-            let settings = settings(&url, &files.script, permission_respawn)?;
+            let settings = settings(&url, &files.script, command_session_start)?;
             write_private(
                 &files.temporary,
                 &serde_json::to_vec_pretty(&settings)?,
@@ -774,7 +774,7 @@ pub(crate) fn claude_config_counts(cwd: &Path, config: &Path) -> Value {
     })
 }
 
-fn settings(url: &str, script: &Path, permission_respawn: bool) -> Result<Value> {
+fn settings(url: &str, script: &Path, command_session_start: bool) -> Result<Value> {
     let command = callback_command(&format!("{url}?kind=statusline"), script)?;
     let mut hooks: Map<String, Value> = EVENTS
         .into_iter()
@@ -785,10 +785,9 @@ fn settings(url: &str, script: &Path, permission_respawn: bool) -> Result<Value>
             )
         })
         .collect();
-    if permission_respawn {
-        // Some CLI versions skip HTTP SessionStart hooks. This switch holds
-        // input until identity is known, so the startup event must reach the
-        // same run-scoped listener without a user prompt.
+    if command_session_start {
+        // Some CLI versions skip HTTP SessionStart hooks on restore. Report
+        // the startup to the same run-scoped listener without a user prompt.
         let command = if cfg!(windows) {
             windows_callback_command(url)
         } else {

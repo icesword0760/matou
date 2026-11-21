@@ -989,7 +989,14 @@ pub fn write_provider_permission(
 #[derive(Clone, Copy)]
 pub enum ClaudeRestore<'a> {
     Begin(&'a str),
-    Fail { binding_id: &'a str, error: &'a str },
+    Ready {
+        binding_id: &'a str,
+        run_id: &'a str,
+    },
+    Fail {
+        binding_id: &'a str,
+        error: &'a str,
+    },
     Retry,
     Fresh,
     PermissionFresh,
@@ -1390,17 +1397,26 @@ fn change_runtime_provider_restore(
                 && binding.as_ref().is_some_and(|binding| binding.resumable)
                 && previous != Some("restoring") =>
         {
-            ("available", "restoring", None, "starting")
+            ("available", "restoring", None, Some("starting"))
+        }
+        ClaudeRestore::Ready { binding_id, .. }
+            if provider == "codex"
+                && target == Some(binding_id)
+                && previous == Some("restoring") =>
+        {
+            ("available", "none", None, None)
         }
         ClaudeRestore::Fail { binding_id, error }
             if target.unwrap_or_default() == binding_id && previous != Some("failed") =>
         {
-            ("failed", "failed", Some(error), "error")
+            ("failed", "failed", Some(error), Some("error"))
         }
         ClaudeRestore::Retry if previous == Some("failed") => {
-            ("available", "restoring", None, "starting")
+            ("available", "restoring", None, Some("starting"))
         }
-        ClaudeRestore::Fresh if previous == Some("failed") => ("expired", "none", None, "starting"),
+        ClaudeRestore::Fresh if previous == Some("failed") => {
+            ("expired", "none", None, Some("starting"))
+        }
         _ => return Ok(None),
     };
     let revision = match change {
@@ -1435,6 +1451,13 @@ fn change_runtime_provider_restore(
                 "DSH restore requires an active DSH card"
             }
         );
+        if let ClaudeRestore::Ready { run_id, .. } = change {
+            let run = require_run(tx, run_id)?;
+            ensure!(
+                run.session_id == session_id && run.status == "running",
+                "Codex restore requires the current live run"
+            );
+        }
         if matches!(change, ClaudeRestore::Fresh) {
             tx.execute(
                 "UPDATE provider_bindings SET resume_state = 'expired', restore_state = 'none',
@@ -1452,16 +1475,21 @@ fn change_runtime_provider_restore(
                 params![resume, restore, error, serde_json::to_string(&metadata)?, now, resume, now, id],
             )?;
         }
-        tx.execute(
-            "UPDATE sessions SET work_status = ?, updated_at = ?, version = version + 1
-             WHERE id = ?",
-            params![work, now, session_id],
-        )?;
+        if let Some(work) = work {
+            tx.execute(
+                "UPDATE sessions SET work_status = ?, updated_at = ?, version = version + 1
+                 WHERE id = ?",
+                params![work, now, session_id],
+            )?;
+        }
         let mut payload = json!({
             "sessionId": session_id, "provider": provider, "bindingId": target,
             "providerSessionId": binding.as_ref().map(|binding| &binding.provider_session_id),
             "restoreState": restore, "restoreError": error, "spawnRevision": revision,
         });
+        if let ClaudeRestore::Ready { run_id, .. } = change {
+            payload["runId"] = json!(run_id);
+        }
         events.push(session_event(
             command, "session.restore-state-changed", &session, now, payload.clone(),
         ));

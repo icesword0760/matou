@@ -164,6 +164,21 @@ enum LevelFocusRequest {
 
 const CARD_RADIUS: Pixels = px(12.);
 
+type CardActionBounds = Rc<std::cell::RefCell<Vec<Bounds<Pixels>>>>;
+
+fn measure_card_action<E: Styled + ParentElement>(button: E, actions: &CardActionBounds) -> E {
+    let actions = actions.clone();
+    button.child(
+        canvas(
+            move |bounds, _, _| actions.borrow_mut().push(bounds),
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .inset_0()
+        .size_full(),
+    )
+}
+
 /// The card's activation area uses a half-open rectangle with four rounded corners.
 pub fn session_card_hit(bounds: &Bounds<Pixels>, position: Point<Pixels>) -> bool {
     if position.x < bounds.left()
@@ -1389,6 +1404,7 @@ pub struct Workspace {
     dialog_subscription: Option<Subscription>,
     pending_close: Option<String>,
     carousel_scroll: ScrollHandle,
+    carousel_drag: Option<(Point<Pixels>, Pixels)>,
     motion_clock: Instant,
     #[cfg(debug_assertions)]
     motion_trace: Option<MotionTrace>,
@@ -2448,6 +2464,7 @@ impl Workspace {
             dialog_subscription: None,
             pending_close: None,
             carousel_scroll: ScrollHandle::new(),
+            carousel_drag: None,
             motion_clock: Instant::now(),
             #[cfg(debug_assertions)]
             motion_trace: open_motion_trace(),
@@ -3797,6 +3814,8 @@ impl Workspace {
                     && self.pending_focus.as_ref().is_some_and(|(scene, session)| {
                         Some(scene) == next_scene && Some(session) == next_focus.as_ref()
                     });
+                let card_focus_confirmed =
+                    focus_confirmed && self.level_focus_request == Some(LevelFocusRequest::Card);
                 let level_focus_request = if scene_changed || focus_confirmed {
                     self.pending_focus = None;
                     self.level_focus_request
@@ -3840,10 +3859,9 @@ impl Workspace {
                 if !scene_changed && focus_changed && level_focus_request.is_none() {
                     self.restore_geometry = false;
                 }
-                if scene_changed || focus_changed {
+                if scene_changed || (focus_changed && !card_focus_confirmed) {
                     let at = self.motion_clock.elapsed().as_secs_f64() * 1000.;
-                    let from_preview = !scene_changed && self.hovered == next_focus;
-                    self.focus_follow_until = if from_preview { None } else { Some(at + 440.) };
+                    self.focus_follow_until = Some(at + 440.);
                     self.hovered = None;
                     self.hover_follow_until = None;
                     self.hover_baseline = None;
@@ -4841,25 +4859,30 @@ impl Workspace {
             cx,
         );
         let sent = self.pending_focus.is_some();
-        if sent && self.read_only.is_none() {
+        if sent {
             self.level_focus_request = Some(LevelFocusRequest::Card);
         }
         sent
     }
 
     fn activate_session_card(&mut self, session_id: &str, window: &Window, cx: &mut Context<Self>) {
-        self.hover_baseline = None;
-        self.hover_restore_at = None;
-        self.hover_follow_until = None;
-        if self.active_split_tree().is_none() {
-            self.capture_geometry(Some(session_id.to_owned()), false, window, cx);
-        }
-        if self.geometry_focus() == Some(session_id) {
+        if self.level_focus() == Some(session_id) {
             return;
         }
         let Some(scene_id) = self.active_scene_id().map(str::to_owned) else {
             return;
         };
+        let activated_from_preview = self.hovered.as_deref() == Some(session_id);
+        self.hovered = None;
+        self.hover_baseline = None;
+        self.hover_restore_at = None;
+        self.hover_follow_until = None;
+        self.restore_geometry = false;
+        let now = self.motion_clock.elapsed().as_secs_f64() * 1000.;
+        self.focus_follow_until = (!activated_from_preview).then_some(now + 440.);
+        if activated_from_preview && self.active_split_tree().is_none() {
+            self.capture_geometry(Some(session_id.to_owned()), false, window, cx);
+        }
         #[cfg(target_os = "macos")]
         let can_defer = self.read_only.is_none() && self.recovery_water.contains_key(session_id);
         #[cfg(not(target_os = "macos"))]
@@ -4875,6 +4898,8 @@ impl Workspace {
             }
             self.pending_focus = Some((scene_id, session_id.to_owned()));
             self.level_focus_request = Some(LevelFocusRequest::CardOnReady);
+        } else if activated_from_preview && sent {
+            self.flush_geometry(cx);
         }
         self.refresh_level(cx);
         cx.notify();
@@ -4887,7 +4912,7 @@ impl Workspace {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
-        let viewport = f64::from(f32::from(window.viewport_size().width)) - 260.;
+        let viewport = self.carousel_viewport_width(window);
         let maximum = self
             .card_geometry
             .last()
@@ -4904,6 +4929,65 @@ impl Workspace {
             continuous,
             cx,
         );
+    }
+
+    fn carousel_viewport_width(&self, window: &Window) -> f64 {
+        let measured = self.carousel_scroll.bounds().size.width;
+        let width = if measured > px(0.) {
+            measured
+        } else {
+            window.viewport_size().width - px(NOTIFICATION_UI_SIDEBAR_WIDTH)
+        };
+        f64::from(f32::from(width.max(px(0.))))
+    }
+
+    fn carousel_has_overlay(&self, window: &Window) -> bool {
+        self.dialog.is_some()
+            || self.hidden_tabs.is_some()
+            || self.settings.is_some()
+            || self.notification_open
+            || self.footer_popovers.contains_key(&window.window_handle())
+            || self.wiring.board_open
+            || self.wiring_overlay_open(window)
+            || self.permission_menu_open(window)
+            || self.project_instructions_open(window)
+    }
+
+    fn carousel_hit(&self, position: Point<Pixels>, retain_gap: bool) -> Option<String> {
+        if !self.carousel_scroll.bounds().contains(&position) {
+            return None;
+        }
+        let offset = self.carousel_scroll.offset();
+        let mut previous: Option<Bounds<Pixels>> = None;
+        for (index, id) in self.order.iter().enumerate() {
+            let Some(mut bounds) = self.carousel_scroll.bounds_for_item(index) else {
+                break;
+            };
+            bounds.origin += offset;
+            if bounds.contains(&position) {
+                return Some(id.clone());
+            }
+            if retain_gap
+                && let Some(left) = previous
+                && position.x >= left.right()
+                && position.x < bounds.left()
+                && position.y >= left.top().max(bounds.top())
+                && position.y < left.bottom().min(bounds.bottom())
+            {
+                return self.hovered.clone();
+            }
+            previous = Some(bounds);
+        }
+        None
+    }
+
+    fn leave_carousel(&mut self, cx: &mut Context<Self>) {
+        self.pointer_position = None;
+        if self.hovered_child_badge.take().is_some() || self.edge_direction != 0 {
+            cx.notify();
+        }
+        self.stop_edge_browse(false);
+        self.hover_card(None, cx);
     }
 
     fn save_geometry(
@@ -4995,7 +5079,7 @@ impl Workspace {
     ) {
         let delta = event.delta.pixel_delta(px(16.));
         let horizontal = event.modifiers.shift || delta.x.abs() >= delta.y.abs();
-        let narrow = f32::from(window.viewport_size().width) - 260. < 720.;
+        let narrow = self.carousel_viewport_width(window) < 720.;
         let over_terminal = self
             .order
             .iter()
@@ -5016,6 +5100,22 @@ impl Workspace {
         if amount == px(0.) {
             return;
         }
+        self.move_carousel(
+            self.carousel_scroll.offset().x + amount,
+            event.position,
+            window,
+            cx,
+        );
+        cx.stop_propagation();
+    }
+
+    fn move_carousel(
+        &mut self,
+        offset: Pixels,
+        position: Point<Pixels>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
         self.stop_edge_browse(true);
         self.restore_geometry = false;
         self.focus_follow_until = None;
@@ -5025,13 +5125,10 @@ impl Workspace {
         let max_scroll = self
             .card_geometry
             .last()
-            .map(|(_, left, width)| {
-                left + width + 10. - (f64::from(f32::from(window.viewport_size().width)) - 260.)
-            })
+            .map(|(_, left, width)| left + width + 10. - self.carousel_viewport_width(window))
             .unwrap_or(0.)
             .max(0.);
-        let next =
-            (f64::from(f32::from(self.carousel_scroll.offset().x + amount))).clamp(-max_scroll, 0.);
+        let next = f64::from(f32::from(offset)).clamp(-max_scroll, 0.);
         self.carousel_scroll
             .set_offset(point(px(next as f32), px(0.)));
         if let Some(focused) = self
@@ -5043,17 +5140,7 @@ impl Workspace {
         }
         // A horizontal gesture retargets visual expansion under the pointer,
         // while its own wheel deltas continue to own the viewport.
-        if let Some(position) = self.pointer_position {
-            let x = f64::from(f32::from(position.x)) - 260. - next;
-            if let Some((id, _, _)) = self
-                .card_geometry
-                .iter()
-                .find(|(_, left, width)| x >= *left && x <= *left + *width)
-            {
-                self.hovered = Some(id.clone());
-            }
-        }
-        cx.stop_propagation();
+        self.hovered = self.carousel_hit(position, true);
         cx.notify();
     }
 
@@ -5086,13 +5173,11 @@ impl Workspace {
             .map(|old| f32::from(position.x - old.x))
             .unwrap_or(0.);
         self.pointer_position = Some(position);
-        let x = f32::from(position.x);
-        let y = f32::from(position.y);
-        let width = f32::from(window.viewport_size().width);
-        let inside_y = y >= 48. && y <= f32::from(window.viewport_size().height) - 38.;
-        let direction = if inside_y && x >= 260. && x <= 344. {
+        let bounds = self.carousel_scroll.bounds();
+        let inside = bounds.contains(&position);
+        let direction = if inside && position.x <= bounds.left() + px(84.) {
             -1
-        } else if inside_y && x >= width - 84. && x <= width {
+        } else if inside && position.x >= bounds.right() - px(84.) {
             1
         } else {
             0
@@ -5100,8 +5185,10 @@ impl Workspace {
         if direction == 0 {
             let away = (self.edge_direction == 1 && delta < -2.)
                 || (self.edge_direction == -1 && delta > 2.);
+            if self.edge_direction != 0 {
+                cx.notify();
+            }
             self.stop_edge_browse(away);
-            cx.notify();
             return;
         }
         if self.edge_direction != 0 && self.edge_direction != direction {
@@ -5115,7 +5202,9 @@ impl Workspace {
         if self.edge_blocked || self.edge_next_at.is_some() {
             return;
         }
-        let Some(target) = self.nearest_hidden_card(direction, (width - 260.) as f64) else {
+        let Some(target) =
+            self.nearest_hidden_card(direction, self.carousel_viewport_width(window))
+        else {
             self.stop_edge_browse(false);
             cx.notify();
             return;
@@ -5158,6 +5247,10 @@ impl Workspace {
     }
 
     fn hover_card(&mut self, id: Option<String>, cx: &mut Context<Self>) {
+        if self.hovered == id {
+            return;
+        }
+        let focused = id.is_some() && id.as_deref() == self.level_focus();
         let now = self.motion_clock.elapsed().as_secs_f64() * 1000.;
         self.hovered = id;
         #[cfg(debug_assertions)]
@@ -5176,9 +5269,9 @@ impl Workspace {
                     self.hover_restore_at = Some(now + 220.);
                 }
             }
-            Some(id) => {
+            Some(_) => {
                 self.hover_restore_at = None;
-                if self.focused.as_ref() == Some(id) {
+                if focused {
                     self.hover_baseline = None;
                 } else {
                     self.focus_follow_until = None;
@@ -9806,6 +9899,7 @@ impl Workspace {
             self.focus_follow_until = (!self.order.is_empty()).then_some(now + 440.);
             self.stop_edge_browse(false);
             self.pointer_position = None;
+            self.carousel_drag = None;
             self.card_motion.clear();
             self.card_geometry.clear();
             self.hovered = None;
@@ -11277,6 +11371,7 @@ impl Workspace {
         id: &str,
         banner: ProviderRestoreBanner<'_>,
         theme: Theme,
+        action_bounds: &CardActionBounds,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         // The card keeps its light surface and has no theme picker; follow the
@@ -11354,6 +11449,7 @@ impl Workspace {
                         .whitespace_nowrap()
                         .cursor_pointer()
                         .child(label);
+                    let button = measure_card_action(button, action_bounds);
                     if let Some(blocked) = blocked {
                         return button
                             .tooltip(move |_, cx| cx.new(|_| CardTooltip(blocked.into())).into());
@@ -11403,6 +11499,7 @@ impl Workspace {
         id: &str,
         card: StartFailureCard<'_>,
         width: f32,
+        action_bounds: &CardActionBounds,
         cx: &mut Context<Self>,
     ) -> Div {
         let controls = &self.start_failure_controls[id];
@@ -11424,8 +11521,9 @@ impl Workspace {
                 .cursor_pointer()
                 .child(label)
         };
-        let retry = action("retry-start", card.retry);
-        let remove = action("remove-failed-session", card.remove);
+        let retry = measure_card_action(action("retry-start", card.retry), action_bounds);
+        let remove =
+            measure_card_action(action("remove-failed-session", card.remove), action_bounds);
         let (retry, remove) = if let Some(blocked) = card.blocked {
             let disable = |button: Stateful<Div>| {
                 button.tooltip(move |_, cx| cx.new(|_| CardTooltip(blocked.into())).into())
@@ -12741,7 +12839,13 @@ impl Workspace {
         })
     }
 
-    fn render_fork_failure(&self, id: &str, node: &Value, cx: &mut Context<Self>) -> Option<Div> {
+    fn render_fork_failure(
+        &self,
+        id: &str,
+        node: &Value,
+        action_bounds: &CardActionBounds,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
         let (title, reason) = fork_failure_copy(node)?;
         let reason = reason.map(|error| fork_error_text(error, self.locale));
         let retry = self.fork_retries.get(id);
@@ -12764,6 +12868,7 @@ impl Workspace {
                 blocked,
                 retry_pending,
             );
+            let button = measure_card_action(button, action_bounds);
             if blocked.is_some() || retry_pending {
                 return button;
             }
@@ -14442,10 +14547,14 @@ impl Render for Workspace {
             );
         }
         self.finish_terminal_return(window, cx);
+        if self.carousel_has_overlay(window) {
+            self.carousel_drag = None;
+            self.leave_carousel(cx);
+        }
         let level_focus = self.level_focus().map(str::to_owned);
         self.refresh_project_instructions(window, cx);
         let active_level_focus = self.active_level_focus().map(str::to_owned);
-        let viewport_width = f64::from(f32::from(window.viewport_size().width)) - 260.;
+        let viewport_width = self.carousel_viewport_width(window);
         let split_tree = self.active_split_tree().cloned();
         let split_widths = split_tree.as_ref().map(|tree| {
             tree.layout(SplitRect {
@@ -14658,23 +14767,15 @@ impl Render for Workspace {
             .track_scroll(&self.carousel_scroll)
             .overflow_y_hidden()
             .bg(rgba(palette.cards.canvas))
-            .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
+            .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, window, cx| {
                 this.stop_edge_browse(true);
-                cx.notify();
-            }))
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
-                this.edge_intent(event.position, window, cx);
-            }))
-            .on_hover(cx.listener(|this, hovered, window, cx| {
-                if !hovered {
-                    this.pointer_position = None;
-                    this.hovered_child_badge = None;
-                    this.stop_edge_browse(false);
-                    this.hover_card(None, cx);
-                } else {
-                    this.edge_blocked = false;
-                    this.edge_intent(window.mouse_position(), window, cx);
+                if event.button == MouseButton::Left
+                    && !this.carousel_has_overlay(window)
+                    && this.carousel_hit(event.position, false).is_none()
+                {
+                    this.carousel_drag = Some((event.position, this.carousel_scroll.offset().x));
                 }
+                cx.notify();
             }));
         let path_valid = self.active_path_valid();
         #[cfg(target_os = "macos")]
@@ -14718,7 +14819,6 @@ impl Render for Workspace {
             } else {
                 -4. * self.card_motion[id].lift.value(now) as f32
             };
-            let hover_id = id.clone();
             let background = rgba(palette.cards.background);
             #[cfg(debug_assertions)]
             crate::settings_shell::probe_workspace_surfaces(|probe| probe.card = Some(background));
@@ -14750,12 +14850,7 @@ impl Render for Workspace {
                         shadow(0x2a3748, 0.075, 2., 7.),
                         shadow(0x2a3748, 0.07, 13., 30.),
                     ]
-                })
-                .on_hover(cx.listener(move |this, hovered, _, cx| {
-                    if *hovered && !in_split {
-                        this.hover_card(Some(hover_id.clone()), cx);
-                    }
-                }));
+                });
             let compact = !in_split && (narrow || self.read_only.is_some()) && !selected;
             let title = node
                 .and_then(|node| node["title"].as_str())
@@ -14801,7 +14896,6 @@ impl Render for Workspace {
                     |_, _| None::<Bounds<Pixels>>,
                 ))
             };
-            let badge_bounds_for_capture = badge_bounds.clone();
             let badge = badge_bounds.as_ref().and_then(|badge_bounds| {
                 let badge = self.child_badge(id)?;
                 let focus = window.use_keyed_state(
@@ -14842,13 +14936,15 @@ impl Render for Workspace {
                 Some(self.child_badge_button(id, badge, badge_bounds.clone(), &focus, cx))
             });
             let focus = terminal.read(cx).focus.clone();
-            let scrollbar_terminal = terminal.clone();
-            let scrollbar_session = id.clone();
+            let capture_terminal = terminal.clone();
+            let capture_session = id.clone();
             let session_id = id.clone();
             // Read the bounds from the frame that registered the handlers, including lift and scroll.
             let card_bounds = Rc::new(Cell::new(None::<Bounds<Pixels>>));
             let capture_bounds = card_bounds.clone();
             let measure_bounds = card_bounds.clone();
+            let action_bounds = CardActionBounds::default();
+            let capture_actions = action_bounds.clone();
             #[cfg(target_os = "macos")]
             let water = if recovery_water_available
                 && (!narrow || selected)
@@ -14886,37 +14982,33 @@ impl Render for Workspace {
             let card = card
                 .capture_any_mouse_down(cx.listener(
                     move |this, event: &MouseDownEvent, window, cx| {
-                        if this.is_stopped_session(&scrollbar_session)
+                        if event.button != MouseButton::Left
+                            || this.carousel_has_overlay(window)
+                            || this.is_stopped_session(&capture_session)
                             || !capture_bounds
                                 .get()
                                 .is_some_and(|bounds| session_card_hit(&bounds, event.position))
+                            || capture_actions
+                                .borrow()
+                                .iter()
+                                .any(|bounds| bounds.contains(&event.position))
+                            || (!compact && capture_terminal.read(cx).scrollbar_hit(event.position))
                         {
                             return;
                         }
-                        // Compact cards mount no badge bounds, so a stale hit
-                        // area can never swallow their ordinary activation.
-                        if let Some(badge_bounds) = &badge_bounds_for_capture
-                            && badge_bounds
-                                .read(cx)
-                                .as_ref()
-                                .is_some_and(|bounds| bounds.contains(&event.position))
+                        if !in_split
+                            && (compact
+                                || !capture_terminal.read(cx).contains_position(event.position))
                         {
-                            // The badge handles its own pointer-down and stops
-                            // propagation in the bubble phase.
-                            return;
+                            this.carousel_drag =
+                                Some((event.position, this.carousel_scroll.offset().x));
                         }
-                        // The original card activates in pointer capture, before
-                        // the scrollbar consumes its drag and preserves focus.
-                        if scrollbar_terminal.read(cx).scrollbar_hit(event.position)
-                            && this.geometry_focus() != Some(scrollbar_session.as_str())
-                        {
-                            this.activate_session_card(&scrollbar_session, window, cx);
-                        }
+                        this.activate_session_card(&capture_session, window, cx);
                     },
                 ))
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    cx.listener(move |this, event: &MouseDownEvent, window, _| {
                         if this.is_stopped_session(&session_id)
                             || !card_bounds
                                 .get()
@@ -14927,7 +15019,6 @@ impl Render for Workspace {
                         if this.active_path_valid() && !this.recovery_blocked(&session_id) {
                             window.focus(&focus);
                         }
-                        this.activate_session_card(&session_id, window, cx);
                     }),
                 )
                 .child(
@@ -14941,7 +15032,7 @@ impl Render for Workspace {
                 );
             let fork_failure = node
                 .filter(|_| !compact && self.read_only.is_none())
-                .and_then(|node| self.render_fork_failure(id, node, cx));
+                .and_then(|node| self.render_fork_failure(id, node, &action_bounds, cx));
             let fork_progress = node
                 .filter(|_| self.read_only.is_none())
                 .and_then(fork_progress_copy);
@@ -14998,19 +15089,24 @@ impl Render for Workspace {
                                 )
                                 .child(
                                     self.button(
-                                        div()
-                                            .id(SharedString::from(format!("retry-recovery-{id}")))
-                                            .px(px(12.))
-                                            .py(px(6.))
-                                            .border_1()
-                                            .border_color(rgb(0x516b8d))
-                                            .rounded(px(7.))
-                                            .text_color(rgb(0xe0ebfa))
-                                            .bg(rgb(0x2a3b51))
-                                            .text_size(px(11.))
-                                            .line_height(px(15.))
-                                            .cursor_pointer()
-                                            .child(self.locale.text("重试", "Retry")),
+                                        measure_card_action(
+                                            div()
+                                                .id(SharedString::from(format!(
+                                                    "retry-recovery-{id}"
+                                                )))
+                                                .px(px(12.))
+                                                .py(px(6.))
+                                                .border_1()
+                                                .border_color(rgb(0x516b8d))
+                                                .rounded(px(7.))
+                                                .text_color(rgb(0xe0ebfa))
+                                                .bg(rgb(0x2a3b51))
+                                                .text_size(px(11.))
+                                                .line_height(px(15.))
+                                                .cursor_pointer()
+                                                .child(self.locale.text("重试", "Retry")),
+                                            &action_bounds,
+                                        ),
                                         &self.recovery_controls[id],
                                         move |this, _, cx| {
                                             this.send(
@@ -15037,7 +15133,12 @@ impl Render for Workspace {
                 )
                 .child(Self::compact_session_summary_themed(node, title, &palette))
             } else {
-                let mut actions = Self::session_card_actions().children(badge);
+                let mut actions = Self::session_card_actions()
+                    .on_children_prepainted({
+                        let action_bounds = action_bounds.clone();
+                        move |children, _, _| action_bounds.borrow_mut().extend(children)
+                    })
+                    .children(badge);
                 if let Some(node) = node {
                     actions = actions.children(
                         card_header_actions(node, self.scene_membership_count() > 1).filter_map(
@@ -15097,13 +15198,27 @@ impl Render for Workspace {
                 .children(self.render_card_egress(id, cx))
                 .children(self.render_live_teammates(id))
                 .children(provider_banner.map(|banner| {
-                    self.render_provider_restore_banner(id, banner, palette.terminal, cx)
+                    self.render_provider_restore_banner(
+                        id,
+                        banner,
+                        palette.terminal,
+                        &action_bounds,
+                        cx,
+                    )
                 }))
                 .children(
                     (self.read_only.is_none() && fork_failure.is_none() && fork_progress.is_none())
                         .then(|| {
                             node.and_then(|node| self.start_failure_card(id, node))
-                                .map(|card| self.render_start_failure_card(id, card, width, cx))
+                                .map(|card| {
+                                    self.render_start_failure_card(
+                                        id,
+                                        card,
+                                        width,
+                                        &action_bounds,
+                                        cx,
+                                    )
+                                })
                         })
                         .flatten(),
                 )
@@ -15193,6 +15308,43 @@ impl Render for Workspace {
         let indicator = canvas(
             |_, _, _| (),
             move |bounds, _, window, _| {
+                let pointer_view = view.clone();
+                window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+                    if phase != DispatchPhase::Capture {
+                        return;
+                    }
+                    let _ = pointer_view.update(cx, |this, cx| {
+                        if event.pressed_button == Some(MouseButton::Left)
+                            && let Some((start, offset)) = this.carousel_drag
+                        {
+                            let dx = event.position.x - start.x;
+                            let dy = event.position.y - start.y;
+                            if dx.abs() >= px(3.) && dx.abs() > dy.abs() {
+                                this.move_carousel(offset + dx, event.position, window, cx);
+                                cx.stop_propagation();
+                            }
+                        } else if event.pressed_button.is_none() && bounds.contains(&event.position)
+                            && !this.carousel_has_overlay(window)
+                        {
+                            this.edge_intent(event.position, window, cx);
+                            this.hover_card(this.carousel_hit(event.position, true), cx);
+                        } else if !bounds.contains(&event.position) {
+                            this.leave_carousel(cx);
+                        }
+                    });
+                });
+                let exit_view = view.clone();
+                window.on_mouse_event(move |_: &MouseExitEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Capture {
+                        let _ = exit_view.update(cx, |this, cx| this.leave_carousel(cx));
+                    }
+                });
+                let drag_view = view.clone();
+                window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Capture && event.button == MouseButton::Left {
+                        let _ = drag_view.update(cx, |this, _| this.carousel_drag = None);
+                    }
+                });
                 let view = view.clone();
                 window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
                     #[cfg(debug_assertions)]
@@ -15208,7 +15360,11 @@ impl Render for Workspace {
                     {
                         return;
                     }
-                    let _ = view.update(cx, |this, cx| { if this.dialog.is_none() && this.hidden_tabs.is_none() && !this.project_instructions_open(window) { this.scroll_carousel(event, window, cx); } });
+                    let _ = view.update(cx, |this, cx| {
+                        if !this.carousel_has_overlay(window) {
+                            this.scroll_carousel(event, window, cx);
+                        }
+                    });
                 });
                 if direction == 0 {
                     return;
@@ -15338,6 +15494,7 @@ impl Render for Workspace {
             .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, _, cx| {
                 if event.button == MouseButton::Left {
                     this.workspace_drag_gesture = false;
+                    this.carousel_drag = None;
                 }
                 if this.keyboard_focus {
                     this.keyboard_focus = false;
@@ -15403,8 +15560,13 @@ impl Render for Workspace {
                                 }
                                 cx.notify();
                             }
-                            // Native scroll bounds are ready only after this frame's layout.
-                            let _ = window;
+                            if split_tree.is_none()
+                                && !this.wiring.board_open
+                                && (this.carousel_viewport_width(window) - viewport_width).abs()
+                                    > 0.5
+                            {
+                                cx.notify();
+                            }
                         });
                     },
                 )
