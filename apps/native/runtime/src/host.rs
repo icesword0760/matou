@@ -16,7 +16,12 @@ use std::{
 };
 
 use crate::{
-    SessionEvent, SessionOptions, browser_integration, claude_model_catalog, codex_catalog,
+    SessionEvent, SessionOptions,
+    antigravity_catalog::{self, Catalog as AntigravityCatalog, RecoveryCandidate},
+    antigravity_launch::{
+        self, LaunchMode as AntigravityMode, PermissionMode as AntigravityPermission,
+    },
+    browser_integration, claude_model_catalog, codex_catalog,
     codex_launch::{self, CodexLaunch},
     codex_permissions,
     codex_resume::{self, Resume as CodexResume},
@@ -377,6 +382,35 @@ pub enum Command {
         session_id: String,
         provider_session_id: String,
     },
+    ListAntigravitySessions {
+        request_id: u64,
+        cwd: String,
+        query: String,
+        full_text: bool,
+        offset: Option<i64>,
+        limit: Option<i64>,
+    },
+    GetAntigravitySession {
+        request_id: u64,
+        cwd: String,
+        provider_session_id: String,
+        before_event_index: Option<i64>,
+        around_event_index: Option<i64>,
+        limit: Option<i64>,
+    },
+    SearchAntigravitySession {
+        request_id: u64,
+        cwd: String,
+        provider_session_id: String,
+        query: String,
+        offset: Option<i64>,
+        limit: Option<i64>,
+    },
+    LoadAntigravitySession {
+        request_id: u64,
+        session_id: String,
+        provider_session_id: String,
+    },
     GetEnvironmentDiagnostics {
         request_id: u64,
         cwd: PathBuf,
@@ -617,6 +651,9 @@ impl StoragePhase {
                 | Command::ListDshSessions { .. }
                 | Command::GetDshSession { .. }
                 | Command::SearchDshSession { .. }
+                | Command::ListAntigravitySessions { .. }
+                | Command::GetAntigravitySession { .. }
+                | Command::SearchAntigravitySession { .. }
                 | Command::GetEnvironmentDiagnostics { .. }
                 | Command::CheckGitRepo { .. }
                 | Command::GetEgressStatus { .. }
@@ -980,6 +1017,7 @@ impl update_download::UpdateFetcher for OfflineUpdate {
 struct RuntimeWiring {
     fixtures: OfflineFixtures,
     dsh: Option<DshSessionCatalog>,
+    antigravity: AntigravityCatalog,
     update: update_download::UpdateManager,
     next_egress_attempt: u64,
 }
@@ -1007,12 +1045,25 @@ fn with_graph_projection(reply: Event, mut projection: Value) -> Event {
 }
 
 impl RuntimeWiring {
-    fn new(fixtures: OfflineFixtures) -> Result<Self> {
+    fn new(fixtures: OfflineFixtures, data_root: &Path) -> Result<Self> {
         let dsh = fixtures
             .dsh_session_root
             .clone()
             .or_else(dsh_catalog::default_session_root)
             .map(DshSessionCatalog::new);
+        let environment = fixtures
+            .provider_environment
+            .clone()
+            .unwrap_or_else(|| std::env::vars_os().collect());
+        let mut antigravity = AntigravityCatalog::new(antigravity_catalog::catalog_root(
+            &antigravity_launch::isolated_home(data_root),
+            &environment,
+        ));
+        if antigravity_launch::env_value(&environment, "MATOU_LOCALE")
+            .is_some_and(|value| value == "en")
+        {
+            antigravity = antigravity.with_english_titles();
+        }
         let update = update_download::UpdateManager::new(
             CurrentVersion::parse(env!("CARGO_PKG_VERSION"))?,
             update_download::UpdateOptions {
@@ -1037,6 +1088,7 @@ impl RuntimeWiring {
         Ok(Self {
             fixtures,
             dsh,
+            antigravity,
             update,
             next_egress_attempt: 0,
         })
@@ -1136,6 +1188,76 @@ impl RuntimeWiring {
                         provider_session_id,
                         query,
                         *offset,
+                        *limit,
+                    )?)?)
+                })(),
+            ),
+            Command::ListAntigravitySessions {
+                request_id,
+                cwd,
+                query,
+                full_text,
+                offset,
+                limit,
+            } => (
+                "antigravitySessionListResult",
+                *request_id,
+                (|| {
+                    Ok(serde_json::to_value(self.antigravity.list(
+                        Path::new(cwd),
+                        antigravity_catalog::ListOptions {
+                            query,
+                            scope: if *full_text {
+                                antigravity_catalog::SearchScope::All
+                            } else {
+                                antigravity_catalog::SearchScope::Metadata
+                            },
+                            offset: offset.unwrap_or_default(),
+                            limit: *limit,
+                            ..Default::default()
+                        },
+                    )?)?)
+                })(),
+            ),
+            Command::GetAntigravitySession {
+                request_id,
+                cwd,
+                provider_session_id,
+                before_event_index,
+                around_event_index,
+                limit,
+            } => (
+                "antigravitySessionDetailResult",
+                *request_id,
+                (|| {
+                    Ok(serde_json::to_value(self.antigravity.detail(
+                        Path::new(cwd),
+                        provider_session_id,
+                        antigravity_catalog::DetailOptions {
+                            before_event_index: *before_event_index,
+                            around_event_index: *around_event_index,
+                            limit: *limit,
+                            ..Default::default()
+                        },
+                    )?)?)
+                })(),
+            ),
+            Command::SearchAntigravitySession {
+                request_id,
+                cwd,
+                provider_session_id,
+                query,
+                offset,
+                limit,
+            } => (
+                "antigravitySessionSearchResult",
+                *request_id,
+                (|| {
+                    Ok(serde_json::to_value(self.antigravity.search(
+                        Path::new(cwd),
+                        provider_session_id,
+                        query,
+                        offset.unwrap_or_default(),
                         *limit,
                     )?)?)
                 })(),
@@ -1703,6 +1825,9 @@ pub fn storage_command_rejected(command: Command, code: &str, message: &str) -> 
     }
     let wiring_request = match &command {
         Command::LoadDshSession { request_id, .. } => Some(("dshSessionLoadResult", *request_id)),
+        Command::LoadAntigravitySession { request_id, .. } => {
+            Some(("antigravitySessionLoadResult", *request_id))
+        }
         Command::RecheckEgress { request_id } => Some(("egressRecheckResult", *request_id)),
         Command::SetEgressExemption { request_id, .. } => {
             Some(("egressExemptionResult", *request_id))
@@ -1946,7 +2071,7 @@ fn run(
     shutdown_requested: &OnceLock<bool>,
     fixtures: OfflineFixtures,
 ) -> Result<()> {
-    let mut wiring = RuntimeWiring::new(fixtures)?;
+    let mut wiring = RuntimeWiring::new(fixtures, &options.data_root)?;
     let generation = id();
     let bootstrap = match startup::open(&options.data_root, &generation) {
         Ok(value) => value,
@@ -2536,8 +2661,11 @@ fn run_writable(
     let mut claude_launch_targets = HashMap::new();
     let mut permission_changes = HashMap::<String, PermissionChange>::new();
     let mut permission_results = Vec::new();
-    let (catalog_requests, catalog_replies) =
-        start_provider_catalog(owner.dsh_session_root.clone(), owner.codex_session_root())?;
+    let (catalog_requests, catalog_replies) = start_provider_catalog(
+        owner.dsh_session_root.clone(),
+        owner.codex_session_root(),
+        owner.antigravity_root(&data_root),
+    )?;
     let (model_catalog_requests, model_catalog_commands) = mpsc::channel();
     let (model_catalog_results, model_catalog_replies) = mpsc::channel();
     let worker_results = model_catalog_results.clone();
@@ -2982,6 +3110,26 @@ fn run_writable(
                     }
                     owner.launch_claude(session_id.clone(), terminal, launch, binding.as_ref())
                 }
+                PreparedLaunch::Antigravity(launch, permission) => {
+                    waits_for_identity = launch.mode.conversation_id().is_some();
+                    // Antigravity can stay at its authentication screen
+                    // until the user acts. Keep other providers' restores moving.
+                    uses_recovery_slot = false;
+                    let terminal = terminal_layouts
+                        .get(&session_id)
+                        .copied()
+                        .unwrap_or_else(default_terminal_options);
+                    owner
+                        .launch_antigravity(
+                            &session_id,
+                            terminal,
+                            &data_root,
+                            launch,
+                            permission,
+                            false,
+                        )
+                        .map(|_| ())
+                }
                 PreparedLaunch::Dsh(launch) => {
                     waits_for_identity = launch.plan.mode.expected_session_id().is_some();
                     uses_recovery_slot = waits_for_identity;
@@ -3295,10 +3443,30 @@ fn run_writable(
                                 shell_submissions.remove(id);
                                 shell_promotions.remove(id);
                                 if let Some(load) = catalog_loads.remove(id) {
+                                    let error =
+                                        anyhow!("Card was closed while loading the conversation");
+                                    if !load.antigravity_requests.is_empty() {
+                                        let projection = active_graph(
+                                            &owner,
+                                            scene_id.as_deref(),
+                                            window_id,
+                                            &startup_deferred,
+                                        )?;
+                                        for request_id in load.antigravity_requests {
+                                            send.send_blocking(with_graph_projection(
+                                                wiring_result(
+                                                    "antigravitySessionLoadResult",
+                                                    request_id,
+                                                    Err(anyhow!("{error:#}")),
+                                                ),
+                                                projection.clone(),
+                                            ))?;
+                                        }
+                                    }
                                     catalog_load_errors.push(catalog_load_error(
                                         id,
                                         &load.provider_session_id,
-                                        &anyhow!("Card was closed while loading the conversation"),
+                                        &error,
                                     ));
                                 }
                                 if let Some(change) = permission_changes.remove(id) {
@@ -4081,7 +4249,8 @@ fn run_writable(
                 }
                 command @ (Command::LoadProviderSession { .. }
                 | Command::LoadCodexSession { .. }
-                | Command::LoadDshSession { .. }) => {
+                | Command::LoadDshSession { .. }
+                | Command::LoadAntigravitySession { .. }) => {
                     let (provider, session_id, provider_session_id, request_id) = match command {
                         Command::LoadProviderSession {
                             session_id,
@@ -4101,6 +4270,16 @@ fn run_writable(
                             session_id,
                             provider_session_id,
                         } => ("dsh", session_id, provider_session_id, Some(request_id)),
+                        Command::LoadAntigravitySession {
+                            request_id,
+                            session_id,
+                            provider_session_id,
+                        } => (
+                            "antigravity",
+                            session_id,
+                            provider_session_id,
+                            Some(request_id),
+                        ),
                         _ => unreachable!(),
                     };
                     let attempt = (|| -> Result<()> {
@@ -4124,12 +4303,22 @@ fn run_writable(
                                 &provider_session_id,
                             )?;
                         }
-                        if let Some(loading) = catalog_loads.get(&session_id) {
+                        if let Some(loading) = catalog_loads.get_mut(&session_id) {
                             anyhow::ensure!(
                                 loading.provider == provider
                                     && loading.provider_session_id == provider_session_id,
                                 "Another conversation is already loading"
                             );
+                            if provider == "antigravity"
+                                && let Some(request_id) = request_id
+                            {
+                                if loading.spawn_revision.is_some() {
+                                    return Err(anyhow!(
+                                        "The Antigravity conversation is already restoring"
+                                    ));
+                                }
+                                loading.antigravity_requests.push(request_id);
+                            }
                             return Ok(());
                         }
                         if provider == "claude-code"
@@ -4178,7 +4367,7 @@ fn run_writable(
                                 session.archived_at.is_none()
                                     && matches!(
                                         session.kind.as_str(),
-                                        "shell" | "claude-code" | "codex" | "dsh"
+                                        "shell" | "claude-code" | "codex" | "dsh" | "antigravity"
                                     )
                             })
                             .context("Card is no longer available")?;
@@ -4206,11 +4395,17 @@ fn run_writable(
                                 provider_session_id: provider_session_id.clone(),
                                 spawn_revision: None,
                                 stopping: None,
+                                antigravity_requests: request_id
+                                    .filter(|_| provider == "antigravity")
+                                    .into_iter()
+                                    .collect(),
                             },
                         );
                         Ok(())
                     })();
-                    if let Some(request_id) = request_id {
+                    if let Some(request_id) = request_id
+                        && (provider != "antigravity" || attempt.is_err())
+                    {
                         let result = match &attempt {
                             Ok(()) => Ok(json!({
                                 "sessionId": session_id, "providerSessionId": provider_session_id, "status": "queued",
@@ -4224,7 +4419,15 @@ fn run_writable(
                             &startup_deferred,
                         )?;
                         send.send_blocking(with_graph_projection(
-                            wiring_result("dshSessionLoadResult", request_id, result),
+                            wiring_result(
+                                if provider == "antigravity" {
+                                    "antigravitySessionLoadResult"
+                                } else {
+                                    "dshSessionLoadResult"
+                                },
+                                request_id,
+                                result,
+                            ),
                             projection,
                         ))?;
                     }
@@ -4246,6 +4449,7 @@ fn run_writable(
                         continue;
                     };
                     let codex = stored.kind == "codex";
+                    let antigravity = stored.kind == "antigravity";
                     let fresh = matches!(command, Command::StartFreshProviderSession { .. });
                     let change = if fresh {
                         ClaudeRestore::Fresh
@@ -4257,10 +4461,11 @@ fn run_writable(
                         || shell_promotions.contains_key(session_id)
                         || catalog_loads.contains_key(session_id)
                         || pending_launch.contains(session_id)
-                        || (codex && recovering.contains_key(session_id))
+                        || ((codex || antigravity) && recovering.contains_key(session_id))
                         || launch_retries.contains_key(session_id)
                         || (!owner.can_launch_provider(session_id)
-                            && !(codex && owner.shell_worker_is_retiring(session_id)));
+                            && !((codex || antigravity)
+                                && owner.shell_worker_is_retiring(session_id)));
                     if codex
                         && !fresh
                         && !blocked
@@ -4286,6 +4491,8 @@ fn run_writable(
                         false
                     } else if codex {
                         owner.change_codex_restore(session_id, change)?
+                    } else if antigravity {
+                        owner.change_antigravity_restore(session_id, change)?
                     } else if stored.kind == "dsh" {
                         owner.change_dsh_restore(session_id, change)?
                     } else {
@@ -4315,7 +4522,7 @@ fn run_writable(
                     operations.retain(|(id, _, _)| id != session_id);
                     searches.retain(|(id, _, _)| id != session_id);
                     copies.retain(|(_, id, _, _)| id != session_id);
-                    if codex {
+                    if codex || antigravity {
                         // Retire immediately, then let the shared queue wait for
                         // the old worker's exit before it launches a new run.
                         owner.retire_sessions(std::slice::from_ref(session_id));
@@ -4537,6 +4744,9 @@ fn run_writable(
                 Command::ListDshSessions { .. }
                 | Command::GetDshSession { .. }
                 | Command::SearchDshSession { .. }
+                | Command::ListAntigravitySessions { .. }
+                | Command::GetAntigravitySession { .. }
+                | Command::SearchAntigravitySession { .. }
                 | Command::GetEnvironmentDiagnostics { .. }
                 | Command::CheckGitRepo { .. }
                 | Command::GetEgressStatus { .. }
@@ -4753,6 +4963,22 @@ fn run_writable(
                 )?;
                 Ok(Some((workspace_id, revision)))
             })();
+            if !matches!(attempt, Ok(None)) && !load.antigravity_requests.is_empty() {
+                let projection =
+                    active_graph(&owner, scene_id.as_deref(), window_id, &startup_deferred)?;
+                for request_id in std::mem::take(&mut load.antigravity_requests) {
+                    let result = match &attempt {
+                        Ok(_) => Ok(json!({
+                            "sessionId": session_id, "providerSessionId": provider_session_id, "status": "restoring",
+                        })),
+                        Err(error) => Err(anyhow!("{error:#}")),
+                    };
+                    send.send_blocking(with_graph_projection(
+                        wiring_result("antigravitySessionLoadResult", request_id, result),
+                        projection.clone(),
+                    ))?;
+                }
+            }
             match attempt {
                 Ok(launch) => {
                     failed_launches.remove(&session_id);
@@ -5464,6 +5690,14 @@ impl ShellPromotion {
                             .insert(session_id.to_owned(), claude_target_metadata(&launch));
                         owner.launch_promoted_claude(session_id, terminal, launch)?
                     }
+                    PreparedLaunch::Antigravity(launch, permission) => owner.launch_antigravity(
+                        session_id,
+                        terminal,
+                        &options.data_root,
+                        launch,
+                        permission,
+                        true,
+                    )?,
                     PreparedLaunch::Dsh(launch) => {
                         owner.launch_dsh(session_id, terminal, &options.data_root, launch, true)?
                     }
@@ -5484,7 +5718,7 @@ impl ShellPromotion {
                 let ready = codex_launch::first_screen_ready(elapsed, has_output)
                     || (matches!(
                         self.launch.profile,
-                        LaunchProfile::ClaudeCode | LaunchProfile::Dsh
+                        LaunchProfile::ClaudeCode | LaunchProfile::Dsh | LaunchProfile::Antigravity
                     ) && elapsed >= SHELL_PROMOTION_SILENT_STARTUP_WINDOW);
                 if !ready {
                     return Ok(ShellPromotionProgress::Pending);
@@ -5809,6 +6043,7 @@ struct CatalogLoad {
     provider_session_id: String,
     spawn_revision: Option<i64>,
     stopping: Option<CatalogStop>,
+    antigravity_requests: Vec<u64>,
 }
 
 fn ensure_codex_catalog_not_pending(
@@ -5942,6 +6177,7 @@ fn codex_catalog_result(request_id: u64, cwd: &str, result: Result<Value, &'stat
 fn start_provider_catalog(
     dsh_root: Option<PathBuf>,
     codex_root: Option<PathBuf>,
+    antigravity_root: PathBuf,
 ) -> Result<(mpsc::SyncSender<CatalogRequest>, Receiver<CatalogReply>)> {
     let (requests, incoming) = mpsc::sync_channel::<CatalogRequest>(16);
     let (outgoing, replies) = mpsc::channel();
@@ -5951,6 +6187,7 @@ fn start_provider_catalog(
         .spawn(move || {
             let mut codex = codex_catalog::Catalog::new(codex_root);
             let mut dsh = dsh_root.map(DshSessionCatalog::new);
+            let mut antigravity = AntigravityCatalog::new(antigravity_root);
             for request in incoming {
                 let reply = match request {
                     CatalogRequest::Index { cwd, load: None } => {
@@ -5970,6 +6207,16 @@ fn start_provider_catalog(
                                 permission_mode: entry.permission_mode.to_owned(),
                                 completed_turn: entry.has_completed_turn,
                             })
+                        } else if target.provider == "antigravity" {
+                            antigravity.detail(Path::new(&cwd), id, antigravity_catalog::DetailOptions {
+                                limit: Some(1), ..Default::default()
+                            }).map(|detail| CatalogSelection {
+                                provider_session_id: detail.summary.provider_session_id,
+                                title: detail.summary.title,
+                                model: None,
+                                permission_mode: detail.summary.permission_mode.to_owned(),
+                                completed_turn: false,
+                            }).map_err(|_| "Antigravity session history is unavailable in this working directory")
                         } else if target.provider == "dsh" {
                             dsh.as_mut().ok_or("DSH session directory is unavailable").and_then(|catalog| {
                                 catalog.detail(Path::new(&cwd), id, dsh_catalog::DetailOptions {limit: Some(1), ..Default::default()})
@@ -6094,6 +6341,22 @@ fn report_session_launch_failure(
         return report_launch_failure(send, session_id, true, reason);
     }
     if let Some(binding) = owner
+        .antigravity_binding(session_id)?
+        .filter(|binding| binding.resumable)
+        && owner
+            .session(session_id)?
+            .is_some_and(|session| session.kind == "antigravity")
+    {
+        owner.change_antigravity_restore(
+            session_id,
+            ClaudeRestore::Fail {
+                binding_id: &binding.id,
+                error: &message,
+            },
+        )?;
+        return report_launch_failure(send, session_id, true, message);
+    }
+    if let Some(binding) = owner
         .dsh_binding(session_id)?
         .filter(|binding| binding.resumable)
     {
@@ -6129,7 +6392,9 @@ fn report_session_launch_failure(
         )?;
         return report_launch_failure(send, session_id, true, reason);
     }
-    if owner.pending_claude_fork(session_id)?.is_some() {
+    if owner.pending_claude_fork(session_id)?.is_some()
+        || owner.pending_antigravity_fork(session_id)?.is_some()
+    {
         let reason = format!("Fork CLI could not start: {message}");
         owner.fail_claude_fork(session_id, &reason)?;
         return report_launch_failure(send, session_id, true, reason);
@@ -6278,7 +6543,7 @@ fn launchable_nodes(graph: &Value) -> impl Iterator<Item = &Value> {
         .filter(|node| {
             matches!(
                 node["currentMode"].as_str(),
-                Some("shell" | "claude-code" | "codex" | "dsh")
+                Some("shell" | "claude-code" | "codex" | "dsh" | "antigravity")
             ) && node.get("archivedAt").is_none()
         })
 }
@@ -6302,6 +6567,16 @@ fn unstarted_sessions(
         };
         if node["currentMode"] == "shell" {
             pending.insert(id.to_owned());
+            continue;
+        }
+        if node["currentMode"] == "antigravity" {
+            if owner.pending_antigravity_fork(id)?.is_some()
+                || owner
+                    .antigravity_binding(id)?
+                    .is_some_and(|binding| binding.resumable)
+            {
+                pending.insert(id.to_owned());
+            }
             continue;
         }
         if node["currentMode"] == "dsh" {
@@ -6363,6 +6638,7 @@ enum PreparedLaunch {
     },
     Codex(CodexLaunch, Option<CodexResume>),
     Dsh(DshLaunch),
+    Antigravity(antigravity_launch::LaunchPlan, AntigravityPermission),
     CodexFork,
 }
 
@@ -6678,6 +6954,49 @@ fn prepare_launch(
                     let _ = send.send(result);
                 })?;
         }
+        "antigravity" => {
+            let mut environment = owner.launch_environment();
+            let catalog_root = owner.antigravity_root(&options.data_root);
+            let data_root = options.data_root.clone();
+            let (mode, metadata) = if let LaunchIntent::ShellPromotion(launch) = intent {
+                (
+                    AntigravityMode::Fresh,
+                    json!({"permissionMode": launch.mode}),
+                )
+            } else if let Some(fork) = owner.pending_antigravity_fork(session_id)? {
+                (AntigravityMode::Fork(fork.source_id), fork.metadata)
+            } else if let Some(binding) = owner
+                .antigravity_binding(session_id)?
+                .filter(|binding| binding.resumable)
+            {
+                (
+                    AntigravityMode::Resume(binding.provider_session_id),
+                    binding.metadata,
+                )
+            } else {
+                (AntigravityMode::Fresh, Value::Null)
+            };
+            thread::Builder::new().name("antigravity-launch".into()).spawn(move || {
+                let result = (|| {
+                    let cwd = Path::new(&session.cwd);
+                    if let AntigravityMode::Resume(id) = &mode {
+                        let mut catalog = AntigravityCatalog::new(catalog_root);
+                        ensure!(
+                            matches!(catalog.recovery_candidate(cwd, id), Ok(RecoveryCandidate::AwaitingIdentity(_))),
+                            "Antigravity session history is unavailable in this working directory"
+                        );
+                    }
+                    antigravity_launch::prepare_isolated_environment(&data_root, &mut environment)?;
+                    let permission = AntigravityPermission::from_saved(metadata["permissionMode"].as_str().unwrap_or_default());
+                    let launch = antigravity_launch::prepare(antigravity_launch::LaunchInput {
+                        cwd, settings_path: None, model: metadata["model"].as_str(), permission, mode,
+                        inherited_environment: environment, run_environment: Default::default(),
+                    })?;
+                    Ok(PreparedLaunch::Antigravity(launch, permission))
+                })();
+                let _ = send.send(result);
+            })?;
+        }
         "dsh" => {
             let catalog_root = owner.dsh_session_root.clone();
             let mut environment = owner.launch_environment();
@@ -6896,7 +7215,8 @@ fn active_graph(
                     };
                     let deferred = startup_deferred.contains(id);
                     let codex = node["currentMode"] == "codex";
-                    if !codex && !deferred {
+                    let antigravity = node["currentMode"] == "antigravity";
+                    if !codex && !antigravity && !deferred {
                         continue;
                     }
                     let Some(session) = owner.session(id)? else {
@@ -6905,6 +7225,8 @@ fn active_graph(
                     if deferred {
                         let provider_session_id = if codex {
                             owner.codex_binding(id)?
+                        } else if antigravity {
+                            owner.antigravity_binding(id)?
                         } else {
                             owner.claude_binding(id)?
                         };
