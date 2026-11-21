@@ -1383,9 +1383,7 @@ impl Workspace {
                 read_only: self.read_only.is_some(),
                 storage_fault: self.storage_fault_sessions.contains(id),
                 environment_unavailable: !self.active_path_valid()
-                    || node["environment"]["state"]
-                        .as_str()
-                        .is_some_and(|state| state != "ready"),
+                    || self.environment_unavailable(id),
                 recovering: !retry_fork && self.recovery_blocked(id),
             },
             self.locale,
@@ -3340,11 +3338,20 @@ impl Render for DetachedCardView {
                         let instructions = owner.project_instructions_overlay(window, cx);
                         let wiring = owner.render_wiring_overlay(window, cx);
 
-                        (hud, permissions, instructions, wiring)
+                        let environment = owner.hud_node(&self.session_id).and_then(|node| {
+                            owner.environment_card_overlay(&self.session_id, node, window, cx)
+                        });
+                        (hud, permissions, instructions, wiring, environment)
                     })
                     .ok()
             })
             .flatten();
+        let (hud, environment) = match hud {
+            Some((hud, permissions, instructions, wiring, environment)) => {
+                (Some((hud, permissions, instructions, wiring)), environment)
+            }
+            None => (None, None),
+        };
         let target = self.session_id.clone();
         let owner = self.owner.clone();
         let main = self.main;
@@ -3380,7 +3387,8 @@ impl Render for DetachedCardView {
                     .flex_1()
                     .min_h_0()
                     .relative()
-                    .child(self.terminal.clone()),
+                    .child(self.terminal.clone())
+                    .children(environment),
             );
         if let Some((hud, permissions, instructions, wiring)) = hud {
             root = root
