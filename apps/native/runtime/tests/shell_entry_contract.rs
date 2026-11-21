@@ -4,7 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use matou_native_runtime::flow;
+use matou_native_runtime::{dsh_launch, flow};
 use serde::Deserialize;
 use serde_json::{Value, json};
 

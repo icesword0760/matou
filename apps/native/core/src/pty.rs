@@ -65,6 +65,7 @@ pub enum LaunchProfile {
     Shell,
     ClaudeCode,
     Codex,
+    Dsh,
 }
 
 impl LaunchProfile {
@@ -73,6 +74,7 @@ impl LaunchProfile {
             Self::Shell => "shell",
             Self::ClaudeCode => "claude-code",
             Self::Codex => "codex",
+            Self::Dsh => "dsh",
         }
     }
 }
@@ -340,6 +342,7 @@ impl PtyProcess {
             LaunchProfile::Shell => "Shell",
             LaunchProfile::ClaudeCode => "Claude Code",
             LaunchProfile::Codex => "Codex",
+            LaunchProfile::Dsh => "DSH",
         };
         // portable-pty falls back to HOME if cwd is invalid. Check it at spawn.
         let metadata = fs::metadata(&launch.cwd)
@@ -372,7 +375,7 @@ impl PtyProcess {
                 }
                 environment
             }
-            LaunchProfile::ClaudeCode => launch.env.clone(),
+            LaunchProfile::ClaudeCode | LaunchProfile::Dsh => launch.env.clone(),
             LaunchProfile::Codex => {
                 let mut environment = launch.env.clone();
                 for key in INHERITED_PROVIDER_MARKERS

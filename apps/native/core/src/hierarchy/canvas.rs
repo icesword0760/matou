@@ -415,12 +415,6 @@ pub fn create_fork_child(
         if trim_display_name(submission_key).is_empty() {
             return Err(fork_error("EMPTY_SUBMISSION_KEY", "分叉提交标识不能为空"));
         }
-        if *worktree_mode != ForkWorktreeMode::Current {
-            return Err(fork_error(
-                "FORK_WORKTREE_MODE_NOT_IMPLEMENTED",
-                "当前仅支持在当前工作树创建分支",
-            ));
-        }
         if let Some(accepted) = tx.query_row(
                 "SELECT session_id, stage, error_message FROM session_fork_intents WHERE submission_key = ?",
                 [submission_key],
@@ -495,9 +489,20 @@ pub fn create_fork_child(
                 .filter(|(_, exists)| *exists)
                 .map(|(id, _)| (id.as_str(), "derived-from")),
         };
-        if kind != "claude-code" {
+        if !matches!(kind.as_str(), "claude-code" | "codex") {
             return Err(not_ready());
         }
+        if *worktree_mode == ForkWorktreeMode::New && kind != "codex" {
+            return Err(fork_error(
+                "FORK_WORKTREE_MODE_NOT_IMPLEMENTED",
+                "当前仅支持在当前工作树创建分支",
+            ));
+        }
+        let mode = if *worktree_mode == ForkWorktreeMode::New {
+            "new"
+        } else {
+            "current"
+        };
         let (provider_id, metadata, restore_state): (String, String, String) = tx
             .query_row(
                 "SELECT provider_session_id, metadata_json, restore_state FROM provider_bindings
@@ -575,16 +580,18 @@ pub fn create_fork_child(
                session_id, source_session_id, source_provider, source_provider_session_id,
                state, stage, display_name, worktree_mode, operation_id, submission_key,
                permission_mode, total_steps, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, 'pending', 'queued', ?, 'current', ?, ?, ?, 2, ?, ?)",
+             ) VALUES (?, ?, ?, ?, 'pending', 'queued', ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 ids.session_id,
                 fork_source_id,
                 kind,
                 provider_id,
                 name,
+                mode,
                 format!("{}{}", crate::sessions::NATIVE_FORK_PREFIX, ids.session_id),
                 submission_key,
                 permission,
+                if mode == "new" { 5 } else { 2 },
                 now,
                 now,
             ],
@@ -607,7 +614,7 @@ pub fn create_fork_child(
                 &ids.relation_id,
                 parent_id,
                 relation_kind,
-                json!({"worktreeMode": "current"}),
+                json!({"worktreeMode": mode}),
             )?;
         }
         let result = json!({"sessionId": ids.session_id, "stage": "queued", "error": null, "replayed": false});
@@ -627,6 +634,186 @@ pub fn create_fork_child(
         return Ok(result);
     }
     Ok(commit.result)
+}
+
+/// The authoritative intent survives runtime and PTY replacement.
+pub struct NativeFork {
+    pub operation_id: String,
+    pub submission_key: String,
+    pub source_session_id: String,
+    pub source_provider_session_id: String,
+    pub worktree_mode: String,
+    pub display_name: String,
+    pub lease_fence: i64,
+    pub worktree: Option<NativeForkWorktree>,
+}
+
+pub struct NativeForkWorktree {
+    pub id: String,
+    pub execution_context_id: String,
+    pub repository_root: String,
+    pub cwd: String,
+    pub branch: String,
+    pub base_revision: String,
+}
+
+pub struct NativeForkLease<'a> {
+    pub operation_id: &'a str,
+    pub token: &'a str,
+    pub fence: i64,
+    pub owner: &'a str,
+}
+
+pub fn native_codex_fork(connection: &Connection, session_id: &str) -> Result<Option<NativeFork>> {
+    Ok(connection.query_row(
+        "SELECT fork.operation_id, fork.submission_key, fork.source_session_id,
+                fork.source_provider_session_id, fork.worktree_mode, fork.display_name, fork.lease_fence,
+                worktree.id, worktree.execution_context_id, worktree.repository_root,
+                worktree.worktree_path, worktree.branch_name, COALESCE(worktree.base_revision, worktree.base_ref)
+         FROM session_fork_intents AS fork
+         LEFT JOIN worktrees AS worktree ON worktree.id = fork.worktree_id
+         WHERE fork.session_id = ? AND fork.source_provider = 'codex'
+           AND fork.state IN ('pending', 'starting')",
+        [session_id],
+        |row| Ok(NativeFork {
+            operation_id: row.get(0)?, submission_key: row.get(1)?, source_session_id: row.get(2)?,
+            source_provider_session_id: row.get(3)?, worktree_mode: row.get(4)?,
+            display_name: row.get(5)?, lease_fence: row.get(6)?,
+            worktree: match row.get::<_, Option<String>>(7)? {
+                Some(id) => Some(NativeForkWorktree {
+                    id, execution_context_id: row.get(8)?, repository_root: row.get(9)?,
+                    cwd: row.get(10)?, branch: row.get(11)?, base_revision: row.get(12)?,
+                }),
+                None => None,
+            },
+        }),
+    ).optional()?)
+}
+
+/// Record progress and atomically associate an owned checkout with its child.
+pub fn checkpoint_codex_fork(
+    connection: &mut Connection,
+    command: &CommandMetadata,
+    session_id: &str,
+    lease: &NativeForkLease<'_>,
+    stage: &str,
+    worktree: Option<&NativeForkWorktree>,
+    now: i64,
+) -> Result<crate::storage::DomainCommit> {
+    ensure!(
+        matches!(
+            stage,
+            "creating-worktree"
+                | "applying-setup"
+                | "binding-session"
+                | "restoring-provider"
+                | "starting-window"
+        ),
+        "Invalid Codex Fork stage"
+    );
+    ensure!(
+        worktree.is_none() || stage == "restoring-provider",
+        "Invalid worktree binding stage"
+    );
+    execute(connection, command, now, |tx, events| {
+        let updated = tx.execute(
+            "UPDATE session_fork_intents
+             SET state = 'starting', stage = ?1, attempt = MAX(attempt, 1),
+                 attempt_count = MAX(attempt_count, 1), started_at = COALESCE(started_at, ?2),
+                 lease_owner = ?3, lease_token = ?4, lease_fence = ?5, last_heartbeat_at = ?2,
+                 completed_steps = CASE ?1
+                    WHEN 'applying-setup' THEN 1 WHEN 'binding-session' THEN 2
+                    WHEN 'restoring-provider' THEN total_steps - 2
+                    WHEN 'starting-window' THEN total_steps - 1 ELSE 0 END,
+                 updated_at = ?2
+             WHERE session_id = ?6 AND operation_id = ?7 AND source_provider = 'codex'
+               AND EXISTS (SELECT 1 FROM sessions WHERE id = ?6 AND archived_at IS NULL)
+               AND (?8 = 0 OR (stage = 'binding-session' AND worktree_mode = 'new' AND worktree_id IS NULL))
+               AND ((state = 'pending' AND lease_fence + 1 = ?5 AND stage = 'queued'
+                       AND ?1 IN ('creating-worktree', 'restoring-provider'))
+                    OR (state = 'starting' AND lease_owner = ?3 AND lease_token = ?4 AND lease_fence = ?5
+                       AND ((stage = 'creating-worktree' AND ?1 = 'applying-setup')
+                         OR (stage = 'applying-setup' AND ?1 = 'binding-session')
+                         OR (stage = 'binding-session' AND ?1 = 'restoring-provider')
+                         OR (stage = 'restoring-provider' AND ?1 = 'starting-window'))))",
+            params![stage, now, lease.owner, lease.token, lease.fence, session_id, lease.operation_id, worktree.is_some()],
+        )?;
+        ensure!(
+            updated == 1,
+            "Codex Fork lease or stage no longer owns the child"
+        );
+        let (task_id, local_context, workspace_id): (String, String, String) = tx.query_row(
+            "SELECT sessions.task_id, sessions.execution_context_id, tasks.workspace_id
+             FROM sessions JOIN tasks ON sessions.task_id = tasks.id WHERE sessions.id = ?",
+            [session_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        if let Some(worktree) = worktree {
+            tx.execute(
+                "INSERT INTO execution_contexts(id, workspace_id, kind, cwd, created_at)
+                 VALUES (?, ?, 'git-worktree', ?, ?)",
+                params![
+                    worktree.execution_context_id,
+                    workspace_id,
+                    worktree.cwd,
+                    now
+                ],
+            )?;
+            tx.execute(
+                "INSERT INTO worktrees(id, execution_context_id, repository_root, worktree_path,
+                   branch_name, base_revision, state, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, 'ready', ?, ?)",
+                params![
+                    worktree.id,
+                    worktree.execution_context_id,
+                    worktree.repository_root,
+                    worktree.cwd,
+                    worktree.branch,
+                    worktree.base_revision,
+                    now,
+                    now
+                ],
+            )?;
+            ensure!(tx.execute(
+                "UPDATE session_environment_bindings SET managed_worktree_id = ?, active_target = 'worktree',
+                   state = 'ready', updated_at = ? WHERE session_id = ? AND local_execution_context_id = ?
+                   AND managed_worktree_id IS NULL",
+                params![worktree.id, now, session_id, local_context],
+            )? == 1, "Codex Fork environment no longer belongs to its lease");
+            tx.execute("UPDATE sessions SET execution_context_id = ?, cwd = ?, updated_at = ?, version = version + 1 WHERE id = ?",
+                params![worktree.execution_context_id, worktree.cwd, now, session_id])?;
+            tx.execute(
+                "UPDATE session_fork_intents SET worktree_id = ?, target_execution_context_id = ?,
+                   worktree_path = ?, branch_name = ? WHERE session_id = ?",
+                params![
+                    worktree.id,
+                    worktree.execution_context_id,
+                    worktree.cwd,
+                    worktree.branch,
+                    session_id
+                ],
+            )?;
+        }
+        let created = read_created_path(tx, session_id)?;
+        let context = CreationEvents {
+            command_id: &command.command_id,
+            workspace_id: &workspace_id,
+            task_id: &task_id,
+            scene_id: created["scene"]["id"].as_str().context("Fork scene")?,
+            session_id,
+            now,
+        };
+        let payload = json!({"sessionId": session_id, "stage": stage});
+        events.push(context.event(
+            "fork-progress",
+            "session.fork-progress",
+            "session",
+            session_id,
+            Some(session_id),
+            payload.clone(),
+        ));
+        Ok(payload)
+    })
 }
 
 pub fn retry_fork(
