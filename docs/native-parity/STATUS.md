@@ -1703,3 +1703,13 @@ On 2026-11-16 the user explicitly chose `保持原样` after the concrete scenar
   8. `G-theme` / `G-provider-editor` (`587cf784`): 13 tests (`theme.json` light/dark/system palette tokens, provider context-window editor & default badge).
   9. `G-dag-navigation` (`dag_canvas.rs`): 19 tests passing all 16 `dag-reference.json` cases (up to 10,000 nodes + 160,000-node failure, search 12 visible / 13th selectable, aggregation, zoom/pan/culling, reconnect).
 - All merged modules pass their unit/contract suites, identifier checks and whitespace checks; wiring into `settings_shell.rs`/`workspace.rs`/`host.rs` starts now (Wave 1: settings shell). Real desktop rendering, real logins/signing and Windows remain unverified.
+
+### Wiring Wave 1 & Wave 2A + Batch P3 merged (2026-11-21)
+
+- **Wiring Wave 1 (`fd949b1e`)**: Connected `dispatch_settings`, `provider_context_editor` (with minimal single-field `contextWindow` >= 100,000 persistence in `provider-config.json` and Claude launch budget lookup), and three-state `theme_tokens` (`theme.json` synced to settings, workspace, recovery water, and terminal theme commands). Verified via hidden `settings_shell_probe` (dispatch, provider context window, light/dark/system theme, plus all existing settings/locale/timezone checks) and core provider launch contracts (26/26).
+- **Wiring Wave 2A (`47c367b2`)**: Wired `dag_canvas` engine into standalone `DagWindow` (zoom, pan, viewport culling, branch clustering, live title/output search, 12 visible / 13th selectable Enter re-focus, reconnect preservation). Re-verified all 22 hidden macOS window probe cases (`dag_window_probe.py`) and 19 canvas contract/unit tests.
+- **Batch P3 isolated modules merged** (all temporary worktrees and branches removed):
+  1. `G-dsh-loader` / `G-dsh-title` / `G-dsh-resume` (`dd46e47e`): `dsh_catalog.rs`, `dsh_resume.rs`, `dsh_catalog_contract.rs` (locked `ruzstd = "=0.9.0"`).
+  2. `G-account-store` / `G-subscription-compat` (`851bd0fd`): `account_store.rs` (0600 atomic storage + redacted projection) and `subscription_launch.rs` (compat flags, catalog filtering, 429 cooldown).
+  3. `G-windows-install` (`4a89bb59`): `tooling/native-parity/package-native-win.mjs` + 55 tests covering all 44 `windows-install-reference.json` cases, x64/arm64 `win-unpacked` assembly with PE32+ arch verification and isolated path guards.
+- Post-merge full serial regression on `codex/native-parity`: **96 suites, 685 passed, 0 failed, 32 ignored**, plus `package-native-win.test.mjs` 55/55, `cargo fmt --all --check`, `cargo check --offline --locked --all-targets`, `pnpm check:identifiers` and `git diff --check` all green. Visible desktop dark-theme/DAG/multi-window/Kanban verification, real logins/signing, and Windows live testing remain unverified.
