@@ -1,11 +1,18 @@
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, fs, path::Path, process::Command};
 
+use matou_native_core::dispatch_config::{
+    DispatchConfig, DispatchConfigError, DispatchConfigSnapshot, DispatchDefaults,
+    form::{
+        ChoiceField, DispatchForm, MISSING_NOTE, NumberField, RETRY_LABEL, SAVED_MESSAGE,
+        SCOPE_NOTE,
+    },
+};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 // Offline capture from the frozen renderer and RPC. The gate runner checks that
 // these bytes match a fresh replay. The core test needs neither Node nor the
-// local evidence directory and does not call a native dispatch implementation.
+// local evidence directory. Replay below drives the native implementation.
 const FIXTURE_JSON: &str = r####"
 {
   "version": 1,
@@ -622,20 +629,19 @@ struct Step {
     op: String,
     #[serde(rename = "as")]
     observation: Option<String>,
+    #[serde(default)]
+    payload: Value,
+    field: Option<String>,
+    value: Option<String>,
+    #[serde(default, rename = "failRename")]
+    fail_rename: bool,
+    #[serde(default, rename = "snapshotOverride")]
+    snapshot_override: Map<String, Value>,
 }
 
 impl Fixture {
     fn load() -> Self {
         serde_json::from_str(FIXTURE_JSON).expect("valid frozen dispatch fixture")
-    }
-
-    fn observations(&self, id: &str) -> &Map<String, Value> {
-        &self
-            .cases
-            .iter()
-            .find(|case| case.id == id)
-            .expect(id)
-            .expected
     }
 }
 
@@ -680,98 +686,315 @@ fn fixture_loads_fixed_inputs_and_every_named_observation() {
     }
 }
 
-#[test]
-fn workspace_inputs_and_process_restart_have_the_frozen_readback() {
-    let fixture = Fixture::load();
-    let workspace = fixture.observations("workspace-global");
-    assert_eq!(workspace["alpha"], workspace["beta"]);
-    assert_eq!(workspace["alpha"]["defaults"]["model"], "astra");
-    assert_eq!(workspace["alpha"]["defaults"]["idleMin"], 14);
-    assert_eq!(
-        workspace["panelRequests"],
-        json!([{ "method": "dispatch-config.snapshot", "payload": {} }])
-    );
-
-    let first = fixture.observations("default-first-read");
-    assert_eq!(
-        first["first"],
-        json!({
-            "exists": false, "path": "$FIXTURE_HOME/.claude/agent-foreman/config.json",
-            "defaults": {
-                "agent": "codex", "model": "sol", "effort": "high",
-                "idleMin": 10, "maxMin": 45, "askWaitMin": 10, "retries": 3
+macro_rules! replay_cases {
+    ($($test:ident),+ $(,)?) => {
+        $(
+            #[test]
+            fn $test() {
+                replay(&stringify!($test).replace('_', "-")).unwrap();
             }
-        })
-    );
-    assert_eq!(
-        first["stillAbsent"],
-        json!({ "bytes": null, "files": null })
-    );
-
-    let saved = fixture.observations("save-reload-restart");
-    assert_eq!(saved["reread"], saved["freshProcess"]);
-    assert_eq!(saved["reread"]["defaults"]["retries"], 0);
-    assert_eq!(saved["savedPanel"]["numbers"]["idleMin"]["value"], "1.5");
-    assert_eq!(
-        saved["savedPanel"]["save"]["status"],
-        "已保存，新派任务生效"
-    );
-    assert_eq!(saved["remountedPanel"]["save"]["status"], Value::Null);
-}
-
-#[test]
-fn rejected_numbers_and_write_failures_keep_the_original_configuration() {
-    let fixture = Fixture::load();
-    let rejected = fixture.observations("numbers-rpc-reject");
-    assert_eq!(rejected["before"], rejected["after"]);
-    assert_eq!(
-        rejected["zero"]["error"],
-        json!({
-            "code": "INVALID_REQUEST", "message": "Invalid dispatch config field: idleMin",
-            "retryable": false
-        })
-    );
-
-    let long = fixture.observations("numbers-ui-long-input");
-    assert_eq!(long["afterClick"]["activeField"], "dispatch-idleMin");
-    assert_eq!(
-        long["afterClick"]["alerts"],
-        json!(["请输入 1–60 之间的数字。", "请输入整数。"])
-    );
-    assert_eq!(
-        long["afterClick"]["numbers"]["maxMin"]["error"],
-        Value::Null
-    );
-    assert_eq!(long["requests"].as_array().unwrap().len(), 1);
-
-    let failed = fixture.observations("save-failure-retry");
-    assert_eq!(failed["before"], failed["afterFailure"]);
-    assert_eq!(
-        failed["failedPanel"]["alerts"],
-        json!(["保存失败，修改已保留。fixture rename failed"])
-    );
-}
-
-#[test]
-fn unlisted_values_distinguish_fallback_display_from_saved_values() {
-    let fixture = Fixture::load();
-    let model = fixture.observations("choices-unlisted-model");
-    assert_eq!(model["before"]["choices"]["model"]["value"], "sol");
-    assert_eq!(model["reread"]["defaults"]["model"], "custom/model");
-
-    let choices = fixture.observations("choices-unlisted-executor-effort");
-    assert_eq!(choices["read"]["defaults"]["agent"], "codex");
-    assert_eq!(choices["read"]["defaults"]["effort"], "high");
-    for (observation, field) in [("unknownExecutor", "agent"), ("unknownEffort", "effort")] {
-        assert_eq!(
-            choices[observation]["error"]["message"],
-            format!("Invalid dispatch config field: {field}")
-        );
+        )+
     }
+}
 
-    let dsh = fixture.observations("choices-dsh-clamp");
-    assert_eq!(dsh["before"]["choices"]["model"]["readOnly"], true);
-    assert_eq!(dsh["before"]["choices"]["effort"]["value"], "high");
-    assert_eq!(dsh["afterUnrelatedSave"]["defaults"]["effort"], "xhigh");
-    assert_eq!(dsh["afterExplicitChoice"]["defaults"]["effort"], "low");
+replay_cases!(
+    workspace_global,
+    workspace_without_global,
+    workspace_save_is_global,
+    default_first_read,
+    version_defaults_missing,
+    unsupported_version,
+    malformed_file,
+    save_reload_restart,
+    cancel_and_restore,
+    save_failure_retry,
+    numbers_file_fallback,
+    numbers_file_overflow_zero,
+    numbers_rpc_reject,
+    numbers_rpc_boundary,
+    numbers_ui_ranges,
+    numbers_ui_syntax,
+    numbers_ui_zero_fraction,
+    numbers_ui_long_input,
+    numbers_ui_boundary,
+    numbers_ui_saved_bypass,
+    choices_unlisted_model,
+    choices_unlisted_executor_effort,
+    choices_invalid_wire_snapshot,
+    choices_dsh_clamp,
+    choices_orchestrator_switch,
+    choices_model_format,
+);
+
+fn replay(id: &str) -> anyhow::Result<()> {
+    let case = Fixture::load()
+        .cases
+        .into_iter()
+        .find(|case| case.id == id)
+        .expect(id);
+    let home = tempfile::tempdir_in(std::env::current_dir()?)?;
+    let config = DispatchConfig::for_home(home.path());
+    let path = config.path();
+    assert_eq!(path, home.path().join(".claude/agent-foreman/config.json"));
+    let initial = case
+        .input
+        .raw
+        .or_else(|| case.input.file.map(|value| value.to_string()));
+    if let Some(initial) = initial {
+        fs::create_dir_all(path.parent().unwrap())?;
+        fs::write(path, initial)?;
+    }
+    let mut form = None;
+    let mut first_error = None;
+    let mut requests = Vec::new();
+    let mut seen = BTreeSet::new();
+    for step in case.input.steps {
+        let actual = match step.op.as_str() {
+            // The native entry point has no workspace input.
+            "snapshot" => Some(snapshot_json(config.snapshot()?, path)),
+            "fresh-process" => Some(fresh_process(home.path())?),
+            "rpc-save" => Some(match config.save(&step.payload["defaults"]) {
+                Ok(snapshot) => snapshot_json(snapshot, path),
+                Err(error @ DispatchConfigError::InvalidField(_)) => json!({
+                    "error": {"code": "INVALID_REQUEST", "message": error.to_string(), "retryable": false}
+                }),
+                Err(error) => return Err(error.into()),
+            }),
+            "disk" => Some(disk(path)?),
+            "requests" => Some(json!(requests)),
+            "open" => {
+                requests.push(json!({"method": "dispatch-config.snapshot", "payload": {}}));
+                let mut snapshot = config.snapshot()?;
+                for (key, value) in step.snapshot_override {
+                    let value = value.as_str().unwrap().into();
+                    match key.as_str() {
+                        "agent" => snapshot.defaults.agent = value,
+                        "effort" => snapshot.defaults.effort = value,
+                        _ => panic!("unsupported snapshot override {key}"),
+                    }
+                }
+                form = Some(DispatchForm::new(snapshot));
+                first_error = None;
+                None
+            }
+            "close" => {
+                form = None;
+                None
+            }
+            "view" => Some(form_json(form.as_ref().unwrap(), first_error)),
+            "change" => {
+                let form = form.as_mut().unwrap().as_mut().unwrap();
+                let key = step.field.as_deref().unwrap();
+                let value = step.value.unwrap();
+                if let Some(field) = ChoiceField::ALL
+                    .into_iter()
+                    .find(|field| field.key() == key)
+                {
+                    form.choose(field, &value);
+                } else {
+                    form.edit_number(number_field(key), value);
+                }
+                None
+            }
+            "enter" | "blur" => {
+                form.as_mut()
+                    .unwrap()
+                    .as_mut()
+                    .unwrap()
+                    .commit_number(number_field(step.field.as_deref().unwrap()));
+                None
+            }
+            "restore-button" => {
+                form.as_mut().unwrap().as_mut().unwrap().restore_defaults();
+                None
+            }
+            "save-button" => {
+                first_error = form.as_mut().unwrap().as_mut().unwrap().save(|defaults| {
+                    requests.push(json!({
+                        "method": "dispatch-config.save", "payload": {"defaults": &defaults}
+                    }));
+                    if step.fail_rename {
+                        assert_rename_fails(&config, defaults);
+                        Err("fixture rename failed".into())
+                    } else {
+                        config
+                            .save_defaults(defaults)
+                            .map_err(|error| error.to_string())
+                    }
+                });
+                None
+            }
+            op => panic!("unknown fixture step {op}"),
+        };
+        if let Some(name) = step.observation {
+            assert_eq!(actual.as_ref(), case.expected.get(&name), "{id}/{name}");
+            assert!(seen.insert(name), "{id}: duplicate observation");
+        } else {
+            assert!(
+                actual.is_none(),
+                "{id}/{} had an unexpected observation",
+                step.op
+            );
+        }
+    }
+    assert_eq!(
+        seen.len(),
+        case.expected.len(),
+        "{id}: missing observations"
+    );
+    Ok(())
+}
+
+fn number_field(key: &str) -> NumberField {
+    NumberField::ALL
+        .into_iter()
+        .find(|field| field.key() == key)
+        .unwrap_or_else(|| panic!("unknown number field {key}"))
+}
+
+fn snapshot_json(snapshot: DispatchConfigSnapshot, path: &Path) -> Value {
+    assert_eq!(snapshot.path, path);
+    json!({
+        "exists": snapshot.exists,
+        "path": "$FIXTURE_HOME/.claude/agent-foreman/config.json",
+        "defaults": snapshot.defaults,
+    })
+}
+
+fn disk(path: &Path) -> anyhow::Result<Value> {
+    let file = match fs::read_to_string(path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    let names = match fs::read_dir(path.parent().unwrap()) {
+        Ok(entries) => {
+            let mut names = entries
+                .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+                .collect::<std::io::Result<Vec<_>>>()?;
+            names.sort();
+            Some(names)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    Ok(json!({"bytes": file, "files": names}))
+}
+
+fn form_json(form: &Result<DispatchForm, &'static str>, active: Option<NumberField>) -> Value {
+    let form = match form {
+        Ok(form) => form,
+        Err(error) => {
+            return json!({"hasForm": false, "loadError": error, "buttonLabels": [RETRY_LABEL]});
+        }
+    };
+    let choices: Map<_, _> = ChoiceField::ALL
+        .into_iter()
+        .map(|field| {
+            let choice = form.choice(field);
+            let options: Vec<_> = choice
+                .options
+                .iter()
+                .map(|option| json!({"value": option.value, "label": option.label}))
+                .collect();
+            (
+                field.key().into(),
+                json!({
+                    "label": field.label(), "value": choice.value, "shownLabel": choice.shown_label,
+                    "options": options, "disabled": choice.disabled, "readOnly": choice.read_only,
+                    "hints": choice.hints,
+                }),
+            )
+        })
+        .collect();
+    let numbers: Map<_, _> = NumberField::ALL.into_iter().map(|field| {
+        (field.key().into(), json!({
+            "label": field.label(), "value": form.number(field), "error": form.number_error(field),
+            "unit": (!field.unit().is_empty()).then_some(field.unit()),
+        }))
+    }).collect();
+    let alerts: Vec<_> = NumberField::ALL
+        .into_iter()
+        .filter_map(|field| form.number_error(field))
+        .chain(form.save_error())
+        .collect();
+    json!({
+        "hasForm": true, "choices": choices, "numbers": numbers, "alerts": alerts,
+        "activeField": active.map(|field| format!("dispatch-{}", field.key())),
+        "save": {
+            "label": "保存", "disabled": !form.is_dirty() && !form.saved(),
+            "ariaDisabled": !form.can_save(), "status": form.saved().then_some(SAVED_MESSAGE),
+        },
+        "restoreLabel": "恢复默认", "scope": SCOPE_NOTE, "path": form.config_path(),
+        "missing": (!form.exists()).then_some(MISSING_NOTE),
+    })
+}
+
+fn fresh_process(home: &Path) -> anyhow::Result<Value> {
+    let child = Command::new(std::env::current_exe()?)
+        .args([
+            "--exact",
+            "dispatch_fixture_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("MATOU_DISPATCH_FIXTURE_HOME", home)
+        .output()?;
+    let stdout = String::from_utf8(child.stdout)?;
+    assert!(
+        child.status.success(),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&child.stderr)
+    );
+    let snapshot = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("DISPATCH_FIXTURE_SNAPSHOT "))
+        .expect("child snapshot on stdout");
+    Ok(serde_json::from_str(snapshot)?)
+}
+
+#[test]
+#[ignore = "invoked in a new process by save_reload_restart"]
+fn dispatch_fixture_child() -> anyhow::Result<()> {
+    let home = std::env::var_os("MATOU_DISPATCH_FIXTURE_HOME").expect("isolated fixture home");
+    let config = DispatchConfig::for_home(home);
+    println!(
+        "DISPATCH_FIXTURE_SNAPSHOT {}",
+        snapshot_json(config.snapshot()?, config.path())
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn assert_rename_fails(config: &DispatchConfig, defaults: DispatchDefaults) {
+    use std::{ffi::CString, os::unix::ffi::OsStrExt};
+
+    let path = CString::new(config.path().as_os_str().as_bytes()).unwrap();
+    let before = disk(config.path()).unwrap();
+    // SAFETY: path is NUL-terminated and names this case's own temporary file.
+    assert_eq!(
+        unsafe { libc::chflags(path.as_ptr(), libc::UF_IMMUTABLE) },
+        0
+    );
+    let result = config.save_defaults(defaults);
+    // SAFETY: clear the flag on the same file before any assertions or cleanup.
+    assert_eq!(unsafe { libc::chflags(path.as_ptr(), 0) }, 0);
+    assert!(matches!(result, Err(DispatchConfigError::Io(_))));
+    assert_eq!(disk(config.path()).unwrap(), before);
+}
+
+#[cfg(not(target_os = "macos"))]
+fn assert_rename_fails(config: &DispatchConfig, defaults: DispatchDefaults) {
+    let path = config.path();
+    let before = disk(path).unwrap();
+    // A regular file cannot be renamed over a directory. Keep a directory entry
+    // for the original while exercising the real native writer.
+    let original = path.with_extension("original");
+    fs::rename(path, &original).unwrap();
+    fs::create_dir(path).unwrap();
+    let result = config.save_defaults(defaults);
+    fs::remove_dir(path).unwrap();
+    fs::rename(original, path).unwrap();
+    assert!(matches!(result, Err(DispatchConfigError::Io(_))));
+    assert_eq!(disk(path).unwrap(), before);
 }
