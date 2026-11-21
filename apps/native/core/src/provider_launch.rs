@@ -405,6 +405,10 @@ pub struct ClaudeGatewayProjection {
     pub web_search: Option<ClaudeGatewayRole>,
     pub compaction: Option<ClaudeGatewayCompaction>,
     pub unknown_compaction_context: bool,
+    pub context_window: Option<u64>,
+    pub stream_keep_alive: bool,
+    source_model: String,
+    source_context_windows: BTreeMap<String, u64>,
     source_provider_id: String,
     source_models: [Option<String>; 3],
     source_efforts: [Option<String>; 3],
@@ -464,6 +468,12 @@ impl ClaudeLazyCompaction {
             } else {
                 target.catalog_model.clone()
             };
+        target.context_window = effective_context_window(
+            target.context_window,
+            target.max_context_window,
+            preferences.context_windows.get(&target.provider_id),
+        );
+        target.stream_keep_alive |= is_gemini_model(&target.model);
         target.max_output_tokens = None;
         Ok(target)
     }
@@ -483,7 +493,8 @@ pub struct ClaudeGatewayRole {
     pub effort: Option<String>,
     pub supported_efforts: Option<Vec<String>>,
     pub max_output_tokens: Option<u64>,
-    context_window: Option<u64>,
+    pub context_window: Option<u64>,
+    pub stream_keep_alive: bool,
     max_context_window: Option<u64>,
 }
 
@@ -554,6 +565,61 @@ impl ClaudeGatewayProjection {
             return None;
         }
         self.source_models[api_role_index(model)?].as_deref()
+    }
+
+    fn direct_gateway_required(&self) -> bool {
+        self.stream_keep_alive
+            || self.source.as_ref().is_some_and(|source| {
+                source.endpoint.host_str() == Some("api.deepseek.com")
+                    && source.endpoint.path().trim_end_matches('/') == "/anthropic"
+            })
+    }
+
+    fn apply_context_preferences(
+        &mut self,
+        config: &Value,
+        preferences: &ClaudeRoleLaunchPreferences,
+    ) {
+        self.source_context_windows = source_context_windows(
+            config,
+            &self.source_provider_id,
+            preferences.context_windows.get(&self.source_provider_id),
+        );
+        for role in self
+            .roles
+            .iter_mut()
+            .flatten()
+            .chain(self.web_search.iter_mut())
+        {
+            role.context_window = effective_context_window(
+                role.context_window,
+                role.max_context_window,
+                preferences.context_windows.get(&role.provider_id),
+            );
+        }
+    }
+
+    pub fn literal_context_window(&self, model: &str) -> Option<u64> {
+        let model = self.literal_model_override(model).unwrap_or(model);
+        self.source_context_windows
+            .get(without_context_suffix(model))
+            .copied()
+    }
+
+    pub fn literal_stream_keep_alive(&self, model: &str) -> bool {
+        if !self.stream_keep_alive {
+            return false;
+        }
+        let candidate = api_role_index(model)
+            .or_else(|| {
+                role_with_effort(model, |role| {
+                    let index = ROLES.iter().position(|candidate| *candidate == role)?;
+                    self.source_models[index].as_deref()
+                })
+            })
+            .and_then(|index| self.source_models[index].as_deref())
+            .unwrap_or(&self.source_model);
+        is_gemini_model(candidate)
     }
 
     pub fn project_environment(&self, launch: &mut ShellLaunch, base_url: &str) -> Value {
@@ -695,7 +761,7 @@ impl ClaudeLaunch {
         // The legacy compaction gateway only adds a route to that launch.
         let independent = has_independent_target(preferences);
         let role_snapshot = has_role_snapshot(preferences);
-        let source_binding = if independent && !role_snapshot {
+        let source_binding = if !role_snapshot {
             json!({"providerConfigId": self.provider_config_id})
         } else {
             Value::Null
@@ -721,6 +787,13 @@ impl ClaudeLaunch {
         } else {
             gateway_projection(&config, &source, Some(&preferences.assignments), role)
         };
+        if let Some(projection) = &mut self.gateway {
+            projection.context_window = get_var(&self.launch.env, "CLAUDE_CODE_MAX_CONTEXT_TOKENS")
+                .and_then(|value| value.to_str())
+                .and_then(|value| value.parse().ok())
+                .or(projection.context_window);
+            projection.apply_context_preferences(&config, preferences);
+        }
         Ok(())
     }
 }
@@ -951,7 +1024,7 @@ fn prepare_claude(
         Some(assignments) => resolve_startup_assignment(&config, &provider, assignments)?,
         None => None,
     };
-    let (gateway, context_window) = match target {
+    let (mut gateway, context_window) = match target {
         Some(ClaudeTarget::New {
             budget_preferences: Some((preferences, catalog)),
             ..
@@ -978,7 +1051,11 @@ fn prepare_claude(
             gateway_projection(&config, &provider, assignments, startup_role(&provider)),
             None,
         ),
-        _ => (None, None),
+        _ => (
+            gateway_projection(&config, &provider, None, None)
+                .filter(|projection| projection.direct_gateway_required()),
+            None,
+        ),
     };
     let model = match provider_binding["model"].as_str() {
         Some(bound)
@@ -1040,6 +1117,16 @@ fn prepare_claude(
             .and_then(|entry| custom_context_window(&entry["contextWindow"]))
     });
     project_context_window(&mut environment, context_window);
+    if let Some(projection) = &mut gateway {
+        projection.context_window = context_window;
+        if let Some(ClaudeTarget::New {
+            budget_preferences: Some((preferences, _)),
+            ..
+        }) = target
+        {
+            projection.apply_context_preferences(&config, preferences);
+        }
+    }
     #[cfg(unix)]
     set_var(&mut environment, "PWD".into(), cwd.as_os_str().into());
 
@@ -1075,18 +1162,19 @@ fn gateway_projection(
     assignments: Option<&ClaudeRoleAssignments>,
     startup_role: Option<&'static str>,
 ) -> Option<ClaudeGatewayProjection> {
-    let mut projection = api_projection(source);
+    let mut projection = api_projection(config, source);
     let Some(assignments) = assignments.filter(|assignments| !assignments.is_empty()) else {
         return (projection.source.is_some()
-            && projection
-                .source_efforts
-                .iter()
-                .chain([&projection.source_effort])
-                .any(|effort| {
-                    effort
-                        .as_deref()
-                        .is_some_and(|level| EFFORTS.contains(&level) && level != "follow")
-                }))
+            && (projection.direct_gateway_required()
+                || projection
+                    .source_efforts
+                    .iter()
+                    .chain([&projection.source_effort])
+                    .any(|effort| {
+                        effort
+                            .as_deref()
+                            .is_some_and(|level| EFFORTS.contains(&level) && level != "follow")
+                    })))
         .then_some(projection);
     };
     // A keyless source can only be replaced when all three selectors have API
@@ -1143,13 +1231,26 @@ fn gateway_projection(
     Some(projection)
 }
 
-fn api_projection(source: &Provider) -> ClaudeGatewayProjection {
+pub fn is_gemini_model(model: &str) -> bool {
+    model.trim().split('/').any(|part| {
+        part.get(..7)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("gemini-"))
+    })
+}
+
+fn api_projection(config: &Value, source: &Provider) -> ClaudeGatewayProjection {
     ClaudeGatewayProjection {
         source: gateway_connection(source),
         roles: [None, None, None],
         web_search: None,
         compaction: None,
         unknown_compaction_context: false,
+        context_window: None,
+        stream_keep_alive: std::iter::once(&source.model)
+            .chain(source.model_mapping.values())
+            .any(|model| is_gemini_model(model)),
+        source_model: source.model.clone(),
+        source_context_windows: source_context_windows(config, &source.id, None),
         source_provider_id: source.id.clone(),
         source_models: ROLES.map(|role| source.model_mapping.get(role).cloned()),
         source_efforts: ROLES.map(|role| source.effort_mapping.get(role).cloned()),
@@ -1157,6 +1258,41 @@ fn api_projection(source: &Provider) -> ClaudeGatewayProjection {
         has_role_assignments: false,
         startup_role: None,
     }
+}
+
+fn effective_context_window(
+    default: Option<u64>,
+    maximum: Option<u64>,
+    preference: Option<&Value>,
+) -> Option<u64> {
+    if let Some(window) = preference.and_then(custom_context_window) {
+        return Some(window);
+    }
+    match preference.and_then(Value::as_str) {
+        Some("maximum") => maximum.or(default),
+        Some("512k") => default.map(|window| window.min(512_000)),
+        _ => default,
+    }
+}
+
+fn source_context_windows(
+    config: &Value,
+    provider_id: &str,
+    preference: Option<&Value>,
+) -> BTreeMap<String, u64> {
+    provider_entry(config, provider_id)
+        .and_then(|provider| provider["modelMetadata"].as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|metadata| {
+            let window = effective_context_window(
+                context_tokens(Some(metadata), "contextWindow"),
+                context_tokens(Some(metadata), "maxContextWindow"),
+                preference,
+            )?;
+            Some((metadata["id"].as_str()?.to_owned(), window))
+        })
+        .collect()
 }
 
 fn gateway_target(
@@ -1183,6 +1319,7 @@ fn gateway_target(
         .filter(|level| EFFORTS.contains(level) && *level != "follow")
         .map(str::to_owned);
     Some(ClaudeGatewayRole {
+        stream_keep_alive: is_gemini_model(catalog_model) || is_gemini_model(&model),
         connection,
         model,
         catalog_model: catalog_model.into(),
@@ -1230,7 +1367,7 @@ fn independent_gateway_projection(
     environment: &BTreeMap<OsString, OsString>,
     load_native_catalog: &dyn Fn() -> Vec<Value>,
 ) -> Result<(ClaudeGatewayProjection, Option<u64>)> {
-    let mut projection = api_projection(source);
+    let mut projection = api_projection(config, source);
     if !has_role_snapshot(preferences) {
         ensure!(
             projection.source.is_some() && projection.supports_environment(environment),
@@ -1315,6 +1452,7 @@ fn independent_gateway_projection(
         &context_windows(config, preferences),
     )?;
     projection.unknown_compaction_context = unknown_compaction_context;
+    projection.context_window = context_window;
     Ok((projection, context_window))
 }
 

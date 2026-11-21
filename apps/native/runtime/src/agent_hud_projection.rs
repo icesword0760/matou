@@ -148,6 +148,24 @@ pub struct AgentActivity {
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct UsageWindow {
+    pub id: String,
+    pub label: String,
+    pub used_percent: f64,
+    pub reset_text: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigCounts {
+    pub mcps: usize,
+    pub hooks: usize,
+    pub claude_md: usize,
+    pub rules: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HudSnapshot {
     pub session_id: String,
     pub mode: &'static str,
@@ -189,11 +207,24 @@ pub struct HudSnapshot {
     pub subagent_count: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subagents: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage_windows: Option<Vec<UsageWindow>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub all_usage_windows: Option<Vec<UsageWindow>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_counts: Option<ConfigCounts>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hook_names: Option<Vec<String>>,
 }
 
 pub struct AgentHudProjection {
     hud: HudSnapshot,
     context_tokens: Option<ContextTokens>,
+    context_used_tokens: Option<u64>,
+    status_context_at: Option<f64>,
+    usage_resets: Vec<(String, f64)>,
+    quota_model_id: Option<String>,
+    provider_tool_history: ClaudeTranscript,
     provider_started_at: f64,
     active_tools: Vec<(String, RunningTool)>,
     completed_tools: Vec<(String, String)>,
@@ -214,7 +245,7 @@ pub struct AgentHudProjection {
 
 impl AgentHudProjection {
     pub fn new(session_id: impl Into<String>, provider: HudProvider, now_ms: f64) -> Self {
-        let agent_details = matches!(provider, HudProvider::ClaudeCode | HudProvider::Antigravity);
+        let agent_details = provider != HudProvider::Dsh;
         let tools = provider != HudProvider::Dsh;
         Self {
             hud: HudSnapshot {
@@ -241,8 +272,17 @@ impl AgentHudProjection {
                 agents: agent_details.then(Vec::new),
                 subagent_count: agent_details.then_some(0),
                 subagents: agent_details.then(Vec::new),
+                usage_windows: None,
+                all_usage_windows: None,
+                config_counts: None,
+                hook_names: None,
             },
             context_tokens: None,
+            context_used_tokens: None,
+            status_context_at: None,
+            usage_resets: Vec::new(),
+            quota_model_id: None,
+            provider_tool_history: ClaudeTranscript::default(),
             provider_started_at: now_ms,
             active_tools: Vec::new(),
             completed_tools: Vec::new(),
@@ -308,12 +348,82 @@ impl AgentHudProjection {
         self.context_tokens
     }
 
+    pub(crate) fn context_usage(&self) -> (Option<u64>, Option<u64>) {
+        (
+            self.context_used_tokens,
+            self.hud.context_window_size.map(|size| size as u64),
+        )
+    }
+
+    pub(crate) fn set_config(&mut self, counts: ConfigCounts, hook_names: Vec<String>) {
+        self.hud.config_counts = Some(counts);
+        self.hud.hook_names = Some(hook_names);
+    }
+
     pub(crate) fn cwd(&self) -> Option<&str> {
         self.hud.cwd.as_deref()
     }
 
     pub fn snapshot(&self, now_ms: f64) -> HudSnapshot {
+        self.snapshot_with_agents(now_ms, Vec::new())
+    }
+
+    pub(crate) fn snapshot_with_agents(
+        &self,
+        now_ms: f64,
+        provider_agents: Vec<AgentActivity>,
+    ) -> HudSnapshot {
         let mut hud = self.hud.clone();
+        if let Some(history) = self
+            .live_claude
+            .as_ref()
+            .filter(|_| hud.provider == HudProvider::ClaudeCode)
+        {
+            if history.todos_observed {
+                hud.todos = Some(history.todos.clone());
+            }
+            let mut errors = history.mcp_errors.clone();
+            for error in &self.failed_mcp_servers {
+                if !errors.contains(error) {
+                    errors.push(error.clone());
+                }
+            }
+            hud.mcp_errors = Some(errors);
+        }
+        if hud.provider == HudProvider::Antigravity {
+            let history = &self.provider_tool_history;
+            let tools_active = !self.session_ended && hud.task_status != TaskStatus::Idle;
+            hud.running_tools = Some(if !tools_active {
+                Vec::new()
+            } else {
+                history
+                    .active_tools
+                    .iter()
+                    .map(|(_, tool)| tool.clone())
+                    .collect()
+            });
+            hud.tool_counts = Some(history.tool_counts.clone());
+            hud.last_tool = tools_active
+                .then(|| history.active_tools.last())
+                .flatten()
+                .map(|(_, tool)| ToolActivity {
+                    tool: tool.clone(),
+                    status: ToolStatus::Running,
+                })
+                .or_else(|| history.last_tool.clone());
+            hud.mcp_errors = Some(history.mcp_errors.clone());
+            hud.todos = Some(history.todos.clone());
+        }
+        for window in hud
+            .usage_windows
+            .iter_mut()
+            .chain(hud.all_usage_windows.iter_mut())
+            .flatten()
+        {
+            if let Some((_, reset)) = self.usage_resets.iter().find(|(id, _)| *id == window.id) {
+                window.reset_text = Some(reset_text(*reset, now_ms));
+            }
+        }
         if hud.provider == HudProvider::ClaudeCode
             && let Some(history) = &self.live_claude
         {
@@ -353,7 +463,11 @@ impl AgentHudProjection {
                         upsert(&mut agents, id.clone(), agent.clone());
                     }
                 }
-                if let Some(history) = &self.live_claude {
+                if let Some(history) = if hud.provider == HudProvider::Antigravity {
+                    Some(&self.provider_tool_history)
+                } else {
+                    self.live_claude.as_ref()
+                } {
                     for (id, (agent, failed_at)) in &history.agents {
                         if failed_at.is_none_or(|time| now_ms - time < 300_000.) {
                             upsert(&mut agents, id.clone(), agent.clone());
@@ -363,6 +477,7 @@ impl AgentHudProjection {
             }
             let mut agents: Vec<_> = agents.into_iter().map(|(_, agent)| agent).collect();
             if !self.session_ended {
+                agents.extend(provider_agents);
                 agents.extend(self.external_agents.iter().cloned());
                 agents.retain(|agent| {
                     agent.source != AgentSource::Claude
@@ -370,16 +485,7 @@ impl AgentHudProjection {
                             .started_at
                             .is_none_or(|time| time >= self.provider_started_at)
                 });
-                agents.sort_by(|a, b| {
-                    a.state
-                        .cmp(&b.state)
-                        .then_with(|| {
-                            a.started_at
-                                .unwrap_or(f64::INFINITY)
-                                .total_cmp(&b.started_at.unwrap_or(f64::INFINITY))
-                        })
-                        .then_with(|| a.id.cmp(&b.id))
-                });
+                sort_agents(&mut agents);
             }
             hud.subagent_count = Some(agents.len());
             hud.subagents = Some(agents.iter().map(|agent| agent.label.clone()).collect());
@@ -401,7 +507,8 @@ impl AgentHudProjection {
         }
         let event = first_text(payload, &["hook_event_name", "hookEventName"]);
         self.observe_settings(payload, event);
-        self.observe_context(payload);
+        self.observe_context(payload, now_ms);
+        self.observe_usage_windows(payload);
         if let Some(duration) = first_value(
             &payload["cost"],
             &["total_duration_ms", "totalDurationMs"],
@@ -475,6 +582,7 @@ impl AgentHudProjection {
                 self.active_tools.clear();
                 self.optimistic_agents.clear();
                 self.transcript_agents.clear();
+                self.provider_tool_history.active_tools.clear();
             }
             _ => {}
         }
@@ -493,17 +601,28 @@ impl AgentHudProjection {
 
     fn observe_settings(&mut self, payload: &Value, event: Option<&str>) {
         let antigravity = self.hud.provider == HudProvider::Antigravity;
-        let cycle_mode = nonempty(&payload["cycle_mode"]);
+        let cycle_mode = first_text(payload, &["cycle_mode", "cycleMode"]);
         let cycle_tick = antigravity
             && event.is_none()
-            && (payload.get("cycle_mode").is_some()
+            && (payload
+                .get("cycle_mode")
+                .or_else(|| payload.get("cycleMode"))
+                .is_some()
                 || self.cycle_mode_observed
                     && ["model", "context_window", "agent_state"]
                         .iter()
                         .any(|key| payload.get(*key).is_some()));
         self.cycle_mode_observed |= cycle_tick;
         let raw_permission = if antigravity {
-            cycle_mode.map(|mode| if mode == "auto" { "default" } else { mode })
+            cycle_mode
+                .map(|mode| {
+                    if mode == "auto" && self.hud.permission_mode != Some("auto") {
+                        "default"
+                    } else {
+                        mode
+                    }
+                })
+                .or_else(|| first_text(payload, &["permission_mode", "permissionMode"]))
         } else {
             first_text(payload, &["permission_mode", "permissionMode"])
         };
@@ -521,7 +640,10 @@ impl AgentHudProjection {
         }
 
         let model = &payload["model"];
-        let base_model = if self.hud.provider == HudProvider::Codex {
+        if antigravity && !model.is_null() {
+            self.quota_model_id = first_text(model, &["id", "modelId"]).map(str::to_owned);
+        }
+        let base_model = if self.hud.provider == HudProvider::Codex || antigravity {
             nonempty(model)
         } else {
             None
@@ -532,6 +654,9 @@ impl AgentHudProjection {
                 && self.hud.model.as_deref() != Some(model_name)
             {
                 self.hud.effort = None;
+            }
+            if antigravity {
+                self.hud.effort = nonempty(&model["effort"]).map(str::to_owned);
             }
             if let Some(effort) = antigravity.then(|| nonempty(&model["effort"])).flatten() {
                 self.hud.effort = Some(effort.to_owned());
@@ -549,7 +674,7 @@ impl AgentHudProjection {
         }
     }
 
-    fn observe_context(&mut self, payload: &Value) {
+    fn observe_context(&mut self, payload: &Value, now_ms: f64) {
         if let Some(window) = first_value(payload, &["context_window", "contextWindow"], |value| {
             value.is_object().then_some(value)
         }) {
@@ -558,16 +683,29 @@ impl AgentHudProjection {
                 &["context_window_size", "contextWindowSize"],
                 Value::as_f64,
             );
+            if let Some(size) = size.filter(|size| *size > 0.) {
+                self.hud.context_window_size = Some(size);
+            }
             let usage = first_value(window, &["current_usage", "currentUsage"], |value| {
                 value.is_object().then_some(value)
             });
-            let tokens = usage.map(|usage| ContextTokens {
-                input: usage["input_tokens"].as_f64(),
-                output: usage["output_tokens"].as_f64(),
-                cache_creation_input: usage["cache_creation_input_tokens"].as_f64(),
-                cache_read_input: usage["cache_read_input_tokens"].as_f64(),
-                total: None,
-            });
+            let tokens = usage
+                .filter(|usage| sum_usage_tokens(usage).is_some())
+                .map(|usage| ContextTokens {
+                    input: first_value(usage, &["input_tokens", "inputTokens"], Value::as_f64),
+                    output: first_value(usage, &["output_tokens", "outputTokens"], Value::as_f64),
+                    cache_creation_input: first_value(
+                        usage,
+                        &["cache_creation_input_tokens", "cacheCreationInputTokens"],
+                        Value::as_f64,
+                    ),
+                    cache_read_input: first_value(
+                        usage,
+                        &["cache_read_input_tokens", "cacheReadInputTokens"],
+                        Value::as_f64,
+                    ),
+                    total: None,
+                });
             let null_usage = [
                 "used_percentage",
                 "usedPercentage",
@@ -579,13 +717,23 @@ impl AgentHudProjection {
             if tokens.is_some() || null_usage {
                 self.context_tokens = tokens;
             }
-            let percent = first_value(
+            let reported_percent = first_value(
                 window,
                 &["used_percentage", "usedPercentage"],
                 Value::as_f64,
             )
-            .or_else(|| {
-                let size = size.filter(|value| *value != 0.)?;
+            .filter(|percent| *percent >= 0.);
+            let used_tokens = usage.and_then(sum_usage_tokens).or_else(|| {
+                let size = self.hud.context_window_size?;
+                let percent = reported_percent.filter(|percent| *percent >= 0.)?;
+                Some((size * percent / 100.).round() as u64)
+            });
+            if used_tokens.is_some() || null_usage {
+                self.context_used_tokens = used_tokens;
+                self.status_context_at = Some(now_ms);
+            }
+            let percent = reported_percent.or_else(|| {
+                let size = self.hud.context_window_size?;
                 let usage = tokens?;
                 Some(
                     (usage.input.unwrap_or_default()
@@ -601,12 +749,109 @@ impl AgentHudProjection {
                 self.hud.context_percent = None;
             }
         }
-        if let Some(size) = payload["context_window"]["context_window_size"]
-            .as_f64()
-            .or_else(|| payload["contextWindow"]["contextWindowSize"].as_f64())
-            .filter(|value| *value > 0.)
-        {
-            self.hud.context_window_size = Some(size);
+    }
+
+    fn observe_usage_windows(&mut self, payload: &Value) {
+        if self.hud.provider == HudProvider::Antigravity {
+            if let Some(quota) = payload["quota"].as_object() {
+                self.usage_resets.clear();
+                let preferred = ["gemini-5h", "gemini-weekly", "3p-5h", "3p-weekly"];
+                let keys = preferred
+                    .into_iter()
+                    .filter(|key| quota.contains_key(*key))
+                    .chain(
+                        quota
+                            .keys()
+                            .map(String::as_str)
+                            .filter(|key| !preferred.contains(key)),
+                    );
+                self.hud.all_usage_windows = Some(
+                    keys.filter_map(|key| {
+                        let entry = &quota[key];
+                        let remaining = first_value(
+                            entry,
+                            &["remaining_fraction", "remainingFraction"],
+                            Value::as_f64,
+                        )?;
+                        Some(usage_window(
+                            &mut self.usage_resets,
+                            key,
+                            &quota_label(key),
+                            (1. - remaining) * 100.,
+                            entry,
+                        ))
+                    })
+                    .collect(),
+                );
+            }
+            if let Some(windows) = &self.hud.all_usage_windows {
+                let model = self.quota_model_id.as_deref().or(self.hud.model.as_deref());
+                self.hud.usage_windows = Some(match_antigravity_quota(windows, model));
+            }
+        } else if self.hud.provider == HudProvider::ClaudeCode {
+            let windows = first_value(payload, &["usageWindows", "usage_windows"], Value::as_array);
+            let limits = first_value(payload, &["rateLimits", "rate_limits"], Value::as_object);
+            if windows.is_none() && limits.is_none() {
+                return;
+            }
+            self.usage_resets.clear();
+            let mut projected = Vec::new();
+            if let Some(windows) = windows {
+                projected.extend(windows.iter().filter_map(|entry| {
+                    let label = nonempty(&entry["label"])?;
+                    let percent = first_value(entry, &["usedPercent", "percent"], Value::as_f64)?;
+                    Some(usage_window(
+                        &mut self.usage_resets,
+                        nonempty(&entry["id"]).unwrap_or(label),
+                        label,
+                        percent,
+                        entry,
+                    ))
+                }));
+            } else {
+                let limits = limits.unwrap();
+                for (id, alias, label) in [
+                    ("five_hour", "fiveHour", "5h"),
+                    ("seven_day", "sevenDay", "Weekly"),
+                ] {
+                    if let Some(entry) = limits.get(id).or_else(|| limits.get(alias))
+                        && let Some(percent) = first_value(
+                            entry,
+                            &["used_percentage", "usedPercentage"],
+                            Value::as_f64,
+                        )
+                    {
+                        projected.push(usage_window(
+                            &mut self.usage_resets,
+                            id,
+                            label,
+                            percent,
+                            entry,
+                        ));
+                    }
+                }
+                for entry in limits
+                    .get("model_scoped")
+                    .or_else(|| limits.get("modelScoped"))
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    if let Some((label, percent)) =
+                        first_text(entry, &["display_name", "displayName"])
+                            .zip(entry["utilization"].as_f64())
+                    {
+                        projected.push(usage_window(
+                            &mut self.usage_resets,
+                            nonempty(&entry["id"]).unwrap_or(label),
+                            label,
+                            percent,
+                            entry,
+                        ));
+                    }
+                }
+            }
+            self.hud.usage_windows = Some(projected);
         }
     }
 
@@ -615,6 +860,41 @@ impl AgentHudProjection {
             return;
         }
         let codex = self.hud.provider == HudProvider::Codex;
+        if self.hud.provider == HudProvider::Antigravity {
+            let call = &payload["toolCall"];
+            let Some(id) = first_text(payload, &["tool_use_id", "toolUseId"])
+                .or_else(|| first_text(call, &["id", "call_id"]))
+            else {
+                return;
+            };
+            let name =
+                first_text(payload, &["tool_name", "toolName"]).or_else(|| nonempty(&call["name"]));
+            let args = payload
+                .get("tool_input")
+                .or_else(|| payload.get("toolInput"))
+                .unwrap_or(&call["args"]);
+            if event == "PreToolUse" {
+                if let Some(name) = name {
+                    self.provider_tool_history.ingest_tool_use(
+                        &serde_json::json!({"id": id, "name": name, "input": tool_arguments(args)}),
+                        Some(now_ms),
+                    );
+                }
+            } else {
+                if let Some(name) = name {
+                    self.provider_tool_history.observe_missing_tool(id, name);
+                }
+                let result = payload
+                    .get("toolResponse")
+                    .or_else(|| payload.get("toolResult"))
+                    .unwrap_or(&Value::Null);
+                self.provider_tool_history.ingest_tool_result(
+                    &serde_json::json!({"tool_use_id": id, "is_error": event == "PostToolUseFailure" || !payload["error"].is_null(),
+                        "content": payload["error"]}), result, Some(now_ms),
+                );
+            }
+            return;
+        }
         let explicit_id = first_text(payload, &["tool_use_id", "toolUseId"]);
         if codex && explicit_id.is_none() {
             return;
@@ -764,6 +1044,203 @@ impl AgentHudProjection {
     }
 }
 
+pub(crate) fn sort_agents(agents: &mut [AgentActivity]) {
+    agents.sort_by(|a, b| {
+        a.state
+            .cmp(&b.state)
+            .then_with(|| {
+                a.started_at
+                    .unwrap_or(f64::INFINITY)
+                    .total_cmp(&b.started_at.unwrap_or(f64::INFINITY))
+            })
+            .then_with(|| a.id.cmp(&b.id))
+    });
+}
+
+fn sum_usage_tokens(usage: &Value) -> Option<u64> {
+    let input = first_value(usage, &["input_tokens", "inputTokens"], Value::as_u64);
+    let output = first_value(usage, &["output_tokens", "outputTokens"], Value::as_u64);
+    let create = first_value(
+        usage,
+        &["cache_creation_input_tokens", "cacheCreationInputTokens"],
+        Value::as_u64,
+    );
+    let read = first_value(
+        usage,
+        &["cache_read_input_tokens", "cacheReadInputTokens"],
+        Value::as_u64,
+    );
+    [input, output, create, read]
+        .into_iter()
+        .flatten()
+        .reduce(u64::saturating_add)
+}
+
+fn is_compact_boundary(row: &Value) -> bool {
+    row["subtype"] == "compact_boundary" || row["type"] == "compact_boundary"
+}
+
+fn transcript_context(row: &Value) -> Option<Option<u64>> {
+    if row["isSidechain"] == true || row["is_sidechain"] == true {
+        return None;
+    }
+    if is_compact_boundary(row) {
+        return Some(None);
+    }
+    let message = &row["message"];
+    if row["type"] == "assistant" || message["role"] == "assistant" {
+        return sum_usage_tokens(&message["usage"]).map(Some);
+    }
+    None
+}
+
+fn reset_text(resets_at: f64, now_ms: f64) -> String {
+    let minutes = ((resets_at - now_ms).max(0.) / 60_000.).ceil() as u64;
+    match minutes {
+        0 => "0m".into(),
+        1..=59 => format!("{minutes}m"),
+        60..=1439 => format!("{}h {}m", minutes / 60, minutes % 60),
+        _ => format!("{}d {}h", minutes / 1440, minutes % 1440 / 60),
+    }
+}
+
+fn usage_window(
+    resets: &mut Vec<(String, f64)>,
+    id: &str,
+    label: &str,
+    used: f64,
+    entry: &Value,
+) -> UsageWindow {
+    if let Some(reset) = first_value(
+        entry,
+        &["reset_time", "resetTime", "resets_at", "resetsAt"],
+        |value| {
+            if let Some(number) = value.as_f64() {
+                return (number > 0.).then_some(if number >= 1e12 {
+                    number
+                } else {
+                    number * 1000.
+                });
+            }
+            timestamp_ms(value)
+        },
+    ) {
+        upsert(resets, id.to_owned(), reset);
+    }
+    UsageWindow {
+        id: id.to_owned(),
+        label: utf16_prefix(label, 64),
+        used_percent: used.clamp(0., 100.).round(),
+        reset_text: nonempty(&entry["resetText"]).map(str::to_owned),
+    }
+}
+
+fn quota_label(key: &str) -> String {
+    for (suffix, label) in [("-5h", "5h"), ("-weekly", "Weekly")] {
+        if let Some(model) = key.strip_suffix(suffix) {
+            let title = model
+                .split('-')
+                .filter(|part| !part.is_empty())
+                .map(|part| {
+                    if part == "3p" {
+                        return "3P".to_owned();
+                    }
+                    let mut chars = part.chars();
+                    chars.next().unwrap().to_uppercase().to_string() + chars.as_str()
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            return format!("{title} {label}");
+        }
+    }
+    key.to_owned()
+}
+
+fn match_antigravity_quota(windows: &[UsageWindow], model: Option<&str>) -> Vec<UsageWindow> {
+    let Some(model) = model else {
+        return windows.to_vec();
+    };
+    let model = model.to_ascii_lowercase();
+    let words: Vec<_> = model
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .collect();
+    let third_party = words.iter().any(|word| {
+        [
+            "claude", "opus", "sonnet", "haiku", "gpt", "o1", "o3", "o4", "chatgpt", "openai",
+            "codex", "deepseek", "qwen", "llama", "mistral", "grok", "kimi", "glm", "minimax",
+        ]
+        .contains(word)
+    });
+    let family = if third_party {
+        Some("3p")
+    } else if words.contains(&"gemini") {
+        Some("gemini")
+    } else {
+        None
+    };
+    let mut matched = Vec::new();
+    for (suffix, label) in [("-5h", "5h"), ("-weekly", "Weekly")] {
+        let dedicated = windows
+            .iter()
+            .filter_map(|window| {
+                let token = window.id.strip_suffix(suffix)?.to_ascii_lowercase();
+                if matches!(token.as_str(), "" | "gemini" | "3p") {
+                    return None;
+                }
+                model
+                    .match_indices(&token)
+                    .any(|(start, _)| {
+                        let end = start + token.len();
+                        (start == 0 || !model.as_bytes()[start - 1].is_ascii_alphanumeric())
+                            && (end == model.len()
+                                || !model.as_bytes()[end].is_ascii_alphanumeric())
+                    })
+                    .then_some((token.len(), window))
+            })
+            .max_by_key(|(length, _)| *length)
+            .map(|(_, window)| window);
+        let selected = dedicated.or_else(|| {
+            let id = format!("{}{suffix}", family?);
+            windows.iter().find(|window| window.id == id)
+        });
+        if let Some(window) = selected {
+            let mut window = window.clone();
+            window.label = label.into();
+            matched.push(window);
+        }
+    }
+    if matched.is_empty() {
+        windows.to_vec()
+    } else {
+        matched
+    }
+}
+
+pub(crate) fn tool_arguments(value: &Value) -> Value {
+    match value {
+        Value::Object(_) => value.clone(),
+        Value::String(text) => serde_json::from_str::<Value>(text)
+            .ok()
+            .filter(Value::is_object)
+            .unwrap_or_default(),
+        _ => Value::Null,
+    }
+}
+
+pub(crate) fn agent_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "Agent"
+            | "Task"
+            | "Subagent"
+            | "subagent"
+            | "spawn_agent"
+            | "SpawnAgent"
+            | "start_subagent"
+            | "collab"
+    )
+}
+
 fn first_value<'a, T>(
     value: &'a Value,
     keys: &[&str],
@@ -825,7 +1302,7 @@ fn increment(counts: &mut Vec<ToolCount>, name: &str) {
     }
 }
 
-fn update_mcp_error(errors: &mut Vec<String>, name: &str, status: ToolStatus) {
+pub(crate) fn update_mcp_error(errors: &mut Vec<String>, name: &str, status: ToolStatus) {
     let Some((server, tool)) = name
         .strip_prefix("mcp__")
         .and_then(|name| name.split_once("__"))
@@ -874,32 +1351,42 @@ fn normalize_model_strategy(value: &str) -> Option<&'static str> {
     }
 }
 
-fn update_todos(todos: &mut Vec<Todo>, name: &str, input: &Value) {
+pub(crate) fn update_todos(todos: &mut Vec<Todo>, name: &str, input: &Value) {
     match name {
-        "TodoWrite" => {
-            *todos = input["todos"]
-                .as_array()
-                .into_iter()
-                .flatten()
+        "TodoWrite" | "update_plan" => {
+            let key = if name == "TodoWrite" { "todos" } else { "plan" };
+            let Some(items) = input[key].as_array() else {
+                return;
+            };
+            *todos = items
+                .iter()
                 .filter_map(|item| {
                     Some(Todo {
-                        content: first_text(item, &["content", "subject", "description"])?
+                        content: first_text(item, &["content", "step", "subject", "description"])?
                             .to_owned(),
                         status: TodoStatus::parse(&item["status"]),
                     })
                 })
                 .collect();
         }
-        "TaskCreate" => todos.push(Todo {
-            content: first_text(input, &["subject", "description"])
-                .unwrap_or("Untitled")
-                .to_owned(),
-            status: TodoStatus::parse(&input["status"]),
-        }),
+        "TaskCreate" => {
+            if let Some(content) = first_text(input, &["subject", "description"]) {
+                todos.push(Todo {
+                    content: content.to_owned(),
+                    status: TodoStatus::parse(&input["status"]),
+                });
+            }
+        }
         "TaskUpdate" => {
             let index = first_text(input, &["taskId", "task_id"])
                 .filter(|id| id.bytes().all(|byte| byte.is_ascii_digit()))
                 .and_then(|id| id.parse::<usize>().ok())
+                .or_else(|| {
+                    ["taskId", "task_id"]
+                        .iter()
+                        .find_map(|key| input[*key].as_u64())
+                        .and_then(|id| usize::try_from(id).ok())
+                })
                 .and_then(|id| id.checked_sub(1));
             if let Some(todo) = index.and_then(|index| todos.get_mut(index)) {
                 if let Some(content) = first_text(input, &["subject", "description"]) {
@@ -914,7 +1401,7 @@ fn update_todos(todos: &mut Vec<Todo>, name: &str, input: &Value) {
     }
 }
 
-fn target_for_tool(name: &str, input: &Value) -> Option<String> {
+pub(crate) fn target_for_tool(name: &str, input: &Value) -> Option<String> {
     match name {
         "Read"
         | "Write"
@@ -949,12 +1436,24 @@ fn utf16_prefix(value: &str, limit: usize) -> String {
     String::from_utf16_lossy(&value.encode_utf16().take(limit).collect::<Vec<_>>())
 }
 
-fn new_agent(id: &str, input: &Value, ordinal: usize, started_at: Option<f64>) -> AgentActivity {
+pub(crate) fn new_agent(
+    id: &str,
+    input: &Value,
+    ordinal: usize,
+    started_at: Option<f64>,
+) -> AgentActivity {
     AgentActivity {
         id: id.to_owned(),
         label: first_text(
             input,
-            &["name", "description", "subagent_type", "subagentType"],
+            &[
+                "name",
+                "nickname",
+                "description",
+                "agent_type",
+                "subagent_type",
+                "subagentType",
+            ],
         )
         .map_or_else(|| format!("Agent {ordinal}"), str::to_owned),
         source: AgentSource::Claude,
@@ -965,22 +1464,80 @@ fn new_agent(id: &str, input: &Value, ordinal: usize, started_at: Option<f64>) -
 }
 
 impl AgentHudProjection {
-    pub(crate) fn ingest_live_claude_row(&mut self, row: Option<&Value>) {
+    pub(crate) fn ingest_antigravity_row(&mut self, row: Option<&Value>) {
         if let Some(row) = row {
+            self.provider_tool_history.ingest(row);
+            if !self.model_observed
+                && let Some(model) = &self.provider_tool_history.model
+            {
+                self.hud.model = Some(model.clone());
+                self.observe_usage_windows(&Value::Null);
+            }
+            if self.status_context_at.is_none() {
+                self.context_used_tokens = self.provider_tool_history.context_used_tokens;
+            }
+        }
+    }
+
+    pub(crate) fn seed_transcript_context<'a>(
+        &mut self,
+        rows: impl IntoIterator<Item = &'a Value>,
+    ) {
+        for row in rows {
+            if let Some(usage) = transcript_context(row) {
+                self.context_used_tokens = usage;
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ingest_live_claude_row(&mut self, row: Option<&Value>) {
+        self.ingest_live_claude_history(row);
+        self.publish_transcript_context();
+    }
+
+    pub(crate) fn ingest_live_claude_history(&mut self, row: Option<&Value>) {
+        if let Some(row) = row {
+            if is_compact_boundary(row)
+                && self.status_context_at.is_some_and(|at| {
+                    timestamp_ms(&row["timestamp"]).is_some_and(|event_at| event_at >= at)
+                })
+            {
+                self.status_context_at = None;
+                self.context_used_tokens = None;
+                self.context_tokens = None;
+                self.hud.context_percent = None;
+            }
             let history = self
                 .live_claude
                 .get_or_insert_with(ClaudeTranscript::default);
             history.ingest(row);
+            if !self.model_observed && history.model.is_some() {
+                self.hud.model = history.model.clone();
+            }
         } else {
             self.live_claude = None;
+        }
+    }
+
+    pub(crate) fn publish_transcript_context(&mut self) {
+        if self.status_context_at.is_none() {
+            self.context_used_tokens = self
+                .live_claude
+                .as_ref()
+                .and_then(|history| history.context_used_tokens);
         }
     }
 
     /// Refresh from the complete sequence of decoded transcript rows for this run.
     pub fn refresh_transcript(&mut self, rows: &[Value]) {
         match self.hud.provider {
-            HudProvider::ClaudeCode | HudProvider::Antigravity => {
-                self.refresh_claude_transcript(rows)
+            HudProvider::ClaudeCode => self.refresh_claude_transcript(rows),
+            HudProvider::Antigravity => {
+                self.provider_tool_history = ClaudeTranscript::default();
+                for row in rows {
+                    self.ingest_antigravity_row(Some(row));
+                }
             }
             HudProvider::Codex if !self.session_ended => self.refresh_codex_transcript(rows),
             HudProvider::Codex | HudProvider::Dsh => {}
@@ -1021,6 +1578,9 @@ impl AgentHudProjection {
         self.hud.last_tool = history.last_tool;
         self.hud.mcp_errors = Some(history.mcp_errors);
         self.hud.todos = Some(history.todos);
+        if self.status_context_at.is_none() {
+            self.context_used_tokens = history.context_used_tokens;
+        }
     }
 
     fn refresh_codex_transcript(&mut self, rows: &[Value]) {
@@ -1125,6 +1685,8 @@ struct ClaudeTranscript {
     last_tool: Option<ToolActivity>,
     mcp_errors: Vec<String>,
     todos: Vec<Todo>,
+    todos_observed: bool,
+    context_used_tokens: Option<u64>,
     observed_agents: Vec<(String, AgentActivity)>,
     agents: Vec<(String, (AgentActivity, Option<f64>))>,
     agent_ids: Vec<(String, String)>,
@@ -1139,7 +1701,41 @@ impl ClaudeTranscript {
         if !row.is_object() || row["type"] == "queue-operation" {
             return;
         }
-        let timestamp = timestamp_ms(&row["timestamp"]);
+        let timestamp =
+            timestamp_ms(&row["timestamp"]).or_else(|| timestamp_ms(&row["created_at"]));
+        if let Some(usage) = transcript_context(row) {
+            self.context_used_tokens = usage;
+        }
+        if row["isSidechain"] == true || row["is_sidechain"] == true {
+            return;
+        }
+        if row["type"] == "PLANNER_RESPONSE" || row["source"] == "MODEL" {
+            if let Some(model) = nonempty(&row["model"]) {
+                self.model = Some(model.to_owned());
+            }
+            if let Some(used) = sum_usage_tokens(&row["usage"]) {
+                self.context_used_tokens = Some(used);
+            }
+            for tool in row["tool_calls"].as_array().into_iter().flatten() {
+                let Some(id) = first_text(tool, &["id", "call_id", "tool_call_id"]) else {
+                    continue;
+                };
+                self.ingest_tool_use(
+                    &serde_json::json!({
+                        "id": id, "name": tool["name"], "input": tool_arguments(&tool["arguments"]),
+                    }),
+                    timestamp,
+                );
+                if let Some(result) = tool.get("result") {
+                    self.ingest_antigravity_result(id, result, timestamp);
+                }
+            }
+        }
+        if matches!(row["type"].as_str(), Some("TOOL_RESULT" | "TOOL_RESPONSE"))
+            && let Some(id) = first_text(row, &["tool_call_id", "tool_use_id", "call_id"])
+        {
+            self.ingest_antigravity_result(id, row, timestamp);
+        }
         if let Some(time) = timestamp {
             self.started_at = Some(self.started_at.unwrap_or(time).min(time));
         }
@@ -1182,7 +1778,7 @@ impl ClaudeTranscript {
         let Some((id, name)) = nonempty(&item["id"]).zip(nonempty(&item["name"])) else {
             return;
         };
-        if self.completed_tools.contains(id) {
+        if self.completed_tools.contains(id) || self.active_tools.iter().any(|(key, _)| key == id) {
             return;
         }
         let input = &item["input"];
@@ -1191,9 +1787,15 @@ impl ClaudeTranscript {
             target: target_for_tool(name, input),
         };
         upsert(&mut self.active_tools, id.to_owned(), tool);
-        update_todos(&mut self.todos, name, input);
+        if matches!(
+            name,
+            "TodoWrite" | "TaskCreate" | "TaskUpdate" | "update_plan"
+        ) {
+            self.todos_observed = true;
+            update_todos(&mut self.todos, name, input);
+        }
 
-        if name == "Agent" {
+        if agent_tool(name) {
             let agent = new_agent(id, input, self.observed_agents.len() + 1, timestamp);
             upsert(&mut self.observed_agents, id.to_owned(), agent.clone());
             upsert(&mut self.agents, id.to_owned(), (agent, None));
@@ -1208,6 +1810,32 @@ impl ClaudeTranscript {
         }
     }
 
+    fn observe_missing_tool(&mut self, id: &str, name: &str) {
+        if !self.completed_tools.contains(id) && !self.active_tools.iter().any(|(key, _)| key == id)
+        {
+            self.active_tools.push((
+                id.to_owned(),
+                RunningTool {
+                    name: name.to_owned(),
+                    target: None,
+                },
+            ));
+        }
+    }
+
+    fn ingest_antigravity_result(&mut self, id: &str, result: &Value, timestamp: Option<f64>) {
+        let failed = result["is_error"] == true
+            || !result["error"].is_null()
+            || matches!(result["status"].as_str(), Some("failed" | "error"));
+        self.ingest_tool_result(
+            &serde_json::json!({
+                "tool_use_id": id, "is_error": failed, "content": result["error"],
+            }),
+            result,
+            timestamp,
+        );
+    }
+
     fn ingest_tool_result(&mut self, item: &Value, result: &Value, timestamp: Option<f64>) {
         let Some(id) = first_text(item, &["tool_use_id", "toolUseId"]) else {
             return;
@@ -1220,9 +1848,13 @@ impl ClaudeTranscript {
         } else {
             ToolStatus::Completed
         };
-        if tool.name == "Agent" {
-            if result["isAsync"] == true || result["status"] == "async_launched" {
-                if let Some(agent_id) = nonempty(&result["agentId"]) {
+        if agent_tool(&tool.name) {
+            if status != ToolStatus::Error
+                && (result["isAsync"] == true
+                    || result["status"] == "async_launched"
+                    || result["status"] == "running")
+            {
+                if let Some(agent_id) = first_text(result, &["agentId", "agent_id"]) {
                     upsert(&mut self.agent_ids, agent_id.to_owned(), id.to_owned());
                 }
             } else {
@@ -1312,7 +1944,7 @@ fn content_text(content: &Value) -> String {
         .join("\n")
 }
 
-fn timestamp_ms(value: &Value) -> Option<f64> {
+pub(crate) fn timestamp_ms(value: &Value) -> Option<f64> {
     if let Some(time) = value.as_f64() {
         return Some(time);
     }
@@ -1609,6 +2241,34 @@ mod tests {
     }
 
     #[test]
+    fn claude_context_usage_uses_last_main_reply_statusline_and_compaction() {
+        let mut hud = AgentHudProjection::new("restored", HudProvider::ClaudeCode, 1.);
+        let assistant = json!({"type":"assistant","message":{"usage":{
+            "input_tokens":150_000,"output_tokens":500,"cache_read_input_tokens":35_000,
+            "cache_creation_input_tokens":1_000
+        }}});
+        let sidechain =
+            json!({"type":"assistant","isSidechain":true,"message":{"usage":{"input_tokens":1}}});
+        hud.seed_transcript_context([&assistant, &sidechain]);
+        assert_eq!(hud.context_usage(), (Some(186_500), None));
+        hud.ingest_provider(
+            &json!({"contextWindow":{"contextWindowSize":512_000,"usedPercentage":25}}),
+            10.,
+        );
+        assert_eq!(hud.context_usage(), (Some(128_000), Some(512_000)));
+        hud.ingest_live_claude_row(Some(&json!({
+            "type":"system","subtype":"compact_boundary","timestamp":9
+        })));
+        assert_eq!(hud.context_usage(), (Some(128_000), Some(512_000)));
+        hud.ingest_live_claude_row(Some(&json!({
+            "type":"system","subtype":"compact_boundary","timestamp":11
+        })));
+        assert_eq!(hud.context_usage(), (None, Some(512_000)));
+        hud.ingest_live_claude_row(Some(&assistant));
+        assert_eq!(hud.context_usage(), (Some(186_500), Some(512_000)));
+    }
+
+    #[test]
     fn agent_hud_projection_codex_counts_hook_and_transcript_command_once() {
         let mut projection = AgentHudProjection::new("cdx", HudProvider::Codex, 1.);
         for event in ["PreToolUse", "PostToolUse", "PostToolUse", "PreToolUse"] {
@@ -1637,7 +2297,8 @@ mod tests {
                 "taskStatus":"running", "resumable":false, "permissionMode":"default",
                 "model":"sample", "effort":"medium", "contextPercent":13.0, "contextWindowSize":258_400.0,
                 "runningTools":[], "toolCounts":[{"name":"Bash","count":1}],
-                "lastTool":{"name":"Bash","target":"echo sample","status":"completed"}
+                "lastTool":{"name":"Bash","target":"echo sample","status":"completed"},
+                "mcpErrors":[], "todos":[], "agents":[], "subagents":[], "subagentCount":0
             })
         );
         assert_eq!(projection.context_tokens().unwrap().total, Some(34_175.));
