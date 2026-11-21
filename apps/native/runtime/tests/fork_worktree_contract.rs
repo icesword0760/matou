@@ -39,6 +39,8 @@ impl Fixture {
         let repo = root.path().join("主 仓库");
         fs::create_dir(&repo).unwrap();
         git(&repo, &["init", "--initial-branch=main"]);
+        // The product and the isolated fixture Git commands must use the same line endings.
+        git(&repo, &["config", "--local", "core.autocrlf", "false"]);
         fs::write(repo.join(".gitignore"), "*.secret\n").unwrap();
         fs::write(repo.join("tracked"), "initial\n").unwrap();
         git(&repo, &["add", ".gitignore", "tracked"]);
@@ -377,7 +379,8 @@ fn rollback_preserves_a_replacement_worktree_at_the_same_path() -> Result<()> {
             |_, _| Ok(()),
             |_, _| Ok(()),
             |binding, _| {
-                let path = binding.cwd.to_str().unwrap();
+                assert_eq!(binding.cwd, cwd.canonicalize()?);
+                let path = cwd.to_str().unwrap();
                 git(&fixture.repo, &["worktree", "remove", "--", path]);
                 git(
                     &fixture.repo,
