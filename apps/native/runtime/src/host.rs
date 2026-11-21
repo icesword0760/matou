@@ -788,6 +788,9 @@ pub enum Command {
     DownloadUpdate {
         request_id: u64,
     },
+    InstallUpdate {
+        request_id: u64,
+    },
     RunRetentionCleanup {
         request_id: u64,
     },
@@ -1359,7 +1362,6 @@ pub struct OfflineFixtures {
 }
 
 pub struct OfflineUpdate {
-    pub directory: tempfile::TempDir,
     pub manifest: update_download::Manifest,
     pub artifact: Vec<u8>,
 }
@@ -1370,6 +1372,10 @@ pub struct OfflineRetention {
 }
 
 impl update_download::UpdateFetcher for OfflineUpdate {
+    fn installer_extension(&self) -> &'static str {
+        if cfg!(windows) { "exe" } else { "dmg" }
+    }
+
     fn check(
         &self,
         _: &url::Url,
@@ -1412,6 +1418,7 @@ struct RuntimeWiring {
 
 struct LiveUpdate {
     platform: Platform,
+    open_installers: bool,
     worker: Option<mpsc::Sender<(&'static str, u64)>>,
 }
 
@@ -1428,28 +1435,36 @@ impl LiveUpdate {
             let (commands, requests) = mpsc::channel();
             let update = Arc::clone(update);
             let events = events.clone();
+            let data_root = data_root.to_owned();
             let files = update_download::LocalUpdateFiles::new(data_root.join("updates"));
             let platform = self.platform;
+            let open_installers = self.open_installers;
             thread::Builder::new()
                 .name("matou-update".into())
                 .spawn(move || {
                     let fetcher = update_http::HttpUpdateFetcher::new(platform);
                     for (kind, request_id) in requests {
-                        let result = match &fetcher {
-                            Ok(fetcher) => {
-                                if kind == "updateCheckResult" {
-                                    update.check(
-                                        fetcher,
-                                        || now() as u64,
-                                        |ms| thread::sleep(Duration::from_millis(ms)),
-                                        |_| {},
-                                    );
-                                } else {
-                                    update.download(fetcher, &files, || now() as u64, |_| {});
+                        let result = if kind == "updateInstallResult" {
+                            install_update(&update, &data_root, open_installers)
+                        } else {
+                            match &fetcher {
+                                Ok(fetcher) => {
+                                    if kind == "updateCheckResult" {
+                                        update.check(
+                                            fetcher,
+                                            || now() as u64,
+                                            |ms| thread::sleep(Duration::from_millis(ms)),
+                                            |_| {},
+                                        );
+                                    } else {
+                                        update.download(fetcher, &files, || now() as u64, |_| {});
+                                    }
+                                    Ok(json!(update.state()))
                                 }
-                                Ok(json!(update.state()))
+                                Err(error) => {
+                                    Err(anyhow!("Could not start update worker: {error}"))
+                                }
                             }
-                            Err(error) => Err(anyhow!("Could not start update worker: {error}")),
                         };
                         if events
                             .send_blocking(wiring_result(kind, request_id, result))
@@ -1467,6 +1482,20 @@ impl LiveUpdate {
             .send((kind, request_id))
             .context("Update worker is unavailable")
     }
+}
+
+fn install_update(
+    update: &update_download::UpdateManager,
+    data_root: &Path,
+    open_installers: bool,
+) -> Result<Value> {
+    update.open_downloaded_installer(data_root, |path| {
+        if open_installers {
+            update_download::open_installer(path)?;
+        }
+        Ok(())
+    })?;
+    Ok(json!({"ok": true}))
 }
 
 struct LiveEgress {
@@ -1726,7 +1755,7 @@ fn with_graph_projection(reply: Event, mut projection: Value) -> Event {
 }
 
 impl RuntimeWiring {
-    fn new(fixtures: OfflineFixtures, shell_home: &Path) -> Result<Self> {
+    fn new(fixtures: OfflineFixtures, shell_home: &Path, live_services: bool) -> Result<Self> {
         let dsh = fixtures
             .dsh_session_root
             .clone()
@@ -1769,6 +1798,13 @@ impl RuntimeWiring {
                 });
             let live = LiveUpdate {
                 platform,
+                // The hidden desktop probes launch the standalone Runtime.
+                open_installers: live_services
+                    && !cfg!(test)
+                    && antigravity_launch::env_value(&environment, "MATOU_DAG_WINDOW_PROBE")
+                        .is_none()
+                    && antigravity_launch::env_value(&environment, "MATOU_WINDOW_REGISTRY_PROBE")
+                        .is_none(),
                 worker: None,
             };
             (settings, Some(live))
@@ -1816,6 +1852,7 @@ impl RuntimeWiring {
         let (kind, request_id) = match command {
             Command::CheckForUpdate { request_id } => ("updateCheckResult", *request_id),
             Command::DownloadUpdate { request_id } => ("updateDownloadResult", *request_id),
+            Command::InstallUpdate { request_id } => ("updateInstallResult", *request_id),
             _ => return false,
         };
         if let Err(error) = live.queue(kind, request_id, &self.update, data_root, events) {
@@ -2157,15 +2194,18 @@ impl RuntimeWiring {
                         .update
                         .as_ref()
                         .context("Offline update fixture unavailable")?;
-                    let files = update_download::LocalUpdateFiles::new(
-                        fixture.directory.path().join("downloads"),
-                    );
+                    let files = update_download::LocalUpdateFiles::new(data_root.join("updates"));
                     self.update
                         .download(fixture, &files, || now() as u64, |_| {});
                     Ok(json!(self.update.state()))
                 })();
                 ("updateDownloadResult", *request_id, result)
             }
+            Command::InstallUpdate { request_id } => (
+                "updateInstallResult",
+                *request_id,
+                install_update(&self.update, data_root, false),
+            ),
             Command::RunRetentionCleanup { request_id } => {
                 ("retentionCleanupResult", *request_id, self.cleanup())
             }
@@ -2395,7 +2435,7 @@ impl RuntimeHost {
     fn start_inner(
         options: LaunchOptions,
         fixtures: OfflineFixtures,
-        live_egress: bool,
+        live_services: bool,
     ) -> Result<Self> {
         LazyLock::force(&PERMISSION_STARTUP_WINDOW);
         let (commands, incoming) = mpsc::channel();
@@ -2411,7 +2451,7 @@ impl RuntimeHost {
                     &send,
                     &domain_shutdown,
                     fixtures,
-                    live_egress,
+                    live_services,
                 );
                 if let Err(error) = &result {
                     let _ = send.send_blocking(Event::Diagnostic(format!("{error:#}")));
@@ -2981,6 +3021,7 @@ pub fn storage_command_rejected(command: Command, code: &str, message: &str) -> 
         }
         Command::CheckForUpdate { request_id } => Some(("updateCheckResult", *request_id)),
         Command::DownloadUpdate { request_id } => Some(("updateDownloadResult", *request_id)),
+        Command::InstallUpdate { request_id } => Some(("updateInstallResult", *request_id)),
         Command::RunRetentionCleanup { request_id } => {
             Some(("retentionCleanupResult", *request_id))
         }
@@ -3217,9 +3258,9 @@ fn run(
     send: &async_channel::Sender<Event>,
     shutdown_requested: &OnceLock<bool>,
     fixtures: OfflineFixtures,
-    live_egress: bool,
+    live_services: bool,
 ) -> Result<()> {
-    let mut wiring = RuntimeWiring::new(fixtures, &options.shell_home)?;
+    let mut wiring = RuntimeWiring::new(fixtures, &options.shell_home, live_services)?;
     let generation = id();
     let bootstrap = match startup::open(&options.data_root, &generation) {
         Ok(value) => value,
@@ -3280,7 +3321,7 @@ fn run(
         &mut recovery_request,
         &generation,
         &mut wiring,
-        live_egress,
+        live_services,
     );
     if let (Some(request_id), Err(error)) = (recovery_request, &result) {
         recovery_result(
@@ -6165,6 +6206,7 @@ fn run_writable(
                 | Command::GetUpdateStatus { .. }
                 | Command::CheckForUpdate { .. }
                 | Command::DownloadUpdate { .. }
+                | Command::InstallUpdate { .. }
                 | Command::RunRetentionCleanup { .. }
                 | Command::GetAccountSummary { .. }
                 | Command::GetClaudeAccounts { .. }
