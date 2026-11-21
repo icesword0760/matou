@@ -38,6 +38,12 @@ use {
 
 use matou_native_core::pty::ShellLaunch;
 
+#[cfg(unix)]
+#[path = "host_control/terminal.rs"]
+mod terminal;
+#[cfg(unix)]
+use terminal::{ReadKind, Reply};
+
 const CONTROL_ENV: [&str; 8] = [
     "MATOU_CONTROL_ENDPOINT",
     "MATOU_CONTROL_TOKEN",
@@ -132,12 +138,15 @@ const IO_POLL: Duration = Duration::from_millis(20);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[cfg(unix)]
-const MANAGED_SCOPES: &[&str] = &["host.identify", "host.list"];
-#[cfg(unix)]
-const OTHER_METHODS: &[&str] = &[
+const MANAGED_SCOPES: &[&str] = &[
+    "host.identify",
+    "host.list",
     "terminal.read-current",
     "terminal.read-history",
     "terminal.read-commands",
+];
+#[cfg(unix)]
+const OTHER_METHODS: &[&str] = &[
     "terminal.send-text",
     "terminal.send-key",
     "task.status.write",
@@ -379,27 +388,13 @@ impl Scope {
 enum Action {
     Identify,
     List(Scope),
-    // Exercise selection through the same transport and owner without exposing terminal data.
-    #[cfg(test)]
-    Resolve(Selector),
+    Terminal(Selector, ReadKind),
 }
 
 #[cfg(unix)]
 impl Action {
     fn parse(method: &str, params: &Value) -> WireResult<Self> {
         if !MANAGED_SCOPES.contains(&method) {
-            #[cfg(test)]
-            if method == "terminal.read-current" {
-                let params = object(params)?;
-                if params
-                    .keys()
-                    .any(|key| !matches!(key.as_str(), "target" | "maxLines" | "maxBytes"))
-                {
-                    return Err(Fault::new(INVALID, "params contains an unsupported field"));
-                }
-                return Selector::parse(params.get("target").unwrap_or(&Value::Null))
-                    .map(Self::Resolve);
-            }
             return Err(unsupported_method());
         }
         let params = object(params)?;
@@ -413,7 +408,10 @@ impl Action {
                     _ => Err(Fault::new(INVALID, "scope is unsupported")),
                 },
             },
-            _ => unreachable!("enabled control method"),
+            _ => Ok(Self::Terminal(
+                Selector::parse(params.get("target").unwrap_or(&Value::Null))?,
+                ReadKind::parse(method, params)?,
+            )),
         }
     }
 }
@@ -425,7 +423,7 @@ struct Pending {
     id: String,
     deadline: i64,
     action: Action,
-    reply: SyncSender<WireResult<Vec<u8>>>,
+    reply: SyncSender<WireResult<Reply>>,
 }
 
 #[cfg(unix)]
@@ -469,6 +467,7 @@ pub(crate) struct ControlServer {
     pending: Option<Receiver<Pending>>,
     state: Arc<ServerState>,
     reader: Connection,
+    root: PathBuf,
     #[cfg(test)]
     projection_aliases: Option<fn(&mut [Target])>,
     #[cfg(test)]
@@ -518,6 +517,7 @@ impl ControlServer {
             pending: Some(pending),
             state,
             reader,
+            root: root.to_owned(),
             #[cfg(test)]
             projection_aliases: None,
             #[cfg(test)]
@@ -534,18 +534,18 @@ impl ControlServer {
         }
     }
 
-    pub(crate) fn poll(&self) {
+    pub(crate) fn poll(&self, owner: &crate::owner::ShellOwner) {
         let Some(pending) = &self.pending else { return };
         for _ in 0..OWNER_BATCH {
             let Ok(request) = pending.try_recv() else {
                 break;
             };
-            let result = self.dispatch(&request);
+            let result = self.dispatch(&request, owner);
             let _ = request.reply.send(result);
         }
     }
 
-    fn dispatch(&self, request: &Pending) -> WireResult<Vec<u8>> {
+    fn dispatch(&self, request: &Pending, owner: &crate::owner::ShellOwner) -> WireResult<Reply> {
         let caller = self
             .state
             .authorize(&request.digest, &request.method, request.deadline)?;
@@ -568,7 +568,7 @@ impl ControlServer {
                     target: &'a Target,
                 }
                 let target = Selector::SelfTarget.resolve(&targets, &caller)?;
-                serialize_ok(&request.id, Identified { caller, target })
+                serialize_ok(&request.id, Identified { caller, target }).map(Reply::Ready)
             }
             Action::List(scope) => {
                 #[derive(Serialize)]
@@ -587,12 +587,21 @@ impl ControlServer {
                         targets: visible,
                     },
                 )
+                .map(Reply::Ready)
             }
-            #[cfg(test)]
-            Action::Resolve(selector) => {
+            Action::Terminal(selector, kind) => {
                 let target = selector.resolve(&targets, &caller)?;
+                let kind = kind.validate()?;
+                #[cfg(test)]
                 self.resolved_reads.set(self.resolved_reads.get() + 1);
-                serialize_ok(&request.id, json!({ "sessionId": target.session_id }))
+                terminal::prepare(
+                    &request.id,
+                    &self.root,
+                    &self.reader,
+                    owner,
+                    &target.session_id,
+                    kind,
+                )
             }
         };
         if result.is_ok() && (self.state.clock)() > request.deadline {
@@ -860,7 +869,7 @@ fn enqueue(
             return Err(deadline_elapsed());
         }
         match response.recv_timeout(IO_POLL) {
-            Ok(result) => return result,
+            Ok(result) => return result?.complete(request, state),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
@@ -1223,10 +1232,6 @@ fn revision(targets: &[&Target]) -> String {
 }
 
 #[cfg(unix)]
-#[allow(
-    dead_code,
-    reason = "non-self selectors are exercised by the isolated target read only"
-)]
 enum Selector {
     SelfTarget,
     Session(String),
@@ -1247,10 +1252,6 @@ enum Selector {
 
 #[cfg(unix)]
 impl Selector {
-    #[allow(
-        dead_code,
-        reason = "the selector ingress is exercised by the isolated target read only"
-    )]
     fn parse(target: &Value) -> WireResult<Self> {
         let target = object(target)?;
         let kind = target.get("kind").and_then(Value::as_str);
@@ -1462,7 +1463,7 @@ impl ControlServer {
         RunControl {}
     }
 
-    pub(crate) fn poll(&self) {}
+    pub(crate) fn poll(&self, _: &crate::owner::ShellOwner) {}
 }
 
 #[cfg(all(unix, test))]

@@ -317,7 +317,7 @@ fn push_recent(lines: &mut VecDeque<HistoryLine>, line: HistoryLine, limit: usiz
     false
 }
 
-fn segment_groups(directory: &Path) -> io::Result<BTreeMap<u32, Vec<PathBuf>>> {
+pub(crate) fn segment_groups(directory: &Path) -> io::Result<BTreeMap<u32, Vec<PathBuf>>> {
     let mut groups = BTreeMap::<u32, Vec<(u8, PathBuf)>>::new();
     for entry in fs::read_dir(directory)? {
         let entry = entry?;
@@ -356,7 +356,9 @@ fn segment_groups(directory: &Path) -> io::Result<BTreeMap<u32, Vec<PathBuf>>> {
 
 // Validate the complete segment before emitting any lines so a corrupt segment
 // cannot leak a valid-looking prefix into the result.
-fn read_first_valid(paths: &[PathBuf]) -> std::result::Result<Vec<Record>, Option<anyhow::Error>> {
+pub(crate) fn read_first_valid(
+    paths: &[PathBuf],
+) -> std::result::Result<Vec<Record>, Option<anyhow::Error>> {
     let mut last_error = None;
     for path in paths {
         match read_segment(path).and_then(|reader| reader.collect::<Result<Vec<_>>>()) {
@@ -371,7 +373,7 @@ fn read_first_valid(paths: &[PathBuf]) -> std::result::Result<Vec<Record>, Optio
     Err(last_error)
 }
 
-fn decode_output(decoder: &mut Decoder, data: &[u8], text: &mut String, last: bool) {
+pub(crate) fn decode_output(decoder: &mut Decoder, data: &[u8], text: &mut String, last: bool) {
     let capacity = decoder
         .max_utf8_buffer_length(data.len())
         .expect("journal output frame is bounded");

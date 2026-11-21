@@ -1,4 +1,4 @@
-//! The native discovery client. It only talks to the local control endpoint.
+//! The native read-only client for the local control endpoint.
 
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -99,7 +99,7 @@ pub(crate) fn run_with(
         .take_while(|arg| arg.as_str() != "--")
         .any(|arg| arg == "--json");
     let (endpoint, token) = identity();
-    let result = discover(command, &args[1..], endpoint, token);
+    let result = request(command, &args[1..], endpoint, token);
     match result {
         Ok(result) => {
             let output = if json_output {
@@ -107,10 +107,14 @@ pub(crate) fn run_with(
                     .as_ref()
                     .map(pretty_json)
                     .unwrap_or_else(|| "undefined".into())
-            } else if command == "identify" {
-                format_identity(result.as_ref().unwrap_or(&Value::Null))
             } else {
-                format_list(result.as_ref().unwrap_or(&Value::Null))
+                let value = result.as_ref().unwrap_or(&Value::Null);
+                match command.as_str() {
+                    "identify" => format_identity(value),
+                    "list" => format_list(value),
+                    "commands" => format_commands(value),
+                    _ => value["text"].as_str().unwrap_or_default().into(),
+                }
             };
             if writeln!(stdout, "{output}").is_ok() {
                 0
@@ -125,7 +129,7 @@ pub(crate) fn run_with(
     }
 }
 
-fn discover(
+fn request(
     command: &str,
     args: &[String],
     endpoint: Option<OsString>,
@@ -137,6 +141,12 @@ fn discover(
     ) else {
         return Err(CliError::new("CAPABILITY_DENIED", MISSING_IDENTITY));
     };
+    if matches!(command, "read" | "history" | "commands") {
+        let (target, method, mut params) = terminal_request(command, args)?;
+        let client = Client::new(Path::new(&endpoint), &token)?;
+        params["target"] = client.terminal_selector(target)?;
+        return client.request(method, params);
+    }
     let (method, params) = discovery_request(command, args)?;
     Client::new(Path::new(&endpoint), &token)?.request(method, params)
 }
@@ -185,6 +195,98 @@ fn discovery_request(command: &str, args: &[String]) -> Result<(&'static str, Va
             json!({ "scope": if all { "all" } else { "current-level" } }),
         ))
     }
+}
+
+fn terminal_request<'a>(
+    command: &str,
+    args: &'a [String],
+) -> Result<(&'a str, &'static str, Value), CliError> {
+    let Some(target) = args
+        .first()
+        .filter(|arg| !arg.is_empty() && !arg.starts_with("--"))
+    else {
+        return Err(CliError::new(
+            "INVALID_REQUEST",
+            format!("{command} 需要目标"),
+        ));
+    };
+    let (method, mut params) = match command {
+        "read" => (
+            "terminal.read-current",
+            json!({"maxLines": 200, "maxBytes": 65_536}),
+        ),
+        "history" => (
+            "terminal.read-history",
+            json!({"maxLines": 1000, "maxBytes": 65_536}),
+        ),
+        "commands" => ("terminal.read-commands", json!({"limit": 100})),
+        _ => unreachable!("terminal read command"),
+    };
+    let mut args = args[1..].iter();
+    while let Some(arg) = args.next() {
+        let (field, max) = match arg.as_str() {
+            "--json" => continue,
+            "--lines" if command != "commands" => ("maxLines", 5000),
+            "--bytes" if command != "commands" => ("maxBytes", 1024 * 1024),
+            "--limit" if command == "commands" => ("limit", 1000),
+            "--" => {
+                if let Some(extra) = args.next() {
+                    return Err(CliError::new(
+                        "INVALID_REQUEST",
+                        format!("-- 之后存在多余参数：{extra}"),
+                    ));
+                }
+                break;
+            }
+            flag if flag.starts_with("--") => {
+                return Err(CliError::new(
+                    "INVALID_REQUEST",
+                    format!("未知选项：{flag}"),
+                ));
+            }
+            extra => {
+                return Err(CliError::new(
+                    "INVALID_REQUEST",
+                    format!("多余参数：{extra}"),
+                ));
+            }
+        };
+        let value = args
+            .next()
+            .and_then(|value| value.trim().parse::<f64>().ok())
+            .filter(|value| (1.0..=9_007_199_254_740_991.0).contains(value) && value.fract() == 0.0)
+            .ok_or_else(|| CliError::new("INVALID_REQUEST", format!("{arg} 需要正整数")))?;
+        if value > f64::from(max) {
+            return Err(CliError::new(
+                "INVALID_REQUEST",
+                format!("{arg} 需要 1-{max} 的整数"),
+            ));
+        }
+        params[field] = json!(value as u64);
+    }
+    Ok((target, method, params))
+}
+
+fn format_commands(value: &Value) -> String {
+    let Some(items) = value.as_array() else {
+        return String::new();
+    };
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let text = item.as_str().or_else(|| {
+                item.get("command")
+                    .filter(|value| !value.is_null())
+                    .or_else(|| item.get("text").filter(|value| !value.is_null()))
+                    .or_else(|| item.get("input"))
+                    .and_then(Value::as_str)
+            });
+            let display = text.map_or_else(|| item.to_string(), str::to_owned);
+            format!("{}. {display}", index + 1)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[derive(Debug, Serialize)]
