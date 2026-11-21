@@ -1067,6 +1067,11 @@ impl Workspace {
         let kind = node["currentMode"].as_str().unwrap_or_default();
         let archived = !node["archivedAt"].is_null();
         let can_mutate = self.card_action_available(id);
+        let retry_fork = kind == "antigravity"
+            && !archived
+            && !self.wiring.is_detached(id)
+            && fork_failure_copy(node).is_some()
+            && self.fork_repair_blocked_reason(id, node).is_none();
         let fork = self
             .fork_access(id, ForkPlacement::Peer)
             .filter(|access| access.blocked.is_none())
@@ -1113,10 +1118,28 @@ impl Workspace {
                     || node["environment"]["state"]
                         .as_str()
                         .is_some_and(|state| state != "ready"),
-                recovering: self.recovery_blocked(id),
+                recovering: !retry_fork && self.recovery_blocked(id),
             },
             self.locale,
         );
+        if retry_fork {
+            let pending = matches!(self.fork_retries.get(id), Some(ForkRetry::Pending));
+            let label = if pending {
+                self.locale.text("正在重试分叉…", "Retrying fork…")
+            } else {
+                self.locale.text("重试创建分支", "Retry fork")
+            };
+            menu.items.insert(
+                0,
+                CardMenuItem {
+                    action: CardMenuAction::RetryFork,
+                    label: label.into(),
+                    disabled_reason: pending.then(|| label.into()),
+                    show_readiness_hint: false,
+                    danger: false,
+                },
+            );
+        }
         if kind != "codex"
             && let Some(item) = menu
                 .items
@@ -1256,6 +1279,7 @@ impl Workspace {
                         window,
                         cx,
                     ),
+                    CardMenuAction::RetryFork => self.retry_fork(id, cx),
                     CardMenuAction::SplitHorizontal => {
                         self.split_pane(id, SplitDirection::Horizontal, cx)
                     }
