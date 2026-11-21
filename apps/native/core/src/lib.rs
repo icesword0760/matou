@@ -5,6 +5,7 @@ pub mod durability;
 pub mod geometry;
 pub mod hierarchy;
 pub mod journal;
+pub mod link_routing;
 pub mod ownership;
 pub mod provider_config;
 pub mod provider_launch;
