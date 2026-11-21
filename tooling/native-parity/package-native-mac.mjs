@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process'
 import { constants } from 'node:fs'
 import {
-  access, chmod, copyFile, cp, lstat, mkdir, mkdtemp, open, readFile, realpath, rename, rm, writeFile
+  access, chmod, copyFile, cp, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, writeFile
 } from 'node:fs/promises'
 import { basename, dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -10,6 +10,9 @@ import { isDeepStrictEqual, parseArgs, promisify } from 'node:util'
 import { verifyInstallSource } from '../install-macos-app.mjs'
 
 const desktopProject = fileURLToPath(new URL('../../apps/desktop/', import.meta.url))
+const accountEngine = 'matou-claude-accounts'
+const accountEnginePath = join('claude-accounts', accountEngine)
+const accountBuild = fileURLToPath(new URL('../../tooling/claude-accounts/build/', import.meta.url))
 const claudePlugin = 'control-assets/providers/claude-plugin'
 const runtimeProject = fileURLToPath(new URL('../../apps/runtime/', import.meta.url))
 const desktopName = 'matou-native-desktop'
@@ -23,7 +26,7 @@ const exec = promisify(execFile)
 const usage = `Usage:
   node tooling/native-parity/package-native-mac.mjs --desktop-bin <file> --runtime-bin <file>
       --out-dir <directory> --version <X.Y.Z> [--app-name <name>] [--bundle-id <id>]
-      [--entitlements <plist>] [--unsigned]
+      [--entitlements <plist>] [--claude-accounts-engine <directory>] [--unsigned]
   node tooling/native-parity/package-native-mac.mjs --verify <path.app>
       [--app-name <name>] [--bundle-id <id>] [--require-release-signature]
 
@@ -154,7 +157,50 @@ async function signatureSummary(path) {
   }
 }
 
-async function requireReleaseSignature(bundle, runtime, signatures, config, bundleId) {
+async function optionalPath(path) {
+  return lstat(path).catch(error => {
+    if (error.code === 'ENOENT') return null
+    throw error
+  })
+}
+
+async function accountEngineSource(explicit) {
+  if (explicit !== undefined) return realpath(explicit)
+  const built = join(accountBuild, accountEngine)
+  if (!await optionalPath(join(built, accountEngine))) return null
+  // PyInstaller's work directory contains an executable but keeps its
+  // dynamic libraries in the collected distribution.
+  if (await optionalPath(join(built, 'COLLECT-00.toc')) &&
+      !await optionalPath(join(built, '_internal'))) {
+    const distribution = join(desktopProject, 'package-resources', accountEnginePath)
+    return await optionalPath(join(distribution, accountEngine)) ? distribution : null
+  }
+  return built
+}
+
+async function verifyEngineCode(directory, requirement) {
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name)
+    if (entry.isDirectory()) {
+      await verifyEngineCode(path, requirement)
+    } else if (entry.isFile()) {
+      const file = await open(path, 'r')
+      const magic = Buffer.alloc(4)
+      try {
+        const { bytesRead } = await file.read(magic)
+        if (bytesRead !== 4) continue
+      } finally {
+        await file.close()
+      }
+      if ([0xfeedface, 0xcefaedfe, 0xfeedfacf, 0xcffaedfe, 0xcafebabe, 0xcafebabf]
+        .includes(magic.readUInt32BE())) {
+        await run('/usr/bin/codesign', ['--verify', '--strict', '-R', `=${requirement}`, path])
+      }
+    }
+  }
+}
+
+async function requireReleaseSignature(bundle, runtime, engine, signatures, config, bundleId) {
   for (const [label, signature] of Object.entries(signatures)) {
     if (signature.status !== 'developer-id' || signature.teamIdentifier !== teamId ||
         signature.authorities[0] !== `Developer ID Application: ${config.build.mac.identity}`) {
@@ -182,6 +228,7 @@ async function requireReleaseSignature(bundle, runtime, signatures, config, bund
     await run('/usr/bin/codesign', ['--verify', '-R', `=${requirement}`, bundle])
   }
   await run('/usr/bin/codesign', ['--verify', '--strict', '-R', `=${runtimeRequirement}`, runtime])
+  if (engine) await verifyEngineCode(dirname(engine), runtimeRequirement)
 }
 
 function validateVersion(version) {
@@ -279,7 +326,16 @@ async function verifyLayout(bundle, config, bundleId, workflow, requestedAppName
   const [desktopArchitectures, runtimeArchitectures] = await Promise.all([
     machoArchitectures(desktop), machoArchitectures(runtime)
   ])
-  return { info, runtime, architectures: { desktop: desktopArchitectures, runtime: runtimeArchitectures } }
+  const engineDirectory = join(resources, accountEnginePath)
+  let engine
+  if (await optionalPath(join(resources, 'claude-accounts'))) {
+    await requirePath(join(resources, 'claude-accounts'), 'account resources directory', 'directory')
+    await requirePath(engineDirectory, 'account engine directory', 'directory')
+    engine = join(engineDirectory, accountEngine)
+    await requireExecutable(engine, 'account engine', true)
+    await machoArchitectures(engine)
+  }
+  return { info, runtime, engine, architectures: { desktop: desktopArchitectures, runtime: runtimeArchitectures } }
 }
 
 async function canonicalOutput(path) {
@@ -329,6 +385,11 @@ async function assemble(options, config, bundleId, workflow) {
   const runtime = await sourceFile(options['runtime-bin'], 'runtime binary')
   await requireExecutable(desktop, 'desktop binary')
   await requireExecutable(runtime, 'runtime binary')
+  const engineSource = await accountEngineSource(options['claude-accounts-engine'])
+  if (engineSource) {
+    await requirePath(engineSource, 'account engine directory', 'directory')
+    await requireExecutable(join(engineSource, accountEngine), 'account engine')
+  }
   const icon = await sourceFile(join(desktopProject, 'build', iconName), 'icon resource')
   const entitlements = await sourceFile(
     options.entitlements ?? join(desktopProject, config.build.mac.entitlements), 'entitlements resource'
@@ -354,6 +415,9 @@ async function assemble(options, config, bundleId, workflow) {
     }
     await copyFile(icon, join(resources, iconName))
     await cp(join(runtimeProject, claudePlugin), join(resources, claudePlugin), { recursive: true })
+    if (engineSource) {
+      await cp(engineSource, join(resources, accountEnginePath), { recursive: true, verbatimSymlinks: true })
+    }
     await copyFile(entitlements, join(resources, entitlementsName))
     const bundledWorkflow = workflowPath(resources, workflow, appName)
     for (const [index, file] of workflowFiles.entries()) {
@@ -386,7 +450,7 @@ async function assemble(options, config, bundleId, workflow) {
 async function main() {
   const input = ['desktop-bin', 'runtime-bin', 'out-dir', 'version']
   const { values } = parseArgs({ options: {
-    ...Object.fromEntries([...input, 'app-name', 'bundle-id', 'entitlements', 'verify'].map(name => [name, { type: 'string' }])),
+    ...Object.fromEntries([...input, 'app-name', 'bundle-id', 'entitlements', 'claude-accounts-engine', 'verify'].map(name => [name, { type: 'string' }])),
     unsigned: { type: 'boolean' },
     'require-release-signature': { type: 'boolean' },
     help: { type: 'boolean', short: 'h' }
@@ -394,7 +458,7 @@ async function main() {
   if (values.help) return console.log(usage)
   if (process.platform !== 'darwin') throw new Error('This toolkit requires macOS')
   const verifying = values.verify !== undefined
-  if (verifying && (!values.verify || [...input, 'entitlements', 'unsigned'].some(name => name in values))) {
+  if (verifying && (!values.verify || [...input, 'entitlements', 'claude-accounts-engine', 'unsigned'].some(name => name in values))) {
     throw new Error('--verify requires a .app path and accepts only --app-name, --bundle-id and --require-release-signature')
   }
   if (!verifying && values['require-release-signature']) {
@@ -419,10 +483,11 @@ async function main() {
 
   const path = resolve(values.verify)
   if (!path.endsWith('.app')) throw new Error('--verify requires a .app directory')
-  const { info, runtime, architectures } = await verifyLayout(path, config, bundleId, workflow, values['app-name'])
+  const { info, runtime, engine, architectures } = await verifyLayout(path, config, bundleId, workflow, values['app-name'])
   const [appSignature, runtimeSignature] = await Promise.all([signatureSummary(path), signatureSummary(runtime)])
   const signatures = { app: appSignature, runtime: runtimeSignature }
-  if (values['require-release-signature']) await requireReleaseSignature(path, runtime, signatures, config, bundleId)
+  if (engine) signatures.claudeAccounts = await signatureSummary(engine)
+  if (values['require-release-signature']) await requireReleaseSignature(path, runtime, engine, signatures, config, bundleId)
   console.log(JSON.stringify({ path, info, architectures, signatures }, null, 2))
 }
 

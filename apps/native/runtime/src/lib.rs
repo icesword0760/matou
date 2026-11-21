@@ -4,6 +4,7 @@ pub mod antigravity_catalog;
 pub mod antigravity_events;
 pub mod antigravity_launch;
 pub mod browser_integration;
+pub mod claude_accounts;
 mod claude_model_catalog;
 mod claude_request_gateway;
 mod codex_catalog;

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
 import {
-  chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile
+  chmod, copyFile, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile
 } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -101,6 +101,20 @@ test('assembles and verifies an app with frozen metadata and universal Mach-O pa
   assert.deepEqual(verified.architectures.runtime.toSorted(), ['arm64', 'x86_64'])
   assert.equal(verified.signatures.app.status, 'unsigned')
   assert.equal(verified.signatures.runtime.status, 'unsigned')
+
+  const explicit = join(root, 'explicit engine')
+  const engineName = 'matou-claude-accounts'
+  await mkdir(join(explicit, '_internal'), { recursive: true })
+  await copyFile(thin, join(explicit, engineName))
+  await writeFile(join(explicit, '_internal', 'fixture.txt'), 'engine fixture')
+  const explicitBundle = success(assemble(join(root, 'bundle with engine'), {
+    extra: ['--claude-accounts-engine', explicit]
+  })).path
+  const packaged = join(explicitBundle, 'Contents/Resources/claude-accounts', engineName)
+  assert.equal(await readFile(join(packaged, '_internal/fixture.txt'), 'utf8'), 'engine fixture')
+  assert.equal(success(cli(['--verify', explicitBundle])).signatures.claudeAccounts.status, 'unsigned')
+  await rm(join(packaged, engineName))
+  failure(cli(['--verify', explicitBundle]), /Missing account engine/)
 })
 
 test('copies custom entitlements and audits the requested bundle ID', { skip }, async () => {

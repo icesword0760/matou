@@ -19,7 +19,7 @@ def run(binary, log_path, root):
         'HOME': str(home), 'ZDOTDIR': str(home), 'XDG_CONFIG_HOME': str(home),
         'TMPDIR': str(scratch), 'PATH': '/usr/bin:/bin:/usr/sbin:/sbin',
         'GIT_CONFIG_NOSYSTEM': '1', 'MATOU_LOCALE': 'zh-CN',
-        'MATOU_DAG_WINDOW_PROBE': 'hidden',
+        'MATOU_DAG_WINDOW_PROBE': 'hidden', 'MATOU_DISABLE_LIVE_EGRESS': '1',
         'HTTP_PROXY': 'http://127.0.0.1:9', 'HTTPS_PROXY': 'http://127.0.0.1:9',
         'ALL_PROXY': 'http://127.0.0.1:9',
     }

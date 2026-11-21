@@ -1421,3 +1421,187 @@ exec /bin/cat
     assert_eq!(hud["teammates"][0]["workStatus"], "idle");
     host.shutdown()
 }
+
+#[test]
+fn claude_roster_uses_only_the_injected_engine_and_claude_preferences() -> Result<()> {
+    use matou_native_runtime::claude_accounts::ClaudeAccountCommand as Action;
+
+    let root = tempfile::tempdir()?;
+    let options = options(root.path())?;
+    let accounts = options.data_root.join("claude-accounts");
+    fs::create_dir_all(&accounts)?;
+    fs::write(
+        options.data_root.join("provider-config.json"),
+        json!({
+            "version": 1, "revision": 2,
+            "activeProviderIds": {"claude-code":"codex-subscription", "codex":"openai-official"},
+            "providers":{"claude-code":[
+                {"id":"codex-subscription", "kind":"subscription",
+                    "subscription":{"provider":"codex", "account":{"status":"ready","plan":"Pro 500"}, "modelMetadata":[]}},
+                {"id":"google-subscription", "kind":"subscription",
+                    "subscription":{"provider":"antigravity","account":{"status":"ready","plan":"Google AI Ultra 5x"}, "modelMetadata":[]}}
+            ], "codex":[]}
+        }).to_string(),
+    )?;
+    let preferences = accounts.join("preferences.json");
+    fs::write(
+        &preferences,
+        json!({
+            "names":{"first":"001"}, "rememberScope":false, "renewedIds":[],
+            "usage":{"first":{"checkedAt":1800000000000_u64,"stale":true,
+                "fiveHour":{"used":91,"resetsAt":"2099-01-01T00:00:00Z"}}}
+        })
+        .to_string(),
+    )?;
+    let engine = root.path().join("fixture-engine");
+    executable(
+        &engine,
+        r#"#!/usr/bin/python3
+import json, pathlib, sys
+
+root = pathlib.Path(sys.argv[1])
+assert root.name == "claude-accounts"
+assert (root / "preferences.json").is_file()
+request = json.loads(sys.stdin.readline())
+action = request["action"]
+current = root / "fixture-current"
+first = dict(id="first", name="alias", email="aa•••@example.invalid", needsLogin=False)
+second = dict(id="second", name="gmail", email="gm•••@example.invalid", needsLogin=False)
+with (root / "fixture-calls").open("a") as calls:
+    print(action, file=calls)
+value = {}
+if action == "login":
+    code = json.loads(sys.stdin.readline())
+    assert code == dict(action="submit-login-code", nonce=request["nonce"], code="fixture-code#fixture-state")
+    value = {"draft": second}
+elif action in ("snapshot", "switch", "reauth", "remove", "save-draft"):
+    if action in ("switch", "reauth"):
+        current.write_text(request["id"])
+    accounts = [first, second]
+    if action == "remove":
+        accounts = [account for account in accounts if account["id"] != request["id"]]
+    value = dict(accounts=accounts, currentId=current.read_text() if current.exists() else "first")
+elif action not in ("cleanup-logins", "cancel-login"):
+    raise AssertionError(action)
+print(json.dumps(dict(ok=True, value=value)))
+"#,
+    )?;
+    let mut host = RuntimeHost::start_with_offline_fixtures(
+        options,
+        OfflineFixtures {
+            claude_accounts_engine: Some(engine),
+            ..Default::default()
+        },
+    )?;
+    ready(&host)?;
+    let first = result(
+        &host,
+        Command::GetClaudeAccounts { request_id: 1 },
+        1,
+        "claudeAccountsResult",
+    )?;
+    let serialized = first.to_string();
+    for unwanted in ["Pro 500", "Google AI Ultra 5x", "codex", "antigravity"] {
+        assert!(!serialized.contains(unwanted));
+    }
+    assert_eq!(first["currentId"], "first");
+    assert_eq!(first["accounts"][0]["name"], "001");
+    assert_eq!(
+        first["accounts"][0]["usage"]["fiveHour"]["used"].as_f64(),
+        Some(91.0)
+    );
+    let command = |request_id, action| Command::ClaudeAccountCommand { request_id, action };
+    let request = |id, action| result(&host, command(id, action), id, "claudeAccountsResult");
+    let refreshed = request(2, Action::RefreshUsage)?;
+    assert_eq!(refreshed["accounts"], first["accounts"]);
+    let switched = request(
+        3,
+        Action::Switch {
+            id: "second".into(),
+            remember_scope: true,
+        },
+    )?;
+    assert_eq!(switched["currentId"], "second");
+    assert_eq!(switched["rememberScope"], true);
+    let renamed = request(
+        4,
+        Action::Rename {
+            id: "second".into(),
+            name: "Work".into(),
+        },
+    )?;
+    assert_eq!(renamed["accounts"][1]["name"], "Work");
+    let login = request(
+        5,
+        Action::Login {
+            replace_id: Some("second".into()),
+        },
+    )?;
+    let attempt = login["loginAttemptId"].as_str().context("awaiting code")?;
+    let invalid = request(
+        6,
+        Action::SubmitLoginCode {
+            attempt_id: attempt.into(),
+            code: "https://example.invalid/".into(),
+        },
+    )?;
+    assert_eq!(invalid["error"], "login-code-invalid");
+    send(
+        &host,
+        command(
+            7,
+            Action::SubmitLoginCode {
+                attempt_id: attempt.into(),
+                code: "fixture-code#fixture-state".into(),
+            },
+        ),
+    )?;
+    let draft = next(&host, |event| match event {
+        Event::Graph(value)
+            if value["type"] == "claudeAccountsResult"
+                && value["requestId"] == 5
+                && value["result"]["draft"].is_object() =>
+        {
+            Some(value["result"].clone())
+        }
+        _ => None,
+    })?;
+    assert_eq!(draft["draft"]["id"], "second");
+    let saved = request(
+        8,
+        Action::SaveDraft {
+            name: "Work".into(),
+        },
+    )?;
+    assert_eq!(saved["renewedIds"], json!(["second"]));
+    let applied = request(
+        9,
+        Action::Reauth {
+            id: "second".into(),
+        },
+    )?;
+    assert_eq!(applied["renewedIds"], json!([]));
+    let removed = request(10, Action::Remove { id: "first".into() })?;
+    assert_eq!(removed["accounts"].as_array().unwrap().len(), 1);
+    let prefs: Value = serde_json::from_slice(&fs::read(preferences)?)?;
+    assert_eq!(prefs["names"], json!({"second":"Work"}));
+    assert_eq!(prefs["usage"], json!({}));
+    assert_eq!(prefs["rememberScope"], true);
+    assert_eq!(
+        fs::read_to_string(accounts.join("fixture-calls"))?
+            .lines()
+            .collect::<Vec<_>>(),
+        [
+            "cleanup-logins",
+            "snapshot",
+            "snapshot",
+            "switch",
+            "login",
+            "save-draft",
+            "reauth",
+            "remove"
+        ]
+    );
+    host.shutdown()?;
+    Ok(())
+}
