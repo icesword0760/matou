@@ -1931,3 +1931,16 @@ On 2026-11-16 the user explicitly chose `保持原样` after the concrete scenar
   - Windows NSIS installer packaging & Authenticode code signing (requires signing cert);
   - Explicit product decision on `recovery-water` strict 0-tolerance pixel gate (already mounted & verified visually; quantization gap vs Chromium Ganesh documented at `N02ba`) and visible-window `DatabaseRecoveryPage` walkthrough.
 
+### Isolated macOS Release visible-window closure (`matou-mac-vis-verify-01`) (2026-11-22)
+
+- **Verified directly on freshly extracted signed Release `Matou-Native-0.2.26-arm64-signed.zip` (`a0279e8c`, SHA-256 `c310d6ce…`, 7 lossless 2624×1784 PNGs in `/tmp/matou-mac-vis-01/shots/01..07`, report `/tmp/matou-mac-vis-01/report.md`)**:
+  - **Scenario A — `DatabaseRecoveryPage` & backup restore (`01`, `02`)**: Clean exit created `matou-*-clean-exit-v35`; corrupting `matou.sqlite` opened visible `Matou 数据恢复 / 数据库需要恢复`, exported recovery bundle, restored selected backup, passed SQLite integrity check, and returned directly to an interactive `zsh` prompt with restored history (`会话已恢复`).
+  - **Scenario B — Global Read-Only Mode (`03`)**: `NewerSchema` opened visible warm-amber `数据库处于只读恢复模式` banner with `搜索当前终端` & `导出数据库资料`, read-only archive history, switchable existing tasks, disabled write buttons (`+` tooltip `数据库处于只读恢复模式`), and byte-identical SQLite hash before/after exit.
+  - **Scenario C — macOS loopback HTTP `DMG` update check & SHA-512 download (`04`, `05`)**: Against local `127.0.0.1` `stable-mac.yml`, Update popover displayed `Matou 0.2.27 可用`, release notes, `当前体验包将通过应用内下载 DMG 更新。` + `下载更新` (confirmed 1:1 with frozen `AppUpdateControl.test.tsx:44-45`, while `下载 DMG 更新` is the fallback error-state button at `:172`), streamed & SHA-512-verified `.dmg` to `<data_root>/updates/`, and transitioned to `DMG 已下载完成` + `打开 DMG 安装` (placeholder `.dmg` not executed).
+  - **Scenario D — Worktree handoff & `SessionCarousel` pinning/hover (`06`, `07`)**: Real Git Worktree creation, visible Local ↔ Worktree handoff updating terminal `pwd` and footer environment popover (`交接到 Local` / blue `Worktree`), moved-worktree missing feedback & visible Restore back to working terminal; 3-card carousel capture-phase pinning of card 2 before mouse release & clean hover collapse on moving into empty canvas space.
+  - All 7 isolated launches exited cleanly with 0 leftover processes/sockets; running beta PID `10325`, production PID `65267`, `/Applications/码头.app`, and real `~/.matou` verified unchanged.
+- **Remaining open scope (strictly gated on user authorization, external credentials/certs, or explicit product decision)**:
+  - Refreshing user's running `/Applications/码头测试版.app` (PID `10325`) once exited, and explicit user-authorized `/Applications/码头.app` replacement install + live TCC document-permission continuity + Finder drop;
+  - Production HTTPS live update check & real browser/Keychain OAuth login/account switch (macOS & Windows), live Windows AI CLI runs, Windows NSIS installer & Authenticode code signing (requires cert);
+  - Explicit product decision on `recovery-water` strict 0-tolerance pixel gate (already mounted & verified visually; 1–4 channel quantization delta vs Chromium Ganesh/GraphiteDawn documented at `N02ba`, no tolerance unilaterally applied).
+
