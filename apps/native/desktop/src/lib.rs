@@ -35,3 +35,5 @@ pub mod recovery_water;
 pub mod recovery_water_macos;
 
 pub mod recovery_water_view;
+pub mod shortcut_panel;
+pub mod split_tree;
