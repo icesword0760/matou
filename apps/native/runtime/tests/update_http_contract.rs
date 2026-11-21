@@ -430,7 +430,9 @@ fn classifies_http_status_timeout_connection_refusal_and_redirect_errors() -> Re
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     let addr = listener.local_addr()?;
     drop(listener);
-    let error = fetcher
+    // Windows can deliver a loopback refusal after the short stalled-response deadline.
+    let error = HttpUpdateFetcher::new(Platform::Darwin)?
+        .with_timeout(Duration::from_secs(5))
         .check(&format!("http://{addr}/stable-mac.yml").parse()?)
         .unwrap_err();
     assert_eq!(error.code, Some("ECONNREFUSED"), "{error:?}");
@@ -522,18 +524,20 @@ fn next_event<T>(host: &RuntimeHost, mut take: impl FnMut(Event) -> Option<T>) -
     })
 }
 
-fn host_reply(host: &RuntimeHost, id: u64, kind: &str) -> Result<Value> {
+fn host_reply_graph(host: &RuntimeHost, id: u64, kind: &str) -> Result<Value> {
     next_event(host, |event| match event {
         Event::Graph(graph) if graph["type"] == kind && graph["requestId"] == id => Some(graph),
         _ => None,
     })
-    .and_then(|graph| {
-        ensure!(
-            graph.get("error").is_none() && graph.get("result").is_some(),
-            "{graph}"
-        );
-        Ok(graph["result"].clone())
-    })
+}
+
+fn host_reply(host: &RuntimeHost, id: u64, kind: &str) -> Result<Value> {
+    let graph = host_reply_graph(host, id, kind)?;
+    ensure!(
+        graph.get("error").is_none() && graph.get("result").is_some(),
+        "{graph}"
+    );
+    Ok(graph["result"].clone())
 }
 
 #[test]
@@ -600,6 +604,12 @@ fn runtime_host_uses_live_http_and_remains_responsive_during_check() -> Result<(
         checked["manualDownloadUrl"],
         server.url(&format!("/stable/{installer}"))
     );
+    host.commands
+        .send(Command::InstallUpdate { request_id: 8 })?;
+    assert_eq!(
+        host_reply_graph(&host, 8, "updateInstallResult")?["error"],
+        "No downloaded update installer is ready to open"
+    );
 
     host.commands
         .send(Command::DownloadUpdate { request_id: 3 })?;
@@ -610,6 +620,30 @@ fn runtime_host_uses_live_http_and_remains_responsive_during_check() -> Result<(
         fs::read(options.data_root.join("updates").join(installer))?,
         vec![b'x'; ARTIFACT_SIZE]
     );
+    if cfg!(any(target_os = "macos", windows)) {
+        // This host uses the actual HTTP worker and an explicit dry-run opener.
+        host.commands
+            .send(Command::InstallUpdate { request_id: 9 })?;
+        assert_eq!(host_reply(&host, 9, "updateInstallResult")?["ok"], true);
+        let path = options.data_root.join("updates").join(installer);
+        fs::remove_file(&path)?;
+        host.commands
+            .send(Command::InstallUpdate { request_id: 10 })?;
+        let missing = host_reply_graph(&host, 10, "updateInstallResult")?;
+        assert!(
+            missing["error"]
+                .as_str()
+                .unwrap()
+                .contains("installer path is unavailable")
+        );
+        fs::create_dir(&path)?;
+        host.commands
+            .send(Command::InstallUpdate { request_id: 11 })?;
+        assert_eq!(
+            host_reply_graph(&host, 11, "updateInstallResult")?["error"],
+            "Downloaded installer is not a regular file"
+        );
+    }
     let manifest_path = if cfg!(target_os = "macos") {
         "/stable/preview-mac.yml"
     } else if cfg!(windows) {

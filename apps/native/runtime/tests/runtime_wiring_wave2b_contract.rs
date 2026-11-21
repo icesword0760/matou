@@ -415,13 +415,16 @@ fn offline_queries_update_retention_and_storage_gate() -> Result<()> {
             b"checkpoint",
         )?;
     }
-    let download = tempfile::tempdir()?;
-    let download_root = download.path().to_owned();
+    let installer = if cfg!(windows) {
+        "fixture.exe"
+    } else {
+        "fixture.dmg"
+    };
     let artifact = b"offline installer fixture".to_vec();
     let manifest = Manifest {
         version: "99.0.1".into(),
         files: vec![ManifestFile {
-            url: Some("fixture.dmg".into()),
+            url: Some(installer.into()),
             size: Some(artifact.len() as u64),
             sha256: Some(format!("{:x}", Sha256::digest(&artifact))),
             sha512: None,
@@ -433,7 +436,6 @@ fn offline_queries_update_retention_and_storage_gate() -> Result<()> {
         OfflineFixtures {
             browser_executable: Some(browser),
             update: Some(OfflineUpdate {
-                directory: download,
                 manifest,
                 artifact: artifact.clone(),
             }),
@@ -549,7 +551,7 @@ fn offline_queries_update_retention_and_storage_gate() -> Result<()> {
         assert_eq!(result(&host, command, id, kind)?["status"], status);
     }
     assert_eq!(
-        fs::read(download_root.join("downloads/fixture.dmg"))?,
+        fs::read(options.data_root.join("updates").join(installer))?,
         artifact
     );
     let report = result(
