@@ -29,7 +29,7 @@ use anyhow::Result;
 use {
     anyhow::{Context, bail, ensure},
     base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD},
-    rusqlite::Connection,
+    rusqlite::{Connection, OptionalExtension, params},
     serde::Serialize,
     serde_json::{Map, Value, json},
     sha2::{Digest, Sha256},
@@ -144,6 +144,10 @@ const MANAGED_SCOPES: &[&str] = &[
     "terminal.read-current",
     "terminal.read-history",
     "terminal.read-commands",
+    "navigation.focus.session",
+    "navigation.switch.workspace",
+    "navigation.switch.task",
+    "navigation.switch.canvas",
 ];
 #[cfg(unix)]
 const OTHER_METHODS: &[&str] = &[
@@ -164,10 +168,6 @@ const OTHER_METHODS: &[&str] = &[
     "structure.remove.commit",
     "structure.canvas-close.preview",
     "structure.canvas-close.commit",
-    "navigation.focus.session",
-    "navigation.switch.workspace",
-    "navigation.switch.task",
-    "navigation.switch.canvas",
 ];
 
 #[cfg(unix)]
@@ -389,6 +389,7 @@ enum Action {
     Identify,
     List(Scope),
     Terminal(Selector, ReadKind),
+    Navigation(EntityLevel, NavigationSelector),
 }
 
 #[cfg(unix)]
@@ -408,8 +409,24 @@ impl Action {
                     _ => Err(Fault::new(INVALID, "scope is unsupported")),
                 },
             },
+            "navigation.focus.session"
+            | "navigation.switch.workspace"
+            | "navigation.switch.task"
+            | "navigation.switch.canvas" => {
+                if params.keys().any(|key| key != "target") {
+                    return Err(Fault::new(INVALID, "params contains an unsupported field"));
+                }
+                let level = match method {
+                    "navigation.focus.session" => EntityLevel::Session,
+                    "navigation.switch.workspace" => EntityLevel::Workspace,
+                    "navigation.switch.task" => EntityLevel::Task,
+                    _ => EntityLevel::Canvas,
+                };
+                let target = params.get("target").unwrap_or(&Value::Null);
+                Ok(Self::Navigation(level, NavigationSelector::parse(target)?))
+            }
             _ => Ok(Self::Terminal(
-                Selector::parse(params.get("target").unwrap_or(&Value::Null))?,
+                Selector::parse(params.get("target").unwrap_or(&Value::Null), false)?,
                 ReadKind::parse(method, params)?,
             )),
         }
@@ -424,6 +441,60 @@ struct Pending {
     deadline: i64,
     action: Action,
     reply: SyncSender<WireResult<Reply>>,
+}
+
+#[cfg(unix)]
+pub(crate) struct PendingNavigation {
+    request: Pending,
+    path: NavigationPath,
+}
+
+#[cfg(unix)]
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct NavigationPath {
+    route_window_id: String,
+    target_window_id: String,
+    workspace_id: String,
+    task_id: String,
+    pub(crate) scene_id: String,
+    pub(crate) session_id: String,
+}
+
+#[cfg(unix)]
+impl PendingNavigation {
+    pub(crate) fn complete(
+        self,
+        window_id: &str,
+        apply: impl FnOnce(&NavigationPath) -> Result<()>,
+    ) {
+        let result = if self.path.route_window_id != window_id {
+            Err(navigation_not_ready())
+        } else {
+            apply(&self.path)
+                .map_err(|error| {
+                    if error
+                        .downcast_ref::<rusqlite::Error>()
+                        .is_some_and(|error| {
+                            error.sqlite_error_code() == Some(rusqlite::ErrorCode::ReadOnly)
+                        })
+                    {
+                        Fault::new("STORAGE_READ_ONLY", "Matou storage is read-only")
+                    } else {
+                        eprintln!("[host-control] navigation failed: {error:#}");
+                        Fault::new("INTERNAL_ERROR", "could not commit host navigation")
+                    }
+                })
+                .and_then(|()| {
+                    serialize_ok(
+                        &self.request.id,
+                        json!({"kind": "navigated", "finalPath": self.path}),
+                    )
+                    .map(Reply::Ready)
+                })
+        };
+        let _ = self.request.reply.send(result);
+    }
 }
 
 #[cfg(unix)]
@@ -534,21 +605,44 @@ impl ControlServer {
         }
     }
 
-    pub(crate) fn poll(&self, owner: &crate::owner::ShellOwner) {
-        let Some(pending) = &self.pending else { return };
+    pub(crate) fn poll(&self, owner: &crate::owner::ShellOwner) -> Option<PendingNavigation> {
+        let pending = self.pending.as_ref()?;
         for _ in 0..OWNER_BATCH {
             let Ok(request) = pending.try_recv() else {
                 break;
             };
-            let result = self.dispatch(&request, owner);
+            let result = match &request.action {
+                Action::Navigation(level, selector) => {
+                    match self.prepare_navigation(&request, *level, selector) {
+                        Ok(path) => return Some(PendingNavigation { request, path }),
+                        Err(error) => Err(error),
+                    }
+                }
+                _ => self.dispatch(&request, owner),
+            };
             let _ = request.reply.send(result);
         }
+        None
     }
 
-    fn dispatch(&self, request: &Pending, owner: &crate::owner::ShellOwner) -> WireResult<Reply> {
+    fn prepare_navigation(
+        &self,
+        request: &Pending,
+        level: EntityLevel,
+        selector: &NavigationSelector,
+    ) -> WireResult<NavigationPath> {
         let caller = self
             .state
             .authorize(&request.digest, &request.method, request.deadline)?;
+        let targets = self.targets()?;
+        let path = selector.resolve(&self.reader, &targets, &caller, level)?;
+        // Resolution can read multiple tables. Recheck before touching window state.
+        self.state
+            .authorize(&request.digest, &request.method, request.deadline)?;
+        Ok(path)
+    }
+
+    fn targets(&self) -> WireResult<Vec<Target>> {
         let targets = read_topology(&self.reader)
             .map_err(|_| Fault::new("INTERNAL_ERROR", "could not read host control topology"))?;
         #[cfg(test)]
@@ -560,6 +654,14 @@ impl ControlServer {
             }
             targets
         };
+        Ok(targets)
+    }
+
+    fn dispatch(&self, request: &Pending, owner: &crate::owner::ShellOwner) -> WireResult<Reply> {
+        let caller = self
+            .state
+            .authorize(&request.digest, &request.method, request.deadline)?;
+        let targets = self.targets()?;
         let result = match &request.action {
             Action::Identify => {
                 #[derive(Serialize)]
@@ -603,6 +705,7 @@ impl ControlServer {
                     kind,
                 )
             }
+            Action::Navigation(..) => unreachable!("navigation is dispatched on the host"),
         };
         if result.is_ok() && (self.state.clock)() > request.deadline {
             return Err(deadline_elapsed());
@@ -1252,11 +1355,12 @@ enum Selector {
 
 #[cfg(unix)]
 impl Selector {
-    fn parse(target: &Value) -> WireResult<Self> {
+    fn parse(target: &Value, navigation: bool) -> WireResult<Self> {
         let target = object(target)?;
         let kind = target.get("kind").and_then(Value::as_str);
-        let is_legacy_ref = !target.contains_key("kind") && target.contains_key("ref");
-        let explicit_session = target.get("sessionId").is_some_and(Value::is_string);
+        let is_legacy_ref =
+            !navigation && !target.contains_key("kind") && target.contains_key("ref");
+        let explicit_session = !navigation && target.get("sessionId").is_some_and(Value::is_string);
         let permitted: &[&str] = match kind {
             _ if explicit_session => &["kind", "sessionId"],
             None if is_legacy_ref => &["ref", "projectionRevision"],
@@ -1276,12 +1380,19 @@ impl Selector {
         }
         let field = |name| target.get(name).unwrap_or(&Value::Null);
         let index = || {
-            integer(field("ordinal"), 10_000)
-                .map(|value| value as usize)
-                .ok_or(Fault::new(
-                    INVALID,
-                    "target.ordinal must be between 1 and 10000",
-                ))
+            let max = if navigation {
+                9_007_199_254_740_991
+            } else {
+                10_000
+            };
+            integer(field("ordinal"), max)
+                .and_then(|value| usize::try_from(value).ok())
+                .ok_or_else(|| {
+                    Fault::new(
+                        INVALID,
+                        format!("target.ordinal must be between 1 and {max}"),
+                    )
+                })
         };
         let revision = || {
             bounded_text(
@@ -1339,15 +1450,6 @@ impl Selector {
     }
 
     fn resolve<'a>(&self, targets: &'a [Target], caller: &Caller) -> WireResult<&'a Target> {
-        let check_revision = |expected: &str, visible: &[&Target]| {
-            if revision(visible) != expected {
-                return Err(Fault::new(
-                    "STALE_PROJECTION",
-                    "target ordinal projection is stale; list targets again",
-                ));
-            }
-            Ok(())
-        };
         let scoped = match self {
             Self::Reference {
                 revision, scope, ..
@@ -1449,6 +1551,270 @@ impl Selector {
     }
 }
 
+#[cfg(unix)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EntityLevel {
+    Workspace,
+    Task,
+    Canvas,
+    Session,
+}
+
+#[cfg(unix)]
+impl EntityLevel {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "workspace" => Some(Self::Workspace),
+            "task" => Some(Self::Task),
+            "canvas" => Some(Self::Canvas),
+            "session" => Some(Self::Session),
+            _ => None,
+        }
+    }
+
+    fn id(self, target: &Target) -> &str {
+        match self {
+            Self::Workspace => &target.workspace_id,
+            Self::Task => &target.task_id,
+            Self::Canvas => target.canvas["id"].as_str().expect("topology canvas ID"),
+            Self::Session => &target.session_id,
+        }
+    }
+}
+
+#[cfg(unix)]
+enum NavigationSelector {
+    Current(EntityLevel),
+    Target(Selector, Option<String>),
+}
+
+#[cfg(unix)]
+impl NavigationSelector {
+    fn parse(target: &Value) -> WireResult<Self> {
+        let fields = object(target)?;
+        match fields.get("kind").and_then(Value::as_str) {
+            Some("current") => {
+                if fields.len() != 2 {
+                    return Err(Fault::new(
+                        INVALID,
+                        "current target must contain kind and entity",
+                    ));
+                }
+                let level = target["entity"]
+                    .as_str()
+                    .and_then(EntityLevel::parse)
+                    .ok_or(Fault::new(INVALID, "target.entity is unsupported"))?;
+                Ok(Self::Current(level))
+            }
+            Some("relative" | "relation") => {
+                let mut fields = fields.clone();
+                let revision = fields.remove("projectionRevision").unwrap_or_default();
+                let revision = bounded_text(
+                    &revision,
+                    160,
+                    "target.projectionRevision must be a non-empty bounded string",
+                )?;
+                let selector = Selector::parse(&Value::Object(fields), true)?;
+                Ok(Self::Target(selector, Some(revision.into())))
+            }
+            _ => Ok(Self::Target(Selector::parse(target, true)?, None)),
+        }
+    }
+
+    fn resolve(
+        &self,
+        connection: &Connection,
+        targets: &[Target],
+        caller: &Caller,
+        level: EntityLevel,
+    ) -> WireResult<NavigationPath> {
+        // Keep both the entity kind and its representative path. A switch can
+        // use the enclosing level of a session selector, while focus needs a session.
+        let (workspace_id, task_id, scene_id, session) = match self {
+            Self::Current(entity) if *entity != EntityLevel::Session => {
+                let current = Selector::SelfTarget.resolve(targets, caller)?;
+                let (workspace, task, scene) =
+                    entity_path(connection, *entity, entity.id(current))?;
+                (workspace, task, scene, None)
+            }
+            Self::Target(
+                Selector::Reference {
+                    reference,
+                    revision: expected,
+                    ..
+                },
+                _,
+            ) if let Some((prefix, id)) = reference.split_once(':')
+                && !id.is_empty()
+                && let Some(entity) =
+                    EntityLevel::parse(if prefix == "scene" { "canvas" } else { prefix })
+                && entity != EntityLevel::Session =>
+            {
+                check_revision(expected, &projection(targets, caller, Scope::All)?)?;
+                let (workspace, task, scene) = entity_path(connection, entity, id)?;
+                (workspace, task, scene, None)
+            }
+            _ => {
+                let target = match self {
+                    Self::Current(_) => Selector::SelfTarget.resolve(targets, caller)?,
+                    Self::Target(selector, expected) => {
+                        if let Some(expected) = expected {
+                            check_revision(
+                                expected,
+                                &projection(targets, caller, Scope::CurrentLevel)?,
+                            )?;
+                        }
+                        selector.resolve(targets, caller)?
+                    }
+                };
+                (
+                    target.workspace_id.clone(),
+                    target.task_id.clone(),
+                    EntityLevel::Canvas.id(target).to_owned(),
+                    Some(target),
+                )
+            }
+        };
+        let route_window_id: String = connection
+            .query_row(
+                "SELECT placement.window_id FROM window_task_placements AS placement
+                 JOIN app_windows AS window ON window.id = placement.window_id
+                 WHERE placement.task_id = ? AND window.kind = 'main' AND window.state <> 'closed'",
+                [&task_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(navigation_query_error)?
+            .ok_or_else(navigation_not_ready)?;
+        let target = if level == EntityLevel::Session {
+            session.ok_or_else(|| missing_target("导航目标必须是会话"))?
+        } else {
+            let session_id = switch_anchor(
+                connection,
+                &route_window_id,
+                &workspace_id,
+                (level != EntityLevel::Workspace).then_some(task_id.as_str()),
+                (level == EntityLevel::Canvas).then_some(scene_id.as_str()),
+            )?;
+            targets
+                .iter()
+                .find(|target| target.session_id == session_id)
+                .ok_or_else(navigation_not_ready)?
+        };
+        if target.mount_id.is_none() {
+            return Err(navigation_not_ready());
+        }
+        Ok(NavigationPath {
+            route_window_id,
+            target_window_id: target.window["id"]
+                .as_str()
+                .expect("topology window ID")
+                .into(),
+            workspace_id: target.workspace_id.clone(),
+            task_id: target.task_id.clone(),
+            scene_id: EntityLevel::Canvas.id(target).into(),
+            session_id: target.session_id.clone(),
+        })
+    }
+}
+
+#[cfg(unix)]
+fn check_revision(expected: &str, visible: &[&Target]) -> WireResult<()> {
+    if revision(visible) != expected {
+        return Err(Fault::new(
+            "STALE_PROJECTION",
+            "target ordinal projection is stale; list targets again",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn entity_path(
+    connection: &Connection,
+    level: EntityLevel,
+    id: &str,
+) -> WireResult<(String, String, String)> {
+    connection
+        .query_row(
+            "WITH target_task AS (
+                SELECT task.id, task.workspace_id FROM tasks AS task
+                JOIN workspaces AS workspace ON workspace.id = task.workspace_id
+                LEFT JOIN window_task_placements AS placement ON placement.task_id = task.id
+                WHERE task.archived_at IS NULL AND workspace.archived_at IS NULL
+                  AND (?1 IS NULL OR workspace.id = ?1) AND (?2 IS NULL OR task.id = ?2)
+                  AND (?3 IS NULL OR task.id = (SELECT task_id FROM scenes WHERE id = ?3))
+                ORDER BY placement.ordinal, task.sort_key, task.created_at, task.id LIMIT 1
+            )
+            SELECT task.workspace_id, task.id, scene.id FROM target_task AS task
+            JOIN scenes AS scene ON scene.task_id = task.id AND scene.archived_at IS NULL
+            WHERE ?3 IS NULL OR scene.id = ?3
+            ORDER BY scene.sort_key, scene.created_at, scene.id LIMIT 1",
+            params![
+                (level == EntityLevel::Workspace).then_some(id),
+                (level == EntityLevel::Task).then_some(id),
+                (level == EntityLevel::Canvas).then_some(id),
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(navigation_query_error)?
+        .ok_or_else(|| missing_target("导航目标已不在 Matou 会话图中"))
+}
+
+#[cfg(unix)]
+fn switch_anchor(
+    connection: &Connection,
+    window_id: &str,
+    workspace_id: &str,
+    task_id: Option<&str>,
+    scene_id: Option<&str>,
+) -> WireResult<String> {
+    connection
+        .query_row(
+            "WITH active_task AS (
+                SELECT task.id FROM tasks AS task
+                JOIN window_task_placements AS placement ON placement.task_id = task.id
+                LEFT JOIN window_workspace_focus AS focus
+                  ON focus.window_id = ?1 AND focus.workspace_id = ?2
+                WHERE task.workspace_id = ?2 AND task.archived_at IS NULL
+                  AND placement.window_id = ?1 AND (?3 IS NULL OR task.id = ?3)
+                ORDER BY (task.id = focus.active_task_id) DESC,
+                         placement.ordinal, task.sort_key, task.created_at, task.id LIMIT 1
+            ), active_scene AS (
+                SELECT scene.id FROM scenes AS scene
+                JOIN active_task AS task ON task.id = scene.task_id
+                LEFT JOIN window_task_focus AS focus
+                  ON focus.window_id = ?1 AND focus.task_id = task.id
+                WHERE scene.archived_at IS NULL AND (?4 IS NULL OR scene.id = ?4)
+                ORDER BY (scene.id = focus.active_scene_id) DESC,
+                         scene.sort_key, scene.created_at, scene.id LIMIT 1
+            )
+            SELECT session.id FROM active_scene AS scene
+            JOIN session_canvas_memberships AS member ON member.scene_id = scene.id
+            JOIN sessions AS session ON session.id = member.session_id AND session.archived_at IS NULL
+            LEFT JOIN window_scene_focus AS focus ON focus.window_id = ?1 AND focus.scene_id = scene.id
+            ORDER BY (session.id = focus.active_session_id) DESC,
+                     member.last_user_interaction_seq DESC, member.sibling_created_seq, session.id
+            LIMIT 1",
+            params![window_id, workspace_id, task_id, scene_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(navigation_query_error)?
+        .ok_or_else(navigation_not_ready)
+}
+
+#[cfg(unix)]
+fn navigation_query_error(_: rusqlite::Error) -> Fault {
+    Fault::new("INTERNAL_ERROR", "could not read host navigation state")
+}
+
+#[cfg(unix)]
+fn navigation_not_ready() -> Fault {
+    Fault::new("TARGET_NOT_READY", "导航目标暂不可用")
+}
+
 #[cfg(not(unix))]
 pub(crate) struct ControlServer;
 
@@ -1462,8 +1828,6 @@ impl ControlServer {
     pub(crate) fn runs(&self) -> RunControl {
         RunControl {}
     }
-
-    pub(crate) fn poll(&self, _: &crate::owner::ShellOwner) {}
 }
 
 #[cfg(all(unix, test))]
@@ -1472,5 +1836,9 @@ mod socket_tests {
 
     mod mt_discovery {
         include!("../tests/host_control/mt_discovery.rs");
+    }
+
+    mod navigation {
+        include!("../tests/host_control/navigation.rs");
     }
 }
