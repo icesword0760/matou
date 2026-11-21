@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
@@ -246,6 +248,21 @@ pub fn scene_workspace_session_count(db: &Connection, scene_id: &str) -> Result<
         |row| row.get(0),
     )?;
     workspace_session_count(db, &workspace_id)
+}
+
+pub fn scene_workspace_session_counts(
+    db: &Connection,
+    scene_id: &str,
+) -> Result<HashMap<String, i64>> {
+    let mut query = db.prepare(
+        "SELECT sessions.task_id, COUNT(*) FROM sessions JOIN tasks ON tasks.id = sessions.task_id
+         WHERE tasks.workspace_id = (SELECT tasks.workspace_id FROM scenes
+            JOIN tasks ON tasks.id = scenes.task_id WHERE scenes.id = ?)
+         AND sessions.archived_at IS NULL AND tasks.archived_at IS NULL GROUP BY sessions.task_id",
+    )?;
+    Ok(query
+        .query_map([scene_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?)
 }
 
 fn workspace_session_count(db: &Connection, workspace_id: &str) -> Result<i64> {

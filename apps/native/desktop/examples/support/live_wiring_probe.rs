@@ -3,6 +3,7 @@ use crate::runtime_bridge::{ProbeReceiver, probe_channel};
 use matou_native_desktop::{
     egress_panel::{EgressAction, EgressRule},
     update_popover::UpdateAction,
+    workspace_board::BoardStatus,
 };
 use matou_native_runtime::{
     dsh_catalog::encode_project_path,
@@ -54,6 +55,7 @@ struct Fixture {
     replies: Vec<Value>,
     identities: Vec<Value>,
     frame_sequences: HashMap<String, u64>,
+    generation: u64,
 }
 
 impl Fixture {
@@ -300,6 +302,7 @@ done
             replies: Vec::new(),
             identities: Vec::new(),
             frame_sequences: HashMap::new(),
+            generation: 1,
         }
     }
 
@@ -310,7 +313,7 @@ done
                     .then(|| view.graph.clone());
                 view.apply(
                     BridgeEvent::Runtime {
-                        generation: 1,
+                        generation: self.generation,
                         event,
                     },
                     window,
@@ -632,7 +635,7 @@ pub(super) async fn verify(cx: &mut AsyncApp, root: PathBuf) {
             (view.session_frames.contains(id)
                 && !view.recovery_blocked(id)
                 && !view.egress_for_probe().families.is_empty())
-                .then(|| id.to_owned())
+            .then(|| id.to_owned())
         })
         .await;
     card_action(fixture.window, cx, &source, CardMenuAction::OpenDetached);
@@ -653,7 +656,11 @@ pub(super) async fn verify(cx: &mut AsyncApp, root: PathBuf) {
         assert!(dispatch_key(fixture.window.into(), cx, key));
     }
     for character in DETACHED_OUTPUT.chars() {
-        assert!(dispatch_key(fixture.window.into(), cx, &character.to_string()));
+        assert!(dispatch_key(
+            fixture.window.into(),
+            cx,
+            &character.to_string()
+        ));
     }
     assert!(dispatch_key(fixture.window.into(), cx, "enter"));
     fixture
@@ -661,7 +668,10 @@ pub(super) async fn verify(cx: &mut AsyncApp, root: PathBuf) {
             view.graph_node(&source)?["latestLines"]
                 .as_array()?
                 .iter()
-                .any(|line| line.as_str().is_some_and(|line| line.trim() == DETACHED_OUTPUT))
+                .any(|line| {
+                    line.as_str()
+                        .is_some_and(|line| line.trim() == DETACHED_OUTPUT)
+                })
                 .then_some(())
         })
         .await;
@@ -1577,12 +1587,211 @@ async fn verify_antigravity_read_only(fixture: &mut Fixture, cx: &mut AsyncApp, 
     let rejected = fixture.reply(cx, "antigravitySessionLoadResult").await;
     assert_eq!(rejected["requestId"], 102);
     assert_eq!(rejected["code"], STORAGE_READ_ONLY);
+    fixture.send(Command::SetTaskStatus {
+        request_id: 103,
+        workspace_id: "unused".into(),
+        task_id: "unused".into(),
+        status: "completed".into(),
+        before_task_id: None,
+    });
+    let rejected = fixture.reply(cx, "taskStatusResult").await;
+    assert_eq!(rejected["requestId"], 103);
+    assert_eq!(rejected["code"], STORAGE_READ_ONLY);
     assert_eq!(
         fs::read_dir(fixture.root.join("agy-runs")).unwrap().count(),
         6
     );
     println!(
         "live Antigravity read-only: Runtime can list, Desktop blocks writes and Runtime rejects a direct load without starting a process"
+    );
+}
+
+pub(super) async fn verify_board(cx: &mut AsyncApp, root: PathBuf) {
+    let mut fixture = Fixture::new(cx, root);
+    let (workspace, task) = fixture
+        .state(cx, "initial board task", |view, _| {
+            let task = view.hierarchy.as_ref()?.task.as_ref()?;
+            view.domain_ready
+                .then(|| (task.workspace_id.clone(), task.id.clone()))
+        })
+        .await;
+    fixture.send(Command::CreateCanvas {
+        task_id: task.clone(),
+    });
+    fixture
+        .state(cx, "two canvases for one task", |view, _| {
+            (view.scenes.len() == 2 && view.graph["workspaceSessionCountByTask"][&task] == 2)
+                .then_some(())
+        })
+        .await;
+    fixture.update(cx, |view, window, cx| view.toggle_board(window, cx));
+    let card = |id: &str| format!("board-card:{workspace}:{id}");
+    let header =
+        |status: BoardStatus| format!("board-column-header:{workspace}:{}", status.as_str());
+    let window = fixture.window;
+    let read_board = |cx: &mut AsyncApp| {
+        window
+            .read_with(cx, |view, _| view.board_view_for_probe().unwrap())
+            .unwrap()
+    };
+    let assert_column = |cx: &mut AsyncApp, id: &str, status: BoardStatus| {
+        let bounds = draw_board(window, cx);
+        let header = bounds[&header(status)];
+        let card = bounds[&card(id)];
+        assert!(
+            header.left() < card.center().x && card.center().x < header.right(),
+            "Task {id} must be painted in {}",
+            status.as_str()
+        );
+    };
+    assert_column(cx, task.as_str(), BoardStatus::Planned);
+    assert_eq!(
+        read_board(cx).columns[0].cards[0].session_count,
+        "2 sessions"
+    );
+    assert_eq!(
+        window
+            .read_with(cx, |view, _| session_levels::nodes(&view.graph).len())
+            .unwrap(),
+        1
+    );
+
+    let mut previous = None;
+    for (from, to, feedback) in [
+        (
+            BoardStatus::Planned,
+            BoardStatus::Active,
+            "Task moved to \"Active\"",
+        ),
+        (
+            BoardStatus::Active,
+            BoardStatus::Completed,
+            "Task moved to \"Done\"",
+        ),
+    ] {
+        drag_board_card(window, cx, &card(&task), &header(to));
+        assert_column(cx, &task, to);
+        assert!(read_board(cx).feedback.is_none());
+        fixture.update(cx, |view, _, _| {
+            assert_eq!(
+                view.tasks
+                    .iter()
+                    .find(|item| item.id == task)
+                    .unwrap()
+                    .status,
+                from.as_str()
+            );
+        });
+        if let Some(request_id) = previous {
+            fixture.apply(cx, Event::Graph(json!({
+                "type": "taskStatusResult", "requestId": request_id, "error": "Late failed reply"
+            })));
+            assert_column(cx, &task, to);
+            assert!(read_board(cx).feedback.is_none());
+        }
+        fixture.replies.clear();
+        let reply = fixture.reply(cx, "taskStatusResult").await;
+        assert_eq!(reply["result"][0]["status"], to.as_str());
+        previous = reply["requestId"].as_u64();
+        assert_eq!(read_board(cx).feedback.as_deref(), Some(feedback));
+        assert!(draw_board(window, cx).contains_key("board-feedback"));
+    }
+
+    fixture.send(Command::CreateTask {
+        workspace_id: workspace.clone(),
+    });
+    let other = fixture
+        .state(cx, "second board task", |view, _| {
+            view.tasks
+                .iter()
+                .find(|item| item.id != task)
+                .map(|item| item.id.clone())
+        })
+        .await;
+    // Drop on a card to insert before it, then reorder inside the same column.
+    for (source, target) in [(&other, &task), (&task, &other)] {
+        drag_board_card(window, cx, &card(source), &card(target));
+        assert_eq!(read_board(cx).columns[3].cards[0].id, *source);
+        fixture.replies.clear();
+        let reply = fixture.reply(cx, "taskStatusResult").await;
+        assert_eq!(reply["result"][0]["id"], *source);
+        assert_eq!(reply["result"][0]["sortKey"], "a00000000");
+        assert_eq!(read_board(cx).columns[3].cards[0].id, *source);
+    }
+
+    fixture.host.shutdown().unwrap();
+    fixture.generation += 1;
+    let generation = fixture.generation;
+    fixture.commands.generation(generation);
+    fixture.host = RuntimeHost::start_with_offline_fixtures(
+        fixture.options.clone(),
+        OfflineFixtures {
+            provider_environment: Some(fixture.environment.clone()),
+            dsh_session_root: Some(fixture.root.join("dsh-history")),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    fixture
+        .state(cx, "reopened board Runtime", |view, _| {
+            (view.runtime_generation == generation && view.domain_ready).then_some(())
+        })
+        .await;
+    assert_eq!(
+        read_board(cx).columns[3]
+            .cards
+            .iter()
+            .map(|card| card.id.as_str())
+            .collect::<Vec<_>>(),
+        [task.as_str(), other.as_str()]
+    );
+    assert_column(cx, &task, BoardStatus::Completed);
+    assert_eq!(
+        read_board(cx).columns[3].cards[0].session_count,
+        "2 sessions"
+    );
+
+    drag_board_card(window, cx, &card(&other), &header(BoardStatus::Blocked));
+    fixture.replies.clear();
+    assert!(fixture.reply(cx, "taskStatusResult").await["result"].is_array());
+    // The destination moves in Runtime while the board still shows the old column.
+    const COMPETING_MOVE: u64 = 10_000;
+    fixture.send(Command::SetTaskStatus {
+        request_id: COMPETING_MOVE,
+        workspace_id: workspace.clone(),
+        task_id: other.clone(),
+        status: "active".into(),
+        before_task_id: None,
+    });
+    drag_board_card(window, cx, &card(&task), &card(&other));
+    assert_column(cx, &task, BoardStatus::Blocked);
+    fixture.replies.clear();
+    let rejected = fixture
+        .wait(cx, "stale board destination", |fixture, _| {
+            fixture
+                .replies
+                .iter()
+                .find(|reply| {
+                    reply["type"] == "taskStatusResult" && reply["requestId"] != COMPETING_MOVE
+                })
+                .cloned()
+        })
+        .await;
+    assert_eq!(
+        rejected["error"],
+        "Board destination must belong to the target column"
+    );
+    assert_column(cx, &task, BoardStatus::Completed);
+    assert_column(cx, &other, BoardStatus::Active);
+    assert_eq!(
+        read_board(cx).feedback.as_deref(),
+        Some("Could not save the status. Try again.")
+    );
+    assert!(draw_board(window, cx).contains_key("board-feedback"));
+    fixture.update(cx, |_, window, _| window.remove_window());
+    fixture.host.shutdown().unwrap();
+    println!(
+        "live board: hidden drag, saved status and order after reopen, cross-canvas counts, stale reply and rollback"
     );
 }
 
