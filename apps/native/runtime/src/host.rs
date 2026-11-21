@@ -2837,7 +2837,7 @@ fn run_writable(
     }
     // A recovery startup keeps its existing isolation even after it opens a
     // replacement database. A subsequent ordinary startup may serve control.
-    let control = if recovery_request.is_none() {
+    let mut control = if recovery_request.is_none() {
         match ControlServer::start(&data_root, generation) {
             Ok(control) => {
                 #[cfg(unix)]
@@ -3071,6 +3071,11 @@ fn run_writable(
             }
             eligible.insert(session_id.clone());
             if !launch_preparations.contains_key(&session_id) {
+                #[cfg(unix)]
+                if let Err(error) = owner.prepare_control_fork_worktree(&session_id) {
+                    completed_launches.push((session_id, Err(error)));
+                    continue;
+                }
                 match prepare_launch(
                     &owner,
                     &options,
@@ -5488,19 +5493,105 @@ fn run_writable(
         #[cfg(unix)]
         if shutdown_requested.get().is_none()
             && navigation_publications.is_empty()
-            && let Some(control) = &control
-            && let Some(navigation) = control.poll(&owner)
+            && let Some(control) = &mut control
+            && let Some(update) = control.poll(&mut owner, window_id)
         {
             // The owner has processed worker exits and older navigation publications.
             // Commit exactly one resolved path before resolving another control request.
-            navigation.complete(window_id, |path| {
-                owner.focus_session(
-                    window_id,
-                    &path.scene_id,
-                    &path.session_id,
-                    self::now(),
-                    "会话不在当前画布中",
-                )?;
+            use crate::host_control::{ControlUpdate, NavigationPath};
+            let (navigation, disposed) = match update {
+                ControlUpdate::Navigation(navigation) => (Some(navigation), Vec::new()),
+                ControlUpdate::Changed(disposed, launches) => {
+                    for session in launches {
+                        if let Some(workspace_id) = owner.session_workspace(&session)? {
+                            checks.request(&owner, &workspace_id)?;
+                            failed_launches.remove(&session);
+                            launch_retries.insert(
+                                session,
+                                LaunchRetry {
+                                    workspace_id,
+                                    recovering: false,
+                                    validated: false,
+                                    fresh_codex: false,
+                                },
+                            );
+                        }
+                    }
+                    (None, disposed)
+                }
+            };
+            let refresh = |path: Option<&NavigationPath>| -> Result<()> {
+                if let Some(path) = path {
+                    owner.focus_session(
+                        window_id,
+                        &path.scene_id,
+                        &path.session_id,
+                        self::now(),
+                        "会话不在当前画布中",
+                    )?;
+                }
+                if !disposed.is_empty() {
+                    for id in &disposed {
+                        shell_submissions.remove(id);
+                        shell_promotions.remove(id);
+                        if let Some(load) = catalog_loads.remove(id) {
+                            let error = anyhow!("Card was closed while loading the conversation");
+                            if !load.antigravity_requests.is_empty() {
+                                let projection = active_graph(
+                                    &owner,
+                                    scene_id.as_deref(),
+                                    window_id,
+                                    &startup_deferred,
+                                )?;
+                                for request_id in load.antigravity_requests {
+                                    send.send_blocking(with_graph_projection(
+                                        wiring_result(
+                                            "antigravitySessionLoadResult",
+                                            request_id,
+                                            Err(anyhow!("{error:#}")),
+                                        ),
+                                        projection.clone(),
+                                    ))?;
+                                }
+                            }
+                            catalog_load_errors.push(catalog_load_error(
+                                id,
+                                &load.provider_session_id,
+                                &error,
+                            ));
+                        }
+                        if let Some(change) = permission_changes.remove(id) {
+                            permission_results.push(permission_result(
+                                id,
+                                &change.mode,
+                                Some("Card was closed during permission respawn".into()),
+                            ));
+                            if let Err(error) = change.rollback_if_pending(&mut owner, id) {
+                                send.send_blocking(Event::Diagnostic(format!("{error:#}")))?;
+                            }
+                        }
+
+                        sessions.remove(id);
+                        dirty.remove(id);
+                        sequence.remove(id);
+                        scroll_requests.remove(id);
+                        views.remove(id);
+                        awaiting_ui.remove(id);
+                        terminal_layouts.remove(id);
+                        recovering.remove(id);
+                        deferred_recovery.remove(id);
+                        startup_deferred.remove(id);
+                        failed_launches.remove(id);
+                        launch_retries.remove(id);
+                        launch_preparations.remove(id);
+                        claude_launch_targets.remove(id);
+                    }
+                    pending_input.retain(|input| !disposed.contains(&input.session_id));
+                    operations.retain(|(id, _, _)| sessions.contains(id));
+                    searches.retain(|(id, _, _)| !disposed.contains(id));
+                    copies.retain(|(_, id, _, _)| !disposed.contains(id));
+                    send.send_blocking(Event::ScenesDisposed(disposed))?;
+                }
                 let hierarchy = owner.hierarchy(window_id)?;
                 let next_workspace = hierarchy.workspace.as_ref().map(|item| item.id.clone());
                 let next_scene = hierarchy.scene.as_ref().map(|item| item.id.clone());
@@ -5515,7 +5606,7 @@ fn run_writable(
                 let graph =
                     active_graph(&owner, scene_id.as_deref(), window_id, &startup_deferred)?;
                 if !target_changed
-                    && focused_session.as_deref() != Some(path.session_id.as_str())
+                    && focused_session.as_deref() != graph["focusedSessionId"].as_str()
                     && let Some(pending) = focused_session
                         .as_ref()
                         .and_then(|id| shell_submissions.get_mut(id))
@@ -5550,12 +5641,21 @@ fn run_writable(
                     hierarchy,
                     scenes,
                     graph: graph.clone(),
-                    geometry: owner.geometry(&path.scene_id)?,
+                    geometry: scene_id
+                        .as_deref()
+                        .map(|id| owner.geometry(id))
+                        .transpose()?
+                        .unwrap_or_default(),
                 })?;
                 send.send_blocking(Event::Graph(graph))?;
                 dirty.extend(sessions.iter().cloned());
                 Ok(())
-            });
+            };
+            if let Some(navigation) = navigation {
+                navigation.complete(window_id, |path| refresh(Some(path)));
+            } else {
+                refresh(None)?;
+            }
         }
         graph_dirty |= owner.poll_codex_hud();
         if (graph_dirty
@@ -6689,6 +6789,10 @@ fn unstarted_sessions(
             pending.insert(id.to_owned());
             continue;
         }
+        if owner.fresh_control_session(id)? {
+            pending.insert(id.to_owned());
+            continue;
+        }
         if node["currentMode"] == "antigravity" {
             if owner.pending_antigravity_fork(id)?.is_some()
                 || owner
@@ -7085,16 +7189,17 @@ fn prepare_launch(
                 )
             } else if let Some(fork) = owner.pending_antigravity_fork(session_id)? {
                 (AntigravityMode::Fork(fork.source_id), fork.metadata)
-            } else if let Some(binding) = owner
-                .antigravity_binding(session_id)?
-                .filter(|binding| binding.resumable)
-            {
-                (
-                    AntigravityMode::Resume(binding.provider_session_id),
-                    binding.metadata,
-                )
             } else {
-                (AntigravityMode::Fresh, Value::Null)
+                match owner.antigravity_binding(session_id)? {
+                    Some(binding) if binding.resumable => (
+                        AntigravityMode::Resume(binding.provider_session_id),
+                        binding.metadata,
+                    ),
+                    Some(binding) if owner.fresh_control_session(session_id)? => {
+                        (AntigravityMode::Fresh, binding.metadata)
+                    }
+                    _ => (AntigravityMode::Fresh, Value::Null),
+                }
             };
             thread::Builder::new().name("antigravity-launch".into()).spawn(move || {
                 let result = (|| {
@@ -7173,7 +7278,8 @@ fn prepare_launch(
                 } => None,
                 _ => bail!("unsupported Codex launch intent"),
             };
-            let fresh = matches!(intent, LaunchIntent::FreshCodex);
+            let fresh = matches!(intent, LaunchIntent::FreshCodex)
+                || owner.fresh_control_session(session_id)?;
             let binding = if promotion.is_none() {
                 owner.codex_binding(session_id)?
             } else {
@@ -7401,7 +7507,7 @@ fn sort_workspaces(workspaces: &mut [Workspace]) {
     });
 }
 
-fn resolve_workspace_directory(directory: &str) -> Result<PathBuf> {
+pub(crate) fn resolve_workspace_directory(directory: &str) -> Result<PathBuf> {
     let mut resolved = PathBuf::new();
     let directory = Path::new(if directory.is_empty() { "." } else { directory });
     for component in std::path::absolute(directory)?.components() {
@@ -7851,7 +7957,7 @@ fn navigate(
     Ok((owner.hierarchy(window_id)?, Vec::new(), None))
 }
 
-fn hierarchy_ids() -> HierarchyIds {
+pub(crate) fn hierarchy_ids() -> HierarchyIds {
     HierarchyIds {
         workspace_id: id(),
         execution_context_id: id(),
