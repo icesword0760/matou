@@ -331,7 +331,7 @@ fn map_node(
     let metadata: Option<Value> = provider
         .as_deref()
         .and_then(|serialized| serde_json::from_str(serialized).ok());
-    let can_fork = matches!(kind.as_str(), "claude-code" | "antigravity")
+    let can_fork = matches!(kind.as_str(), "claude-code" | "codex" | "antigravity")
         && restore_state.as_deref() == Some("none")
         && metadata.as_ref().is_some_and(binding_can_fork);
     let cwd: String = row.get("cwd")?;
