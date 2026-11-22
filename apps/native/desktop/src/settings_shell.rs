@@ -7419,6 +7419,10 @@ impl SettingsShell {
                 "Google 的 Antigravity 条款不允许第三方工具使用该账号。被判定违规时，Antigravity 与 Gemini CLI 账号可能被停用，申诉机会有限。",
                 "Google's Antigravity terms do not allow third-party tools to use the account. If a violation is detected, your Antigravity and Gemini CLI accounts may be suspended, with limited appeals.",
             );
+            let display_text = self.locale.text(
+                "Google 的 Antigravity 条款不允许第三方工具使用该账号。\n被判定违规时，Antigravity 与 Gemini CLI 账号可能被停用，申诉机会有限。",
+                "Google's Antigravity terms do not allow third-party tools to use the account. If a violation is detected, your Antigravity and Gemini CLI accounts may be suspended, with limited appeals.",
+            );
             body = body.child(mark_provider(
                 div()
                     .mb(px(16.))
@@ -7426,7 +7430,7 @@ impl SettingsShell {
                     .line_height(px(22.75))
                     .text_color(rgba(colors.secondary_text))
                     .whitespace_normal()
-                    .child(text),
+                    .child(display_text),
                 "subscription-risk-body",
                 text,
                 true,
