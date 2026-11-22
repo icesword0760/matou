@@ -7,14 +7,14 @@ import signal
 import subprocess
 import tempfile
 
+from support.instance_channel import instance_channel
+
 
 def run(binary, log_path, root):
     data, home, scratch, workspace = (root / name for name in ('data', 'home', 'tmp', 'workspace'))
     for directory in (data, home, scratch, workspace):
         directory.mkdir()
     (data / 'dag-window-probe.fixture').touch()
-    endpoint = data / '.instance/open.sock'
-    assert len(os.fsencode(endpoint)) < 104, endpoint
     env = {
         'HOME': str(home), 'ZDOTDIR': str(home), 'XDG_CONFIG_HOME': str(home),
         'TMPDIR': str(scratch), 'PATH': '/usr/bin:/bin:/usr/sbin:/sbin',
@@ -28,7 +28,7 @@ def run(binary, log_path, root):
         '--shell-home', str(home), '--shell', '/bin/zsh',
     ]
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    with log_path.open('wb') as log:
+    with log_path.open('wb') as log, instance_channel(data) as (endpoint, _):
         log.write(f'argv={args!r}\n'.encode())
         log.flush()
         process = subprocess.Popen(
@@ -45,7 +45,7 @@ def run(binary, log_path, root):
                     pass
                 process.wait(timeout=5)
             print(log_path.read_text(), end='')
-    assert not endpoint.exists(), 'clean exit left a socket'
+        assert not endpoint.exists(), 'clean exit left a socket'
     output = log_path.read_text()
     assert not any(
         'sequence' in line.lower() and any(marker in line.lower() for marker in (

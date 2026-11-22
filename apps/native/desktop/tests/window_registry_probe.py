@@ -14,6 +14,8 @@ import subprocess
 import tempfile
 import time
 
+from support.instance_channel import instance_channel
+
 
 PROBE = '[instance-probe] '
 MOUNT = '''
@@ -49,13 +51,11 @@ def children(pid):
 
 
 class Fixture:
-    def __init__(self, binary, root, logs):
+    def __init__(self, binary, root, logs, channels):
         self.binary = binary
         self.root = root
         self.logs = logs
         self.data = root / 'data'
-        self.endpoint = self.data / '.instance/open.sock'
-        assert len(os.fsencode(self.endpoint)) < 104, self.endpoint
         self.home = root / 'home'
         self.temp = root / 'tmp'
         self.default = root / 'default'
@@ -71,6 +71,7 @@ class Fixture:
         }
         for folder in (self.data, self.home, self.temp, self.default, self.a, self.b, self.c):
             folder.mkdir(parents=True)
+        self.endpoint, self.lock = channels.enter_context(instance_channel(self.data))
 
     def argv(self, paths, data=None):
         argv = [str(self.binary), '--data-root', str(data or self.data), '--workspace',
@@ -196,8 +197,8 @@ def check(label, **values):
     print(f'{label}: ' + json.dumps(values, ensure_ascii=False), flush=True)
 
 
-def cases(binary, temp, logs):
-    same = Fixture(binary, temp / 'a', logs)
+def cases(binary, temp, logs, channels):
+    same = Fixture(binary, temp / 'a', logs, channels)
     old_pid = None
     with same.owner('ready-owner') as owner:
         owner.initial(1)
@@ -246,7 +247,7 @@ def cases(binary, temp, logs):
         same.verify_owner(owner)
         check('root-alias', owner=old_pid, runtime=owner.runtime, windows=1, focus=owner.window)
 
-        separate = Fixture(binary, temp / 'f', logs)
+        separate = Fixture(binary, temp / 'f', logs, channels)
         with separate.owner('other-root-owner', separate.b) as other:
             other.initial(1)
             assert separate.mount(separate.b) and same.mount(same.c)
@@ -266,7 +267,7 @@ def cases(binary, temp, logs):
         check('takeover', old_pid=old_pid, owner=successor.process.pid, runtime=successor.runtime,
               windows=1, active='B', cwd='B', focus=successor.window)
 
-    boot = Fixture(binary, temp / 'b', logs)
+    boot = Fixture(binary, temp / 'b', logs, channels)
     with boot.owner('startup-owner', mode='startup') as owner:
         boot.launch('startup-secondary', boot.a, boot.b, boot.a)
         boot.launch('startup-no-path')
@@ -281,7 +282,7 @@ def cases(binary, temp, logs):
         check('startup', owner=owner.process.pid, runtime_before=0, runtime_after=owner.runtime,
               windows_before=0, windows_after=1, order=[boot.a.name, 'B'], active='B', cwd='B', focus=owner.window)
 
-    empty = Fixture(binary, temp / 'c', logs)
+    empty = Fixture(binary, temp / 'c', logs, channels)
     with empty.owner('no-window-owner', mode='no-window') as owner:
         owner.initial(0)
         empty.mount(empty.default)
@@ -298,7 +299,7 @@ def cases(binary, temp, logs):
         empty.verify_owner(owner)
         check('no-window-directory', owner=owner.process.pid, runtime=owner.runtime, windows=1, active='B', cwd='B', focus=owner.window)
 
-    broken = Fixture(binary, temp / 'd', logs)
+    broken = Fixture(binary, temp / 'd', logs, channels)
     with broken.owner('channel-owner') as owner:
         owner.initial(1)
         broken.mount(broken.default)
@@ -338,10 +339,8 @@ def cases(binary, temp, logs):
         broken.verify_owner(owner)
         check('stale-socket', owner=owner.process.pid, runtime=owner.runtime, windows=1, active='B', cwd='B')
 
-    blocked = Fixture(binary, temp / 'e', logs)
-    channel = blocked.endpoint.parent
-    channel.mkdir(mode=0o700)
-    with (channel / 'lock').open('wb+') as lock:
+    blocked = Fixture(binary, temp / 'e', logs, channels)
+    with blocked.lock.open('wb+') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         with socket.socket(socket.AF_UNIX) as silent:
             silent.bind(str(blocked.endpoint))
@@ -361,8 +360,8 @@ def main():
     args.logs.mkdir(parents=True, exist_ok=True)
     temp = Path.cwd() / '.tmp'
     temp.mkdir(exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix='w', dir=temp) as fixtures:
-        cases(args.binary.resolve(strict=True), Path(fixtures).resolve(), args.logs.resolve())
+    with tempfile.TemporaryDirectory(prefix='w', dir=temp) as fixtures, contextlib.ExitStack() as channels:
+        cases(args.binary.resolve(strict=True), Path(fixtures).resolve(), args.logs.resolve(), channels)
 
 
 if __name__ == '__main__':
