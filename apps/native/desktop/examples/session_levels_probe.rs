@@ -864,13 +864,22 @@ mod workspace {
         ) {
             assert_eq!(self.level_parent(), parent);
             assert_eq!(self.order, cards);
-            for index in 0..cards.len() {
+            let viewport = self.carousel_scroll.bounds();
+            for (index, id) in cards.iter().enumerate() {
                 let bounds = self.carousel_scroll.bounds_for_item(index).unwrap();
                 assert!(bounds.size.width > px(0.) && bounds.size.height > px(0.));
+                let (actual_id, left, width) = &self.card_geometry[index];
+                assert_eq!(actual_id.as_str(), *id);
+                assert!((bounds.left() - viewport.left() - px(*left as f32)).abs() < px(1.));
+                assert!((bounds.size.width - px(*width as f32)).abs() < px(1.));
             }
             assert_eq!(self.card_geometry.len(), cards.len());
             if !cards.is_empty() {
                 assert!(self.carousel_scroll.bounds_for_item(cards.len()).is_none());
+                let (_, left, width) = self.card_geometry.last().unwrap();
+                let max_scroll =
+                    (px((left + width + 10.) as f32) - viewport.size.width).max(px(0.));
+                assert!((self.carousel_scroll.max_offset().width - max_scroll).abs() < px(1.));
             }
             let (actual_label, actual_count) = self.breadcrumb_labels();
             assert_eq!(

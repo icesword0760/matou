@@ -1596,6 +1596,16 @@ mod workspace {
         };
         let initial = offset(cx);
         let base_width = card_bounds(window, cx, B).size.width;
+        let focus_width = card_bounds(window, cx, A).size.width;
+        window
+            .update(cx, |view, window, _| {
+                assert_eq!(
+                    f64::from(f32::from(view.carousel_scroll.bounds().size.width)),
+                    view.carousel_viewport_width(window),
+                );
+                assert_eq!(view.carousel_viewport_width(window), 1000.);
+            })
+            .unwrap();
         let b = card_header(window, cx, B);
         move_at(cx, b);
         hover(cx, Some(B));
@@ -1604,10 +1614,27 @@ mod workspace {
         cx.background_executor()
             .timer(Duration::from_millis(400))
             .await;
-        draw(window.into(), cx);
+        let painted = draw(window.into(), cx);
         let b = card_bounds(window, cx, B);
         assert!(b.size.width > base_width + px(20.));
         let a = card_bounds(window, cx, A);
+        assert_eq!(a.size.width, focus_width);
+        window
+            .update(cx, |view, _, _| {
+                for id in [A, B] {
+                    let index = view.order.iter().position(|card| card == id).unwrap();
+                    let slot = view.carousel_slot_bounds(index, id).unwrap();
+                    let header = painted[&format!("session-header-{id}")];
+                    assert!((header.left() - slot.left()).abs() < px(1.));
+                    assert!((header.top() - slot.top()).abs() < px(1.));
+                    assert!((header.size.width - slot.size.width).abs() < px(1.));
+                    assert_eq!(
+                        view.carousel_hit(header.center(), false).as_deref(),
+                        Some(id)
+                    );
+                }
+            })
+            .unwrap();
         move_at(cx, point((a.right() + b.left()) / 2., b.center().y));
         hover(cx, Some(B));
         let viewport = window
@@ -1623,6 +1650,41 @@ mod workspace {
             .await;
         draw(window.into(), cx);
         assert!((card_bounds(window, cx, B).size.width - base_width).abs() <= px(1.));
+
+        let third = card_header(window, cx, TEAM);
+        move_at(cx, third);
+        hover(cx, Some(TEAM));
+        for _ in 0..20 {
+            draw(window.into(), cx);
+            cx.background_executor()
+                .timer(Duration::from_millis(22))
+                .await;
+        }
+        draw(window.into(), cx);
+        let preview_scroll = offset(cx);
+        assert!(preview_scroll < initial - px(20.));
+        move_at(cx, point(viewport.center().x, viewport.top() + px(1.)));
+        hover(cx, None);
+        assert_eq!(offset(cx), preview_scroll);
+        draw(window.into(), cx);
+        assert_eq!(offset(cx), preview_scroll);
+        window
+            .update(cx, |view, _, cx| {
+                assert!(view.hover_restore_at.is_some());
+                view.hover_restore_at = Some(0.);
+                cx.notify();
+            })
+            .unwrap();
+        draw(window.into(), cx);
+        let restore_step = offset(cx) - preview_scroll;
+        assert!(restore_step > px(0.) && restore_step <= px(28.));
+        for _ in 0..20 {
+            draw(window.into(), cx);
+            if (offset(cx) - initial).abs() <= px(0.5) {
+                break;
+            }
+        }
+        assert!((offset(cx) - initial).abs() <= px(0.5));
 
         let third = card_header(window, cx, TEAM);
         move_at(cx, third);
@@ -1709,8 +1771,51 @@ mod workspace {
             .update(cx, |_, window, _| window.remove_window())
             .unwrap();
         println!(
-            "carousel focus: gap, blank, optimistic preview activation, saved scroll, keyboard follow, and manual drag"
+            "carousel focus: gap, blank, bounded preview restore, optimistic preview activation, saved scroll, keyboard follow, and manual drag"
         );
+    }
+
+    fn verify_carousel_narrow(cx: &mut AsyncApp) {
+        use crate::carousel_motion::{CardElevation, WidthRule};
+
+        let (window, _) = open_probe_at(cx, 970.);
+        draw(window.into(), cx);
+        let bounds = card_bounds(window, cx, B);
+        let offset = window
+            .update(cx, |view, window, _| {
+                let width = view.carousel_viewport_width(window);
+                assert!(width < 720.);
+                assert_eq!(view.carousel_scroll.bounds().size.width, px(width as f32));
+                assert_eq!(
+                    view.carousel_hit(bounds.center(), false).as_deref(),
+                    Some(B)
+                );
+                view.carousel_scroll.offset()
+            })
+            .unwrap();
+        dispatch_mouse(
+            window,
+            cx,
+            MouseMoveEvent {
+                position: bounds.center(),
+                ..Default::default()
+            },
+        );
+        draw(window.into(), cx);
+        window
+            .update(cx, |view, window, _| {
+                assert!(view.hovered.is_none());
+                assert!(view.hover_follow_until.is_none());
+                assert!(view.hover_baseline.is_none());
+                assert!(view.edge_next_at.is_none());
+                assert_eq!(view.carousel_scroll.offset(), offset);
+                let motion = &view.card_motion[B];
+                assert!(motion.width.as_ref().unwrap().target_rule() == WidthRule::NarrowBase);
+                assert_eq!(motion.shadow_target, CardElevation::Resting);
+                window.remove_window();
+            })
+            .unwrap();
+        println!("carousel narrow: compact width, no hover elevation or follow");
     }
 
     async fn verify_carousel_and_zoom(cx: &mut AsyncApp, root: &std::path::Path) {
@@ -3215,6 +3320,7 @@ mod workspace {
                 verify_horizontal_divider_drag(cx);
                 verify_splits(cx);
                 verify_carousel_focus(cx).await;
+                verify_carousel_narrow(cx);
                 verify_carousel_and_zoom(cx, &fixture_root.join("font-zoom")).await;
                 verify_links(cx).await;
                 live_wiring::verify(cx, fixture_root.clone()).await;

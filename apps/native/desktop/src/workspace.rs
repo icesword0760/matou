@@ -79,8 +79,8 @@ mod project_instructions;
 
 use crate::{
     carousel_motion::{
-        CardWidth, CarouselLayout, Curve, Transition, centered_scroll, focus_scroll_step,
-        fully_visible_scroll,
+        CardElevation, CardWidth, CarouselLayout, Curve, HOVER_RESTORE_DELAY_MS, Transition,
+        centered_scroll, focus_scroll_step, fully_visible_scroll, hover_restore_step,
     },
     rename_input::{RenameInput, RenameInputEvent, trim_name},
     runtime_bridge::{
@@ -153,6 +153,47 @@ impl Render for WorkspaceDrag {
 struct CardMotion {
     width: Option<CardWidth>,
     lift: Transition,
+    drawn_lift: Pixels,
+    hover_elevation: Transition,
+    shadow_start: [f32; 3],
+    shadow_target: CardElevation,
+}
+
+impl CardMotion {
+    fn new(selected: bool) -> Self {
+        let elevation = CardElevation::for_card(selected, false);
+        Self {
+            width: None,
+            lift: Transition::new(if selected { 1. } else { 0. }),
+            drawn_lift: px(0.),
+            hover_elevation: Transition::new(1.),
+            shadow_start: elevation.weights(),
+            shadow_target: elevation,
+        }
+    }
+
+    fn retarget_elevation(&mut self, target: CardElevation, now: f64) {
+        if self.shadow_target != target {
+            self.shadow_start = self.shadow_weights(now);
+            self.shadow_target = target;
+            self.hover_elevation.snap(0.);
+            self.hover_elevation.retarget(1., now, 180., Curve::Ease);
+        }
+    }
+
+    fn shadow_weights(&self, now: f64) -> [f32; 3] {
+        let progress = self.hover_elevation.value(now) as f32;
+        let target = self.shadow_target.weights();
+        std::array::from_fn(|i| self.shadow_start[i] * (1. - progress) + target[i] * progress)
+    }
+
+    fn lift_for_frame(&self, now: f64, in_split: bool) -> Pixels {
+        if in_split {
+            px(0.)
+        } else {
+            px(-4. * self.lift.value(now) as f32)
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -5004,12 +5045,9 @@ impl Workspace {
     }
 
     fn carousel_viewport_width(&self, window: &Window) -> f64 {
-        let measured = self.carousel_scroll.bounds().size.width;
-        let width = if measured > px(0.) {
-            measured
-        } else {
-            window.viewport_size().width - px(NOTIFICATION_UI_SIDEBAR_WIDTH)
-        };
+        // The fixed sidebar is border-box sized, including its right divider.
+        // Use the current window width even when the scroll handle has stale bounds.
+        let width = window.viewport_size().width - px(NOTIFICATION_UI_SIDEBAR_WIDTH);
         f64::from(f32::from(width.max(px(0.))))
     }
 
@@ -5029,14 +5067,12 @@ impl Workspace {
         if !self.carousel_scroll.bounds().contains(&position) {
             return None;
         }
-        let offset = self.carousel_scroll.offset();
         let mut previous: Option<Bounds<Pixels>> = None;
         for (index, id) in self.order.iter().enumerate() {
-            let Some(mut bounds) = self.carousel_scroll.bounds_for_item(index) else {
+            let Some(bounds) = self.carousel_slot_bounds(index, id) else {
                 break;
             };
-            bounds.origin += offset;
-            if bounds.contains(&position) {
+            if session_card_hit(&bounds, position) {
                 return Some(id.clone());
             }
             if retain_gap
@@ -5051,6 +5087,19 @@ impl Workspace {
             previous = Some(bounds);
         }
         None
+    }
+
+    fn carousel_slot_bounds(&self, index: usize, id: &str) -> Option<Bounds<Pixels>> {
+        let mut bounds = self.carousel_scroll.bounds_for_item(index)?;
+        bounds.origin += self.carousel_scroll.offset();
+        bounds.origin.y += self.card_motion.get(id)?.drawn_lift;
+        Some(bounds)
+    }
+
+    fn cancel_hover_restore(&mut self) {
+        if self.hover_restore_at.take().is_some() {
+            self.hover_baseline = None;
+        }
     }
 
     fn leave_carousel(&mut self, cx: &mut Context<Self>) {
@@ -5149,6 +5198,7 @@ impl Workspace {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
+        self.cancel_hover_restore();
         let delta = event.delta.pixel_delta(px(16.));
         let horizontal = event.modifiers.shift || delta.x.abs() >= delta.y.abs();
         let narrow = self.carousel_viewport_width(window) < 720.;
@@ -5212,7 +5262,11 @@ impl Workspace {
         }
         // A horizontal gesture retargets visual expansion under the pointer,
         // while its own wheel deltas continue to own the viewport.
-        self.hovered = self.carousel_hit(position, true);
+        self.hovered = if self.carousel_viewport_width(window) >= 720. {
+            self.carousel_hit(position, true)
+        } else {
+            None
+        };
         cx.notify();
     }
 
@@ -5319,6 +5373,10 @@ impl Workspace {
     }
 
     fn hover_card(&mut self, id: Option<String>, cx: &mut Context<Self>) {
+        let id = id.filter(|_| {
+            self.carousel_scroll.bounds().size.width >= px(720.)
+                && self.active_split_tree().is_none()
+        });
         if self.hovered == id {
             return;
         }
@@ -5335,11 +5393,7 @@ impl Workspace {
         match &self.hovered {
             None => {
                 self.hover_follow_until = None;
-                if let Some(baseline) = self.hover_baseline {
-                    self.carousel_scroll
-                        .set_offset(point(px(-baseline as f32), px(0.)));
-                    self.hover_restore_at = Some(now + 220.);
-                }
+                self.hover_restore_at = self.hover_baseline.map(|_| now + HOVER_RESTORE_DELAY_MS);
             }
             Some(_) => {
                 self.hover_restore_at = None;
@@ -10029,15 +10083,14 @@ impl Workspace {
         }
         let focus = self.level_focus().map(str::to_owned);
         for id in &self.order {
-            let selected = if focus.as_ref() == Some(id) { 1. } else { 0. };
+            let selected = focus.as_ref() == Some(id);
             let motion = self
                 .card_motion
                 .entry(id.clone())
-                .or_insert_with(|| CardMotion {
-                    width: None,
-                    lift: Transition::new(selected),
-                });
-            motion.lift.retarget(selected, now, 180., Curve::Lift);
+                .or_insert_with(|| CardMotion::new(selected));
+            motion
+                .lift
+                .retarget(if selected { 1. } else { 0. }, now, 180., Curve::Lift);
         }
     }
 
@@ -14758,6 +14811,14 @@ impl Render for Workspace {
         });
         let layout = CarouselLayout::for_viewport(viewport_width);
         let narrow = layout.narrow;
+        let in_split = split_tree.is_some();
+        if narrow || in_split {
+            self.hovered = None;
+            self.hover_follow_until = None;
+            self.hover_restore_at = None;
+            self.hover_baseline = None;
+            self.stop_edge_browse(false);
+        }
         let now = self.motion_clock.elapsed().as_secs_f64() * 1000.;
         let dragging = cx.has_active_drag();
         if !dragging {
@@ -14829,11 +14890,12 @@ impl Render for Workspace {
         let mut moving = false;
         let width_duration = if reduced_motion() { 1. } else { 380. };
         for id in &self.order {
-            let rule = layout.width_rule(
-                level_focus.as_ref() == Some(id),
-                self.hovered.as_ref() == Some(id),
-            );
+            let selected = level_focus.as_ref() == Some(id);
+            let hovered = self.hovered.as_ref() == Some(id);
+            let rule = layout.width_rule(selected, hovered);
             let motion = self.card_motion.get_mut(id).expect("mounted card motion");
+            motion.drawn_lift = motion.lift_for_frame(now, in_split);
+            motion.retarget_elevation(CardElevation::for_card(selected, hovered), now);
             let motion_width = motion.width.get_or_insert_with(|| CardWidth::new(rule));
             motion_width.retarget(rule, now, width_duration);
             let width = motion_width.value(viewport_width, now);
@@ -14847,10 +14909,14 @@ impl Render for Workspace {
                 preview_geometry = Some((left, width));
             }
             left += width + 12.;
-            moving |= motion_width.is_running(now) || motion.lift.is_running(now);
+            moving |= motion_width.is_running(now)
+                || motion.lift.is_running(now)
+                || motion.hover_elevation.is_running(now);
         }
-        let total =
-            20. + widths.values().sum::<f64>() + self.order.len().saturating_sub(1) as f64 * 12.;
+        let total = self
+            .card_geometry
+            .last()
+            .map_or(20., |(_, left, width)| left + width + 10.);
         let max_scroll = (total - viewport_width).max(0.);
         if was_cruising {
             // The next cruise target depends on this frame's hidden cards.
@@ -14896,14 +14962,18 @@ impl Render for Workspace {
             }
         }
         if split_tree.is_none()
-            && let Some(at) = self.hover_restore_at
+            && let (Some(at), Some(baseline)) = (self.hover_restore_at, self.hover_baseline)
         {
-            if now >= at || !moving {
-                if let Some(baseline) = self.hover_baseline.take() {
-                    self.carousel_scroll
-                        .set_offset(point(px(-baseline as f32), px(0.)));
-                }
+            let current =
+                f64::from(-f32::from(self.carousel_scroll.offset().x)).clamp(0., max_scroll);
+            let (next, settled) = hover_restore_step(now, at, current, baseline, max_scroll);
+            if next != current {
+                self.carousel_scroll
+                    .set_offset(point(px(-next as f32), px(0.)));
+            }
+            if settled {
                 self.hover_restore_at = None;
+                self.hover_baseline = None;
             } else {
                 moving = true;
             }
@@ -14942,19 +15012,25 @@ impl Render for Workspace {
                 cx,
             );
         }
-        if split_tree.is_none() && moving {
+        if (!in_split && moving)
+            || (in_split
+                && self
+                    .card_motion
+                    .values()
+                    .any(|motion| motion.hover_elevation.is_running(now)))
+        {
             window.request_animation_frame();
         }
         let mut carousel = div()
             .id("session-carousel")
             .flex_1()
             .min_h_0()
+            .min_w_0()
             .flex()
             .gap(px(12.))
             .p(px(10.))
             .overflow_x_scroll()
             .track_scroll(&self.carousel_scroll)
-            .overflow_y_hidden()
             .bg(rgba(palette.cards.canvas))
             .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, window, cx| {
                 this.stop_edge_browse(true);
@@ -14992,6 +15068,8 @@ impl Render for Workspace {
         }
         let mut badge_tooltip = None;
         let mut split_cards = HashMap::new();
+        let mut stacked_cards = Vec::new();
+        let dark = self.wiring_dark();
         for id in self.order.iter().filter(|_| !self.wiring.board_open) {
             let node = session_levels::node(session_levels::nodes(&self.graph), id);
             let selected = level_focus.as_ref() == Some(id);
@@ -15002,58 +15080,59 @@ impl Render for Workspace {
                 },
                 None => widths[id] as f32,
             };
-            let in_split = split_tree.is_some();
-            let lift = if in_split {
-                0.
-            } else {
-                -4. * self.card_motion[id].lift.value(now) as f32
+            let motion = &self.card_motion[id];
+            let weights = motion.shadow_weights(now);
+            let elevation = motion.shadow_target;
+            let lift = motion.drawn_lift;
+            let place_card = |card: Stateful<Div>| {
+                let glass = dark && selected;
+                let card = card.children(
+                    (glass || weights[2] > 0.).then(|| card_reflection(dark, glass, weights[2])),
+                );
+                let shadows = card_shadows(dark, weights);
+                if in_split {
+                    card.shadow(shadows).into_any_element()
+                } else {
+                    div()
+                        .absolute()
+                        .left(px((positions[id] - 10.) as f32))
+                        .top(lift)
+                        .w(px(width))
+                        .h_full()
+                        .child(carousel_card_shadow(shadows))
+                        .child(card)
+                        .into_any_element()
+                }
             };
             let background = rgba(palette.cards.background);
             #[cfg(debug_assertions)]
             crate::settings_shell::probe_workspace_surfaces(|probe| probe.card = Some(background));
             let card = div()
                 .id(SharedString::from(format!("card-{id}")))
-                .when_else(in_split, |card| card.w_full(), |card| card.w(px(width)))
+                .relative()
+                .w_full()
                 .h_full()
                 .flex_none()
-                .relative()
-                .top(px(lift))
                 .rounded(CARD_RADIUS)
                 .overflow_hidden()
                 .bg(background)
                 .flex()
-                .flex_col()
-                .shadow(if selected {
-                    vec![
-                        shadow(0x32445c, 0.11, 7., 15.),
-                        shadow(0x32445c, 0.19, 24., 52.),
-                        shadow(0x3f82d4, 0.12, 15., 42.),
-                    ]
-                } else if self.hovered.as_ref() == Some(id) {
-                    vec![
-                        shadow(0x2a3748, 0.1, 4., 12.),
-                        shadow(0x2a3748, 0.12, 17., 36.),
-                    ]
-                } else {
-                    vec![
-                        shadow(0x2a3748, 0.075, 2., 7.),
-                        shadow(0x2a3748, 0.07, 13., 30.),
-                    ]
-                });
+                .flex_col();
             let compact = !in_split && (narrow || self.read_only.is_some()) && !selected;
             let title = node
                 .and_then(|node| node["title"].as_str())
                 .unwrap_or("Shell");
             if let Some(node) = node.filter(|node| Self::team_member_node(node)) {
-                carousel = carousel.child(card.child(self.render_team_member(id, node)));
+                let card = place_card(card.child(self.render_team_member(id, node)));
+                stacked_cards.push((elevation, card));
                 continue;
             }
             if self.wiring.is_detached(id) {
-                let card = card.child(self.render_detached_placeholder(id, title, cx));
+                let card = place_card(card.child(self.render_detached_placeholder(id, title, cx)));
                 if in_split {
-                    split_cards.insert(id.clone(), card.into_any_element());
+                    split_cards.insert(id.clone(), card);
                 } else {
-                    carousel = carousel.child(card);
+                    stacked_cards.push((elevation, card));
                 }
                 continue;
             }
@@ -15067,7 +15146,7 @@ impl Render for Workspace {
                 } else {
                     card.child(self.stopped_session_card(id, node, cx))
                 };
-                carousel = carousel.child(card);
+                stacked_cards.push((elevation, place_card(card)));
                 continue;
             }
             let Some(terminal) = self.terminals.get(id) else {
@@ -15488,11 +15567,33 @@ impl Render for Workspace {
             } else {
                 card
             };
+            let card = place_card(card);
             if in_split {
-                split_cards.insert(id.clone(), card.into_any_element());
+                split_cards.insert(id.clone(), card);
             } else {
-                carousel = carousel.child(card);
+                stacked_cards.push((elevation, card));
             }
+        }
+        if !in_split && !self.wiring.board_open && !self.order.is_empty() {
+            stacked_cards.sort_by_key(|(elevation, _)| *elevation);
+            let stack = div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .w(px((total - 20.) as f32))
+                .h_full()
+                .children(stacked_cards.into_iter().map(|(_, card)| card));
+            // GPUI tracks the direct children as logical scroll items. The
+            // first slot hosts the painted stack without sizing or clipping it.
+            let mut stack = Some(stack);
+            carousel = carousel.children(self.order.iter().map(|id| {
+                div()
+                    .relative()
+                    .flex_none()
+                    .w(px(widths[id] as f32))
+                    .h_full()
+                    .children(stack.take())
+            }));
         }
         if self.order.is_empty() {
             carousel = carousel.child(
@@ -15541,7 +15642,9 @@ impl Render for Workspace {
                         } else if event.pressed_button.is_none() && bounds.contains(&event.position)
                             && !this.carousel_has_overlay(window)
                         {
-                            this.edge_intent(event.position, window, cx);
+                            if this.carousel_viewport_width(window) >= 720. {
+                                this.edge_intent(event.position, window, cx);
+                            }
                             this.hover_card(this.carousel_hit(event.position, true), cx);
                         } else if !bounds.contains(&event.position) {
                             this.leave_carousel(cx);
@@ -15639,7 +15742,14 @@ impl Render for Workspace {
                 if let Some(tree) = &split_tree {
                     stage.child(self.render_split_canvas(tree, split_cards, cx))
                 } else {
-                    stage.child(carousel).child(indicator)
+                    stage
+                        .overflow_hidden()
+                        .child(carousel)
+                        .children(
+                            (!self.order.is_empty())
+                                .then(|| carousel_shadow_fade(rgba(palette.cards.canvas))),
+                        )
+                        .child(indicator)
                 }
             })
             .children(board)
@@ -15707,6 +15817,7 @@ impl Render for Workspace {
                 }),
             )
             .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                this.cancel_hover_restore();
                 if event.button == MouseButton::Left {
                     this.workspace_drag_gesture = false;
                     this.carousel_drag = None;
@@ -15715,6 +15826,9 @@ impl Render for Workspace {
                     this.keyboard_focus = false;
                     cx.notify();
                 }
+            }))
+            .capture_key_down(cx.listener(|this, _: &KeyDownEvent, _, _| {
+                this.cancel_hover_restore();
             }))
             .size_full()
             .flex()
@@ -17379,6 +17493,112 @@ mod icon_tests {
     }
 }
 
+#[cfg(test)]
+mod carousel_tests {
+    use super::{CardElevation, CardMotion, Curve, card_shadows, session_card_hit, shadow};
+    use CardElevation::{Focused, Preview, Resting};
+    use gpui::{Bounds, Rgba, point, px, rgb, size};
+
+    #[test]
+    fn card_shadow_layers_match_the_reference_profiles() {
+        for (dark, elevation, expected) in [
+            (
+                false,
+                Resting,
+                &[(0x2a3748, 0.075, 2., 7.), (0x2a3748, 0.07, 13., 30.)][..],
+            ),
+            (
+                false,
+                Preview,
+                &[(0x2a3748, 0.1, 4., 12.), (0x2a3748, 0.12, 17., 36.)][..],
+            ),
+            (
+                false,
+                Focused,
+                &[
+                    (0x32445c, 0.11, 7., 15.),
+                    (0x32445c, 0.19, 24., 52.),
+                    (0x3f82d4, 0.12, 15., 42.),
+                ][..],
+            ),
+            (true, Resting, &[(0, 0.2, 2., 8.), (0, 0.13, 12., 30.)][..]),
+            (true, Preview, &[(0, 0.22, 5., 14.), (0, 0.2, 17., 38.)][..]),
+            (
+                true,
+                Focused,
+                &[
+                    (0, 0.24, 9., 18.),
+                    (0, 0.3, 24., 52.),
+                    (0x528bcd, 0.12, 13., 38.),
+                ][..],
+            ),
+        ] {
+            let shadows = card_shadows(dark, elevation.weights());
+            assert_eq!(shadows.len(), expected.len());
+            for (shadow, &(hex, alpha, y, css_blur)) in shadows.iter().rev().zip(expected) {
+                let color = Rgba::from(shadow.color);
+                let tint = rgb(hex);
+                assert!((color.r - tint.r).abs() < 1e-6);
+                assert!((color.g - tint.g).abs() < 1e-6);
+                assert!((color.b - tint.b).abs() < 1e-6);
+                assert!((color.a - alpha).abs() < 1e-6);
+                assert_eq!(shadow.offset, point(px(0.), px(y)));
+                assert_eq!(shadow.blur_radius, px(css_blur / 2.));
+                assert_eq!(shadow.spread_radius, px(0.));
+            }
+        }
+        assert_eq!(shadow(0, 0.2, 2., 7.).blur_radius, px(7.));
+    }
+
+    #[test]
+    fn elevation_eases_color_blur_and_offset_for_180_ms() {
+        let mut motion = CardMotion::new(false);
+        motion.retarget_elevation(Preview, 20.);
+        assert_eq!(motion.shadow_weights(20.), Resting.weights());
+        let progress = Curve::Ease.ease(0.5) as f32;
+        assert_eq!(motion.shadow_weights(110.), [1. - progress, progress, 0.]);
+        let shadows = card_shadows(false, motion.shadow_weights(110.));
+        let near = shadows.last().unwrap();
+        assert!((near.color.a - (0.075 + 0.025 * progress)).abs() < 1e-6);
+        assert!((near.offset.y - px(2. + 2. * progress)).abs() < px(0.001));
+        assert!((near.blur_radius - px((7. + 5. * progress) / 2.)).abs() < px(0.001));
+        assert_eq!(motion.shadow_weights(200.), Preview.weights());
+        assert!(!motion.hover_elevation.is_running(200.));
+
+        motion.retarget_elevation(Focused, 200.);
+        let midpoint = motion.shadow_weights(290.);
+        let glow = &card_shadows(false, midpoint)[0];
+        assert!((glow.color.a - 0.12 * progress).abs() < 1e-6);
+        assert!((glow.blur_radius - px(21. * progress)).abs() < px(0.001));
+        motion.retarget_elevation(Resting, 290.);
+        assert_eq!(motion.shadow_weights(290.), midpoint);
+        assert_eq!(motion.shadow_weights(470.), Resting.weights());
+    }
+
+    #[test]
+    fn stacking_prioritizes_focus_and_splits_keep_cards_level() {
+        let mut paint = [
+            (CardElevation::for_card(true, true), "left"),
+            (CardElevation::for_card(false, true), "middle"),
+            (CardElevation::for_card(false, false), "right"),
+        ];
+        paint.sort_by_key(|(elevation, _)| *elevation);
+        assert_eq!(
+            paint,
+            [(Resting, "right"), (Preview, "middle"), (Focused, "left")]
+        );
+
+        let motion = CardMotion::new(true);
+        assert_eq!(motion.lift_for_frame(0., false), px(-4.));
+        assert_eq!(motion.lift_for_frame(0., true), px(0.));
+        let bounds = Bounds::new(point(px(10.), px(10.)), size(px(300.), px(420.)));
+        let lifted = bounds + point(px(0.), motion.lift_for_frame(0., false));
+        assert!(session_card_hit(&lifted, point(px(160.), px(7.))));
+        assert!(!session_card_hit(&bounds, point(px(160.), px(7.))));
+        assert!(!session_card_hit(&lifted, lifted.origin));
+    }
+}
+
 fn shadow(color: u32, alpha: f32, y: f32, blur: f32) -> BoxShadow {
     let mut color: Hsla = rgb(color).into();
     color.a = alpha;
@@ -17388,6 +17608,178 @@ fn shadow(color: u32, alpha: f32, y: f32, blur: f32) -> BoxShadow {
         blur_radius: px(blur),
         spread_radius: px(0.),
     }
+}
+
+fn card_shadows(dark: bool, weights: [f32; 3]) -> Vec<BoxShadow> {
+    // Rows are normal, preview and focused. Each layer is (RGB, alpha, Y, CSS blur).
+    let layers = if dark {
+        [
+            [(0, 0.2, 2., 8.), (0, 0.13, 12., 30.), (0, 0., 0., 0.)],
+            [(0, 0.22, 5., 14.), (0, 0.2, 17., 38.), (0, 0., 0., 0.)],
+            [
+                (0, 0.24, 9., 18.),
+                (0, 0.3, 24., 52.),
+                (0x528bcd, 0.12, 13., 38.),
+            ],
+        ]
+    } else {
+        [
+            [
+                (0x2a3748, 0.075, 2., 7.),
+                (0x2a3748, 0.07, 13., 30.),
+                (0, 0., 0., 0.),
+            ],
+            [
+                (0x2a3748, 0.1, 4., 12.),
+                (0x2a3748, 0.12, 17., 36.),
+                (0, 0., 0., 0.),
+            ],
+            [
+                (0x32445c, 0.11, 7., 15.),
+                (0x32445c, 0.19, 24., 52.),
+                (0x3f82d4, 0.12, 15., 42.),
+            ],
+        ]
+    };
+    // CSS puts the first shadow on top. GPUI draws the later layers over earlier ones.
+    (0..3)
+        .rev()
+        .filter_map(|index| {
+            let mut color = Rgba::default();
+            let mut y = 0.;
+            let mut css_blur = 0.;
+            for (layers, weight) in layers.iter().zip(weights) {
+                let (hex, alpha, offset, blur) = layers[index];
+                let tint = rgb(hex);
+                let alpha = alpha * weight;
+                color.r += tint.r * alpha;
+                color.g += tint.g * alpha;
+                color.b += tint.b * alpha;
+                color.a += alpha;
+                y += offset * weight;
+                css_blur += blur * weight;
+            }
+            if color.a <= 0. {
+                return None;
+            }
+            color.r /= color.a;
+            color.g /= color.a;
+            color.b /= color.a;
+            Some(BoxShadow {
+                color: color.into(),
+                offset: point(px(0.), px(y)),
+                // GPUI takes the Gaussian sigma. CSS blur is twice that value.
+                blur_radius: px(css_blur / 2.),
+                spread_radius: px(0.),
+            })
+        })
+        .collect()
+}
+
+fn carousel_card_shadow(shadows: Vec<BoxShadow>) -> Canvas<()> {
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            // GPUI batches by primitive bounds, while the shader paints out to
+            // three sigmas. Register that footprint so shadows order against neighbors.
+            let layer = shadows.iter().fold(bounds, |layer, shadow| {
+                let extent = shadow.spread_radius + shadow.blur_radius * 3.;
+                layer.union(&(bounds + shadow.offset).dilate(extent))
+            });
+            let radius = CARD_RADIUS
+                .min(bounds.size.width / 2.)
+                .min(bounds.size.height / 2.);
+            window.paint_layer(layer, |window| {
+                window.paint_shadows(bounds, radius.into(), &shadows)
+            });
+        },
+    )
+    .absolute()
+    .inset_0()
+    .size_full()
+}
+
+fn vertical_card_gradient(from: Hsla, to: Hsla) -> Background {
+    linear_gradient(180., linear_color_stop(from, 0.), linear_color_stop(to, 1.))
+}
+
+fn card_reflection(dark: bool, glass: bool, focus_weight: f32) -> Canvas<()> {
+    let white: Hsla = rgb(0xffffff).into();
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            let radius = CARD_RADIUS
+                .min(bounds.size.width / 2.)
+                .min(bounds.size.height / 2.);
+            if glass && bounds.size.height > px(0.) {
+                let height = bounds.size.height * 0.34;
+                let midpoint = height * 0.4;
+                let white_stop = white.alpha(0.14 * 0.7);
+                let blue_stop = Hsla::from(rgb(0xa0c4eb)).alpha(0.045 * 0.7);
+                // GPUI gradients have two stops. Join them at the CSS 40% stop.
+                window.paint_quad(
+                    fill(
+                        Bounds::new(bounds.origin, size(bounds.size.width, midpoint)),
+                        vertical_card_gradient(white_stop, blue_stop),
+                    )
+                    .corner_radii(Corners {
+                        top_left: radius,
+                        top_right: radius,
+                        ..Default::default()
+                    }),
+                );
+                window.paint_quad(fill(
+                    Bounds::new(
+                        bounds.origin + point(px(0.), midpoint),
+                        size(bounds.size.width, height - midpoint),
+                    ),
+                    vertical_card_gradient(blue_stop, blue_stop.alpha(0.)),
+                ));
+            }
+            if focus_weight > 0. {
+                window.paint_quad(quad(
+                    bounds,
+                    radius,
+                    transparent_black(),
+                    Edges {
+                        top: px(focus_weight),
+                        ..Default::default()
+                    },
+                    white.alpha(if dark { 0.12 } else { 0.96 } * focus_weight),
+                    BorderStyle::default(),
+                ));
+            }
+        },
+    )
+    .absolute()
+    .inset_0()
+    .size_full()
+}
+
+fn carousel_shadow_fade(background: Rgba) -> Canvas<()> {
+    let background: Hsla = background.into();
+    let transparent = background.alpha(0.);
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            if bounds.size.height >= px(20.) {
+                // The fades only cover canvas padding, including on the lifted frame.
+                let top = Bounds::new(bounds.origin, size(bounds.size.width, px(6.)));
+                let bottom = Bounds::new(
+                    point(bounds.left(), bounds.bottom() - px(10.)),
+                    size(bounds.size.width, px(10.)),
+                );
+                window.paint_quad(fill(top, vertical_card_gradient(background, transparent)));
+                window.paint_quad(fill(
+                    bottom,
+                    vertical_card_gradient(transparent, background),
+                ));
+            }
+        },
+    )
+    .absolute()
+    .inset_0()
+    .size_full()
 }
 
 fn loading_badge_ring(spread: f32) -> BoxShadow {

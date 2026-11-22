@@ -8,6 +8,31 @@ pub enum Curve {
     Edge,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CardElevation {
+    Resting,
+    Preview,
+    Focused,
+}
+
+impl CardElevation {
+    pub fn for_card(selected: bool, hovered: bool) -> Self {
+        if selected {
+            Self::Focused
+        } else if hovered {
+            Self::Preview
+        } else {
+            Self::Resting
+        }
+    }
+
+    pub fn weights(self) -> [f32; 3] {
+        let mut weights = [0.; 3];
+        weights[self as usize] = 1.;
+        weights
+    }
+}
+
 impl Curve {
     pub(crate) fn ease(self, elapsed_fraction: f64) -> f64 {
         if elapsed_fraction <= 0.0 {
@@ -293,6 +318,26 @@ pub fn focus_scroll_step(current: f64, target: f64) -> f64 {
     }
 }
 
+pub const HOVER_RESTORE_DELAY_MS: f64 = 220.;
+
+pub fn hover_restore_step(
+    now: f64,
+    restore_at: f64,
+    current: f64,
+    baseline: f64,
+    max_scroll: f64,
+) -> (f64, bool) {
+    if now < restore_at {
+        return (current, false);
+    }
+    let target = baseline.clamp(0., max_scroll);
+    if (target - current).abs() <= 28. {
+        (target, true)
+    } else {
+        (focus_scroll_step(current, target), false)
+    }
+}
+
 /// Source preview follows the clipped edge without recentering an already visible card.
 pub fn fully_visible_scroll(
     left: f64,
@@ -307,5 +352,81 @@ pub fn fully_visible_scroll(
         (left + width - viewport + 10.).clamp(0., max_scroll)
     } else {
         current
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn card_widths_match_viewport_breakpoints_and_limits() {
+        for (viewport, columns, base, expanded) in [
+            (720., 2, 344., 336.),
+            (863., 2, 415.5, 404.64),
+            (864., 3, 820. / 3., 405.12),
+            (1155., 3, 1111. / 3., 544.8),
+            (1156., 4, 275., 545.28),
+            (1500., 4, 361., 620.),
+        ] {
+            let layout = CarouselLayout::for_viewport(viewport);
+            assert!(!layout.narrow);
+            assert_eq!(layout.columns, columns);
+            assert!((layout.width_rule(false, false).width(viewport) - base).abs() < 1e-9);
+            assert!((layout.width_rule(false, true).width(viewport) - expanded).abs() < 1e-9);
+            assert!((layout.width_rule(true, true).width(viewport) - expanded).abs() < 1e-9);
+        }
+        for (viewport, columns, base, expanded) in [
+            (300., 1, 112., 260.),
+            (520., 1, 140., 340.),
+            (719., 2, 176., 475.32),
+        ] {
+            let layout = CarouselLayout::for_viewport(viewport);
+            assert!(layout.narrow);
+            assert_eq!(layout.columns, columns);
+            assert!((layout.width_rule(false, false).width(viewport) - base).abs() < 1e-9);
+            assert!((layout.width_rule(false, true).width(viewport) - base).abs() < 1e-9);
+            assert!((layout.width_rule(true, false).width(viewport) - expanded).abs() < 1e-9);
+        }
+        assert_eq!(WidthRule::Columns(1).width(560.), 540.);
+        assert_eq!(WidthRule::NarrowExpanded.width(1000.), 560.);
+    }
+
+    #[test]
+    fn preview_expands_with_the_width_curve_and_promotes_without_retargeting() {
+        let viewport = 1000.;
+        let layout = CarouselLayout::for_viewport(viewport);
+        let mut preview = CardWidth::new(layout.width_rule(false, false));
+        let mut focused = CardWidth::new(layout.width_rule(true, false));
+        preview.retarget(layout.width_rule(false, true), 100., 380.);
+        focused.retarget(layout.width_rule(true, false), 100., 380.);
+        let start = WidthRule::Columns(3).width(viewport);
+        let end = WidthRule::WideExpanded.width(viewport);
+        let middle = preview.value(viewport, 290.);
+        assert!((middle - (start + (end - start) * Curve::Width.ease(0.5))).abs() < 1e-9);
+        assert_eq!(focused.value(viewport, 290.), end);
+        preview.retarget(layout.width_rule(true, false), 290., 380.);
+        assert_eq!(preview.value(viewport, 290.), middle);
+        assert_eq!(preview.value(viewport, 480.), end);
+        assert!(!preview.is_running(480.));
+    }
+
+    #[test]
+    fn hover_restore_waits_then_moves_at_most_28_pixels_per_frame() {
+        let at = 100. + HOVER_RESTORE_DELAY_MS;
+        assert_eq!(
+            hover_restore_step(at - 1., at, 150., 100., 200.),
+            (150., false)
+        );
+        assert_eq!(hover_restore_step(at, at, 150., 100., 200.), (122., false));
+        assert_eq!(
+            hover_restore_step(at + 16., at, 122., 100., 200.),
+            (100., true)
+        );
+        assert_eq!(
+            hover_restore_step(at + 16., at, 95., 150., 110.),
+            (110., true)
+        );
+        assert_eq!(hover_restore_step(at, at, 10., 38.2, 100.), (38., false));
     }
 }
