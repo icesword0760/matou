@@ -10,9 +10,9 @@ use matou_native_core::{
     provider_config::{ProviderConfigLocale, ProviderConfigStore},
     provider_launch::{
         attach_claude_settings, parse_claude_role_assignments, prepare_claude_fork,
-        prepare_claude_launch, prepare_claude_permission_restart, prepare_new_claude_launch,
-        prepare_new_claude_launch_with_budget, validate_claude_role_assignments,
-        validate_claude_web_search,
+        prepare_claude_fork_rebuild, prepare_claude_launch, prepare_claude_permission_restart,
+        prepare_new_claude_launch, prepare_new_claude_launch_with_budget,
+        validate_claude_role_assignments, validate_claude_web_search,
     },
     pty::ShellLaunch,
     sessions::{read_claude_role_launch_preferences, save_claude_model_assignments},
@@ -1155,6 +1155,83 @@ fn bound_resume_and_fork_keep_the_existing_launch_arguments() -> Result<()> {
             "plan",
         ]
     );
+    Ok(())
+}
+
+#[test]
+fn fork_rebuild_uses_the_parent_and_preserves_the_child_launch_settings() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path();
+    fs::write(
+        root.join("provider-config.json"),
+        role_providers().to_string(),
+    )?;
+    let environment = BTreeMap::from([(
+        "MATOU_CLAUDE_COMMAND".into(),
+        std::env::current_exe()?.into_os_string(),
+    )]);
+    let binding =
+        json!({"providerConfigId": "target", "model": "target-opus", "permissionMode": "plan"});
+    let parent = "fff4132a-f6f8-4b49-9f6d-4b07be37f5c2";
+    let child = "7ec4132a-f6f8-4b49-9f6d-4b07be37f5c2";
+    let resume = prepare_claude_launch(
+        root,
+        root,
+        &binding,
+        Some(child),
+        environment.clone(),
+        80,
+        24,
+    )?;
+    let automatic = resume.for_fork_rebuild(parent, child)?;
+    let manual = prepare_claude_fork_rebuild(
+        root,
+        root,
+        &binding,
+        (parent, child),
+        environment.clone(),
+        80,
+        24,
+    )?;
+    for plan in [automatic, manual] {
+        assert_eq!(
+            plan.launch.argv,
+            [
+                "--model",
+                "target-opus",
+                "--effort",
+                "high",
+                "--resume",
+                parent,
+                "--fork-session",
+                "--session-id",
+                child,
+                "--permission-mode",
+                "plan",
+            ]
+        );
+        assert_eq!(plan.launch.env, resume.launch.env);
+        assert_eq!(plan.launch.cwd, resume.launch.cwd);
+    }
+    for same in [
+        parent.to_owned(),
+        parent.to_ascii_uppercase(),
+        parent.replace('-', ""),
+    ] {
+        assert!(resume.for_fork_rebuild(parent, &same).is_err());
+        assert!(
+            prepare_claude_fork_rebuild(
+                root,
+                root,
+                &binding,
+                (parent, &same),
+                environment.clone(),
+                80,
+                24
+            )
+            .is_err()
+        );
+    }
     Ok(())
 }
 
