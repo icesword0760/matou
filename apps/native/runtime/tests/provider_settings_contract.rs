@@ -3,6 +3,7 @@
 use std::{
     fs,
     io::{BufRead, BufReader, Read, Write},
+    net::{Shutdown, TcpListener},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command as ProcessCommand, Stdio},
     sync::mpsc::{self, Receiver},
@@ -466,5 +467,232 @@ fn invalid_json_does_not_block_startup_or_fall_back_on_read_or_write() -> Result
         "corrupt file was modified"
     );
     assert!(!path.with_file_name(TEMP_FILE).exists());
+    runtime.finish()
+}
+
+fn model_endpoint(
+    status: &'static str,
+    body: &'static str,
+    cli: &'static str,
+) -> Result<(String, JoinHandle<Result<()>>)> {
+    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    listener.set_nonblocking(true)?;
+    let endpoint = format!("http://{}/v1", listener.local_addr()?);
+    let server = thread::spawn(move || {
+        let deadline = Instant::now() + TIMEOUT;
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && Instant::now() < deadline =>
+                {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
+        // Accepted sockets on macOS can inherit the listener's nonblocking flag.
+        stream.set_nonblocking(false)?;
+        stream.set_read_timeout(Some(TIMEOUT))?;
+        let mut request = BufReader::new(&mut stream);
+        let mut line = String::new();
+        request.read_line(&mut line)?;
+        assert_eq!(line.trim(), "GET /v1/models HTTP/1.1");
+        let mut headers = std::collections::BTreeMap::new();
+        loop {
+            line.clear();
+            ensure!(request.read_line(&mut line)? != 0, "truncated request");
+            if line.trim().is_empty() {
+                break;
+            }
+            let (name, value) = line.split_once(':').context("expected header")?;
+            headers.insert(name.to_ascii_lowercase(), value.trim().to_owned());
+        }
+        assert_eq!(headers["accept"], "application/json");
+        assert!(headers["authorization"] == format!("Bearer {KEY}"));
+        if cli == CLAUDE {
+            assert!(headers["x-api-key"] == KEY);
+            assert_eq!(headers["anthropic-version"], "2023-06-01");
+        } else {
+            assert!(!headers.contains_key("x-api-key"));
+        }
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(response.as_bytes())?;
+        stream.shutdown(Shutdown::Write)?;
+        Ok(())
+    });
+    Ok((endpoint, server))
+}
+
+fn fetch_models(request_id: u64, input: Value) -> Command {
+    Command::FetchProviderModels { request_id, input }
+}
+
+#[test]
+fn discovers_models_and_classifies_loopback_http_results() -> Result<()> {
+    let (temp, path) = isolated()?;
+    let mut runtime = RuntimeChild::start(temp.path(), "en")?;
+    let (endpoint, server) = model_endpoint(
+        "200 OK",
+        r#"{"data":[{"id":"z"},{"id":"a"},{"id":"a","name":"Discovery A",
+             "context_window":200000,"max_context_window":1000000,"max_output_tokens":4096,
+             "effort":{"supported_levels":["high","bogus","high","low"]}},{"id":42}]}"#,
+        CLAUDE,
+    )?;
+    runtime.send([save(
+        1,
+        json!({
+            "cli": CLAUDE, "name": "Discovery fixture", "endpoint": endpoint,
+            "model": "a", "apiKey": KEY,
+        }),
+    )])?;
+    let saved = runtime.reply(1)?;
+    let id = saved["provider"]["id"].as_str().context("provider ID")?;
+    let before = fs::read(&path)?;
+    runtime.send([fetch_models(
+        2,
+        json!({
+            "cli": CLAUDE, "providerId": id, "endpoint": format!(" {endpoint}/ "),
+        }),
+    )])?;
+    let found = runtime.reply(2)?;
+    server.join().expect("model endpoint panicked")?;
+    assert_eq!(
+        found["models"],
+        json!({
+            "models": ["a", "z"],
+            "modelMetadata": [{
+                "id": "a", "displayName": "Discovery A", "contextWindow": 200000,
+                "maxContextWindow": 1000000, "maxOutputTokens": 4096,
+                "supportedEfforts": ["high", "low"]
+            }, {"id": "z"}]
+        })
+    );
+    let closed = TcpListener::bind(("127.0.0.1", 0))?;
+    let changed = format!("http://{}/v1", closed.local_addr()?);
+    runtime.send([fetch_models(
+        3,
+        json!({
+            "cli": CLAUDE, "providerId": id, "endpoint": changed,
+        }),
+    )])?;
+    assert_eq!(
+        runtime.reply(3)?["models"],
+        json!({"error": "key-required"})
+    );
+
+    for (request_id, status, body, expected) in [
+        (4, "401 Unauthorized", "{}", json!({"error": "auth"})),
+        (5, "404 Not Found", "{}", json!({"error": "unsupported"})),
+        (6, "200 OK", r#"{"data":[]}"#, json!({"error": "empty"})),
+        (
+            7,
+            "200 OK",
+            r#"{"data":[{"id":"only-id"}]}"#,
+            json!({"models":["only-id"]}),
+        ),
+    ] {
+        let (endpoint, server) = model_endpoint(status, body, CODEX)?;
+        runtime.send([fetch_models(
+            request_id,
+            json!({
+                "cli": CODEX, "endpoint": endpoint, "apiKey": KEY,
+            }),
+        )])?;
+        let discovered = runtime.reply(request_id)?;
+        server.join().expect("model endpoint panicked")?;
+        assert_eq!(discovered["models"], expected);
+    }
+    runtime.send([fetch_models(
+        8,
+        json!({
+            "cli": CODEX, "endpoint": "http://127.0.0.1/v1?secret=x", "apiKey": KEY,
+        }),
+    )])?;
+    assert_eq!(runtime.reply(8)?["models"], json!({"error": "invalid"}));
+    assert_eq!(
+        fs::read(path)?,
+        before,
+        "discovery must not change settings"
+    );
+    runtime.finish()
+}
+
+#[test]
+fn edits_subscription_and_context_mode_without_replacing_the_account() -> Result<()> {
+    let (temp, path) = isolated()?;
+    fs::create_dir_all(path.parent().unwrap())?;
+    let mut seed: Value = serde_json::from_str(FROZEN)?;
+    let subscription = &mut seed["providers"][CLAUDE][2];
+    let id = subscription["id"]
+        .as_str()
+        .context("subscription ID")?
+        .to_owned();
+    subscription["subscription"]["modelMetadata"]
+        .as_array_mut()
+        .unwrap()
+        .extend([
+            json!({"id": "demo-medium", "supportedEfforts": ["medium", "max"]}),
+            json!({"id": "demo-fast"}),
+            json!({"id": "demo-image"}),
+        ]);
+    let original_account = subscription["subscription"].clone();
+    fs::write(&path, serde_json::to_vec(&seed)?)?;
+    let mut runtime = RuntimeChild::start(temp.path(), "en")?;
+    let input = json!({
+        "cli": CLAUDE, "id": id, "kind": "subscription", "name": " Renamed subscription ",
+        "modelMapping": {"opus": "demo-sub", "sonnet": "demo-medium", "haiku": "demo-fast"},
+        "effortMapping": {"opus": "high", "sonnet": "medium", "haiku": "low"},
+        "contextWindowMode": "maximum",
+    });
+    let mut invalid = input.clone();
+    invalid["modelMapping"]["haiku"] = json!("demo-image");
+    let mut bad_effort = input.clone();
+    bad_effort["effortMapping"]["sonnet"] = json!("max");
+    let mut credentials = input.clone();
+    credentials["subscription"] = json!({"credentialRef": {"name": "replacement.json"}});
+    runtime.send([save(1, invalid), save(2, bad_effort), save(3, credentials)])?;
+    for request_id in 1..=3 {
+        assert!(runtime.reply(request_id)?["error"].is_string());
+    }
+    assert_eq!(serde_json::from_slice::<Value>(&fs::read(&path)?)?, seed);
+    runtime.send([save(4, input.clone()), activate(5, &id)])?;
+    let edited = runtime.reply(4)?["provider"].clone();
+    assert_eq!(edited["kind"], "subscription");
+    assert_eq!(edited["name"], "Renamed subscription");
+    assert_eq!(edited["model"], "demo-medium");
+    assert_eq!(edited["modelMapping"], input["modelMapping"]);
+    assert_eq!(edited["effortMapping"], input["effortMapping"]);
+    assert_eq!(edited["contextWindowMode"], "maximum");
+    let active = &runtime.reply(5)?["snapshot"];
+    assert_eq!(active["activeProviderIds"][CLAUDE], id);
+    assert_eq!(active["providers"][CLAUDE][2], edited);
+    let disk: Value = serde_json::from_slice(&fs::read(&path)?)?;
+    assert_eq!(
+        disk["providers"][CLAUDE][2]["subscription"],
+        original_account
+    );
+    runtime.finish()?;
+
+    let db = rusqlite::Connection::open(path.with_file_name("matou.sqlite"))?;
+    let preferences: String = db.query_row(
+        "SELECT value_json FROM preferences WHERE key = 'agent.modelPreferences'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(
+        serde_json::from_str::<Value>(&preferences)?["contextWindows"][&id],
+        "maximum"
+    );
+    let mut runtime = RuntimeChild::start(temp.path(), "en")?;
+    runtime.send([get(6)])?;
+    assert_eq!(
+        runtime.reply(6)?["snapshot"]["providers"][CLAUDE][2],
+        edited
+    );
     runtime.finish()
 }
