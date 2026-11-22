@@ -574,6 +574,7 @@ impl Workspace {
             self.stop_edge_browse(true);
             if self.wiring_available()
                 && !self.wiring.board_open
+                && !self.provider_restore_hides_terminal(&new)
                 && let Some(terminal) = self.terminals.get(&new)
             {
                 terminal.read(cx).focus.focus(window);
@@ -585,7 +586,9 @@ impl Workspace {
     fn focus_split_pane(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         if self.wiring.is_detached(id) {
             self.focus_detached_card(id, cx);
-        } else if let Some(terminal) = self.terminals.get(id) {
+        } else if !self.provider_restore_hides_terminal(id)
+            && let Some(terminal) = self.terminals.get(id)
+        {
             terminal.read(cx).focus.focus(window);
         }
         if self.geometry_focus() != Some(id)
@@ -714,6 +717,7 @@ impl Workspace {
             || self.wiring.is_detached(id)
             || !self.active_path_valid()
             || self.recovery_blocked(id)
+            || self.provider_restore_hides_terminal(id)
             || self
                 .history_request
                 .as_ref()
@@ -782,6 +786,7 @@ impl Workspace {
                 .filter(|previous| *previous != handle)
             {
                 let focus = self.reset_wiring_overlay();
+                let focus = self.visible_wiring_focus(focus, cx);
                 let overlay_focus = self.wiring.overlay_focus.clone();
                 let _ = previous.update(cx, |_, previous_window, cx| {
                     restore_wiring_focus(previous_window, cx, &overlay_focus, focus);
@@ -819,6 +824,7 @@ impl Workspace {
         if self.wiring.overlay.is_some() {
             let accounts = self.wiring.overlay == Some(Overlay::Accounts);
             let previous = self.reset_wiring_overlay();
+            let previous = self.visible_wiring_focus(previous, cx);
             if accounts && self.account_footer_visible(window) {
                 window.focus(&self.control_focus["accounts"]);
             } else {
@@ -848,6 +854,14 @@ impl Workspace {
             None => {}
         }
         self.wiring.restore_focus.take()
+    }
+
+    fn visible_wiring_focus(&self, previous: Option<FocusHandle>, cx: &App) -> Option<FocusHandle> {
+        previous.filter(|focus| {
+            !self.terminals.iter().any(|(id, terminal)| {
+                terminal.read(cx).focus == *focus && self.provider_restore_hides_terminal(id)
+            })
+        })
     }
 
     pub(super) fn wiring_key(

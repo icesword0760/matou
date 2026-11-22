@@ -1942,7 +1942,12 @@ impl Workspace {
             return;
         }
         self.sync_terminal_input(window, cx);
-        if let Some(terminal) = self.focused.as_ref().and_then(|id| self.terminals.get(id)) {
+        if let Some(terminal) = self
+            .focused
+            .as_ref()
+            .filter(|id| !self.provider_restore_hides_terminal(id))
+            .and_then(|id| self.terminals.get(id))
+        {
             window.focus(&terminal.read(cx).focus);
         }
         cx.notify();
@@ -2222,7 +2227,12 @@ impl Workspace {
             && let Some(view) = &self.history_view
         {
             window.focus(&view.read(cx).focus);
-        } else if let Some(terminal) = self.focused.as_ref().and_then(|id| self.terminals.get(id)) {
+        } else if let Some(terminal) = self
+            .focused
+            .as_ref()
+            .filter(|id| !self.provider_restore_hides_terminal(id))
+            .and_then(|id| self.terminals.get(id))
+        {
             window.focus(&terminal.read(cx).focus);
         }
         cx.notify();
@@ -4158,6 +4168,7 @@ impl Workspace {
                         .focused
                         .as_ref()
                         .filter(|id| self.active_level_focus() == Some(id.as_str()))
+                        .filter(|id| !self.provider_restore_hides_terminal(id))
                         .and_then(|id| self.terminals.get(id))
                 {
                     if self.read_only.is_some()
@@ -4506,6 +4517,7 @@ impl Workspace {
                         && !self.wiring.is_detached(&session_id)
                         && self.active_path_valid()
                         && !self.recovery_blocked(&session_id)
+                        && !self.provider_restore_hides_terminal(&session_id)
                         && window.focused(cx).is_none()
                     {
                         window.focus(&terminal.read(cx).focus);
@@ -4622,6 +4634,7 @@ impl Workspace {
                         .is_none_or(|id| !self.wiring.is_detached(id))
                     && self.active_path_valid()
                     && !self.recovery_blocked(&session_id)
+                    && !self.provider_restore_hides_terminal(&session_id)
                     && window.focused(cx).is_none()
                     && let Some(terminal) = self.terminals.get(&session_id)
                 {
@@ -4840,7 +4853,7 @@ impl Workspace {
             return;
         }
         if !matches!(event.kind, SurfaceEventKind::Resize { .. })
-            && self.recovery_blocked(session_id)
+            && (self.recovery_blocked(session_id) || self.provider_restore_hides_terminal(session_id))
         {
             return;
         }
@@ -5482,11 +5495,16 @@ impl Workspace {
             let blocked = self.recovery_blocked(id);
             #[cfg(target_os = "macos")]
             let blocked = blocked || self.recovery_water_covers_terminal(id);
+            let restore_hidden = self.provider_restore_hides_terminal(id);
+            if restore_hidden && terminal.read(cx).focus.is_focused(window) {
+                window.blur();
+            }
             let disabled = self.database_recovery.is_some()
                 || self.detached_path_invalid(id).unwrap_or(disabled)
                 || self.read_only.is_some()
                 || self.environment_unavailable(id)
                 || blocked
+                || restore_hidden
                 || (self.settings.is_some() && !self.wiring.is_detached(id))
                 || self.egress_frozen(id)
                 || self
@@ -9414,6 +9432,18 @@ impl Workspace {
             .filter(|state| matches!(*state, "restoring" | "failed"))
     }
 
+    fn provider_restore_hides_terminal(&self, id: &str) -> bool {
+        self.read_only.is_none()
+            && !self.wiring.is_detached(id)
+            && !self.is_deferred(id)
+            && self.graph_node(id).is_some_and(|node| {
+                Self::provider_restore_state(node) == Some("failed")
+                    && node["archivedAt"].is_null()
+                    && fork_failure_copy(node).is_none()
+                    && fork_progress_copy(node).is_none()
+            })
+    }
+
     fn provider_restore_banner<'a>(
         &self,
         id: &str,
@@ -11737,7 +11767,12 @@ impl Workspace {
             .text_size(px(11.))
             .line_height(relative(1.2))
             .when(restoring, |row| row.justify_start())
-            .when(!restoring, |row| row.justify_between());
+            .when(!restoring, |row| {
+                row.flex_wrap().justify_between().gap_y(px(4.))
+            })
+            .children(workspace_wiring::wiring_probe_bounds(format!(
+                "provider-restore-banner-{id}"
+            )));
         match banner {
             ProviderRestoreBanner::Restoring { title } => {
                 row.child(div().font_weight(FontWeight::BOLD).child(title))
@@ -11782,6 +11817,7 @@ impl Workspace {
                         .bg(button_background)
                         .whitespace_nowrap()
                         .cursor_pointer()
+                        .children(workspace_wiring::wiring_probe_bounds(format!("{name}-{id}")))
                         .child(label);
                     let button = measure_card_action(button, action_bounds);
                     if let Some(blocked) = blocked {
@@ -11806,24 +11842,51 @@ impl Workspace {
                 row.child(
                     div()
                         .flex()
+                        .flex_auto()
                         .min_w_0()
                         .items_baseline()
                         .gap(px(8.))
-                        .child(div().font_weight(FontWeight::BOLD).child(title))
+                        .child(
+                            div()
+                                .flex_none()
+                                .max_w_full()
+                                .font_weight(FontWeight::BOLD)
+                                .truncate()
+                                .children(workspace_wiring::wiring_probe_bounds(format!(
+                                    "provider-restore-title-{id}"
+                                )))
+                                .child(title),
+                        )
                         .child(
                             div()
                                 .id(SharedString::from(format!("provider-restore-reason-{id}")))
+                                .flex_1()
+                                .w(px(0.))
                                 .min_w_0()
                                 .text_color(reason_color)
                                 .truncate()
+                                .children(workspace_wiring::wiring_probe_bounds(format!(
+                                    "provider-restore-reason-{id}"
+                                )))
                                 .tooltip(move |_, cx| {
                                     cx.new(|_| CardTooltip(reason_tooltip.clone())).into()
                                 })
                                 .child(reason),
                         ),
                 )
-                .child(retry_button)
-                .child(fresh_button)
+                .child(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .flex_wrap()
+                        .max_w_full()
+                        .ml_auto()
+                        .justify_end()
+                        .gap(px(12.))
+                        .gap_y(px(4.))
+                        .child(retry_button)
+                        .child(fresh_button),
+                )
             }
         }
     }
@@ -15334,6 +15397,7 @@ impl Render for Workspace {
                 Some(self.child_badge_button(id, badge, badge_bounds.clone(), &focus, cx))
             });
             let focus = terminal.read(cx).focus.clone();
+            let restore_hidden = self.provider_restore_hides_terminal(id);
             let capture_terminal = terminal.clone();
             let capture_session = id.clone();
             let session_id = id.clone();
@@ -15410,12 +15474,14 @@ impl Render for Workspace {
                                 .borrow()
                                 .iter()
                                 .any(|bounds| bounds.contains(&event.position))
-                            || (!compact && capture_terminal.read(cx).scrollbar_hit(event.position))
+                            || (!compact && !restore_hidden
+                                && capture_terminal.read(cx).scrollbar_hit(event.position))
                         {
                             return;
                         }
                         if !in_split
                             && (compact
+                                || restore_hidden
                                 || !capture_terminal.read(cx).contains_position(event.position))
                         {
                             this.carousel_drag =
@@ -15434,7 +15500,10 @@ impl Render for Workspace {
                         {
                             return;
                         }
-                        if this.active_path_valid() && !this.recovery_blocked(&session_id) {
+                        if this.active_path_valid()
+                            && !this.recovery_blocked(&session_id)
+                            && !this.provider_restore_hides_terminal(&session_id)
+                        {
                             window.focus(&focus);
                         }
                     }),
@@ -15652,7 +15721,7 @@ impl Render for Workspace {
                         .flex_1()
                         .min_h_0()
                         .relative()
-                        .child(terminal.clone())
+                        .children((!restore_hidden).then(|| terminal.clone()))
                         .children(
                             self.history_view
                                 .as_ref()
