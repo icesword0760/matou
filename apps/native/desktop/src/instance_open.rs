@@ -169,7 +169,9 @@ pub fn claim(
     paths: &[String],
     sender: async_channel::Sender<OpenRequest>,
 ) -> Result<Instance> {
-    fs::create_dir_all(data_root).context("create native data root")?;
+    if !data_root.is_dir() {
+        fs::create_dir_all(data_root).context("create native data root")?;
+    }
     let root = data_root
         .canonicalize()
         .context("locate native data root")?;
@@ -293,33 +295,24 @@ mod transport {
 
     pub struct Endpoint {
         root: PathBuf,
-        dir: PathBuf,
+        lock: PathBuf,
         socket: PathBuf,
     }
 
     impl Endpoint {
         pub fn new(root: &Path) -> Result<Self> {
-            let dir = root.join(".instance");
+            let key = root_key(root.as_os_str().as_bytes().iter().copied());
+            let dir = PathBuf::from(format!("/tmp/matou-instance-{}", unsafe { geteuid() }));
             private_dir(&dir)?;
-            let mut socket = dir.join("open.sock");
-            // Darwin's sockaddr_un has 104 bytes for the path, including NUL.
-            if socket.as_os_str().as_bytes().len() >= 104 {
-                let short = PathBuf::from(format!("/tmp/matou-instance-{}", unsafe { geteuid() }));
-                private_dir(&short)?;
-                socket = short.join(format!(
-                    "{:016x}.sock",
-                    root_key(root.as_os_str().as_bytes().iter().copied())
-                ));
-            }
             Ok(Self {
                 root: root.into(),
-                dir,
-                socket,
+                lock: dir.join(format!("{key:016x}.lock")),
+                socket: dir.join(format!("{key:016x}.sock")),
             })
         }
 
-        pub fn lock_path(&self) -> PathBuf {
-            self.dir.join("lock")
+        pub fn lock_path(&self) -> &Path {
+            &self.lock
         }
 
         pub fn connect(&self) -> io::Result<UnixStream> {
@@ -436,6 +429,60 @@ mod transport {
             io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused | io::ErrorKind::WouldBlock
         )
     }
+
+    #[cfg(test)]
+    #[test]
+    fn claims_and_forwards_with_a_readonly_data_root() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        struct Fixture {
+            root: PathBuf,
+            lock: Option<PathBuf>,
+        }
+
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                if let Some(lock) = &self.lock {
+                    let _ = fs::remove_file(lock);
+                }
+                let _ = fs::set_permissions(&self.root, fs::Permissions::from_mode(0o700));
+                let _ = fs::remove_dir_all(&self.root);
+            }
+        }
+
+        let root =
+            std::env::temp_dir().join(format!("matou-readonly-root-{}", uuid::Uuid::new_v4()));
+        fs::DirBuilder::new().mode(0o700).create(&root)?;
+        let mut fixture = Fixture { root, lock: None };
+        fs::set_permissions(&fixture.root, fs::Permissions::from_mode(0o500))?;
+        let modified = fs::metadata(&fixture.root)?.modified()?;
+
+        let (sender, requests) = async_channel::bounded(1);
+        let Instance::Primary(_owner) = claim(&fixture.root, &[], sender)? else {
+            panic!("first claim must become the primary instance");
+        };
+        fixture.lock = Some(
+            Endpoint::new(&fixture.root.canonicalize()?)?
+                .lock_path()
+                .to_owned(),
+        );
+        assert!(fs::read_dir(&fixture.root)?.next().is_none());
+
+        let paths = [fixture.root.to_string_lossy().into_owned()];
+        let (sender, _requests) = async_channel::bounded(1);
+        assert!(matches!(
+            claim(&fixture.root.join("."), &paths, sender)?,
+            Instance::Forwarded
+        ));
+        assert!(
+            matches!(requests.try_recv()?, OpenRequest::SecondLaunch(received) if received == paths)
+        );
+        assert!(fs::read_dir(&fixture.root)?.next().is_none());
+        let metadata = fs::metadata(&fixture.root)?;
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o500);
+        assert_eq!(metadata.modified()?, modified);
+        Ok(())
+    }
 }
 
 // A fixed hash keeps endpoint names stable across compiler and application upgrades.
@@ -484,19 +531,23 @@ mod transport {
     pub struct Endpoint {
         root: PathBuf,
         pipe: String,
+        lock: PathBuf,
     }
 
     impl Endpoint {
         pub fn new(root: &Path) -> Result<Self> {
             let key = root_key(root.as_os_str().encode_wide().flat_map(u16::to_le_bytes));
+            let dir = std::env::temp_dir().join("matou-desktop-open");
+            fs::create_dir_all(&dir).context("create desktop instance lock directory")?;
             Ok(Self {
                 root: root.into(),
                 pipe: format!(r"\\.\pipe\matou-desktop-open-{key:016x}"),
+                lock: dir.join(format!("{key:016x}.lock")),
             })
         }
 
-        pub fn lock_path(&self) -> PathBuf {
-            self.root.join(".desktop-instance-lock")
+        pub fn lock_path(&self) -> &Path {
+            &self.lock
         }
 
         pub fn connect(&self) -> io::Result<Pipe<File>> {
@@ -619,6 +670,64 @@ mod transport {
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn claims_and_forwards_with_a_readonly_data_root() -> Result<()> {
+        struct Fixture {
+            root: PathBuf,
+            lock: Option<PathBuf>,
+        }
+
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                if let Some(lock) = &self.lock {
+                    let _ = fs::remove_file(lock);
+                }
+                let _ = fs::remove_dir_all(&self.root);
+            }
+        }
+
+        let root =
+            std::env::temp_dir().join(format!("matou-readonly-root-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root)?;
+        let mut fixture = Fixture { root, lock: None };
+        fixture.lock = Some(Endpoint::new(&fixture.root.canonicalize()?)?.lock);
+
+        // A Windows directory's read-only attribute does not prevent file creation.
+        // Deny writes using the well-known Everyone SID, while allowing fixture cleanup.
+        let acl = std::process::Command::new("icacls.exe")
+            .arg(&fixture.root)
+            .args(["/deny", "*S-1-1-0:(WD,AD,WEA,WA)"])
+            .output()?;
+        ensure!(
+            acl.status.success(),
+            "deny writes to the test data root: {} {}",
+            String::from_utf8_lossy(&acl.stdout),
+            String::from_utf8_lossy(&acl.stderr)
+        );
+        let error = File::create(fixture.root.join("write-probe"))
+            .expect_err("the test data root must reject writes");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+
+        let (sender, requests) = async_channel::bounded(1);
+        let Instance::Primary(_owner) = claim(&fixture.root, &[], sender)? else {
+            panic!("first claim must become the primary instance");
+        };
+        assert!(fs::read_dir(&fixture.root)?.next().is_none());
+
+        let paths = [fixture.root.to_string_lossy().into_owned()];
+        let (sender, _requests) = async_channel::bounded(1);
+        assert!(matches!(
+            claim(&fixture.root.join("."), &paths, sender)?,
+            Instance::Forwarded
+        ));
+        assert!(
+            matches!(requests.try_recv()?, OpenRequest::SecondLaunch(received) if received == paths)
+        );
+        assert!(fs::read_dir(&fixture.root)?.next().is_none());
+        Ok(())
     }
 
     #[cfg(test)]
