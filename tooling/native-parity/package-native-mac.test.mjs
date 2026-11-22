@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import {
-  chmod, copyFile, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile
+  appendFile, chmod, copyFile, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile
 } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -16,14 +17,33 @@ const iconPath = 'Contents/Resources/icon.icns'
 const entitlementsPath = 'Contents/Resources/entitlements.mac.plist'
 const workflowPath = 'Contents/Resources/finder-quick-action/进入码头.workflow/Contents/Resources/document.wflow'
 const pluginPath = 'Contents/Resources/control-assets/providers/claude-plugin'
+const modelRouterPath = 'Contents/Resources/model-router'
 const skip = process.platform !== 'darwin' && 'macOS bundle verification requires macOS'
+const releaseIdentity = process.env.MATOU_NATIVE_TEST_DEVELOPER_ID
 
 let root
 let thin
 let universal
+const routers = {}
+
+async function writeRouterManifest(directory, version = '8.0.69') {
+  const binary = await readFile(join(directory, 'model-router'))
+  const binarySha256 = createHash('sha256').update(binary).digest('hex')
+  await writeFile(join(directory, 'source.json'), JSON.stringify({ version, binarySha256 }))
+}
+
+async function routerFixture(name, binary = thin) {
+  const directory = join(root, name)
+  await mkdir(directory)
+  await copyFile(binary, join(directory, 'model-router'))
+  await writeFile(join(directory, 'LICENSE'), 'Fixture license\n')
+  await writeRouterManifest(directory)
+  return directory
+}
+
 before(async () => {
   if (skip) return
-  root = await mkdtemp(join(tmpdir(), 'matou-native-mac-test-'))
+  root = await mkdtemp(join(await realpath(tmpdir()), 'matou-native-mac-test-'))
   const source = join(root, 'main.c')
   await writeFile(source, 'int main(void) { return 0; }\n')
   const compile = arch => {
@@ -37,6 +57,8 @@ before(async () => {
   const arm64 = compile('arm64')
   universal = join(root, 'universal')
   execFileSync('/usr/bin/lipo', ['-create', thin, arm64, '-output', universal])
+  routers.thin = await routerFixture('thin router')
+  routers.universal = await routerFixture('universal router', universal)
 })
 after(async () => {
   if (root) await rm(root, { recursive: true, force: true })
@@ -58,17 +80,17 @@ function failure(result, message) {
   assert.match(result.stderr, message)
 }
 
-function assemble(out, { desktop = thin, runtime = thin, extra = [] } = {}) {
+function assemble(out, { desktop = thin, runtime = thin, router = routers.thin, extra = [] } = {}) {
   return cli([
     '--desktop-bin', desktop, '--runtime-bin', runtime,
-    '--out-dir', out, '--version', '0.2.24', '--unsigned', ...extra
+    '--out-dir', out, '--version', '0.2.24', '--unsigned', '--model-router', router, ...extra
   ])
 }
 
 test('assembles and verifies an app with frozen metadata and universal Mach-O payloads', { skip }, async () => {
   const out = join(root, 'complete output')
   const app = join(out, appName)
-  const result = success(assemble(out, { desktop: universal, runtime: universal }))
+  const result = success(assemble(out, { desktop: universal, runtime: universal, router: routers.universal }))
   assert.equal(result.bundleId, 'com.matou.desktop')
   assert.equal(result.version, '0.2.24')
   assert.deepEqual(await readdir(out), [appName])
@@ -99,6 +121,13 @@ test('assembles and verifies an app with frozen metadata and universal Mach-O pa
   })) assert.equal(verified.info[key], value, key)
   assert.deepEqual(verified.architectures.desktop.toSorted(), ['arm64', 'x86_64'])
   assert.deepEqual(verified.architectures.runtime.toSorted(), ['arm64', 'x86_64'])
+  assert.deepEqual(verified.architectures.modelRouter.toSorted(), ['arm64', 'x86_64'])
+  const router = join(app, modelRouterPath)
+  assert.deepEqual((await readdir(router)).sort(), ['LICENSE', 'model-router', 'source.json'])
+  for (const name of await readdir(router)) {
+    assert.deepEqual(await readFile(join(router, name)), await readFile(join(routers.universal, name)))
+  }
+  assert.equal(verified.signatures.modelRouter.status, 'unsigned')
   assert.equal(verified.signatures.app.status, 'unsigned')
   assert.equal(verified.signatures.runtime.status, 'unsigned')
 
@@ -236,6 +265,77 @@ test('requires Developer ID for release verification and reports unsigned and ad
   assert.equal(signatures.app.identifier, 'com.matou.desktop')
   assert.match(signatures.app.designatedRequirement, /^cdhash /)
   failure(cli(strict), /app requires the Matou Developer ID signature \(Team JAKX72KQ6X\); found ad-hoc/)
+})
+
+test('rejects missing, mismatched and tampered model-router inputs and bundles', { skip }, async () => {
+  const output = join(root, 'router rejected')
+  const source = await routerFixture('router validation')
+  const app = success(assemble(join(root, 'router tampering'), { router: source })).path
+  const packaged = join(app, modelRouterPath)
+  const verify = ['--verify', app]
+  for (const name of ['model-router', 'LICENSE', 'source.json']) {
+    const error = /Missing model-router/
+    for (const directory of [source, packaged]) {
+      const path = join(directory, name)
+      const { mode } = await lstat(path)
+      const data = await readFile(path)
+      await rm(path)
+      failure(directory === source ? assemble(output, { router: source }) : cli(verify), error)
+      await writeFile(path, data, { mode })
+    }
+  }
+  failure(assemble(output, { desktop: universal, router: source }), /model-router architecture mismatch/)
+  await writeRouterManifest(source, '8.0.68')
+  failure(assemble(output, { router: source }), /source.json version must be 8\.0\.69/)
+  await writeFile(join(source, 'source.json'), '{')
+  failure(assemble(output, { router: source }), /Invalid model-router source.json/)
+  await writeRouterManifest(source)
+  for (const directory of [source, packaged]) {
+    await appendFile(join(directory, 'model-router'), 'tampered')
+    failure(directory === source ? assemble(output, { router: source }) : cli(verify), /binarySha256 mismatch/)
+  }
+  failure(cli([...verify, '--allow-missing-model-router']), /binarySha256 mismatch/)
+  await rm(packaged, { recursive: true })
+  failure(cli(verify), /Missing model-router directory/)
+  assert.equal(success(cli([...verify, '--allow-missing-model-router'])).signatures.modelRouter, undefined)
+  failure(cli([...verify, '--allow-missing-model-router', '--require-release-signature']), /requires model-router/)
+  assert.deepEqual(await readdir(output), [])
+})
+
+test('verifies the signed model-router seal and stable Developer ID requirement', {
+  skip: skip || (!releaseIdentity && 'set MATOU_NATIVE_TEST_DEVELOPER_ID to run with the release certificate')
+}, async () => {
+  const source = await routerFixture('release router', universal)
+  const identifier = 'com.matou.desktop.model-router'
+  const sign = (path, ...options) => execFileSync('/usr/bin/codesign', [
+    '--force', '--sign', releaseIdentity, '--timestamp=none', ...options, path
+  ], { stdio: 'pipe' })
+  sign(join(source, 'model-router'), '--identifier', identifier)
+  await writeRouterManifest(source)
+  const app = success(assemble(join(root, 'signed router bundle'), {
+    desktop: universal, runtime: universal, router: source
+  })).path
+  const strict = ['--verify', app, '--require-release-signature']
+  sign(join(app, runtimePath))
+  sign(app)
+  const { signatures } = success(cli(strict))
+  assert.equal(signatures.modelRouter.status, 'developer-id')
+  assert.equal(signatures.modelRouter.teamIdentifier, 'JAKX72KQ6X')
+  assert.equal(signatures.modelRouter.identifier, identifier)
+  assert.match(signatures.modelRouter.designatedRequirement, /anchor apple generic/)
+
+  const packaged = join(app, modelRouterPath)
+  const binary = join(packaged, 'model-router')
+  sign(binary, '--identifier', identifier, '--requirements', `=designated => identifier "${identifier}"`)
+  failure(cli(strict), /binarySha256 mismatch/)
+  await writeRouterManifest(packaged)
+  sign(app)
+  failure(cli(strict), /modelRouter .*requires the designated requirement/)
+
+  execFileSync('/usr/bin/codesign', ['--force', '--sign', '-', binary], { stdio: 'pipe' })
+  await writeRouterManifest(packaged)
+  sign(app)
+  failure(cli(strict), /modelRouter requires the Matou Developer ID signature .*ad-hoc/)
 })
 
 test('rejects /Applications and its aliases before creating output', { skip }, async () => {

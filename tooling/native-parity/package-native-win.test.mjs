@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { appendFile, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { after, before, test } from 'node:test'
@@ -17,6 +18,7 @@ const version = '0.2.24'
 const desktopName = '码头.exe'
 const runtimeName = 'matou-native-runtime.exe'
 const ghosttyName = 'ghostty-vt.dll'
+const modelRouterName = 'model-router.exe'
 let root
 const binaries = {}
 
@@ -269,6 +271,66 @@ function cli(args) {
   assert.ifError(result.error)
   return result
 }
+
+async function routerFixture(label, binary) {
+  const directory = join(root, label)
+  await mkdir(directory)
+  await writeFile(join(directory, modelRouterName), binary)
+  await writeFile(join(directory, 'LICENSE'), 'Fixture license\n')
+  const binarySha256 = createHash('sha256').update(binary).digest('hex')
+  await writeFile(join(directory, 'source.json'), JSON.stringify({ version: '8.0.69', binarySha256 }))
+  return directory
+}
+
+for (const [arch, machine] of [['x64', 0x8664], ['arm64', 0xaa64]]) {
+  test(`CLI assembles and verifies the ${arch} model-router resources`, async () => {
+    const outDir = join(root, `CLI with ${arch} model-router`)
+    const modelRouterDir = await routerFixture(`${arch} model-router`, peFixture(machine, 'engine'))
+    const { desktopBin, runtimeBin } = binaries[arch]
+    const result = cli([
+      '--arch', arch, '--desktop-bin', desktopBin, '--runtime-bin', runtimeBin,
+      '--out-dir', outDir, '--version', version, '--model-router', modelRouterDir
+    ])
+    assert.equal(result.status, 0, result.stderr)
+    const { path } = JSON.parse(result.stdout)
+    const packaged = join(path, 'resources', 'model-router')
+    assert.deepEqual((await readdir(packaged)).sort(), ['LICENSE', modelRouterName, 'source.json'])
+    for (const name of await readdir(packaged)) {
+      assert.deepEqual(await readFile(join(packaged, name)), await readFile(join(modelRouterDir, name)))
+    }
+    await verifyWindowsDirPackage(path, options(arch, outDir))
+  })
+}
+
+test('rejects a wrong-model-router machine, PE32 executable and hash tampering', async () => {
+  const outDir = join(root, 'rejected model-router')
+  const modelRouterDir = await routerFixture('wrong model-router', peFixture(0x8664, 'engine'))
+  const input = options('arm64', outDir, { modelRouterDir })
+  await assert.rejects(assembleWindowsDirPackage(input), /model-router binary architecture mismatch: expected arm64, found PE machine 0x8664/)
+  const pe32 = peFixture(0xaa64, 'engine')
+  pe32.writeUInt16LE(0x010b, 64 + 24)
+  await writeFile(join(modelRouterDir, modelRouterName), pe32)
+  await assert.rejects(assembleWindowsDirPackage(input), /Expected a Windows PE executable for model-router binary/)
+
+  const valid = peFixture(0xaa64, 'engine')
+  const validSource = await routerFixture('valid model-router', valid)
+  const validInput = options('arm64', outDir, { modelRouterDir: validSource })
+  const sourceBinary = join(validSource, modelRouterName)
+  await appendFile(sourceBinary, 'tampered')
+  await assert.rejects(assembleWindowsDirPackage(validInput), /model-router binarySha256 mismatch/)
+  assert.deepEqual(await readdir(outDir), [])
+
+  await writeFile(sourceBinary, valid)
+  const { path } = await assembleWindowsDirPackage(validInput)
+  const packaged = join(path, 'resources', 'model-router')
+  await writeFile(join(packaged, 'LICENSE'), '')
+  await assert.rejects(verifyWindowsDirPackage(path, validInput), /model-router LICENSE must be a non-empty regular file/)
+  await writeFile(join(packaged, 'LICENSE'), 'Fixture license\n')
+  await appendFile(join(packaged, modelRouterName), 'tampered')
+  await assert.rejects(verifyWindowsDirPackage(path, options('arm64', outDir)), /model-router binarySha256 mismatch/)
+  await rm(packaged, { recursive: true })
+  await assert.rejects(verifyWindowsDirPackage(path, validInput), /Missing model-router directory/)
+})
 
 test('CLI assembles from all supported options and prints the verification result', async () => {
   const outDir = join(root, 'from CLI')
