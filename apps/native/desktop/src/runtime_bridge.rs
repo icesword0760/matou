@@ -860,6 +860,51 @@ mod supervisor_tests {
         })?;
         Ok(result.unwrap())
     }
+    fn wait_for_shell_prompt(
+        bridge: &RuntimeBridge,
+        generation: u64,
+        session: &str,
+        prompt: &str,
+    ) -> Result<()> {
+        let mut applied = Ok(());
+        next(bridge, |event| {
+            let BridgeEvent::Runtime {
+                generation: current,
+                event:
+                    Event::Frame {
+                        session_id,
+                        sequence,
+                        screen,
+                        ..
+                    },
+            } = event
+            else {
+                return false;
+            };
+            if current != generation || session_id != session {
+                return false;
+            }
+            let has_prompt = screen.cells.chunks(screen.cols).any(|row| {
+                let text: String = row.iter().map(|cell| cell.text.as_str()).collect();
+                text.trim_end() == prompt
+            });
+            if has_prompt {
+                // Leave the writer queue empty for the input-pause hook.
+                return true;
+            }
+            applied = bridge.commands.send_at(
+                generation,
+                Command::Applied {
+                    session_id,
+                    sequence,
+                },
+            );
+            applied.is_err()
+        })
+        .with_context(|| format!("wait for the Shell prompt in generation {generation}"))?;
+        applied?;
+        Ok(())
+    }
     fn kill_owned(bridge: &RuntimeBridge, root: &Path) -> Result<u32> {
         kill_pid_owned(bridge.runtime_pid(), root)
     }
@@ -915,6 +960,8 @@ mod supervisor_tests {
         const NEW_INPUT_LIMIT: Duration = Duration::from_secs(30);
         let (root, mut bridge) = setup()?;
         let (g1, session) = ready(&bridge)?;
+        // Ready opens the bridge before the Shell and its journal are initialized.
+        wait_for_shell_prompt(&bridge, g1, &session, "RACE_READY>")?;
         let (paused, resume) = install(&bridge.commands.shared.hooks.before_business);
         let old = root.join("OLD_QUEUE_SIDE_EFFECT");
         let fresh = root.join("NEW_QUEUE_SIDE_EFFECT");
@@ -927,6 +974,8 @@ mod supervisor_tests {
             },
         )?;
         paused.recv_timeout(LIMIT)?;
+        // A distinct prompt proves the replacement Shell itself has started.
+        fs::write(root.join("home/.zshrc"), "PROMPT='RACE_RESTORED> '\n")?;
         kill_owned(&bridge, &root)?;
         // The reader must retire this exact attempt before its blocked writer can continue.
         let deadline = Instant::now() + LIMIT;
@@ -940,6 +989,7 @@ mod supervisor_tests {
         resume.send(())?;
         let (g2, session2) = ready(&bridge)?;
         ensure!(g2 == g1 + 1 && session == session2);
+        wait_for_shell_prompt(&bridge, g2, &session, "RACE_RESTORED>")?;
         bridge.commands.send_at(
             g2,
             Command::Input {
@@ -1367,8 +1417,24 @@ mod supervisor_tests {
         drop(state);
         kill_pid_owned(pid, &root)?;
         let deadline = Instant::now() + LIMIT;
-        while commands.connection().1 == ConnectionPhase::Ready {
-            ensure!(Instant::now() < deadline);
+        loop {
+            let status = ProcessCommand::new("ps")
+                .args(["-p", &pid.to_string(), "-o", "stat="])
+                .output()?;
+            // Reader EOF can arrive before the child closes its stdin. The
+            // supervisor cannot reap it until this test releases the writer.
+            if status.status.success()
+                && String::from_utf8_lossy(&status.stdout)
+                    .trim_start()
+                    .starts_with('Z')
+                && commands.connection().1 != ConnectionPhase::Ready
+            {
+                break;
+            }
+            ensure!(
+                Instant::now() < deadline,
+                "killed runtime {pid} did not exit and retire before resuming the writer"
+            );
             thread::sleep(Duration::from_millis(2));
         }
         resume.send(())?;

@@ -190,6 +190,9 @@ fn accept_batch(server: &TcpListener, request_target: &str) -> Result<Vec<TcpStr
             }
             Err(error) => return Err(error.into()),
         };
+        // Darwin can inherit the listener's nonblocking mode before curl has
+        // written its request. Keep the timeout effective on the accepted stream.
+        stream.set_nonblocking(false)?;
         stream.set_read_timeout(Some(QUICK_WAIT))?;
         let mut reader = BufReader::new(stream);
         let mut line = String::new();
