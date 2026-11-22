@@ -113,6 +113,15 @@ fn environment_preserves_options_and_filters_caller_state_in_source_order() -> R
     );
     assert_eq!(projected[OsStr::new("ZDOTDIR")], generated_dir);
     assert_eq!(projected[OsStr::new("MATOU_ORIGINAL_ZDOTDIR")], original);
+    let rc = fs::read_to_string(generated_dir.join(".zshrc"))?;
+    for expected in [
+        "unalias cc 2>/dev/null",
+        "cc() {",
+        "$# -eq 0",
+        "--canvas current",
+    ] {
+        assert!(rc.contains(expected), "generated .zshrc missing {expected}");
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -144,6 +153,93 @@ fn environment_preserves_options_and_filters_caller_state_in_source_order() -> R
     let projected = prepare_shell_environment(&launch)?;
     assert!(!plain.exists());
     assert!(!projected.contains_key(OsStr::new("MATOU_ORIGINAL_ZDOTDIR")));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn clean_zsh_cc_uses_control_only_for_a_bare_command() -> Result<()> {
+    use std::{os::unix::fs::PermissionsExt, process::Command};
+
+    let _guard = TEST_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir()?;
+    let mut launch = launch(temp.path(), "/bin/zsh")?;
+    let bin = temp.path().join("bin");
+    fs::create_dir(&bin)?;
+    for executable in ["mt", "claude"] {
+        let stub = bin.join(executable);
+        fs::write(
+            &stub,
+            "#!/bin/sh\nprintf '%s\\n' \"${0##*/}\" \"$@\" > \"$CC_ARGUMENTS\"\nexit 37\n",
+        )?;
+        fs::set_permissions(stub, fs::Permissions::from_mode(0o700))?;
+    }
+    let path = std::env::join_paths([bin.as_path(), Path::new("/usr/bin"), Path::new("/bin")])?;
+    launch.inherited_env.insert("PATH".into(), path);
+    let argv_path = temp.path().join("argv");
+    let environment = prepare_shell_environment(&launch)?;
+
+    for (endpoint, token, input, expected) in [
+        (
+            "/local/runtime.sock",
+            "fixture-token",
+            "cc",
+            vec![
+                "mt",
+                "create",
+                "session",
+                "--canvas",
+                "current",
+                "--profile",
+                "claude-code",
+                "--permission-mode",
+                "bypassPermissions",
+                "--cwd",
+                launch.cwd.to_str().unwrap(),
+                "--enter",
+            ],
+        ),
+        (
+            "/local/runtime.sock",
+            "fixture-token",
+            "cc --help 'two words'",
+            vec![
+                "claude",
+                "--dangerously-skip-permissions",
+                "--help",
+                "two words",
+            ],
+        ),
+        (
+            "",
+            "fixture-token",
+            "cc",
+            vec!["claude", "--dangerously-skip-permissions"],
+        ),
+        (
+            "/local/runtime.sock",
+            "",
+            "cc",
+            vec!["claude", "--dangerously-skip-permissions"],
+        ),
+    ] {
+        let output = Command::new(&launch.executable)
+            .args(["-ic", input])
+            .current_dir(&launch.cwd)
+            .env_clear()
+            .envs(&environment)
+            .env("MATOU_CONTROL_ENDPOINT", endpoint)
+            .env("MATOU_CONTROL_TOKEN", token)
+            .env("CC_ARGUMENTS", &argv_path)
+            .output()?;
+        assert_eq!(output.status.code(), Some(37), "{input}: {output:?}");
+        assert_eq!(
+            fs::read_to_string(&argv_path)?.lines().collect::<Vec<_>>(),
+            expected,
+            "{input}"
+        );
+        fs::remove_file(&argv_path)?;
+    }
     Ok(())
 }
 

@@ -6,6 +6,9 @@ mod claude_fork_rebuild;
 mod claude_gateway_restart;
 #[path = "process_contract/claude_model_catalog.rs"]
 mod claude_model_catalog;
+#[cfg(unix)]
+#[path = "process_contract/claude_plugin_entries.rs"]
+mod claude_plugin_entries;
 #[path = "process_contract/codex_events.rs"]
 mod codex_events;
 #[path = "process_contract/codex_launch.rs"]
@@ -90,7 +93,10 @@ impl RuntimeChild {
         let workspace = root.join("工作 区");
         let home = root.join("Shell 家目录");
         fs::create_dir_all(&home)?;
-        fs::write(home.join(".zshrc"), zshrc)?;
+        let rc = home.join(".zshrc");
+        if !zshrc.is_empty() || rc.exists() {
+            fs::write(rc, zshrc)?;
+        }
         let mut command = ProcessCommand::new(env!("CARGO_BIN_EXE_matou-native-runtime"));
         command
             .env_remove("MATOU_CONTROL_ASSET_ROOT")
@@ -1721,7 +1727,7 @@ fn configured_cc_alias_promotes_only_claude_with_its_permission_mode() -> Result
     for (alias, bypass) in [
         ("claude", Some(false)),
         ("claude --dangerously-skip-permissions", Some(true)),
-        ("printf CC_STAYED_IN_SHELL", None),
+        ("printf OLD_CUSTOM_CC", None),
     ] {
         let root = tempfile::tempdir()?;
         let stub = root.path().join("cc-cli");
@@ -1730,11 +1736,13 @@ fn configured_cc_alias_promotes_only_claude_with_its_permission_mode() -> Result
             "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.argv\"\nprintf 'CC_PROMOTED\\n'\nexec /bin/sleep 60\n",
         )?;
         fs::set_permissions(&stub, fs::Permissions::from_mode(0o700))?;
-        let rc = format!("PROMPT='{PROMPT} '\nalias cc='{alias}'\n");
+        let rc = format!(
+            "PROMPT='{PROMPT} '\nalias cc='{alias}'\nclaude() {{ printf 'CC_STAYED_IN_SHELL\\n'; }}\n"
+        );
         let mut child =
             RuntimeChild::spawn_configured(root.path(), &rc, Path::new("/bin/zsh"), Some(&stub))?;
         child.hello()?;
-        child.input("cc")?;
+        child.input(if bypass.is_some() { "cc" } else { "cc --help" })?;
         let db = Connection::open(child.data.join("matou.sqlite"))?;
         db.busy_timeout(TIMEOUT)?;
         if let Some(bypass) = bypass {
