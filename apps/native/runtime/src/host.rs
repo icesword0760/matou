@@ -45,7 +45,7 @@ use crate::{
     retention_policy::{self, IndexedCheckpoint, IndexedSession, RetentionQuota, SessionRetention},
     search::{SearchRequest, SearchResult},
     shell_input::{InteractiveLaunch, ShellInput},
-    subscription_launch,
+    subscription_launch::{self, SubscriptionProvider},
     subscription_service::{PreparedClaudeLaunch, SubscriptionService},
     update_download, update_http,
     worker::{SelectionCopy, ShellSubmission, WorkerCommand},
@@ -523,6 +523,48 @@ pub enum Command {
     },
     ConfirmAntigravityRisk {
         request_id: u64,
+    },
+    StartSubscriptionLogin {
+        request_id: u64,
+        settings_id: u64,
+        provider: SubscriptionProvider,
+        chinese: bool,
+    },
+    GetSubscriptionLoginStatus {
+        request_id: u64,
+        settings_id: u64,
+        attempt_id: String,
+    },
+    ReopenSubscriptionLogin {
+        request_id: u64,
+        settings_id: u64,
+        attempt_id: String,
+        system_browser: bool,
+    },
+    CancelSubscriptionLogin {
+        request_id: u64,
+        settings_id: u64,
+        attempt_id: Option<String>,
+    },
+    CommitSubscriptionDraft {
+        request_id: u64,
+        settings_id: u64,
+        attempt_id: String,
+        input: Value,
+        activate: bool,
+    },
+    OpenSubscriptionSettings {
+        request_id: u64,
+        settings_id: u64,
+    },
+    CloseSubscriptionSettings {
+        request_id: u64,
+        settings_id: u64,
+    },
+    RefreshSubscriptionModels {
+        request_id: u64,
+        settings_id: u64,
+        provider_id: String,
     },
     Search {
         session_id: String,
@@ -2874,6 +2916,14 @@ enum ProviderSettingsRequest {
     Delete(u64, String, String),
     SetActive(u64, String, String),
     ConfirmRisk(u64),
+    StartSubscriptionLogin(u64, u64, SubscriptionProvider, bool),
+    GetSubscriptionLoginStatus(u64, u64, String),
+    ReopenSubscriptionLogin(u64, u64, String, bool),
+    CancelSubscriptionLogin(u64, u64, Option<String>),
+    CommitSubscriptionDraft(u64, u64, String, Value, bool),
+    OpenSubscriptionSettings(u64, u64),
+    CloseSubscriptionSettings(u64, u64),
+    RefreshSubscriptionModels(u64, u64, String),
 }
 
 struct ProviderSettingsWorker {
@@ -2895,14 +2945,30 @@ impl ProviderSettingsWorker {
             .spawn(move || {
                 // The host's owner lease excludes another native runtime for this root.
                 // Legacy or external processes writing the file outside that lease can race.
-                let project_windows = |mut snapshot: Value| {
-                    if let Ok(db) = startup::open_read_only(&data_root.join("matou.sqlite")) {
-                        ProviderConfigStore::project_context_windows(&db, &mut snapshot);
-                    }
-                    Snapshot(snapshot)
+                use ProviderSettingsResult::{
+                    Accepted, Error, Models, Provider, Snapshot, SubscriptionLogin,
+                    SubscriptionModels, SubscriptionSettings,
                 };
-                use ProviderSettingsResult::{Accepted, Error, Models, Provider, Snapshot};
-                for request in incoming {
+                let project_windows =
+                    |snapshot: Value| Snapshot(project_provider_windows(&data_root, snapshot));
+                let service = || {
+                    subscriptions
+                        .as_deref()
+                        .context("Subscription service is unavailable")
+                };
+                let mut reads: Vec<JoinHandle<()>> = Vec::new();
+                loop {
+                    let request = match incoming.recv_timeout(Duration::from_millis(250)) {
+                        Ok(request) => request,
+                        Err(mpsc::RecvTimeoutError::Timeout) => {
+                            if let Some(service) = &subscriptions {
+                                service.expire_logins();
+                            }
+                            reads.retain(|read| !read.is_finished());
+                            continue;
+                        }
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    };
                     let (request_id, result) = match request {
                         ProviderSettingsRequest::Get(id) => {
                             (id, store.snapshot().map(&project_windows))
@@ -2953,6 +3019,137 @@ impl ProviderSettingsWorker {
                             id,
                             store.confirm_antigravity_risk().map(|()| Accepted(true)),
                         ),
+                        ProviderSettingsRequest::StartSubscriptionLogin(
+                            id,
+                            owner,
+                            provider,
+                            chinese,
+                        ) => (
+                            id,
+                            service()
+                                .and_then(|service| service.start_login(owner, provider, chinese))
+                                .map(SubscriptionLogin),
+                        ),
+                        ProviderSettingsRequest::GetSubscriptionLoginStatus(id, owner, attempt) => {
+                            (
+                                id,
+                                service()
+                                    .and_then(|service| service.login_status(owner, &attempt))
+                                    .map(SubscriptionLogin),
+                            )
+                        }
+                        ProviderSettingsRequest::ReopenSubscriptionLogin(
+                            id,
+                            owner,
+                            attempt,
+                            system,
+                        ) => (
+                            id,
+                            service()
+                                .and_then(|service| service.reopen_login(owner, &attempt, system))
+                                .map(SubscriptionLogin),
+                        ),
+                        ProviderSettingsRequest::CancelSubscriptionLogin(id, owner, attempt) => (
+                            id,
+                            service().and_then(|service| match attempt {
+                                Some(attempt) => {
+                                    service.cancel_login(owner, &attempt).map(SubscriptionLogin)
+                                }
+                                None => service
+                                    .cancel_settings_logins(owner)
+                                    .map(|()| Accepted(true)),
+                            }),
+                        ),
+                        ProviderSettingsRequest::CommitSubscriptionDraft(
+                            id,
+                            owner,
+                            attempt,
+                            input,
+                            activate,
+                        ) => (
+                            id,
+                            service()
+                                .and_then(|service| {
+                                    let mut db = open_role_assignments_writer(&data_root)?;
+                                    service.commit_draft(
+                                        owner,
+                                        &attempt,
+                                        &input,
+                                        activate,
+                                        &mut db,
+                                        now(),
+                                    )
+                                })
+                                .map(Provider),
+                        ),
+                        ProviderSettingsRequest::OpenSubscriptionSettings(id, owner) => {
+                            if let Some(service) = &subscriptions {
+                                let result = service.begin_settings(owner).and_then(|()| {
+                                    let service = Arc::clone(service);
+                                    let data_root = data_root.clone();
+                                    spawn_provider_read(id, &outgoing, &mut reads, move || {
+                                        let mut view = service.read_settings(owner)?;
+                                        view.snapshot =
+                                            project_provider_windows(&data_root, view.snapshot);
+                                        Ok(SubscriptionSettings(view))
+                                    })
+                                });
+                                if result.is_ok() {
+                                    continue;
+                                }
+                                (id, result.map(|()| Accepted(true)))
+                            } else {
+                                (
+                                    id,
+                                    (|| {
+                                        Ok(SubscriptionSettings(
+                                            crate::protocol::SubscriptionSettingsView {
+                                                snapshot: project_provider_windows(
+                                                    &data_root,
+                                                    store.snapshot()?,
+                                                ),
+                                                accounts: BTreeMap::new(),
+                                                antigravity_risk_accepted: store
+                                                    .antigravity_risk_accepted()?,
+                                            },
+                                        ))
+                                    })(),
+                                )
+                            }
+                        }
+                        ProviderSettingsRequest::CloseSubscriptionSettings(id, owner) => {
+                            let result = if let Some(service) = &subscriptions {
+                                service.close_settings(owner);
+                                service.cancel_settings_logins(owner)
+                            } else {
+                                Ok(())
+                            };
+                            (id, result.map(|()| Accepted(true)))
+                        }
+                        ProviderSettingsRequest::RefreshSubscriptionModels(
+                            id,
+                            owner,
+                            provider_id,
+                        ) => {
+                            let result = subscriptions
+                                .as_ref()
+                                .context("Subscription service is unavailable")
+                                .and_then(|service| {
+                                    let service = Arc::clone(service);
+                                    let data_root = data_root.clone();
+                                    spawn_provider_read(id, &outgoing, &mut reads, move || {
+                                        let mut view =
+                                            service.refresh_models(owner, &provider_id)?;
+                                        view.snapshot =
+                                            project_provider_windows(&data_root, view.snapshot);
+                                        Ok(SubscriptionModels(view))
+                                    })
+                                });
+                            if result.is_ok() {
+                                continue;
+                            }
+                            (id, result.map(|()| Accepted(true)))
+                        }
                     };
                     let result = result.unwrap_or_else(|error| Error(error.to_string()));
                     if outgoing
@@ -2961,6 +3158,12 @@ impl ProviderSettingsWorker {
                     {
                         break;
                     }
+                }
+                if let Some(service) = &subscriptions {
+                    service.close_all_settings();
+                }
+                for read in reads {
+                    let _ = read.join();
                 }
             })
             .context("start provider settings worker")?;
@@ -2989,6 +3192,33 @@ impl ProviderSettingsWorker {
         }
         Ok(())
     }
+}
+
+fn project_provider_windows(data_root: &Path, mut snapshot: Value) -> Value {
+    if let Ok(db) = startup::open_read_only(&data_root.join("matou.sqlite")) {
+        ProviderConfigStore::project_context_windows(&db, &mut snapshot);
+    }
+    snapshot
+}
+
+fn spawn_provider_read(
+    request_id: u64,
+    outgoing: &Sender<ProviderSettingsReply>,
+    reads: &mut Vec<JoinHandle<()>>,
+    read: impl FnOnce() -> Result<ProviderSettingsResult> + Send + 'static,
+) -> Result<()> {
+    let outgoing = outgoing.clone();
+    reads.retain(|read| !read.is_finished());
+    reads.push(
+        thread::Builder::new()
+            .name("matou-subscription-settings".into())
+            .spawn(move || {
+                let result =
+                    read().unwrap_or_else(|error| ProviderSettingsResult::Error(error.to_string()));
+                let _ = outgoing.send(ProviderSettingsReply { request_id, result });
+            })?,
+    );
+    Ok(())
 }
 
 impl Drop for ProviderSettingsWorker {
@@ -3108,6 +3338,14 @@ pub fn storage_command_rejected(command: Command, code: &str, message: &str) -> 
         | Command::DeleteProvider { request_id, .. }
         | Command::SetActiveProvider { request_id, .. }
         | Command::ConfirmAntigravityRisk { request_id }
+        | Command::StartSubscriptionLogin { request_id, .. }
+        | Command::GetSubscriptionLoginStatus { request_id, .. }
+        | Command::ReopenSubscriptionLogin { request_id, .. }
+        | Command::CancelSubscriptionLogin { request_id, .. }
+        | Command::CommitSubscriptionDraft { request_id, .. }
+        | Command::OpenSubscriptionSettings { request_id, .. }
+        | Command::CloseSubscriptionSettings { request_id, .. }
+        | Command::RefreshSubscriptionModels { request_id, .. }
         | Command::CopySelection { request_id, .. }
         | Command::ScrollTo { request_id, .. } => Some(*request_id),
         Command::PutGeometry { sequence, .. } | Command::Applied { sequence, .. } => {
@@ -5263,6 +5501,111 @@ fn run_writable(
                 }
                 Command::ConfirmAntigravityRisk { request_id } => {
                     provider_settings.send(ProviderSettingsRequest::ConfirmRisk(request_id))?;
+                    continue;
+                }
+                Command::StartSubscriptionLogin {
+                    request_id,
+                    settings_id,
+                    provider,
+                    chinese,
+                } => {
+                    provider_settings.send(ProviderSettingsRequest::StartSubscriptionLogin(
+                        request_id,
+                        settings_id,
+                        provider,
+                        chinese,
+                    ))?;
+                    continue;
+                }
+                Command::GetSubscriptionLoginStatus {
+                    request_id,
+                    settings_id,
+                    attempt_id,
+                } => {
+                    provider_settings.send(ProviderSettingsRequest::GetSubscriptionLoginStatus(
+                        request_id,
+                        settings_id,
+                        attempt_id,
+                    ))?;
+                    continue;
+                }
+                Command::ReopenSubscriptionLogin {
+                    request_id,
+                    settings_id,
+                    attempt_id,
+                    system_browser,
+                } => {
+                    provider_settings.send(ProviderSettingsRequest::ReopenSubscriptionLogin(
+                        request_id,
+                        settings_id,
+                        attempt_id,
+                        system_browser,
+                    ))?;
+                    continue;
+                }
+                Command::CancelSubscriptionLogin {
+                    request_id,
+                    settings_id,
+                    attempt_id,
+                } => {
+                    provider_settings.send(ProviderSettingsRequest::CancelSubscriptionLogin(
+                        request_id,
+                        settings_id,
+                        attempt_id,
+                    ))?;
+                    continue;
+                }
+                Command::CommitSubscriptionDraft {
+                    request_id,
+                    settings_id,
+                    attempt_id,
+                    input,
+                    activate,
+                } => {
+                    provider_settings.send(ProviderSettingsRequest::CommitSubscriptionDraft(
+                        request_id,
+                        settings_id,
+                        attempt_id,
+                        input,
+                        activate,
+                    ))?;
+                    continue;
+                }
+                Command::OpenSubscriptionSettings {
+                    request_id,
+                    settings_id,
+                } => {
+                    provider_settings.send(ProviderSettingsRequest::OpenSubscriptionSettings(
+                        request_id,
+                        settings_id,
+                    ))?;
+                    continue;
+                }
+                Command::CloseSubscriptionSettings {
+                    request_id,
+                    settings_id,
+                } => {
+                    // Release a ready settings lease even if a pending OAuth
+                    // cancellation is still draining on the settings worker.
+                    if let Some(service) = &subscriptions {
+                        service.close_settings(settings_id);
+                    }
+                    provider_settings.send(ProviderSettingsRequest::CloseSubscriptionSettings(
+                        request_id,
+                        settings_id,
+                    ))?;
+                    continue;
+                }
+                Command::RefreshSubscriptionModels {
+                    request_id,
+                    settings_id,
+                    provider_id,
+                } => {
+                    provider_settings.send(ProviderSettingsRequest::RefreshSubscriptionModels(
+                        request_id,
+                        settings_id,
+                        provider_id,
+                    ))?;
                     continue;
                 }
                 Command::Input {
@@ -8586,7 +8929,11 @@ fn save_role_assignments(
     web_search: Option<&Value>,
     compaction: Option<&Value>,
 ) -> Result<ClaudeModelPreferencesReply> {
-    let assignments = validate_claude_role_assignments(data_root, value)?;
+    let assignments = if value.is_null() && compaction.is_some() && web_search.is_none() {
+        load_role_preferences(data_root).assignments
+    } else {
+        validate_claude_role_assignments(data_root, value)?
+    };
     let search_patch = web_search
         .map(|target| {
             if target.is_null() {

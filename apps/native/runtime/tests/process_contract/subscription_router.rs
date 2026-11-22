@@ -601,6 +601,136 @@ fn preferences(
     }
 }
 
+#[test]
+fn subscription_settings_worker_reads_once_and_persists_explicit_refresh() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let mut host = fixture.spawn(None)?;
+    host.hello()
+        .context("handshake before creating subscription fixture")?;
+    let row = codex(true);
+    write_config(&host, CODEX_ID, std::slice::from_ref(&row))
+        .context("seed stored subscription")?;
+    credential(
+        &host,
+        &row,
+        &["codex-opus", "codex-fable", "codex-sonnet", "codex-haiku"],
+    )?;
+    assert!(matches!(
+        activate(&mut host, CODEX_ID, 79)?,
+        ProviderSettingsResult::Snapshot(_)
+    ));
+    assert!(router_events(&host, "account-probe")?.is_empty());
+
+    let open = |host: &mut RuntimeChild, id| {
+        settings(
+            host,
+            Command::OpenSubscriptionSettings {
+                request_id: id,
+                settings_id: id,
+            },
+            id,
+        )
+    };
+    let close = |host: &mut RuntimeChild, id| {
+        settings(
+            host,
+            Command::CloseSubscriptionSettings {
+                request_id: id + 10,
+                settings_id: id,
+            },
+            id + 10,
+        )
+    };
+    let ProviderSettingsResult::SubscriptionSettings(view) = open(&mut host, 80)? else {
+        bail!("expected account details on settings open")
+    };
+    assert_eq!(view.accounts[CODEX_ID].account["plan"], "Pro 200");
+    assert_eq!(view.accounts[CODEX_ID].quota[0].used_percent, 35.0);
+    assert_eq!(router_events(&host, "account-probe")?.len(), 1);
+    let wire = serde_json::to_string(&view)?;
+    assert!(
+        !wire.contains("credentialRef") && !wire.contains(CODEX_REF) && !wire.contains("c-index")
+    );
+    assert!(matches!(
+        close(&mut host, 80)?,
+        ProviderSettingsResult::Accepted(true)
+    ));
+
+    assert!(matches!(
+        open(&mut host, 81)?,
+        ProviderSettingsResult::SubscriptionSettings(_)
+    ));
+    assert_eq!(router_events(&host, "account-probe")?.len(), 1);
+    fs::write(
+        host.data.join("model-router/fixture-catalog-mode"),
+        "updated",
+    )?;
+    let refresh = settings(
+        &mut host,
+        Command::RefreshSubscriptionModels {
+            request_id: 82,
+            settings_id: 81,
+            provider_id: CODEX_ID.into(),
+        },
+        82,
+    )?;
+    let ProviderSettingsResult::SubscriptionModels(view) = refresh else {
+        bail!("expected refreshed subscription catalog")
+    };
+    assert!(
+        view.details
+            .models
+            .iter()
+            .any(|model| model["id"] == "fixture-updated-model")
+    );
+    assert_eq!(router_events(&host, "account-probe")?.len(), 2);
+    preferences(
+        &mut host,
+        json!({"fable": {"providerId": CODEX_ID, "model": "codex-fable"}}),
+        Some(json!({"providerId": CODEX_ID, "model": "codex-haiku"})),
+        None,
+    )?;
+    preferences(
+        &mut host,
+        Value::Null,
+        None,
+        Some(
+            json!({"mode": "custom", "providerId": CODEX_ID, "model": "codex-fable", "effort": "low"}),
+        ),
+    )?;
+    host.send(Command::GetClaudeModelPreferences { request_id: 83 })?;
+    loop {
+        if let Event::Graph(graph) = host.event(Instant::now() + TIMEOUT, true)?
+            && graph["claudeRoleAssignmentsResult"]["requestId"] == 83
+        {
+            let settings = &graph["claudeRoleAssignmentsResult"];
+            assert_eq!(settings["assignments"]["fable"]["model"], "codex-fable");
+            assert_eq!(settings["webSearch"]["model"], "codex-haiku");
+            assert_eq!(settings["compaction"]["model"], "codex-fable");
+            break;
+        }
+    }
+    assert!(matches!(
+        close(&mut host, 81)?,
+        ProviderSettingsResult::Accepted(true)
+    ));
+    let port = router_events(&host, "engine-start")?.last().unwrap()["port"]
+        .as_u64()
+        .unwrap() as u16;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if TcpStream::connect((Ipv4Addr::LOCALHOST, port)).is_err() {
+            break;
+        }
+        ensure!(
+            Instant::now() < deadline,
+            "settings lease remained after close"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    stop(&mut host)
+}
+
 struct Trace {
     url: String,
     mainland: Arc<AtomicBool>,

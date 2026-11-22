@@ -202,6 +202,8 @@ pub(crate) struct AssignmentRow {
     pub(crate) note: Option<String>,
     pub(crate) problem: Option<String>,
     pub(crate) retry_catalog: bool,
+    /// Provider id whose subscription account needs a new sign-in.
+    pub(crate) relogin: Option<String>,
 }
 
 /// A closed dropdown.
@@ -234,6 +236,8 @@ pub(crate) enum AssignmentAction {
     Manual(usize, String),
     Retry,
     RetryCatalog(usize),
+    /// Re-open the OAuth flow for a subscription account that is signed out.
+    Relogin(String),
     Restore,
     Save,
 }
@@ -286,6 +290,7 @@ pub(crate) struct AssignmentView {
     controls: [[FocusHandle; 3]; ASSIGNMENT_ROWS],
     /// Slot 0 is the disconnect retry; the remaining slots are per-row catalog retries.
     retry_focus: [FocusHandle; ASSIGNMENT_ROWS + 1],
+    relogin_focus: [FocusHandle; ASSIGNMENT_ROWS],
     restore_focus: FocusHandle,
     save_focus: FocusHandle,
     manual_inputs: [Entity<RenameInput>; ASSIGNMENT_ROWS],
@@ -303,6 +308,7 @@ impl AssignmentView {
         let controls: [[FocusHandle; 3]; ASSIGNMENT_ROWS] =
             std::array::from_fn(|_| std::array::from_fn(|_| cx.focus_handle().tab_stop(true)));
         let retry_focus = std::array::from_fn(|_| cx.focus_handle().tab_stop(true));
+        let relogin_focus = std::array::from_fn(|_| cx.focus_handle().tab_stop(true));
         let restore_focus = cx.focus_handle().tab_stop(true);
         let save_focus = cx.focus_handle().tab_stop(true);
         let manual_inputs: [Entity<RenameInput>; ASSIGNMENT_ROWS] = std::array::from_fn(|_| {
@@ -343,6 +349,7 @@ impl AssignmentView {
             colors: AssignmentColors::new(&LIGHT, false),
             controls,
             retry_focus,
+            relogin_focus,
             restore_focus,
             save_focus,
             manual_inputs,
@@ -751,6 +758,18 @@ impl AssignmentView {
                     .whitespace_normal()
                     .child(row.account.clone()),
             );
+        }
+        if let Some(provider_id) = row.relogin.clone() {
+            let label = self.locale.text("重新登录", "Sign in again");
+            provider_field = provider_field.child(assignment_link_button(
+                SharedString::from(format!("assignment-relogin-{index}")),
+                label,
+                self.relogin_focus[index].clone(),
+                keyboard_focus,
+                &colors,
+                cx,
+                move |_, _, cx| cx.emit(AssignmentAction::Relogin(provider_id.clone())),
+            ));
         }
 
         let mut model_field = div()
@@ -1680,8 +1699,6 @@ where
 
 // Assignment preferences and runtime replies.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use matou_native_core::provider_launch::{ClaudeRoleAssignment, ClaudeRoleAssignments, EFFORTS};
 use matou_native_runtime::protocol::{
     ClaudeModelCatalogReply, ClaudeModelCatalogResult, ClaudeRoleAssignmentsReply,
@@ -1689,6 +1706,9 @@ use matou_native_runtime::protocol::{
 use serde_json::Value;
 
 use super::effort_name;
+use super::subscription_settings::{
+    account_line as subscription_account_line, subscription_ready, subscription_status,
+};
 use crate::{
     provider_settings::ProviderSettings,
     rename_input::trim_name,
@@ -1699,7 +1719,6 @@ const SEARCH_INDEX: usize = ROLES.len();
 const ASSIGNMENT_ROWS: usize = SEARCH_INDEX + 1;
 const FOLLOW_PROVIDER: &str = "沿用默认供应商";
 const CHOOSE_MODEL: &str = "请选择模型";
-static NEXT_ASSIGNMENT_REQUEST: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Problem {
@@ -1849,9 +1868,12 @@ fn row_problem(
         return Some(Problem::Provider);
     };
     if subscription(provider) {
-        return Some(Problem::Account);
-    }
-    if !subscription(provider) && !official(provider) && provider["hasApiKey"] != true {
+        // Only an authenticated account can back a Claude Code target. A
+        // signed-out row keeps its saved mapping visible and points at relogin.
+        if !subscription_ready(provider) {
+            return Some(Problem::Account);
+        }
+    } else if !official(provider) && provider["hasApiKey"] != true {
         return Some(Problem::Key);
     }
 
@@ -1891,12 +1913,13 @@ fn search_problem(
         // A stored target whose provider was deleted keeps its old value.
         return Some(Problem::Provider);
     };
-    // The frozen runtime rejects subscription targets as unavailable search
-    // providers; the row keeps the stored value so the user can clear it.
+    // Subscription targets are valid for search once the account is signed in;
+    // a signed-out target keeps its value and exposes the relogin entry.
     if subscription(provider) {
-        return Some(Problem::Provider);
-    }
-    if provider["hasApiKey"] != true {
+        if !subscription_ready(provider) {
+            return Some(Problem::Account);
+        }
+    } else if provider["hasApiKey"] != true {
         return Some(Problem::Key);
     }
     // An existing but empty authoritative/native directory is reported before
@@ -1971,7 +1994,7 @@ fn account_caption(provider: Option<&Value>, assigned: bool, locale: InterfaceLo
         return String::new();
     };
     if subscription(provider) {
-        return String::new();
+        return subscription_account_line(provider, locale);
     }
     let endpoint = provider["endpoint"].as_str().unwrap_or_default();
     endpoint
@@ -2034,6 +2057,10 @@ fn default_model<'a>(provider: &'a Value, role: &str, native: &'a [Value]) -> Op
         .filter(|id| !id.is_empty())
     {
         return Some(mapped);
+    }
+    // Historical three-tier subscriptions launch Fable with Opus.
+    if subscription(provider) && role == "fable" {
+        return default_model(provider, "opus", native);
     }
     if !official(provider) {
         return None;
@@ -2140,7 +2167,7 @@ impl ClaudeAssignments {
         if self.pending.is_some() || phase != ConnectionPhase::Ready {
             return None;
         }
-        let id = NEXT_ASSIGNMENT_REQUEST.fetch_add(1, Ordering::Relaxed);
+        let id = crate::provider_settings::next_provider_settings_request();
         self.commands.send_at(generation, command(id)).ok()?;
         self.pending = Some(PendingAssignment {
             id,
@@ -2198,7 +2225,7 @@ impl ClaudeAssignments {
         if !needed || phase != ConnectionPhase::Ready {
             return None;
         }
-        let id = NEXT_ASSIGNMENT_REQUEST.fetch_add(1, Ordering::Relaxed);
+        let id = crate::provider_settings::next_provider_settings_request();
         self.commands
             .send_at(
                 generation,
@@ -2458,7 +2485,8 @@ impl ClaudeAssignments {
         };
         let selectable = enabled
             && assigned.is_some()
-            && provider.is_some_and(|provider| !subscription(provider));
+            && provider
+                .is_some_and(|provider| !subscription(provider) || subscription_ready(provider));
 
         let mut provider_items = vec![option(
             "",
@@ -2468,16 +2496,13 @@ impl ClaudeAssignments {
                 locale.text(FOLLOW_PROVIDER, "Follow default provider")
             },
         )];
-        if let Some(id) = provider_id.filter(|_| provider.is_none_or(subscription)) {
+        if let Some(id) = provider_id.filter(|_| provider.is_none()) {
             provider_items.push(option(
                 id,
                 format!("{id} · {}", locale.text("不可用", "Unavailable")),
             ));
         }
         provider_items.extend(providers.providers().iter().filter_map(|provider| {
-            if subscription(provider) {
-                return None;
-            }
             let id = provider["id"].as_str()?;
             Some(option(id, provider["name"].as_str().unwrap_or(id)))
         }));
@@ -2569,6 +2594,12 @@ impl ClaudeAssignments {
             note: None,
             problem: problem_text,
             retry_catalog: problem == Some(Problem::Catalog),
+            relogin: provider
+                .filter(|provider| {
+                    subscription(provider) && subscription_status(provider) == "needs-sign-in"
+                })
+                .and_then(|provider| provider["id"].as_str())
+                .map(str::to_owned),
         }
     }
 
@@ -2604,26 +2635,23 @@ impl ClaudeAssignments {
         let problem = assigned.and_then(|_| search_problem(provider, selected, effort, native));
         let selectable = enabled
             && assigned.is_some()
-            && provider.is_some_and(|provider| !subscription(provider));
+            && provider
+                .is_some_and(|provider| !subscription(provider) || subscription_ready(provider));
 
         let mut provider_items = vec![option(
             "",
             locale.text(VIEW_SEARCH_UNASSIGNED, "Unassigned"),
         )];
-        if let Some(id) = provider_id.filter(|_| provider.is_none_or(subscription)) {
+        if let Some(id) = provider_id.filter(|_| provider.is_none()) {
             provider_items.push(option(
                 id,
                 format!("{id} · {}", locale.text("不可用", "Unavailable")),
             ));
         }
         provider_items.extend(providers.providers().iter().filter_map(|provider| {
-            // Only Claude Code provider targets are selectable; subscription
-            // providers stay out of the menu. A keyless target stays
-            // selectable so its frozen "API Key 未配置" reason is visible, and
-            // a stored subscription remains visible until the user clears it.
-            if subscription(provider) {
-                return None;
-            }
+            // A keyless target stays selectable so its frozen "API Key 未配置"
+            // reason is visible. A signed-out subscription keeps its stored
+            // value and can be re-authenticated from the row.
             let id = provider["id"].as_str()?;
             Some(option(id, provider["name"].as_str().unwrap_or(id)))
         }));
@@ -2715,6 +2743,12 @@ impl ClaudeAssignments {
             note: Some(locale.text(VIEW_SEARCH_NOTE, "Search requests include the current conversation content and are sent to that provider.").into()),
             problem: problem.map(|problem| problem.localized(locale).to_owned()),
             retry_catalog: problem == Some(Problem::Catalog),
+            relogin: provider
+                .filter(|provider| {
+                    subscription(provider) && subscription_status(provider) == "needs-sign-in"
+                })
+                .and_then(|provider| provider["id"].as_str())
+                .map(str::to_owned),
         }
     }
 
@@ -3007,7 +3041,17 @@ mod assignment_validation_tests {
                 "follow",
                 &[],
             ),
-            Some(Problem::Provider)
+            Some(Problem::Account)
+        );
+        let ready = json!({"id": "sub", "subscription": {
+            "provider": "codex",
+            "account": {"status": "ready"},
+            "modelMetadata": [{"id": "a", "supportedEfforts": ["low"]}]
+        }});
+        assert_eq!(search_problem(Some(&ready), "a", "low", &[]), None);
+        assert_eq!(
+            search_problem(Some(&ready), "a", "high", &[]),
+            Some(Problem::Effort)
         );
         assert_eq!(
             search_problem(

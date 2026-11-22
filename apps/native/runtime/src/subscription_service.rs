@@ -1,3 +1,8 @@
+mod account_details;
+mod callback;
+mod login;
+mod settings;
+
 use std::{
     collections::{BTreeMap, HashMap},
     ffi::OsString,
@@ -38,6 +43,10 @@ pub(crate) struct SubscriptionService {
     // stored account at a time. The PTY owner never takes this lock.
     serial: Mutex<()>,
     bindings: Mutex<HashMap<String, Vec<Weak<TargetBinding>>>>,
+    login_attempts: Mutex<HashMap<String, login::LoginAttempt>>,
+    login_options: login::LoginOptions,
+    settings_rounds: Mutex<HashMap<u64, Arc<settings::SettingsRound>>>,
+    account_details: Mutex<HashMap<String, settings::CachedDetails>>,
 }
 
 pub(crate) struct TargetBinding {
@@ -96,6 +105,10 @@ impl SubscriptionService {
             store,
             serial: Mutex::new(()),
             bindings: Mutex::default(),
+            login_attempts: Mutex::default(),
+            login_options: login::LoginOptions::default(),
+            settings_rounds: Mutex::default(),
+            account_details: Mutex::default(),
         })
     }
 
@@ -133,15 +146,50 @@ impl SubscriptionService {
         } else {
             None
         };
-        let result = self.store.delete(cli, id)?;
-        if let Some(account) = account {
-            self.revoke_provider_targets(id);
-            if let Some(connection) = self.manager.current_connection() {
-                let _ = ManagementClient::new(&connection)
-                    .set_disabled(&account.identity.credential_name, true);
+        let Some(account) = account else {
+            return self.store.delete(cli, id);
+        };
+        if self.store.snapshot()?["activeProviderIds"][cli] == id {
+            return self.store.delete(cli, id);
+        }
+        // Disable before dropping the saved reference. An absent credential
+        // can already be deleted, even when the router is unavailable.
+        let name = &account.identity.credential_name;
+        let connection = if model_router::credential_path(&self.root, name).is_ok()
+            || self.manager.current_connection().is_some()
+        {
+            Some(self.manager.acquire()?)
+        } else {
+            None
+        };
+        let mut restore = false;
+        if let Some((connection, _)) = &connection {
+            let client = ManagementClient::new(connection);
+            if let Some(file) = credential_entry(
+                &client.credentials()?,
+                provider(&account)?,
+                &account.identity,
+            ) && file["disabled"] != true
+            {
+                client.set_disabled(name, true)?;
+                restore = true;
             }
         }
-        Ok(result)
+        match self.store.delete(cli, id) {
+            Ok(result) => {
+                self.revoke_provider_targets(id);
+                self.account_details.lock().unwrap().remove(name);
+                Ok(result)
+            }
+            Err(error) => {
+                if restore && let Some((connection, _)) = &connection {
+                    ManagementClient::new(connection)
+                        .set_disabled(name, false)
+                        .context("Could not restore the subscription after deletion failed")?;
+                }
+                Err(error)
+            }
+        }
     }
 
     /// Called within the account mutation boundary before another identity binds.
