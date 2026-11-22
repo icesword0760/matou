@@ -5,7 +5,8 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     future::Future,
     io::{self, Read},
-    net::{IpAddr, Ipv6Addr},
+    net::{IpAddr, Ipv6Addr, TcpStream},
+    path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
     sync::{LazyLock, mpsc},
     thread::{self, JoinHandle},
@@ -13,7 +14,7 @@ use std::{
 };
 
 use matou_native_core::provider_launch::{
-    automatic_time_zone, cli_time_zone, valid_claude_time_zone,
+    automatic_time_zone, cli_time_zone, system_time_zone, valid_claude_time_zone,
 };
 pub use matou_native_core::sessions::{
     InterfaceLocale, LocalePreference, resolve_interface_locale,
@@ -27,6 +28,7 @@ pub const FROZEN_RECHECK_MS: u64 = 15_000;
 pub const RECOVERY_CONFIRM_MS: u64 = 5_000;
 pub(crate) const LIVE_RECHECK_INTERVAL: Duration = Duration::from_secs(60);
 const MAX_TRACE_BYTES: usize = 4096;
+const LOCAL_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -420,7 +422,6 @@ impl HostPair {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct EgressSample {
     hosts: BTreeMap<Family, HostPair>,
-    live_trace_only: bool,
     pub browser_login: Option<HostSample>,
     pub agent_has_proxy_env: bool,
     pub system_proxy_enabled: bool,
@@ -664,7 +665,7 @@ pub(crate) struct LiveEgressSampler {
 }
 
 impl LiveEgressSampler {
-    pub(crate) fn start() -> anyhow::Result<Option<Self>> {
+    pub(crate) fn start(data_root: PathBuf) -> anyhow::Result<Option<Self>> {
         if std::env::var_os("MATOU_DISABLE_LIVE_EGRESS").is_some_and(|value| value == "1") {
             return Ok(None);
         }
@@ -689,7 +690,8 @@ impl LiveEgressSampler {
             .name("matou-egress-probe".into())
             .spawn(move || {
                 while incoming.recv().is_ok() {
-                    let Some(sample) = sample_trace_batch(base.as_ref(), &incoming) else {
+                    let Some(sample) = sample_live_batch(base.as_ref(), &incoming, &data_root)
+                    else {
                         break;
                     };
                     if completed.send(sample).is_err() {
@@ -722,9 +724,76 @@ impl Drop for LiveEgressSampler {
     }
 }
 
+fn sample_live_batch(
+    base: Option<&Url>,
+    incoming: &mpsc::Receiver<()>,
+    data_root: &Path,
+) -> Option<EgressSample> {
+    let local_deadline = Instant::now() + LOCAL_PROBE_TIMEOUT;
+    let (local_results, local_signals) = mpsc::sync_channel(1);
+    let data_root = data_root.to_owned();
+    let loopback = base.is_some();
+    // Wait only until the deadline, including time spent in the OS address and
+    // time zone lookups, while the HTTP traces continue independently.
+    let _ = thread::Builder::new()
+        .name("matou-egress-local".into())
+        .spawn(move || {
+            let setting = (|| -> anyhow::Result<_> {
+                let db = rusqlite::Connection::open_with_flags(
+                    data_root.join("matou.sqlite"),
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                )?;
+                db.busy_timeout(Duration::ZERO)?;
+                matou_native_core::sessions::read_claude_time_zone(&db)
+            })();
+            let mainland = setting
+                .map(TimeZonePreference)
+                .unwrap_or_default()
+                .mainland_warning(&system_time_zone());
+            let (tun, ipv6) = if loopback {
+                (false, false)
+            } else {
+                sample_interface_paths(local_deadline)
+            };
+            let _ = local_results.send((tun, ipv6, mainland));
+        });
+    thread::scope(|scope| {
+        // Loopback trace fixtures never inspect the machine's proxy or try an external IPv6 address.
+        let browser = (!loopback).then(|| {
+            scope.spawn(|| {
+                let url = trace_url(None, Family::Anthropic.hosts().1);
+                sample_browser_path(&url, read_system_proxy)
+            })
+        });
+        let mut sample = sample_trace_batch(base, incoming)?;
+        if let Some((enabled, login)) = browser.and_then(|worker| worker.join().ok()) {
+            sample.system_proxy_enabled = enabled;
+            sample.browser_login = login;
+        }
+        let remaining = local_deadline.saturating_duration_since(Instant::now());
+        if let Ok((tun, ipv6, mainland)) = local_signals.recv_timeout(remaining) {
+            sample.tun_detected = tun;
+            sample.ipv6_bypass = ipv6;
+            sample.agent_time_zone_mainland = mainland;
+        }
+        Some(sample)
+    })
+}
+
+fn trace_url(base: Option<&Url>, host: &str) -> Url {
+    match base {
+        Some(url) => url.join(TRACE_PATH).expect("loopback trace URL"),
+        None => Url::parse(&format!("https://{host}{TRACE_PATH}")).expect("official trace URL"),
+    }
+}
+
 fn sample_trace_batch(base: Option<&Url>, incoming: &mpsc::Receiver<()>) -> Option<EgressSample> {
     let env = proxy_environment();
-    let anthropic = anthropic_proxy_environment(env.clone());
+    let anthropic = if base.is_none() {
+        anthropic_proxy_environment(env.clone())
+    } else {
+        env.clone()
+    };
     let plan = SamplingPlan {
         subscription: SubscriptionRoute::Disabled,
     };
@@ -734,17 +803,18 @@ fn sample_trace_batch(base: Option<&Url>, incoming: &mpsc::Receiver<()>) -> Opti
         if incoming.try_recv() == Err(mpsc::TryRecvError::Disconnected) {
             return None;
         }
-        let url = match base {
-            Some(url) => url.join(TRACE_PATH).expect("loopback trace URL"),
-            None => Url::parse(&format!("https://{}{TRACE_PATH}", target.host))
-                .expect("official trace URL"),
-        };
+        let url = trace_url(base, target.host);
         let env = if target.family == Family::Anthropic {
             &anthropic
         } else {
             &env
         };
-        match CurlTrace::start(&url, proxy_for_trace(env, &url)) {
+        let proxy = proxy_for_trace(env, &url).filter(|proxy| {
+            base.is_none()
+                || Url::parse(&normalized_curl_proxy(proxy))
+                    .is_ok_and(|url| matches!(url.host_str(), Some("127.0.0.1" | "[::1]")))
+        });
+        match CurlTrace::start(&url, proxy, Duration::from_millis(DEFAULT_TIMEOUT_MS)) {
             Ok(child) => {
                 pending.insert(target, child);
             }
@@ -770,7 +840,6 @@ fn sample_trace_batch(base: Option<&Url>, incoming: &mpsc::Receiver<()>) -> Opti
         }
     }
     let mut sample = plan.collect_full(samples);
-    sample.live_trace_only = true;
     sample.agent_has_proxy_env =
         ["https_proxy", "http_proxy", "all_proxy"]
             .into_iter()
@@ -782,13 +851,340 @@ fn sample_trace_batch(base: Option<&Url>, incoming: &mpsc::Receiver<()>) -> Opti
     Some(sample)
 }
 
+fn sample_browser_path(
+    url: &Url,
+    read_proxy: impl FnOnce(Instant) -> Option<String>,
+) -> (bool, Option<HostSample>) {
+    let deadline = Instant::now() + LOCAL_PROBE_TIMEOUT;
+    let Some(proxy) = read_proxy(deadline) else {
+        return (false, None);
+    };
+    let host = Family::Anthropic.hosts().1;
+    let result = (|| {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining < Duration::from_millis(1) {
+            return Err(HostError::Timeout);
+        }
+        let mut trace = CurlTrace::start(url, Some(&proxy), remaining)?;
+        loop {
+            if let Some(sample) = trace.poll(host) {
+                return Ok(sample);
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(HostError::Timeout);
+            }
+            thread::sleep(remaining.min(Duration::from_millis(10)));
+        }
+    })();
+    (
+        true,
+        Some(result.unwrap_or_else(|error| HostSample::failed(host, error))),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn read_system_proxy(deadline: Instant) -> Option<String> {
+    let mut command = Command::new("/usr/sbin/scutil");
+    command.arg("--proxy");
+    parse_scutil_proxy(&local_command_output(command, deadline)?)
+}
+
+#[cfg(windows)]
+fn read_system_proxy(deadline: Instant) -> Option<String> {
+    use std::os::windows::process::CommandExt;
+
+    let mut command = Command::new("reg.exe");
+    command.creation_flags(0x08000000).args([
+        "query",
+        r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+    ]);
+    parse_windows_proxy(&local_command_output(command, deadline)?)
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+fn read_system_proxy(_: Instant) -> Option<String> {
+    None
+}
+
+#[cfg(any(target_os = "macos", windows))]
+fn local_command_output(mut command: Command, deadline: Instant) -> Option<String> {
+    const MAX_BYTES: u64 = 64 * 1024;
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let stdout = child.stdout.take().expect("piped local probe response");
+    thread::scope(|scope| {
+        let output = scope.spawn(|| {
+            let mut bytes = Vec::new();
+            stdout.take(MAX_BYTES + 1).read_to_end(&mut bytes).ok()?;
+            (bytes.len() as u64 <= MAX_BYTES).then(|| String::from_utf8_lossy(&bytes).into_owned())
+        });
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) if status.success() => return output.join().ok().flatten(),
+                Ok(Some(_)) => return None,
+                Ok(None) if Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                _ => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+            }
+        }
+    })
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn parse_scutil_proxy(text: &str) -> Option<String> {
+    let settings: BTreeMap<_, _> = text
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .map(|(key, value)| (key.trim(), value.trim()))
+        .collect();
+    for (prefix, scheme) in [("HTTPS", "http"), ("HTTP", "http"), ("SOCKS", "socks5")] {
+        if settings.get(format!("{prefix}Enable").as_str()) != Some(&"1") {
+            continue;
+        }
+        let Some(&host) = settings.get(format!("{prefix}Proxy").as_str()) else {
+            continue;
+        };
+        let host = if host.parse::<Ipv6Addr>().is_ok() {
+            format!("[{host}]")
+        } else {
+            host.to_owned()
+        };
+        let port = settings
+            .get(format!("{prefix}Port").as_str())
+            .and_then(|port| port.parse::<u16>().ok())
+            .filter(|port| *port != 0)
+            .map_or_else(String::new, |port| format!(":{port}"));
+        if let Some(proxy) = system_proxy_url(scheme, &format!("{host}{port}")) {
+            return Some(proxy);
+        }
+    }
+    None
+}
+
+#[cfg(any(windows, test))]
+fn parse_windows_proxy(text: &str) -> Option<String> {
+    let value = |name, registry_type| {
+        text.lines().find_map(|line| {
+            line.trim()
+                .strip_prefix(name)?
+                .trim_start()
+                .strip_prefix(registry_type)
+                .map(str::trim)
+        })
+    };
+    let enabled = value("ProxyEnable", "REG_DWORD")?;
+    if u32::from_str_radix(enabled.strip_prefix("0x").unwrap_or(enabled), 16).ok()? == 0 {
+        return None;
+    }
+    let server = value("ProxyServer", "REG_SZ")?;
+    if !server.contains('=') {
+        return system_proxy_url("http", server);
+    }
+    let settings: BTreeMap<_, _> = server
+        .split(';')
+        .filter_map(|entry| entry.split_once('='))
+        .map(|(key, value)| (key.trim().to_ascii_lowercase(), value.trim()))
+        .collect();
+    [("https", "http"), ("http", "http"), ("socks", "socks5")]
+        .into_iter()
+        .find_map(|(entry, scheme)| system_proxy_url(scheme, settings.get(entry)?))
+}
+
+#[cfg(any(target_os = "macos", windows, test))]
+fn system_proxy_url(scheme: &str, address: &str) -> Option<String> {
+    if address.is_empty() || address.contains(['/', '?', '#', '@']) {
+        return None;
+    }
+    let proxy = Url::parse(&format!("{scheme}://{address}")).ok()?;
+    proxy.host_str().map(|_| proxy.to_string())
+}
+
+fn sample_interface_paths(deadline: Instant) -> (bool, bool) {
+    let (tun, global_ipv6) = interface_signals(interface_addresses());
+    let timeout = deadline.saturating_duration_since(Instant::now());
+    let ipv6_bypass = global_ipv6
+        && !timeout.is_zero()
+        && TcpStream::connect_timeout(
+            &("2606:4700:4700::1111".parse::<Ipv6Addr>().unwrap(), 443).into(),
+            timeout,
+        )
+        .is_ok();
+    (tun, ipv6_bypass)
+}
+
+fn interface_signals(addresses: impl IntoIterator<Item = IpAddr>) -> (bool, bool) {
+    let (mut tun, mut global_ipv6) = (false, false);
+    for address in addresses {
+        match address {
+            IpAddr::V4(ip) => tun |= matches!(ip.octets(), [198, 18 | 19, ..]),
+            // The current global unicast allocation is 2000::/3.
+            IpAddr::V6(ip) => global_ipv6 |= ip.segments()[0] & 0xe000 == 0x2000,
+        }
+    }
+    (tun, global_ipv6)
+}
+
+#[cfg(unix)]
+fn interface_addresses() -> Vec<IpAddr> {
+    let mut head = std::ptr::null_mut();
+    // SAFETY: getifaddrs initializes head to a list owned by this call.
+    if unsafe { libc::getifaddrs(&mut head) } != 0 {
+        return Vec::new();
+    }
+    let mut addresses = Vec::new();
+    let mut current = head;
+    // SAFETY: Each link and its sockaddr remain valid until freeifaddrs.
+    unsafe {
+        while let Some(interface) = current.as_ref() {
+            current = interface.ifa_next;
+            if interface.ifa_flags & libc::IFF_LOOPBACK as u32 != 0 {
+                continue;
+            }
+            let Some(address) = interface.ifa_addr.as_ref() else {
+                continue;
+            };
+            match i32::from(address.sa_family) {
+                libc::AF_INET => {
+                    let ipv4 = &*interface.ifa_addr.cast::<libc::sockaddr_in>();
+                    addresses.push(ipv4.sin_addr.s_addr.to_ne_bytes().into());
+                }
+                libc::AF_INET6 => {
+                    let ipv6 = &*interface.ifa_addr.cast::<libc::sockaddr_in6>();
+                    addresses.push(ipv6.sin6_addr.s6_addr.into());
+                }
+                _ => {}
+            }
+        }
+        libc::freeifaddrs(head);
+    }
+    addresses
+}
+
+#[cfg(windows)]
+fn interface_addresses() -> Vec<IpAddr> {
+    use std::{ffi::c_void, ptr};
+
+    // The fields used from IP_ADAPTER_ADDRESSES and IP_ADAPTER_UNICAST_ADDRESS.
+    #[repr(C)]
+    struct Adapter {
+        header: u64,
+        next: *const Adapter,
+        name: *const u8,
+        first_unicast: *const Unicast,
+        anycast: *const c_void,
+        multicast: *const c_void,
+        dns_server: *const c_void,
+        dns_suffix: *const u16,
+        description: *const u16,
+        friendly_name: *const u16,
+        physical_address: [u8; 8],
+        physical_address_length: u32,
+        flags: u32,
+        mtu: u32,
+        interface_type: u32,
+    }
+
+    #[repr(C)]
+    struct Unicast {
+        header: u64,
+        next: *const Unicast,
+        sockaddr: *const u8,
+        sockaddr_length: i32,
+    }
+
+    #[link(name = "iphlpapi")]
+    unsafe extern "system" {
+        fn GetAdaptersAddresses(
+            family: u32,
+            flags: u32,
+            reserved: *mut c_void,
+            addresses: *mut Adapter,
+            size: *mut u32,
+        ) -> u32;
+    }
+    const SKIP_UNUSED_ADDRESSES: u32 = 0x2 | 0x4 | 0x8 | 0x20;
+    const ERROR_BUFFER_OVERFLOW: u32 = 111;
+    const IF_TYPE_SOFTWARE_LOOPBACK: u32 = 24;
+    const AF_INET: u16 = 2;
+    const AF_INET6: u16 = 23;
+
+    let mut size = 15_000u32;
+    for _ in 0..3 {
+        // The documented size is in bytes, but the output needs pointer alignment.
+        let mut buffer = vec![0u64; (size as usize).div_ceil(size_of::<u64>())];
+        let head = buffer.as_mut_ptr().cast::<Adapter>();
+        // SAFETY: The output buffer is aligned, writable and at least size bytes.
+        match unsafe {
+            GetAdaptersAddresses(0, SKIP_UNUSED_ADDRESSES, ptr::null_mut(), head, &mut size)
+        } {
+            0 => {}
+            ERROR_BUFFER_OVERFLOW if size <= 1_048_576 => continue,
+            _ => return Vec::new(),
+        }
+        let mut addresses = Vec::new();
+        let mut adapter = head.cast_const();
+        // SAFETY: The returned list and sockaddr data are owned by buffer, which
+        // is kept alive while walking the list. Read only within the reported sockaddr length.
+        unsafe {
+            while let Some(info) = adapter.as_ref() {
+                adapter = info.next;
+                if info.interface_type == IF_TYPE_SOFTWARE_LOOPBACK {
+                    continue;
+                }
+                let mut unicast = info.first_unicast;
+                while let Some(address) = unicast.as_ref() {
+                    unicast = address.next;
+                    if address.sockaddr.is_null() || address.sockaddr_length < 2 {
+                        continue;
+                    }
+                    let bytes = std::slice::from_raw_parts(
+                        address.sockaddr,
+                        address.sockaddr_length as usize,
+                    );
+                    match u16::from_ne_bytes([bytes[0], bytes[1]]) {
+                        AF_INET if bytes.len() >= 16 => {
+                            addresses.push(<[u8; 4]>::try_from(&bytes[4..8]).unwrap().into());
+                        }
+                        AF_INET6 if bytes.len() >= 28 => {
+                            addresses.push(<[u8; 16]>::try_from(&bytes[8..24]).unwrap().into());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        return addresses;
+    }
+    Vec::new()
+}
+
+fn normalized_curl_proxy(proxy: &str) -> String {
+    if let Some(address) = proxy.strip_prefix("socks://") {
+        format!("socks5h://{address}")
+    } else if proxy.contains("://") {
+        proxy.to_owned()
+    } else {
+        format!("http://{proxy}")
+    }
+}
+
 struct CurlTrace {
     child: Child,
     output: Option<JoinHandle<io::Result<(u64, Vec<u8>)>>>,
 }
 
 impl CurlTrace {
-    fn start(url: &Url, proxy: Option<&str>) -> Result<Self, HostError> {
+    fn start(url: &Url, proxy: Option<&str>, timeout: Duration) -> Result<Self, HostError> {
         // Curl is already used by the native runtime hooks. The current
         // Runtime crate cannot link the desktop's HTTP client under --locked.
         #[cfg(windows)]
@@ -800,9 +1196,7 @@ impl CurlTrace {
         };
         #[cfg(not(windows))]
         let mut request = Command::new("/usr/bin/curl");
-        let timeout = Duration::from_millis(DEFAULT_TIMEOUT_MS)
-            .as_secs_f64()
-            .to_string();
+        let timeout = timeout.as_secs_f64().to_string();
         request
             .args([
                 "--disable",
@@ -829,13 +1223,7 @@ impl CurlTrace {
             request.env_remove(key);
         }
         if let Some(proxy) = proxy {
-            let normalized = if let Some(address) = proxy.strip_prefix("socks://") {
-                format!("socks5h://{address}")
-            } else if proxy.contains("://") {
-                proxy.to_owned()
-            } else {
-                format!("http://{proxy}")
-            };
+            let normalized = normalized_curl_proxy(proxy);
             let url = Url::parse(&normalized).map_err(|_| HostError::Invalid)?;
             if !matches!(
                 url.scheme(),
@@ -1071,29 +1459,15 @@ pub fn evaluate_egress(sample: &EgressSample, rule: &EgressRule) -> Evaluation {
         families.push(evaluation);
         checks.extend(family_checks);
     }
-    if sample.live_trace_only {
-        checks.extend(
-            [
-                CheckId::AgentProxyPath,
-                CheckId::BrowserPath,
-                CheckId::TimeZone,
-                CheckId::Ipv6,
-            ]
-            .map(|id| {
-                Check::new(id, None, CheckResult::Unknown).facts([("reason", "notCollected")])
-            }),
-        );
-    } else {
-        checks.extend([
-            global_check(
-                CheckId::AgentProxyPath,
-                sample.system_proxy_enabled && !sample.agent_has_proxy_env && !sample.tun_detected,
-            ),
-            browser_check(sample),
-            global_check(CheckId::TimeZone, sample.agent_time_zone_mainland),
-            global_check(CheckId::Ipv6, sample.ipv6_bypass),
-        ]);
-    }
+    checks.extend([
+        global_check(
+            CheckId::AgentProxyPath,
+            sample.system_proxy_enabled && !sample.agent_has_proxy_env && !sample.tun_detected,
+        ),
+        browser_check(sample),
+        global_check(CheckId::TimeZone, sample.agent_time_zone_mainland),
+        global_check(CheckId::Ipv6, sample.ipv6_bypass),
+    ]);
     let state = if families
         .iter()
         .any(|family| family.state == State::Abnormal)
@@ -1104,12 +1478,7 @@ pub fn evaluate_egress(sample: &EgressSample, rule: &EgressRule) -> Evaluation {
         .any(|family| matches!(family.state, State::Unknown | State::Warning))
         || checks.iter().any(|check| {
             check.result == CheckResult::Warn
-                || (check.result == CheckResult::Unknown
-                    && check.id != CheckId::LoginApiMatch
-                    && check
-                        .facts
-                        .get("reason")
-                        .is_none_or(|reason| reason != "notCollected"))
+                || (check.result == CheckResult::Unknown && check.id != CheckId::LoginApiMatch)
         })
     {
         State::Warning
@@ -2264,7 +2633,7 @@ mod tests {
     }
 
     #[test]
-    fn live_trace_reports_uncollected_signals_without_changing_host_health() {
+    fn live_local_signals_produce_four_checks() {
         let (api, login) = Family::Anthropic.hosts();
         let exit = Exit {
             ip: "203.0.113.7".into(),
@@ -2278,19 +2647,189 @@ mod tests {
                 HostSample::success(login, exit),
             ),
         )]));
-        sample.live_trace_only = true;
+        sample.system_proxy_enabled = true;
+        sample.browser_login = Some(HostSample::success(
+            login,
+            Exit {
+                ip: "203.0.113.8".into(),
+                country: "US".into(),
+            },
+        ));
+        sample.agent_time_zone_mainland = true;
+        sample.ipv6_bypass = true;
         let evaluation = evaluate_egress(&sample, &EgressRule::default());
-        assert_eq!(evaluation.state, State::Ok);
+        assert_eq!(evaluation.state, State::Warning);
         let checks: Vec<_> = evaluation
             .checks
             .iter()
             .filter(|check| check.family.is_none())
+            .map(|check| (check.id, check.result))
             .collect();
-        assert_eq!(checks.len(), 4);
-        for check in checks {
-            assert_eq!(check.result, CheckResult::Unknown, "{check:?}");
-            assert_eq!(check.facts["reason"], "notCollected");
+        assert_eq!(
+            checks,
+            [
+                (CheckId::AgentProxyPath, CheckResult::Warn),
+                (CheckId::BrowserPath, CheckResult::Warn),
+                (CheckId::TimeZone, CheckResult::Warn),
+                (CheckId::Ipv6, CheckResult::Warn),
+            ]
+        );
+        sample.tun_detected = true;
+        let evaluation = evaluate_egress(&sample, &EgressRule::default());
+        assert!(evaluation.checks.iter().any(|check| {
+            check.id == CheckId::AgentProxyPath && check.result == CheckResult::Pass
+        }));
+    }
+
+    #[test]
+    fn mac_system_proxy_prefers_https_then_http_then_socks_and_formats_ipv6() {
+        let https = "HTTPSEnable : 1\n HTTPSProxy : 2001:db8::5\n HTTPSPort : 8443";
+        let http = "HTTPEnable : 1\n HTTPProxy : workstation\n HTTPPort : 8080";
+        let socks = "SOCKSEnable : 1\n SOCKSProxy : [::1]\n SOCKSPort : 1080";
+        assert_eq!(
+            parse_scutil_proxy(&format!("{https}\n{http}\n{socks}")).as_deref(),
+            Some("http://[2001:db8::5]:8443/")
+        );
+        assert_eq!(
+            parse_scutil_proxy(&format!("{http}\n{socks}")).as_deref(),
+            Some("http://workstation:8080/")
+        );
+        assert_eq!(
+            parse_scutil_proxy(&format!("HTTPSEnable : 1\n{socks}")).as_deref(),
+            Some("socks5://[::1]:1080")
+        );
+        assert_eq!(
+            parse_scutil_proxy("HTTPEnable : 0\n HTTPProxy : workstation"),
+            None
+        );
+    }
+
+    #[test]
+    fn windows_system_proxy_supports_shared_and_protocol_specific_addresses() {
+        let registry = |enabled, server| {
+            format!(
+                "    ProxyEnable    REG_DWORD    {enabled}\r\n    ProxyServer    REG_SZ    {server}\r\n"
+            )
+        };
+        assert_eq!(
+            parse_windows_proxy(&registry("0x1", "[::1]:3128")).as_deref(),
+            Some("http://[::1]:3128/")
+        );
+        assert_eq!(
+            parse_windows_proxy(&registry(
+                "0x1",
+                "http=other:80;https=secure:8080;socks=local:1080"
+            ))
+            .as_deref(),
+            Some("http://secure:8080/")
+        );
+        assert_eq!(
+            parse_windows_proxy(&registry("0x1", "socks=[::1]:1080")).as_deref(),
+            Some("socks5://[::1]:1080")
+        );
+        assert_eq!(parse_windows_proxy(&registry("0x0", "disabled:80")), None);
+    }
+
+    #[test]
+    fn local_addresses_only_flag_tun_cidr_and_global_unicast() {
+        let signals =
+            |values: &[&str]| interface_signals(values.iter().map(|value| value.parse().unwrap()));
+        assert_eq!(
+            signals(&[
+                "127.0.0.1",
+                "198.17.255.255",
+                "198.20.0.0",
+                "::",
+                "::1",
+                "::ffff:c000:201",
+                "fe80::1",
+                "febf::",
+                "fc00::1",
+                "fd00::1",
+                "ff02::1",
+                "4000::1"
+            ]),
+            (false, false)
+        );
+        assert_eq!(signals(&["198.18.0.0"]), (true, false));
+        assert_eq!(signals(&["198.19.255.255", "2000::1"]), (true, true));
+        assert_eq!(signals(&["3fff::1"]), (false, true));
+    }
+
+    #[test]
+    fn mainland_warning_uses_effective_claude_time_zone() {
+        let system = TimeZonePreference("system".into());
+        for mainland in [
+            "Asia/Shanghai",
+            "Asia/Chongqing",
+            "Asia/Chungking",
+            "Asia/Harbin",
+            "Asia/Urumqi",
+            "Asia/Kashgar",
+            "PRC",
+            "Asia/Hong_Kong",
+            "Hongkong",
+            "Asia/Macau",
+            "Asia/Macao",
+        ] {
+            assert!(system.mainland_warning(mainland), "{mainland}");
+            assert!(
+                !TimeZonePreference::default().mainland_warning(mainland),
+                "{mainland}"
+            );
         }
+        for safe in ["Asia/Taipei", "Asia/Singapore", "UTC"] {
+            assert!(!system.mainland_warning(safe), "{safe}");
+        }
+        assert!(TimeZonePreference("Asia/Shanghai".into()).mainland_warning("UTC"));
+        assert!(!TimeZonePreference("UTC".into()).mainland_warning("Asia/Shanghai"));
+    }
+
+    #[test]
+    fn browser_trace_uses_the_system_proxy_on_loopback() -> anyhow::Result<()> {
+        use std::{
+            io::{BufRead, BufReader, Write},
+            net::{Ipv4Addr, TcpListener},
+        };
+
+        let proxy = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+        proxy.set_nonblocking(true)?;
+        let proxy_url = format!("http://{}", proxy.local_addr()?);
+        // The target is a different loopback address, so a direct request cannot
+        // reach the proxy listener. No external connections are needed.
+        let target = Url::parse("http://127.0.0.1:1/cdn-cgi/trace")?;
+        thread::scope(|scope| -> anyhow::Result<()> {
+            let browser = scope.spawn(|| sample_browser_path(&target, |_| Some(proxy_url)));
+            let deadline = Instant::now() + LOCAL_PROBE_TIMEOUT;
+            let mut connection = loop {
+                match proxy.accept() {
+                    Ok((connection, _)) => break connection,
+                    Err(error)
+                        if error.kind() == io::ErrorKind::WouldBlock
+                            && Instant::now() < deadline =>
+                    {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            };
+            connection.set_read_timeout(Some(LOCAL_PROBE_TIMEOUT))?;
+            let mut line = String::new();
+            BufReader::new(&connection).read_line(&mut line)?;
+            assert_eq!(line.split_whitespace().nth(1), Some(target.as_str()));
+            let body = "ip=203.0.113.8\nloc=US\n";
+            write!(
+                connection,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )?;
+            let (enabled, login) = browser.join().unwrap();
+            assert!(enabled);
+            let login = login.unwrap();
+            assert_eq!(login.host, "claude.ai");
+            assert_eq!(login.ip.as_deref(), Some("203.0.113.8"));
+            Ok(())
+        })
     }
 
     #[test]

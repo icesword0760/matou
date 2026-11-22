@@ -495,12 +495,7 @@ impl ProviderHookServer {
         })
     }
 
-    pub fn register(
-        &self,
-        data_root: &Path,
-        scope: Scope,
-        command_session_start: bool,
-    ) -> Result<Registration> {
+    pub fn register(&self, data_root: &Path, scope: Scope) -> Result<Registration> {
         let token = new_token();
         let url = format!("http://127.0.0.1:{}/hooks/{token}", self.port);
         let directory = data_root.join("provider-hooks");
@@ -536,7 +531,7 @@ impl ProviderHookServer {
             )?;
             fs::rename(&files.temporary, &files.settings)?;
         } else if !matches!(scope.profile, LaunchProfile::Dsh | LaunchProfile::Codex) {
-            let settings = settings(&url, &files.script, command_session_start)?;
+            let settings = settings(&url, &files.script)?;
             write_private(
                 &files.temporary,
                 &serde_json::to_vec_pretty(&settings)?,
@@ -774,7 +769,7 @@ pub(crate) fn claude_config_counts(cwd: &Path, config: &Path) -> Value {
     })
 }
 
-fn settings(url: &str, script: &Path, command_session_start: bool) -> Result<Value> {
+fn settings(url: &str, script: &Path) -> Result<Value> {
     let command = callback_command(&format!("{url}?kind=statusline"), script)?;
     let mut hooks: Map<String, Value> = EVENTS
         .into_iter()
@@ -785,23 +780,20 @@ fn settings(url: &str, script: &Path, command_session_start: bool) -> Result<Val
             )
         })
         .collect();
-    if command_session_start {
-        // Some CLI versions skip HTTP SessionStart hooks on restore. Report
-        // the startup to the same run-scoped listener without a user prompt.
-        let command = if cfg!(windows) {
-            windows_callback_command(url)
-        } else {
-            format!(
-                "/usr/bin/curl --silent --noproxy '*' --max-time 2 --output /dev/null --header 'content-type: application/json' --data-binary @- '{url}'"
-            )
-        };
-        hooks.insert(
-            "SessionStart".into(),
-            json!([{
-                "hooks": [{"type": "command", "command": command, "timeout": 5}]
-            }]),
-        );
-    }
+    // Claude Code dispatches SessionStart to command hooks only.
+    let session_start = if cfg!(windows) {
+        windows_callback_command(url)
+    } else {
+        format!(
+            "/usr/bin/curl --disable --silent --noproxy '*' --max-time 2 --output /dev/null --header 'content-type: application/json' --data-binary @- '{url}'"
+        )
+    };
+    hooks.insert(
+        "SessionStart".into(),
+        json!([{
+            "hooks": [{"type": "command", "command": session_start, "timeout": 5}]
+        }]),
+    );
     Ok(json!({
         "hooks": hooks,
         "statusLine": { "type": "command", "command": command, "padding": 0 },
@@ -1159,7 +1151,7 @@ mod tests {
             stop: Arc::new(AtomicBool::new(false)),
             listener: None,
         };
-        let registration = server.register(root.path(), scope("drained-run"), false)?;
+        let registration = server.register(root.path(), scope("drained-run"))?;
         let mut socket = TcpStream::connect((Ipv4Addr::LOCALHOST, server.port))?;
         socket.set_nodelay(true)?;
         socket.set_read_timeout(Some(Duration::from_secs(2)))?;
@@ -1238,7 +1230,7 @@ mod tests {
     fn files_and_ingress_match_contract() -> Result<()> {
         let root = tempfile::tempdir()?;
         let server = ProviderHookServer::start()?;
-        let run = server.register(root.path(), scope("current"), false)?;
+        let run = server.register(root.path(), scope("current"))?;
         let config: Value = serde_json::from_reader(File::open(&run.settings_path)?)?;
         let script = run
             .settings_path
@@ -1253,7 +1245,6 @@ mod tests {
         assert!(b"AEIMQUYcgkosw048".contains(&run.token.as_bytes()[42]));
         assert_eq!(config["hooks"].as_object().unwrap().len(), 9);
         for (event, timeout) in [
-            ("SessionStart", 5),
             ("SessionEnd", 3),
             ("UserPromptSubmit", 5),
             ("PreToolUse", 10),
@@ -1268,6 +1259,16 @@ mod tests {
                 json!([{"hooks": [{"type": "http", "url": url, "timeout": timeout}]}])
             );
         }
+        let session_start = &config["hooks"]["SessionStart"][0]["hooks"][0];
+        assert_eq!(session_start["type"], "command");
+        assert_eq!(session_start["timeout"], 5);
+        let callback = session_start["command"].as_str().unwrap();
+        assert!(callback.contains(&url));
+        assert!(callback.contains(if cfg!(windows) {
+            r#"--noproxy "*""#
+        } else {
+            "--noproxy '*'"
+        }));
         #[cfg(not(windows))]
         {
             assert_eq!(
@@ -1534,10 +1535,10 @@ mod tests {
     fn retired_token_loses_authority_before_the_files_expire() -> Result<()> {
         let root = tempfile::tempdir()?;
         let server = ProviderHookServer::start()?;
-        let first = server.register(root.path(), scope("first"), false)?;
+        let first = server.register(root.path(), scope("first"))?;
         let old = first.token.clone();
         let old_file = first.settings_path.clone();
-        let second = server.register(root.path(), scope("second"), false)?;
+        let second = server.register(root.path(), scope("second"))?;
         assert_ne!(old, second.token);
         drop(first);
         let body = br#"{"hook_event_name":"UserPromptSubmit","sessionId":"external"}"#;

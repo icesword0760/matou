@@ -2902,14 +2902,7 @@ impl ShellOwner {
                 options.launch.argv.split_off(end - 2)
             });
             let mut registration = self
-                .register_hook(
-                    &mut options,
-                    &run_id,
-                    permission_starting
-                        || (profile == LaunchProfile::ClaudeCode && expected_id.is_some()),
-                    expected_id,
-                    fork_source_id,
-                )
+                .register_hook(&mut options, &run_id, expected_id, fork_source_id)
                 .context(HookSetup)?;
             if let Some(argv) = fork_argv {
                 options.launch.argv.extend(argv);
@@ -3226,7 +3219,6 @@ impl ShellOwner {
         &mut self,
         options: &mut SessionOptions,
         run_id: &str,
-        command_session_start: bool,
         expected_id: Option<String>,
         fork_source_id: Option<String>,
     ) -> Result<Registration> {
@@ -3243,7 +3235,6 @@ impl ShellOwner {
                 expected_id,
                 fork_source_id,
             },
-            command_session_start,
         )?;
         if options.launch.profile == LaunchProfile::Codex {
             registration.attach_codex(&mut options.launch)?;

@@ -271,6 +271,10 @@ fn codex_events_shell_promotion_late_identity_approval_and_normal_stop() -> Resu
     assert_eq!(identity["providerSessionId"], UUID);
     assert_eq!(identity["runId"], run.id);
     assert_eq!(
+        node(&graph, &child.session).unwrap()["historyProviderSessionId"],
+        UUID
+    );
+    assert_eq!(
         node(&graph, &child.session).unwrap()["model"],
         "fixture-observed-model"
     );
