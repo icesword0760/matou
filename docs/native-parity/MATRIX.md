@@ -25,6 +25,14 @@ Group inventory below is not an acceptance result. Concrete observed scenarios f
 | A17 | 安装/更新/活跃会话保护 | AppUpdateControl; app-update-manager; update-feed | app-updates; packaged-runtime |
 
 
+## Current acceptance deltas — 2026-11-22
+
+| Scenario | Reference behavior | Latest observed native result | Still open |
+| --- | --- | --- | --- |
+| A06/A09: restore a Claude child after restarting | Failed auto-restore cards show the recovery action strip, not a live terminal (`TerminalPane.tsx:425–451,481–484`). Successful restore must continue the exact bound conversation. | Beta `22840512` (Image #43) showed three child restore failures with the raw CLI error painted under the strip. `ba06bbf3` now hides the terminal, its input and focus while failed, keeps the header history entry, and reuses the terminal after recovery; `session_levels_probe --provider-restore` fails before and passes after, including 260/274 pt narrow layouts. Isolated real-CLI reproduction: Claude Code 2.1.330 never persists a forked child transcript unless the child completes a turn, so those three cards have no restorable conversation; Matou had marked the fork succeeded on `SessionStart` alone. | Wrapped-UUID failure detection at narrow widths (`provider resume exited with code 1`), paired visible Electron/native window check, and a product decision on whether to rebuild such empty forks from the parent. No repair of user sessions. |
+| A10: compaction custom mode, no provider selected | Compare full three fields + disabled save and localized effort in a matched Electron window. | macOS v9 `03c-mac-sub-compaction-custom-full.png`: 1200×780 window reaches bottom with all controls, still showing old `follow`. Windows 11 ARM64 v10 (`22840512`), `/tmp/matou-win-vm-v10/shots/01-win-compaction-effort-zh.png`: after selecting custom mode and scrolling, all three fields show localized labels, including `跟随会话`, and Save is disabled. | Changed label not yet point-verified in the final macOS or Windows x64 build; matched Electron comparison and wheel pacing/earlier event failure cause remain open. |
+| A17: scoped macOS beta replacement | Only the authorized beta can be replaced; no changes to installed production. | Prior beta quit normally; old ZIP at `/tmp/matou-beta-backup-20261122-194126.zip`. New beta passed strict verification and relaunched on its own data root. | This is not production installation, TCC continuity, or full parity acceptance. |
+
 ## Observed reference scenarios — 2026-11-15
 
 Evidence base: artifacts/native-parity/reference/evidence/. Native results for the first Shell slice are recorded below; other groups remain pending. Source baseline and path-only harness documented in STATUS.md. Screenshots are actual frozen product, not mockups.
