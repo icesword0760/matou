@@ -127,12 +127,17 @@ fn qualify_command(phase: &ConnectionPhase, command: &Command) -> Result<(), Sen
     }
     Ok(())
 }
+#[cfg(all(test, target_os = "macos"))]
+type BeforeShutdown = Box<dyn FnOnce(&std::process::ChildStdin) -> Result<()> + Send>;
+
 #[cfg(test)]
 #[derive(Default)]
 struct TestHooks {
     spawn_error_once: Mutex<Option<std::io::ErrorKind>>,
     before_hello: Mutex<Option<(Sender<()>, std::sync::mpsc::Receiver<()>)>>,
     before_business: Mutex<Option<(Sender<()>, std::sync::mpsc::Receiver<()>)>>,
+    #[cfg(target_os = "macos")]
+    before_shutdown: Mutex<Option<BeforeShutdown>>,
     after_hello: Mutex<Option<(Sender<()>, std::sync::mpsc::Receiver<()>)>>,
     transitions: Mutex<Vec<(u64, ConnectionPhase, std::time::Instant)>>,
 }
@@ -567,6 +572,14 @@ fn run_child(
                     while let Ok(message) = incoming.recv() {
                         match message {
                             Outgoing::Stop => {
+                                #[cfg(all(test, target_os = "macos"))]
+                                {
+                                    let hook =
+                                        writer_shared.hooks.before_shutdown.lock().unwrap().take();
+                                    if let Some(hook) = hook {
+                                        hook(&stdin)?;
+                                    }
+                                }
                                 // Lifecycle is independent of Ready and never becomes a business command.
                                 write_message(
                                     &mut stdin,
@@ -1397,60 +1410,98 @@ mod supervisor_tests {
         Ok(())
     }
 
+    fn wait_for_stdin_hangup(stdin: &std::process::ChildStdin, deadline: Instant) -> Result<()> {
+        use std::{
+            ffi::{c_int, c_short, c_uint},
+            io,
+            os::fd::AsRawFd,
+        };
+
+        // Darwin's <sys/poll.h>. This test only builds on macOS.
+        const POLLHUP: c_short = 0x0010;
+        #[repr(C)]
+        struct PollFd {
+            fd: c_int,
+            events: c_short,
+            revents: c_short,
+        }
+        unsafe extern "C" {
+            fn poll(fds: *mut PollFd, count: c_uint, timeout: c_int) -> c_int;
+        }
+
+        let mut fd = PollFd {
+            fd: stdin.as_raw_fd(),
+            events: POLLHUP,
+            revents: 0,
+        };
+        loop {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .context("runtime stdin hangup deadline")?;
+            let timeout = c_int::try_from(remaining.as_millis().max(1))?;
+            // SAFETY: stdin keeps the descriptor open and fd is one valid pollfd.
+            match unsafe { poll(&mut fd, 1, timeout) } {
+                1 => {
+                    ensure!(
+                        fd.revents & POLLHUP != 0,
+                        "unexpected runtime stdin poll events: {:#x}",
+                        fd.revents
+                    );
+                    return Ok(());
+                }
+                0 => bail!("runtime stdin hangup deadline"),
+                _ => {
+                    let error = io::Error::last_os_error();
+                    if error.kind() != io::ErrorKind::Interrupted {
+                        return Err(error).context("wait for runtime stdin hangup");
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn active_shutdown_returns_actual_child_and_transport_failure() -> Result<()> {
         let (root, mut bridge) = setup()?;
-        let (generation, _) = ready(&bridge)?;
+        ready(&bridge)?;
         let pid = bridge.runtime_pid();
-        let (paused, resume) = install(&bridge.commands.shared.hooks.before_business);
-        bridge.commands.send_at(generation, Command::Refresh)?;
-        paused.recv_timeout(LIMIT)?;
         let commands = bridge.commands.clone();
-        let shutdown = thread::spawn(move || bridge.shutdown());
-        let state = commands.shared.state.lock().unwrap();
-        let (state, _) = commands
-            .shared
-            .changed
-            .wait_timeout_while(state, LIMIT, |state| !state.stopping)
-            .unwrap();
-        let stopping = state.stopping;
-        drop(state);
+        let began = Instant::now();
+        let deadline = began + LIMIT;
+        let (writer_reached, before_shutdown) = mpsc::channel();
+        *commands.shared.hooks.before_shutdown.lock().unwrap() = Some(Box::new(move |stdin| {
+            writer_reached.send(())?;
+            // Stdout EOF and child exit do not prove stdin has lost its last
+            // reader. Wait for the write endpoint itself to report hangup.
+            wait_for_stdin_hangup(stdin, deadline)
+        }));
+        let (finished, shutdown) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = finished.send(bridge.shutdown());
+        });
+        before_shutdown
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .context("writer did not reach the Shutdown write")?;
+        ensure!(
+            commands.shared.state.lock().unwrap().stopping,
+            "active shutdown did not close command admission"
+        );
         kill_pid_owned(pid, &root)?;
-        let deadline = Instant::now() + LIMIT;
-        loop {
-            let status = ProcessCommand::new("ps")
-                .args(["-p", &pid.to_string(), "-o", "stat="])
-                .output()?;
-            // Reader EOF can arrive before the child closes its stdin. The
-            // supervisor cannot reap it until this test releases the writer.
-            if status.status.success()
-                && String::from_utf8_lossy(&status.stdout)
-                    .trim_start()
-                    .starts_with('Z')
-                && commands.connection().1 != ConnectionPhase::Ready
-            {
-                break;
-            }
-            ensure!(
-                Instant::now() < deadline,
-                "killed runtime {pid} did not exit and retire before resuming the writer"
-            );
-            thread::sleep(Duration::from_millis(2));
-        }
-        resume.send(())?;
         let result = shutdown
-            .join()
-            .map_err(|_| anyhow!("shutdown test thread panicked"))?;
-        ensure!(stopping);
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .context("active shutdown did not return")?;
         let error = result.expect_err("active shutdown swallowed real child failure");
         let message = format!("{error:#}");
         ensure!(
             message.contains("reader:")
-                && message.contains("writer:")
+                && message.contains("writer: write native runtime shutdown:")
                 && message.contains("child exit:"),
             "lost error sources: {message}"
         );
-        println!("active shutdown error preserved: {message}");
+        println!(
+            "active shutdown error preserved in {:?}: {message}",
+            began.elapsed()
+        );
         fs::remove_dir_all(root)?;
         Ok(())
     }
