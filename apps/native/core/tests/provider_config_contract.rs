@@ -387,6 +387,57 @@ fn endpoint_sentinel_and_key_rules_keep_failures_off_disk() -> Result<()> {
 }
 
 #[test]
+fn fable_mappings_round_trip_and_clear_for_api_and_subscription() -> Result<()> {
+    let temp = temp();
+    let root = root(&temp);
+    let config = store(&root);
+    let mut api = api();
+    api["apiKey"] = json!(KEY);
+    api["modelMapping"] = json!({"opus": "old-opus", "sonnet": "old-sonnet", "haiku": "old-haiku"});
+    let legacy_api = config.upsert(&api)?;
+    let mut subscription_input = subscription("codex");
+    subscription_input["subscription"]["modelMetadata"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"id": "fable-special", "supportedEfforts": ["low"]}));
+    let legacy_subscription = config.adopt_subscription(&subscription_input)?;
+    assert!(legacy_api["modelMapping"].get("fable").is_none());
+    assert!(legacy_subscription["modelMapping"].get("fable").is_none());
+
+    api["id"] = legacy_api["id"].clone();
+    api["modelMapping"]["fable"] = json!(" fable-special ");
+    api["effortMapping"] = json!({"fable": "xhigh"});
+    let mut edit = json!({
+        "id": legacy_subscription["id"], "cli": CLAUDE, "kind": "subscription",
+        "name": "Existing subscription", "modelMapping": legacy_subscription["modelMapping"],
+        "effortMapping": {"fable": "high"}
+    });
+    edit["modelMapping"]["fable"] = json!("fable-special");
+    assert!(config.upsert(&edit).is_err());
+    edit["effortMapping"]["fable"] = json!("low");
+    for (input, effort) in [(&mut api, "xhigh"), (&mut edit, "low")] {
+        let saved = config.upsert(input)?;
+        let disk = state(&root);
+        let stored = disk["providers"][CLAUDE]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == saved["id"])
+            .unwrap();
+        for row in [&saved, stored] {
+            assert_eq!(row["modelMapping"]["fable"], "fable-special");
+            assert_eq!(row["effortMapping"]["fable"], effort);
+        }
+        input["modelMapping"]["fable"] = json!("");
+        input["effortMapping"] = json!({});
+        let cleared = config.upsert(input)?;
+        assert!(cleared["modelMapping"].get("fable").is_none());
+        assert!(cleared["effortMapping"].get("fable").is_none());
+    }
+    Ok(())
+}
+
+#[test]
 fn model_directory_and_role_settings_follow_whitelists_and_replacement_rules() -> Result<()> {
     let temp = temp();
     let root = root(&temp);

@@ -2,11 +2,16 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    ffi::OsStr,
     io,
     sync::LazyLock,
 };
 
-use matou_native_core::{journal::MAX_SAFE_INTEGER, provider_launch::EFFORTS};
+use matou_native_core::{
+    claude_role_budget::{CLAUDE_ROLE_LABELS, CLAUDE_ROLES},
+    journal::MAX_SAFE_INTEGER,
+    provider_launch::{EFFORTS, is_claude_model_environment, role_model_env_key},
+};
 use regex::Regex;
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -44,35 +49,30 @@ pub fn subscription_supported(is_macos: bool, macos_major: Option<u32>) -> bool 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModelRole {
     Opus,
+    Fable,
     Sonnet,
     Haiku,
 }
 
-const ROLES: [ModelRole; 3] = [ModelRole::Opus, ModelRole::Sonnet, ModelRole::Haiku];
+const ROLES: [ModelRole; CLAUDE_ROLES.len()] = [
+    ModelRole::Opus,
+    ModelRole::Fable,
+    ModelRole::Sonnet,
+    ModelRole::Haiku,
+];
 const FABLE_FALLBACK_ALIAS: &str = "matou-opus-fallback";
 
 impl ModelRole {
     fn name(self) -> &'static str {
-        match self {
-            Self::Opus => "opus",
-            Self::Sonnet => "sonnet",
-            Self::Haiku => "haiku",
-        }
+        CLAUDE_ROLES[self as usize]
     }
 
     fn label(self) -> &'static str {
-        match self {
-            Self::Opus => "Opus",
-            Self::Sonnet => "Sonnet",
-            Self::Haiku => "Haiku",
-        }
+        CLAUDE_ROLE_LABELS[self as usize]
     }
 
     fn env_key(self) -> String {
-        format!(
-            "ANTHROPIC_DEFAULT_{}_MODEL",
-            self.name().to_ascii_uppercase()
-        )
+        role_model_env_key(self.name())
     }
 }
 
@@ -97,6 +97,7 @@ pub struct CatalogModel {
 #[derive(Default)]
 pub struct RoleModels<'a> {
     pub opus: Option<&'a CatalogModel>,
+    pub fable: Option<&'a CatalogModel>,
     pub sonnet: Option<&'a CatalogModel>,
     pub haiku: Option<&'a CatalogModel>,
     pub default: Option<&'a CatalogModel>,
@@ -107,6 +108,12 @@ impl<'a> RoleModels<'a> {
     fn resolve(&self, role: ModelRole) -> Option<&'a CatalogModel> {
         let (preferred, fallback, last) = match role {
             ModelRole::Opus => (self.opus, self.default, self.small_fast),
+            ModelRole::Fable => (
+                self.fable
+                    .filter(|model| !model.id.trim_matches(js_whitespace).is_empty()),
+                self.resolve(ModelRole::Opus),
+                None,
+            ),
             ModelRole::Sonnet => (self.sonnet, self.default, self.small_fast),
             ModelRole::Haiku => (self.haiku, self.small_fast, self.default),
         };
@@ -162,15 +169,18 @@ pub fn build_launch(input: LaunchInput<'_>) -> Result<LaunchPlan, LaunchError> {
         return Err(LaunchError::InvalidInput);
     }
     let resolved = ROLES.map(|role| input.models.resolve(role));
-    let [Some(opus), Some(sonnet), Some(haiku)] = resolved else {
+    if resolved.iter().any(Option::is_none) {
         let missing = ROLES
             .into_iter()
             .zip(resolved)
-            .filter_map(|(role, model)| model.is_none().then_some(role))
+            .filter_map(|(role, model)| {
+                (model.is_none() && (role != ModelRole::Fable || input.models.fable.is_some()))
+                    .then_some(role)
+            })
             .collect();
         return Err(LaunchError::MissingRoleModels(missing));
-    };
-    let models = [opus, sonnet, haiku];
+    }
+    let models = resolved.map(Option::unwrap);
     let windows = models.map(|model| {
         input
             .context_window
@@ -226,26 +236,25 @@ pub fn build_launch(input: LaunchInput<'_>) -> Result<LaunchPlan, LaunchError> {
             });
         }
     }
-    for suffix in ["", "_NAME", "_DESCRIPTION"] {
-        env.insert(
-            format!("ANTHROPIC_DEFAULT_FABLE_MODEL{suffix}"),
-            env[&format!("ANTHROPIC_DEFAULT_OPUS_MODEL{suffix}")].clone(),
-        );
-    }
+    // Old sessions may still reference the previously generated fallback alias.
     aliases.push(ModelAlias {
-        name: strip_context_marker(&models[0].id).into(),
+        name: strip_context_marker(&models[ModelRole::Opus as usize].id).into(),
         alias: FABLE_FALLBACK_ALIAS.into(),
         fork: true,
     });
-    let hidden_fable = format!("{prefix}/{FABLE_FALLBACK_ALIAS}");
+    let fable = &env[&ModelRole::Fable.env_key()];
     let mut settings = json!({
         "env": { "ANTHROPIC_API_KEY": "", "CLAUDE_CODE_OAUTH_TOKEN": "" },
         "modelPicker": { "replaceBuiltInOptions": true, "options": picker },
-        "modelOverrides": { "claude-fable-5": hidden_fable, "claude-fable-5-2": hidden_fable },
+        "modelOverrides": {
+            "claude-fable-5": fable,
+            "claude-fable-5-2": fable,
+            "claude-fable-5-5": fable,
+        },
     });
     let mut unknown = Vec::new();
-    if let [Some(opus), Some(sonnet), Some(haiku)] = windows {
-        let window = opus.min(sonnet).min(haiku).min(1_000_000);
+    if let [Some(opus), Some(fable), Some(sonnet), Some(haiku)] = windows {
+        let window = opus.min(fable).min(sonnet).min(haiku).min(1_000_000);
         settings["autoCompactWindow"] = json!(window);
         env.insert("CLAUDE_CODE_MAX_CONTEXT_TOKENS".into(), window.to_string());
         if window < 1_000_000 {
@@ -369,22 +378,18 @@ fn inherited_env_to_clear(names: &[&str]) -> BTreeSet<String> {
         "CLAUDE_CODE_AUTO_MODE_SERVER",
     ];
     let mut clear: BTreeSet<_> = fixed.into_iter().map(str::to_owned).collect();
-    for role in ["OPUS", "SONNET", "HAIKU", "FABLE"] {
+    clear.insert("CLAUDE_CODE_GATEWAY_HINT_HEADERS".into());
+    for role in ROLES {
+        let key = role.env_key();
         for suffix in ["", "_NAME", "_DESCRIPTION"] {
-            clear.insert(format!("ANTHROPIC_DEFAULT_{role}_MODEL{suffix}"));
+            clear.insert(format!("{key}{suffix}"));
         }
     }
     clear.extend(
         names
             .iter()
             .copied()
-            .filter(|name| {
-                name.starts_with("ANTHROPIC_DEFAULT_")
-                    || name
-                        .strip_prefix("CLAUDE_CODE_")
-                        .and_then(|suffix| suffix.split_once("SUBAGENT"))
-                        .is_some_and(|(_, suffix)| suffix.contains("MODEL"))
-            })
+            .filter(|name| is_claude_model_environment(OsStr::new(name)))
             .map(str::to_owned),
     );
     clear
@@ -796,14 +801,22 @@ mod tests {
         assert!(!plan.clear_env.contains("PATH"));
         assert!(!plan.clear_env.contains("CLAUDE_CODE_MODEL_SUBAGENT"));
         assert!(!plan.env.contains_key("CLAUDE_CODE_SUBAGENT_MODEL"));
-        assert_eq!(plan.env["ANTHROPIC_DEFAULT_FABLE_MODEL"], plan.main_model);
+        assert_eq!(
+            plan.env["ANTHROPIC_DEFAULT_FABLE_MODEL"],
+            "matou-chatgpt/matou-fable"
+        );
+        assert_eq!(
+            plan.env["ANTHROPIC_DEFAULT_FABLE_MODEL_NAME"],
+            "Fixture Main"
+        );
         assert_eq!(plan.main_model, "matou-chatgpt/matou-opus");
         assert_eq!(plan.alias_provider(), "codex");
-        assert_eq!(plan.aliases[2].name, "fixture-fast");
-        assert_eq!(plan.aliases[3].name, "fixture-main");
+        assert_eq!(plan.aliases[1].name, "fixture-main");
+        assert_eq!(plan.aliases[1].alias, "matou-fable");
+        assert_eq!(plan.aliases[3].name, "fixture-fast");
         assert_eq!(
             plan.settings["modelOverrides"]["claude-fable-5"],
-            "matou-chatgpt/matou-opus-fallback"
+            "matou-chatgpt/matou-fable"
         );
         assert_eq!(
             plan.settings["modelPicker"]["options"][0]["label"],
@@ -817,6 +830,40 @@ mod tests {
         assert_eq!(plan.env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"], "128000");
         assert_eq!(plan.env["CLAUDE_CODE_DISABLE_1M_CONTEXT"], "1");
         assert!(plan.unknown.is_empty());
+    }
+
+    #[test]
+    fn fable_uses_its_own_subscription_alias_name_and_window() {
+        let opus = model("fixture-opus", 512_000);
+        let fable = model("fixture-fable", 200_000);
+        for provider in [ChatGpt, Antigravity] {
+            let mut launch = input(&opus);
+            launch.provider = provider;
+            launch.models.fable = Some(&fable);
+            launch.main_role = ModelRole::Fable;
+            let plan = build_launch(launch).unwrap();
+            assert_eq!(
+                plan.main_model,
+                format!("{}/matou-fable", provider.prefix())
+            );
+            assert_eq!(
+                plan.env["ANTHROPIC_DEFAULT_FABLE_MODEL_NAME"],
+                "fixture-fable"
+            );
+            assert_eq!(
+                plan.settings["modelPicker"]["options"][1]["label"],
+                "Fable · fixture-fable"
+            );
+            assert_eq!(plan.settings["autoCompactWindow"], 200_000);
+            for alias in ["claude-fable-5", "claude-fable-5-2", "claude-fable-5-5"] {
+                assert_eq!(plan.settings["modelOverrides"][alias], plan.main_model);
+            }
+            assert!(
+                plan.aliases
+                    .iter()
+                    .any(|item| item.alias == "matou-fable" && item.name == fable.id)
+            );
+        }
     }
 
     #[test]

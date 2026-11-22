@@ -189,7 +189,7 @@ pub fn provider_context_mode(provider: &Value) -> &str {
 /// providers resolve through their role mapping only; API providers also count
 /// the default model.
 pub fn provider_context_model_ids(provider: &Value) -> Vec<String> {
-    let mapped = ["opus", "sonnet", "haiku"]
+    let mapped = matou_native_core::claude_role_budget::CLAUDE_ROLES
         .into_iter()
         .filter_map(|role| provider["modelMapping"][role].as_str())
         .map(str::trim)
@@ -912,10 +912,10 @@ mod tests {
         let codex = json!({
             "kind": "subscription", "model": "CLI 默认",
             "subscription": {"provider": "codex"},
-            "modelMapping": {"opus": "a", "sonnet": "b", "haiku": "c"}
+            "modelMapping": {"opus": "a", "fable": "d", "sonnet": "b", "haiku": "c"}
         });
         assert_eq!(provider_context_mode(&codex), "512k");
-        assert_eq!(provider_context_model_ids(&codex), ["a", "b", "c"]);
+        assert_eq!(provider_context_model_ids(&codex), ["a", "d", "b", "c"]);
         let antigravity = json!({
             "kind": "subscription", "subscription": {"provider": "antigravity"},
             "modelMapping": {"opus": "a"}

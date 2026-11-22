@@ -5214,7 +5214,7 @@ fn assigned_claude_gateway_changes_target_without_restarting_the_cli() -> Result
 set -eu
 test "$ANTHROPIC_API_KEY" = matou-local-role-gateway || { echo 'gateway API placeholder missing'; exit 10; }
 test -z "${ANTHROPIC_AUTH_TOKEN-}" && test -z "${CLAUDE_CODE_OAUTH_TOKEN-}" || { echo 'gateway CLI received an auth token'; exit 11; }
-test "$ANTHROPIC_DEFAULT_FABLE_MODEL" = "$ANTHROPIC_DEFAULT_OPUS_MODEL"
+test "$ANTHROPIC_DEFAULT_FABLE_MODEL" = matou-role/fable
 test "$3" = --model
 test "$4" = matou-role/opus
 printf '%s\n' "$ANTHROPIC_BASE_URL" > "$0.url"
@@ -5249,7 +5249,7 @@ done
     let model_picker = serde_json::to_string(&settings["modelPicker"])?;
     assert_eq!(
         model_picker,
-        r#"{"replaceBuiltInOptions":true,"options":[{"model":"opus","label":"Opus · shared-model","description":"a"},{"model":"sonnet","label":"Sonnet · shared-model","description":"b"},{"model":"haiku","label":"Haiku · source-haiku","description":"a"}]}"#
+        r#"{"replaceBuiltInOptions":true,"options":[{"model":"opus","label":"Opus · shared-model","description":"a"},{"model":"fable","label":"Fable · shared-model","description":"a"},{"model":"sonnet","label":"Sonnet · shared-model","description":"b"},{"model":"haiku","label":"Haiku · upstream-haiku","description":"a"}]}"#
     );
     println!("modelPicker from the live CLI settings file = {model_picker}");
     post_claude_identity(

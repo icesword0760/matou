@@ -24,6 +24,9 @@ use std::{
 };
 
 use gpui::{prelude::*, *};
+use matou_native_core::claude_role_budget::{
+    CLAUDE_ROLE_LABELS as ROLE_LABELS, CLAUDE_ROLES as ROLES,
+};
 use matou_native_core::dispatch_config::{
     DispatchConfig,
     form::{DispatchForm, LOAD_FAILED, RETRY_LABEL},
@@ -93,7 +96,6 @@ const WORKSPACE_SIDEBAR_WIDTH: f32 = 260.;
 const SETTINGS_ANIMATION_MS: u64 = 180;
 const DIALOG_ANIMATION_MS: u64 = 160;
 const CLI_DEFAULT_MODEL: &str = "CLI 默认";
-const ROLE_LABELS: [&str; 3] = ["Opus", "Sonnet", "Haiku"];
 
 /// Resolved colors for the frozen provider setup dialog and its status cards.
 ///
@@ -917,7 +919,7 @@ struct ProviderPreset {
     endpoint: &'static str,
     key_url: &'static str,
     model: &'static str,
-    mapping: [&'static str; 3],
+    mapping: [&'static str; ROLES.len()],
 }
 
 /// `PROVIDER_PRESETS['claude-code']` from the frozen contracts source.
@@ -928,7 +930,7 @@ const PRESETS: [ProviderPreset; 4] = [
         endpoint: "https://api.deepseek.com/anthropic",
         key_url: "https://platform.deepseek.com/api_keys",
         model: "deepseek-v4-pro",
-        mapping: ["deepseek-v4-pro", "deepseek-v4-pro", "deepseek-flash"],
+        mapping: ["deepseek-v4-pro", "", "deepseek-v4-pro", "deepseek-flash"],
     },
     ProviderPreset {
         id: "glm",
@@ -936,7 +938,7 @@ const PRESETS: [ProviderPreset; 4] = [
         endpoint: "https://open.bigmodel.cn/api/anthropic",
         key_url: "https://open.bigmodel.cn",
         model: "glm-5.3",
-        mapping: ["glm-5.3", "glm-5.3", "glm-5.3"],
+        mapping: ["glm-5.3", "", "glm-5.3", "glm-5.3"],
     },
     ProviderPreset {
         id: "kimi",
@@ -944,7 +946,7 @@ const PRESETS: [ProviderPreset; 4] = [
         endpoint: "https://api.moonshot.cn/anthropic",
         key_url: "https://platform.kimi.com/console/api-keys",
         model: "kimi-k2.7-code",
-        mapping: ["kimi-k2.7-code", "kimi-k2.7-code", "kimi-k2.7-code"],
+        mapping: ["kimi-k2.7-code", "", "kimi-k2.7-code", "kimi-k2.7-code"],
     },
     ProviderPreset {
         id: "minimax",
@@ -952,7 +954,7 @@ const PRESETS: [ProviderPreset; 4] = [
         endpoint: "https://api.minimax.cn/anthropic",
         key_url: "https://platform.minimax.cn/subscribe/token-plan",
         model: "MiniMax-M3[1M]",
-        mapping: ["MiniMax-M3[1M]", "MiniMax-M3[1M]", "MiniMax-M3[1M]"],
+        mapping: ["MiniMax-M3[1M]", "", "MiniMax-M3[1M]", "MiniMax-M3[1M]"],
     },
 ];
 
@@ -1098,7 +1100,7 @@ impl ProviderSelect {
     fn slot(self) -> usize {
         match self {
             Self::Mapping(index) => index,
-            Self::Effort(index) => index + 3,
+            Self::Effort(index) => index + ROLES.len(),
         }
     }
 }
@@ -1136,10 +1138,10 @@ struct EditorFocus {
     chooser: FocusHandle,
     model_search: FocusHandle,
     name: FocusHandle,
-    mappings: [FocusHandle; 3],
-    mapping_choices: [FocusHandle; 3],
-    manual_links: [FocusHandle; 3],
-    efforts: [FocusHandle; 3],
+    mappings: [FocusHandle; ROLES.len()],
+    mapping_choices: [FocusHandle; ROLES.len()],
+    manual_links: [FocusHandle; ROLES.len()],
+    efforts: [FocusHandle; ROLES.len()],
     context_modes: [FocusHandle; 3],
     delete: FocusHandle,
     save: FocusHandle,
@@ -1162,16 +1164,16 @@ struct Editor {
     endpoint: Entity<RenameInput>,
     model: Entity<RenameInput>,
     name: Entity<RenameInput>,
-    mappings: [Entity<RenameInput>; 3],
-    efforts: [String; 3],
-    manual_mappings: [bool; 3],
+    mappings: [Entity<RenameInput>; ROLES.len()],
+    efforts: [String; ROLES.len()],
+    manual_mappings: [bool; ROLES.len()],
     model_query: Entity<RenameInput>,
     model_chooser: bool,
     fetch_error: Option<String>,
     fetch_snapshot: Option<(String, String)>,
     revealed_key: bool,
     select_open: Option<(ProviderSelect, usize)>,
-    select_bounds: Rc<RefCell<[Option<Bounds<Pixels>>; 6]>>,
+    select_bounds: Rc<RefCell<[Option<Bounds<Pixels>>; ROLES.len() * 2]>>,
     select_scroll: ScrollHandle,
     model_scroll: ScrollHandle,
     model_cursor: usize,
@@ -1190,8 +1192,8 @@ struct FormValues {
     endpoint: String,
     model: String,
     key: String,
-    mappings: [String; 3],
-    efforts: [String; 3],
+    mappings: [String; ROLES.len()],
+    efforts: [String; ROLES.len()],
     reasoning_effort: String,
     context_mode: String,
 }
@@ -1438,14 +1440,14 @@ impl Editor {
             name,
             mappings,
             efforts,
-            manual_mappings: [false; 3],
+            manual_mappings: [false; ROLES.len()],
             model_query,
             model_chooser: false,
             fetch_error: None,
             fetch_snapshot: None,
             revealed_key: false,
             select_open: None,
-            select_bounds: Rc::new(RefCell::new([None; 6])),
+            select_bounds: Rc::new(RefCell::new([None; ROLES.len() * 2])),
             select_scroll: ScrollHandle::new(),
             model_scroll: ScrollHandle::new(),
             model_cursor: 0,
@@ -1585,7 +1587,7 @@ fn preset_draft(preset_id: Option<&'static str>) -> ProviderDraft {
         endpoint: preset.endpoint.into(),
         model: preset.model.into(),
         model_mapping: preset.mapping.map(str::to_owned),
-        effort_mapping: ["follow".into(), "follow".into(), "follow".into()],
+        effort_mapping: ROLES.map(|_| "follow".into()),
         ..Default::default()
     }
 }
@@ -4917,7 +4919,7 @@ impl SettingsShell {
                 }
                 order.push(editor.focus.name.clone());
                 if !work.is_codex() && (!subscription || !work.available_models().is_empty()) {
-                    for index in 0..3 {
+                    for index in 0..ROLES.len() {
                         if editor.manual_mappings[index] {
                             order.push(editor.focus.mappings[index].clone());
                             order.push(editor.focus.manual_links[index].clone());
@@ -5676,10 +5678,10 @@ impl SettingsShell {
             ));
         } else if !work.is_codex() {
             let mut roles = div().flex().flex_col().gap(px(10.)).mt(px(4.));
-            for index in 0..3 {
+            for index in 0..ROLES.len() {
                 let current = work.model_mapping[index].trim();
                 let known = models.iter().any(|row| row["id"] == current);
-                let model = if editor.manual_mappings[index] && !subscription {
+                let model = if editor.manual_mappings[index] {
                     let label = self.locale.text("从列表选择", "Choose from list");
                     div()
                         .flex()
@@ -5773,7 +5775,7 @@ impl SettingsShell {
                             .any(|row| row["id"] == id.trim() && row["supportedEfforts"].is_array())
                 })
                 .count();
-            if known_efforts < 3 {
+            if known_efforts < ROLES.len() {
                 let hint = if known_efforts > 0 && !subscription {
                     self.locale.text(
                         "已获取模型的推理强度来自接口返回范围；其余模型仍为候选，待服务确认。",
@@ -6711,46 +6713,52 @@ impl SettingsShell {
         }
     }
 
+    fn empty_mapping_label(&self, index: usize) -> &'static str {
+        if ROLES[index] == "fable" {
+            self.locale.text("沿用 Opus", "Follow Opus")
+        } else {
+            self.locale.text("沿用 CLI 默认", "Use CLI default")
+        }
+    }
+
     fn mapping_label(&self, work: &ProviderDraft, index: usize) -> (String, bool) {
         let id = work.model_mapping[index].trim();
-        let (label, enabled) = if id.is_empty() && work.subscription_kind.is_none() {
-            (
-                self.locale.text("沿用 CLI 默认", "Use CLI default").into(),
-                true,
-            )
-        } else if !work.ignore_model_efforts
-            && let Some(row) = work
-                .available_models()
-                .into_iter()
-                .find(|row| row["id"] == id)
-        {
-            (row["displayName"].as_str().unwrap_or(id).into(), true)
-        } else if work.subscription_kind.is_some() {
-            (
-                if id.is_empty() {
-                    "—".into()
-                } else {
-                    format!("{id} · {}", self.locale.text("不可用", "Unavailable"))
-                },
-                false,
-            )
-        } else if work.ignore_model_efforts || work.available_models().is_empty() {
-            (
-                format!(
-                    "{id} {}",
-                    self.locale.text("（尚未获取列表）", "(list not fetched)")
-                ),
-                true,
-            )
-        } else {
-            (
-                format!(
-                    "{id} {}",
-                    self.locale.text("（未在列表中）", "(not in list)")
-                ),
-                true,
-            )
-        };
+        let (label, enabled) =
+            if id.is_empty() && (ROLES[index] == "fable" || work.subscription_kind.is_none()) {
+                (self.empty_mapping_label(index).into(), true)
+            } else if !work.ignore_model_efforts
+                && let Some(row) = work
+                    .available_models()
+                    .into_iter()
+                    .find(|row| row["id"] == id)
+            {
+                (row["displayName"].as_str().unwrap_or(id).into(), true)
+            } else if work.subscription_kind.is_some() {
+                (
+                    if id.is_empty() {
+                        "—".into()
+                    } else {
+                        format!("{id} · {}", self.locale.text("不可用", "Unavailable"))
+                    },
+                    false,
+                )
+            } else if work.ignore_model_efforts || work.available_models().is_empty() {
+                (
+                    format!(
+                        "{id} {}",
+                        self.locale.text("（尚未获取列表）", "(list not fetched)")
+                    ),
+                    true,
+                )
+            } else {
+                (
+                    format!(
+                        "{id} {}",
+                        self.locale.text("（未在列表中）", "(not in list)")
+                    ),
+                    true,
+                )
+            };
         (label, enabled)
     }
 
@@ -6798,10 +6806,11 @@ impl SettingsShell {
                 };
                 let known = models.iter().any(|row| row["id"] == id);
                 let mut options = Vec::with_capacity(models.len() + 3);
-                if !subscription {
+                let fable = ROLES[index] == "fable";
+                if !subscription || fable {
                     options.push(SelectOption {
                         choice: ProviderChoice::Model(String::new()),
-                        label: self.locale.text("沿用 CLI 默认", "Use CLI default").into(),
+                        label: self.empty_mapping_label(index).into(),
                         detail: None,
                         selected: id.is_empty(),
                         enabled: true,
@@ -6818,7 +6827,7 @@ impl SettingsShell {
                         enabled: true,
                     }
                 }));
-                if !known && (!id.is_empty() || subscription) {
+                if !known && (!id.is_empty() || (subscription && !fable)) {
                     let (label, enabled) = self.mapping_label(work, index);
                     options.push(SelectOption {
                         choice: ProviderChoice::Model(id.into()),
@@ -6828,7 +6837,7 @@ impl SettingsShell {
                         enabled,
                     });
                 }
-                if !subscription {
+                if !subscription || fable {
                     options.push(SelectOption {
                         choice: ProviderChoice::Manual,
                         label: self
@@ -7260,9 +7269,13 @@ impl SettingsShell {
             "reveal" => &focus.reveal,
             "name" => &focus.name,
             "mapping-0" => &focus.mapping_choices[0],
+            "mapping-1" => &focus.mapping_choices[1],
             "manual-0" => &focus.mappings[0],
+            "manual-1" => &focus.mappings[1],
             "mapping-list-0" => &focus.manual_links[0],
+            "mapping-list-1" => &focus.manual_links[1],
             "effort-0" => &focus.efforts[0],
+            "effort-1" => &focus.efforts[1],
             "context-512k" => &focus.context_modes[1],
             "context-maximum" => &focus.context_modes[2],
             "delete" => &focus.delete,
