@@ -755,6 +755,72 @@ mod workspace {
             "accounts: dedicated roster, expired sign-in and quota cards, refresh, switch, manage, Escape and restored trigger focus"
         );
 
+        use matou_native_runtime::claude_accounts::ClaudeAccountCommand as AccountAction;
+        let account = draw(window.into(), cx)["footer-account"].center();
+        click(window.into(), cx, MouseButton::Left, account);
+        overlay(window, cx, Some("accounts"));
+        let roster_request = std::iter::from_fn(|| sink.try_recv().ok())
+            .find_map(|command| match command {
+                Command::GetClaudeAccounts { request_id } => Some(request_id),
+                _ => None,
+            })
+            .expect("reopening refreshes the roster");
+        let add = draw(window.into(), cx)["claude-account-add"].center();
+        click(window.into(), cx, MouseButton::Left, add);
+        let start_login = |window: Handle, cx: &mut AsyncApp| {
+            let start = draw(window.into(), cx)["claude-start-login"].center();
+            click(window.into(), cx, MouseButton::Left, start);
+            let attempt = std::iter::from_fn(|| sink.try_recv().ok())
+                .find_map(|command| match command {
+                    Command::ClaudeAccountCommand {
+                        request_id,
+                        action: AccountAction::Login { replace_id: None },
+                    } => Some(request_id),
+                    _ => None,
+                })
+                .expect("private window starts login immediately");
+            let waiting = draw(window.into(), cx);
+            assert!(waiting.contains_key("claude-submit-code"));
+            assert!(waiting.contains_key("claude-cancel-login"));
+            attempt
+        };
+        let login = start_login(window, cx);
+        state["switched"] = json!(false);
+        supply(window, cx, roster_request, &state);
+        let mut waiting = state.clone();
+        waiting["loginAttemptId"] = json!("fixture-attempt");
+        supply(window, cx, login, &waiting);
+        assert!(draw(window.into(), cx).contains_key("claude-cancel-login"));
+
+        let mut failed = state.clone();
+        failed["error"] = json!("browser-missing");
+        supply(window, cx, login, &failed);
+        let failed_view = draw(window.into(), cx);
+        assert!(failed_view.contains_key("claude-start-login"));
+        let panel = failed_view["footer-account-panel"];
+        let error = failed_view["claude-account-error"];
+        assert!(error.top() >= panel.top() && error.bottom() <= panel.bottom());
+
+        let login = start_login(window, cx);
+        let cancel = draw(window.into(), cx)["claude-cancel-login"].center();
+        click(window.into(), cx, MouseButton::Left, cancel);
+        let cancelled = std::iter::from_fn(|| sink.try_recv().ok())
+            .find_map(|command| match command {
+                Command::ClaudeAccountCommand {
+                    request_id,
+                    action: AccountAction::CancelLogin,
+                } => Some(request_id),
+                _ => None,
+            })
+            .expect("cancel routes to the worker before the attempt ID arrives");
+        supply(window, cx, login, &waiting);
+        assert!(draw(window.into(), cx).contains_key("claude-account-add"));
+        supply(window, cx, cancelled, &state);
+        press(window, cx, "escape");
+        println!(
+            "accounts: immediate private sign-in, visible browser error and pending cancellation"
+        );
+
         window
             .update(cx, |view, window, cx| {
                 view.open_search(window, cx);
