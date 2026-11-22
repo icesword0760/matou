@@ -1166,8 +1166,9 @@ fn match_antigravity_quota(windows: &[UsageWindow], model: Option<&str>) -> Vec<
         .collect();
     let third_party = words.iter().any(|word| {
         [
-            "claude", "opus", "sonnet", "haiku", "gpt", "o1", "o3", "o4", "chatgpt", "openai",
-            "codex", "deepseek", "qwen", "llama", "mistral", "grok", "kimi", "glm", "minimax",
+            "claude", "opus", "fable", "sonnet", "haiku", "gpt", "o1", "o3", "o4", "chatgpt",
+            "openai", "codex", "deepseek", "qwen", "llama", "mistral", "grok", "kimi", "glm",
+            "minimax",
         ]
         .contains(word)
     });
