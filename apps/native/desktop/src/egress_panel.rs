@@ -184,12 +184,16 @@ impl EgressCheck {
         let zh = locale == InterfaceLocale::Chinese;
         let host = self.fact("host");
         if self.result == EgressCheckResult::Unknown {
+            let error = self.fact("error");
+            if error.is_empty() && self.fact("reason") == "notCollected" {
+                return Some(locale.text("本次未采集", "Not collected in this check").into());
+            }
             let target = if host.is_empty() {
                 String::new()
             } else {
                 format!("{host} ")
             };
-            let reason = match self.fact("error") {
+            let reason = match error {
                 "unreachable" => format!("{target}{}", locale.text("连不上", "unreachable")),
                 "invalid" => format!("{target}{}", locale.text("返回异常", "invalid response")),
                 _ if host.is_empty() => locale.text("检测超时", "check timed out").into(),
@@ -2457,7 +2461,7 @@ pub use egress_ui::{
 #[cfg(test)]
 mod tests {
     use super::*;
-    use EgressCheckKind::{ExitRule, Ipv6, LoginApiMatch, Mainland};
+    use EgressCheckKind::{BrowserPath, ExitRule, Ipv6, LoginApiMatch, Mainland};
     use EgressCheckResult::{Fail, Pass, Unknown, Warn};
     use EgressFamily::{Anthropic, ChatGptSubscription, Google, OpenAi};
     use InterfaceLocale::{Chinese, English};
@@ -2664,6 +2668,30 @@ mod tests {
                 .session_family_sets
                 .insert("google-card".into(), vec![]);
         }
+    }
+
+    #[test]
+    fn uncollected_checks_are_distinguished_from_explicit_timeouts() {
+        let mut diagnostic = check(BrowserPath, None, Unknown, &[("reason", "notCollected")]);
+        assert_eq!(
+            diagnostic.detail(None, Chinese).as_deref(),
+            Some("本次未采集")
+        );
+        assert_eq!(
+            diagnostic.detail(None, English).as_deref(),
+            Some("Not collected in this check")
+        );
+
+        diagnostic.facts.insert("error".into(), "timeout".into());
+        diagnostic.facts.insert("host".into(), "login.example".into());
+        assert_eq!(
+            diagnostic.detail(None, Chinese).as_deref(),
+            Some("无法确认（login.example 检测超时）")
+        );
+        assert_eq!(
+            diagnostic.detail(None, English).as_deref(),
+            Some("Couldn't confirm (login.example timed out)")
+        );
     }
 
     #[test]
