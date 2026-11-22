@@ -60,6 +60,83 @@ pub(crate) fn projection(source: SocketAddr, other: SocketAddr) -> Result<Claude
     .context("missing API gateway projection")
 }
 
+#[test]
+fn fable_aliases_use_their_own_target_or_the_legacy_opus_target() -> Result<()> {
+    let temp = within_workspace()?;
+    let upstream = listener()?;
+    let address = upstream.local_addr()?;
+    let ids = [
+        "matou-role/fable",
+        "matou-api/fable",
+        "fable",
+        "claude-fable-5-2",
+        "claude-fable-5-5[1m]",
+    ];
+    let config = json!({
+        "version": 1,
+        "activeProviderIds": {"claude-code": "a"},
+        "providers": {"claude-code": [
+            {"id": "a", "endpoint": format!("http://{address}/opus"),
+             "model": "source-opus", "apiKey": "synthetic-opus",
+             "modelMapping": {"opus": "source-opus"}, "effortMapping": {"opus": "low"}},
+            {"id": "b", "endpoint": format!("http://{address}/fable"),
+             "model": "fable-target", "apiKey": "synthetic-fable",
+             "modelMetadata": [{"id": "fable-target", "resolvedModel": "fable-upstream",
+                                "supportedEfforts": ["high"]}]}
+        ]}
+    });
+    let path = temp.path().join("provider-config.json");
+    std::fs::write(&path, config.to_string())?;
+    for (assignments, lane, model, effort) in [
+        (
+            json!({"fable": {"providerId": "b", "model": "fable-target", "effort": "high"}}),
+            "fable",
+            "fable-upstream",
+            "high",
+        ),
+        (
+            json!({"opus": {"providerId": "a", "model": "source-opus"}}),
+            "opus",
+            "source-opus",
+            "low",
+        ),
+        (json!({}), "opus", "source-opus", "low"),
+    ] {
+        let assignments = parse_claude_role_assignments(&assignments)?;
+        let plan = prepare_new_claude_launch(
+            temp.path(),
+            temp.path(),
+            &Value::Null,
+            Some(&assignments),
+            BTreeMap::from([(
+                "MATOU_CLAUDE_COMMAND".into(),
+                std::env::current_exe()?.into_os_string(),
+            )]),
+            80,
+            24,
+        )?;
+        let gateway = Gateway::start(Arc::new(plan.gateway.context("missing Fable gateway")?))?;
+        let (requests, workers) = record(upstream.try_clone()?, ids.len(), "200 OK", "", b"ok");
+        for id in ids {
+            let request = json!({"model": id});
+            assert_eq!(
+                exchange(&gateway, MESSAGES, &serde_json::to_vec(&request)?, "")?.0,
+                200
+            );
+            let (start, headers, body) = requests.recv_timeout(TIMEOUT)?;
+            assert!(start.starts_with(&format!("POST /{lane}/v1/messages ")));
+            assert_eq!(headers["x-api-key"], format!("synthetic-{lane}"));
+            let payload: Value = serde_json::from_slice(&body)?;
+            assert_eq!(payload["model"], model);
+            assert_eq!(payload["output_config"]["effort"], effort);
+        }
+        for worker in workers {
+            worker.join().unwrap()?;
+        }
+    }
+    Ok(())
+}
+
 fn search_projection(
     source: SocketAddr,
     search: SocketAddr,
