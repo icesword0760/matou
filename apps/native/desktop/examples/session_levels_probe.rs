@@ -966,12 +966,23 @@ mod workspace {
         }
 
         pub(super) fn qualify(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+            self.qualify_with_content(id, b"", window, cx);
+        }
+
+        pub(super) fn qualify_with_content(
+            &mut self,
+            id: &str,
+            content: &[u8],
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
             let (cols, rows, cell_width, cell_height) = self.terminals[id]
                 .read(cx)
                 .target_dimensions()
                 .expect("terminal painted in hidden GPUI layout");
             let mut terminal =
                 Terminal::new(TerminalOptions::new(cols, rows, cell_width, cell_height)).unwrap();
+            terminal.feed(content);
             self.deliver(
                 Event::Recovery {
                     session_id: id.into(),
@@ -1082,16 +1093,22 @@ mod workspace {
             self.session_loader_blocked_reason(id, self.graph_node(id).unwrap())
         }
 
-        pub(super) fn loader_button_position(&self, id: &str) -> Point<Pixels> {
-            let fork_count = [ForkPlacement::Child, ForkPlacement::Sibling]
-                .into_iter()
-                .filter(|placement| self.fork_access(id, *placement).is_some())
-                .count();
-            self.remove_button_position(id)
-                - point(
-                    px(31.5 + 30. * fork_count as f32 + self.more_action_width(id)),
-                    px(0.),
-                )
+        pub(super) fn header_action_position(
+            action_id: &str,
+            window: &mut Window,
+            cx: &mut App,
+        ) -> Point<Pixels> {
+            Self::capture_render_bounds(window, cx)[action_id].center()
+        }
+
+        pub(super) fn capture_render_bounds(
+            window: &mut Window,
+            cx: &mut App,
+        ) -> HashMap<String, Bounds<Pixels>> {
+            workspace_wiring::capture_wiring_bounds(|| {
+                window.refresh();
+                window.draw(cx).clear();
+            })
         }
 
         fn more_action_width(&self, id: &str) -> f32 {
@@ -1165,7 +1182,7 @@ mod workspace {
             if !indices.is_empty() {
                 assert_eq!(
                     state.preview_scroll.children_count(),
-                    indices.len() + usize::from(earlier)
+                    indices.len() + usize::from(earlier) + usize::from(state.first_event.is_some())
                 );
             }
             if indices.contains(&8) {
@@ -1470,7 +1487,9 @@ mod workspace {
 
         pub(super) fn assert_card_error(&self) {
             self.assert_no_dialog();
-            assert_eq!(self.fault.as_deref(), Some("probe: navigation error"));
+            assert!(self.pending_card_action.is_none());
+            assert!(self.task_toast_error);
+            assert_eq!(self.task_toast.as_deref(), Some("操作未完成，请重试。"));
         }
 
         pub(super) fn assert_remove_tooltip(&self, id: &str, expected: &str, enabled: bool) {
@@ -1598,6 +1617,50 @@ mod workspace {
                     .and_then(|node| self.provider_restore_banner(id, node))
                     .is_none()
             );
+        }
+
+        pub(super) fn assert_loading_badge(
+            &self,
+            id: &str,
+            awaiting_first_frame: bool,
+            expected: Option<&str>,
+        ) {
+            let node = self.graph_node(id).expect("projected card");
+            assert_eq!(
+                self.loading_badge(id, node, awaiting_first_frame)
+                    .map(|badge| badge.label(&self.locale)),
+                expected
+            );
+        }
+
+        pub(super) fn probe_recovery(&mut self, id: &str, state: Option<RecoveryState>) {
+            match &state {
+                Some(RecoveryState::Restoring) => {
+                    self.restoring_sessions.insert(id.to_owned());
+                }
+                Some(
+                    RecoveryState::Deferred
+                    | RecoveryState::Failed(_)
+                    | RecoveryState::StartFailed(_)
+                    | RecoveryState::Restarting(_),
+                ) => {
+                    self.restoring_sessions.remove(id);
+                }
+                Some(RecoveryState::Ready) | None => {}
+            }
+            if let Some(state) = state {
+                self.recovery.insert(id.to_owned(), state);
+            } else {
+                self.recovery.remove(id);
+            }
+        }
+
+        pub(super) fn probe_forget_restoring_intent(&mut self, id: &str) {
+            self.restoring_sessions.remove(id);
+        }
+
+        pub(super) fn assert_deferred(&self, id: &str) {
+            assert!(self.is_deferred(id));
         }
 
         pub(super) fn assert_background_provider_restore_hidden(&self, id: &str) {
@@ -2528,12 +2591,16 @@ mod probe {
         }
     }
 
-    fn press(window: WindowHandle<Workspace>, cx: &mut AsyncApp, key: &str) {
+    fn dispatch_key(window: WindowHandle<Workspace>, cx: &mut AsyncApp, key: &str) -> bool {
         AnyWindowHandle::from(window)
             .update(cx, |_, window, cx| {
-                assert!(window.dispatch_keystroke(Keystroke::parse(key).unwrap(), cx));
+                window.dispatch_keystroke(Keystroke::parse(key).unwrap(), cx)
             })
-            .unwrap();
+            .unwrap()
+    }
+
+    fn press(window: WindowHandle<Workspace>, cx: &mut AsyncApp, key: &str) {
+        assert!(dispatch_key(window, cx, key), "unhandled key {key}");
     }
 
     fn press_native_escape(window: WindowHandle<Workspace>, cx: &mut AsyncApp) {
@@ -3363,7 +3430,9 @@ mod probe {
                 );
             }
 
-            click(window, cx, point(center_x, bounds.top() + px(y)));
+            let position = point(center_x, bounds.top() + px(y));
+            mouse(window, cx, position, NSEventType::NSMouseMoved);
+            click(window, cx, position);
             let check_optimistic = |cx: &mut AsyncApp| {
                 window
                     .update(cx, |view, _, _| {
@@ -3461,7 +3530,10 @@ mod probe {
                 Command::Resize { session_id, .. } => {
                     assert!(!stopped.contains(&session_id.as_str()))
                 }
-                _ => panic!("stopped-card interaction sent an unexpected command"),
+                _ => panic!(
+                    "stopped-card interaction sent an unexpected command: {}",
+                    serde_json::to_string(&command).unwrap()
+                ),
             }
         }
     }
@@ -3636,7 +3708,12 @@ mod probe {
             })
             .unwrap();
         press(window, cx, "cmd-w");
+        assert!(matches!(
+            sink.try_recv(),
+            Ok(Command::PreviewSceneClose { scene_id }) if scene_id == SCENE
+        ));
         assert_stopped_interaction_writes(&sink, &[PARENT, PEER]);
+        send_card_failure(window, cx);
         click_remove(window, cx, PEER);
         window
             .update(cx, |view, _, _| {
@@ -3900,6 +3977,15 @@ mod probe {
         const NO_BLOCK: [Option<&str>; 2] = [None, None];
         let mut fixture = Fixture::new();
         let (window, sink) = open_hidden(cx, 900.);
+        let badge_painted = |cx: &mut AsyncApp| {
+            AnyWindowHandle::from(window)
+                .update(cx, |_, window, cx| {
+                    assert!(!matou_native_desktop::macos::is_window_visible(window).unwrap());
+                    Workspace::capture_render_bounds(window, cx)
+                        .contains_key(&format!("session-loading-badge-{PEER}"))
+                })
+                .unwrap()
+        };
         let inspect = |cx: &mut AsyncApp, reason, pending, blocked| {
             draw(window, cx);
             window
@@ -4063,6 +4149,77 @@ mod probe {
         assert!(fixture.process(window, cx, &sink).is_empty());
         println!("Missing runtime acknowledgement unlocks both controls without another command");
 
+        // Deferred cards own the whole card, so the provider banner must never
+        // duplicate that surface. The loading badge follows the same state.
+        fixture.set_provider_restore("restoring", None, 2);
+        deliver(window, cx, fixture.graph_event());
+        deliver(
+            window,
+            cx,
+            Event::Recovery {
+                session_id: PEER.into(),
+                state: RecoveryState::Deferred,
+            },
+        );
+        draw(window, cx);
+        window
+            .update(cx, |view, _, _| {
+                view.assert_deferred(PEER);
+                view.assert_no_provider_restore(PEER);
+                view.assert_loading_badge(PEER, true, None);
+            })
+            .unwrap();
+        crate::macos::MOUNT_HIDDEN_WATER.set(true);
+        assert!(!badge_painted(cx));
+        deliver(
+            window,
+            cx,
+            Event::Recovery {
+                session_id: PEER.into(),
+                state: RecoveryState::Restoring,
+            },
+        );
+        window
+            .update(cx, |view, _, _| {
+                view.assert_loading_badge(PEER, true, Some("恢复中"));
+                view.assert_loading_badge(PEER, false, None);
+                // Restoring -> Ready must stay "recovering" until the first
+                // visible frame arrives.
+                view.probe_recovery(PEER, Some(RecoveryState::Ready));
+                view.assert_loading_badge(PEER, true, Some("恢复中"));
+                // A new Session can receive Ready without ever being part of
+                // the recovery plan; it must read as loading, not recovering.
+                view.probe_forget_restoring_intent(PEER);
+                view.assert_loading_badge(PEER, true, Some("加载中"));
+                view.probe_recovery(PEER, Some(RecoveryState::Failed("probe".into())));
+                view.assert_loading_badge(PEER, true, None);
+                view.probe_recovery(PEER, Some(RecoveryState::Restoring));
+            })
+            .unwrap();
+        assert!(badge_painted(cx));
+        window
+            .update(cx, |view, window, cx| view.qualify(PEER, window, cx))
+            .unwrap();
+        assert!(badge_painted(cx));
+        window
+            .update(cx, |view, window, cx| {
+                view.qualify_with_content(PEER, b"first visible screen", window, cx);
+            })
+            .unwrap();
+        assert!(!badge_painted(cx));
+        crate::macos::MOUNT_HIDDEN_WATER.set(false);
+        inspect(cx, None, false, NO_BLOCK);
+        println!("Deferred provider banner hidden | loading badge ends on first visible frame");
+
+        // Restore the fixture's background-failure state for the final retry.
+        window
+            .update(cx, |view, _, _| {
+                view.probe_recovery(PEER, Some(RecoveryState::Failed(reason.clone())));
+            })
+            .unwrap();
+        fixture.set_provider_restore("failed", Some(BACKGROUND), 2);
+        deliver(window, cx, fixture.graph_event());
+
         drop(sink);
         activate(cx, 0);
         inspect(cx, Some(BACKGROUND_ZH), false, NO_BLOCK);
@@ -4156,7 +4313,7 @@ mod probe {
         window
             .update(cx, |view, _, _| view.assert_leaf_dialog())
             .unwrap();
-        press(window, cx, "cmd-w");
+        assert!(!dispatch_key(window, cx, "cmd-w"));
         press(window, cx, "tab");
         press(window, cx, "enter"); // Cancel after the header close control.
         window
@@ -4197,7 +4354,7 @@ mod probe {
             .update(cx, |view, window, cx| view.qualify(CHILD, window, cx))
             .unwrap();
         press(window, cx, "cmd-w");
-        press(window, cx, "cmd-w");
+        assert!(!dispatch_key(window, cx, "cmd-w"));
         draw(window, cx);
         window.update(cx, |view, window, _| view.assert_stop_dialog(
             "“child-urgent”正在运行。停止后，该节点会在会话列表和 DAG 中保持为“已停止”，子会话继续工作。",
@@ -4352,11 +4509,10 @@ mod probe {
     }
 
     fn verify_last_card(cx: &mut AsyncApp) {
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
         let root = Fixture {
             db: None,
-            root: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../target")
-                .join(format!("last-card-probe-{}", uuid::Uuid::new_v4())),
+            root: std::env::temp_dir().join(format!("lc-{}", &nonce[..16])),
         };
         let options = LaunchOptions {
             data_root: root.root.join("data"),
@@ -4413,7 +4569,7 @@ mod probe {
         assert!(before.0.is_none() && before.1 != "[]");
 
         press(window, cx, "cmd-w");
-        press(window, cx, "cmd-w");
+        assert!(!dispatch_key(window, cx, "cmd-w"));
         window
             .update(cx, |view, window, _| view.assert_last_dialog(&id, window))
             .unwrap();
@@ -4449,26 +4605,26 @@ mod probe {
         host.commands.send(command).unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         let reply = loop {
-            match runtime_event(&host, deadline) {
-                Event::Graph(graph) if graph["sessionCardAction"]["outcome"] == "hide-window" => {
-                    let action = &graph["sessionCardAction"];
-                    assert_eq!(action["sessionId"], id);
-                    assert_eq!(action["disposedSessionIds"], serde_json::json!([]));
-                    break Event::Graph(graph);
+            match host.events.try_recv() {
+                Ok(event @ Event::NavigationFailed { .. }) => {
+                    assert!(matches!(&event, Event::NavigationFailed { message, .. }
+                        if message == "Session deletion intent is stale"));
+                    break event;
                 }
-                Event::ScenesDisposed(ids) => panic!("last card disposed: {ids:?}"),
-                _ => {}
+                Ok(Event::ScenesDisposed(ids)) => panic!("last card disposed: {ids:?}"),
+                Ok(Event::Diagnostic(message)) => panic!("probe runtime: {message}"),
+                Ok(_) => {}
+                Err(async_channel::TryRecvError::Empty) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("timed out or disconnected from probe runtime: {error}"),
             }
         };
         deliver(window, cx, reply);
         draw(window, cx);
         window
-            .update(cx, |view, window, _| view.assert_last_dialog(&id, window))
-            .unwrap();
-        press(window, cx, "escape");
-        window
             .update(cx, |view, window, cx| {
-                view.assert_no_dialog();
+                view.assert_card_error();
                 view.assert_card_focus(&id, window, cx);
                 window.remove_window();
             })
@@ -4476,7 +4632,7 @@ mod probe {
         assert!(sink.try_recv().is_err());
         assert_eq!(card_state(), before);
         println!(
-            "Actual runtime: hide-window, unchanged mounts, no archive events or close transaction"
+            "Actual runtime rejected the unconfirmed close, preserving mounts without any archive event"
         );
         drop(db);
         let same_canvas = runtime_navigation(
@@ -4871,13 +5027,14 @@ mod probe {
                 .unwrap();
 
             for remove in [false, true] {
-                let position = window
-                    .update(cx, |view, _, _| {
-                        if remove {
-                            view.remove_button_position(PEER)
-                        } else {
-                            view.loader_button_position(PEER)
-                        }
+                let action_id = if remove {
+                    format!("remove-session-{PEER}")
+                } else {
+                    format!("session-loader-open-{PEER}")
+                };
+                let position = AnyWindowHandle::from(window)
+                    .update(cx, |_, window, cx| {
+                        Workspace::header_action_position(&action_id, window, cx)
                     })
                     .unwrap();
                 click(window, cx, position);
@@ -5200,9 +5357,14 @@ mod probe {
                 .unwrap();
         };
         let click_entry = |cx: &mut AsyncApp| {
-            draw(window, cx);
-            let at = window
-                .update(cx, |view, _, _| view.loader_button_position(PEER))
+            let at = AnyWindowHandle::from(window)
+                .update(cx, |_, window, cx| {
+                    Workspace::header_action_position(
+                        &format!("session-loader-open-{PEER}"),
+                        window,
+                        cx,
+                    )
+                })
                 .unwrap();
             click(window, cx, at);
             draw(window, cx);
@@ -7615,6 +7777,7 @@ mod probe {
         let deferred_only = std::env::args().any(|arg| arg == "--deferred-recovery");
         let show_deferred = std::env::args().any(|arg| arg == "--show-deferred-recovery");
         let loader_only = std::env::args().any(|arg| arg == "--session-loader");
+        let provider_restore_only = std::env::args().any(|arg| arg == "--provider-restore");
         let fork_only = std::env::args().any(|arg| arg == "--fork");
         let permission_only = std::env::args().any(|arg| arg == "--permission");
         let codex_permission_only = std::env::args().any(|arg| arg == "--codex-permission");
@@ -7725,6 +7888,14 @@ mod probe {
             if loader_only {
                 cx.spawn(async |cx| {
                     verify_session_loader(cx);
+                    cx.update(|cx| cx.quit()).unwrap();
+                })
+                .detach();
+                return;
+            }
+            if provider_restore_only {
+                cx.spawn(async |cx| {
+                    verify_provider_restore_banner(cx).await;
                     cx.update(|cx| cx.quit()).unwrap();
                 })
                 .detach();
