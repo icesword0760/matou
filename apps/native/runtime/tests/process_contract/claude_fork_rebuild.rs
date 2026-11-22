@@ -10,8 +10,15 @@ const MISSING: &str = "provider session not found";
 #[test]
 fn claude_fork_rebuild_process_contract() -> Result<()> {
     for (case, manual, submitted, child_file, rebuild_failure) in [
-        ("automatic", false, false, false, None),
-        ("manual", true, false, false, None),
+        ("automatic direct rebuild", false, false, false, None),
+        ("manual direct rebuild", true, false, false, None),
+        (
+            "parent appears during ordinary retry",
+            true,
+            false,
+            false,
+            None,
+        ),
         ("parent absent", false, false, false, None),
         ("has prompt", false, true, false, None),
         (
@@ -88,14 +95,13 @@ fn claude_fork_rebuild_process_contract() -> Result<()> {
                 }).to_string()],
         )?;
         let parent_absent = case == "parent absent";
+        let late_parent = case == "parent appears during ordinary retry";
         let projects = root.path().join("Shell 家目录/claude/projects");
-        if !parent_absent {
-            let parent = projects.join("parent-project");
+        let parent = projects.join("parent-project");
+        let parent_file = parent.join(format!("{PARENT}.jsonl"));
+        if !parent_absent && !late_parent {
             fs::create_dir_all(&parent)?;
-            fs::write(
-                parent.join(format!("{PARENT}.jsonl")),
-                b"synthetic parent transcript",
-            )?;
+            fs::write(&parent_file, b"synthetic parent transcript")?;
         }
         if child_file {
             let other = root
@@ -130,6 +136,14 @@ case "$*" in
   *)
     printf '%s\n' "$@" > "$0.resume-argv"
     printf 'resume\n' >> "$0.calls"
+    if [ -n "$MATOU_TEST_WAIT_FOR_PARENT" ]; then
+      attempts=0
+      until [ -f "$MATOU_TEST_WAIT_FOR_PARENT" ]; do
+        [ "$attempts" -lt 200 ] || exit 43
+        attempts=$((attempts + 1))
+        /bin/sleep 0.02
+      done
+    fi
     printf 'No conversation found with session ID: {CHILD}\n' >&2
     exit 1
     ;;
@@ -154,6 +168,9 @@ esac
                     },
                 );
                 command.env("MATOU_TEST_REBUILD_MARKER", "same launch environment");
+                if late_parent {
+                    command.env("MATOU_TEST_WAIT_FOR_PARENT", &parent_file);
+                }
             },
         )?;
         child.connect()?;
@@ -162,6 +179,15 @@ esac
             child.send(Command::RetryProviderRestore {
                 session_id: child.session.clone(),
             })?;
+        }
+        if late_parent {
+            let deadline = Instant::now() + TIMEOUT;
+            while !stub.with_extension("resume-argv").is_file() {
+                ensure!(Instant::now() < deadline, "ordinary retry did not start");
+                thread::sleep(Duration::from_millis(20));
+            }
+            fs::create_dir_all(&parent)?;
+            fs::write(&parent_file, b"synthetic parent transcript")?;
         }
 
         let rebuilt = !submitted && !child_file && !parent_absent;
@@ -294,16 +320,21 @@ esac
             let (status, stderr) = restarted.wait()?;
             ensure!(status.success(), "runtime restart shutdown: {stderr}");
         }
-        let expected = if manual {
-            "rebuild\n"
-        } else if rebuilt {
+        let expected = if late_parent {
             "resume\nrebuild\n"
+        } else if rebuilt {
+            "rebuild\n"
         } else {
             "resume\n"
         };
         let calls = fs::read_to_string(stub.with_extension("calls"))?;
         assert_eq!(calls, expected, "{case}");
-        if !manual && rebuilt {
+        assert_eq!(
+            stub.with_extension("resume-argv").is_file(),
+            !rebuilt || late_parent,
+            "{case}: ordinary child resume argv"
+        );
+        if late_parent {
             let env = fs::read_to_string(stub.with_extension("env"))?;
             let env = env.lines().collect::<Vec<_>>();
             assert_eq!(env.len(), 2);
