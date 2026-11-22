@@ -930,7 +930,12 @@ mod tests {
         let claude = root.path().join("claude");
         executable(&claude, "#!/usr/bin/env node\n");
         let path = login_shell_path(shell.as_os_str(), root.path()).unwrap();
-        assert_eq!(std::env::split_paths(&path).next(), Some(bin));
+        assert_eq!(
+            std::env::split_paths(&path)
+                .next()
+                .map(|entry| fs::canonicalize(entry).unwrap()),
+            Some(fs::canonicalize(&bin).unwrap())
+        );
         let result = Command::new(claude).env("PATH", path).output().unwrap();
         assert!(result.status.success());
         assert_eq!(result.stdout, b"ready from node\n");
