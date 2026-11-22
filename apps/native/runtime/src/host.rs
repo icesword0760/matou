@@ -9016,12 +9016,10 @@ fn active_graph(
                         continue;
                     };
                     let codex = profile == "codex";
+                    // History stays readable even when the bound conversation cannot resume.
                     let provider_session_id = owner
                         .environment_provider_binding(id, profile)?
-                        .filter(|binding| {
-                            !binding.provider_session_id.is_empty()
-                                && (deferred || binding.resumable)
-                        })
+                        .filter(|binding| !binding.provider_session_id.is_empty())
                         .map(|binding| binding.provider_session_id);
                     node["historyProviderSessionId"] = json!(provider_session_id);
                     if codex && let Some(hud) = owner.codex_hud(&session.id) {
