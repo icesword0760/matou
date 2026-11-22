@@ -92,17 +92,54 @@ pub fn system_time_zone() -> String {
     std::env::var("TZ")
         .ok()
         .filter(|zone| !matches!(zone.as_str(), "auto" | "system") && valid_claude_time_zone(zone))
-        .or_else(|| {
-            let zone = fs::canonicalize("/etc/localtime").ok()?;
-            let name = zone.to_str()?.rsplit_once("/zoneinfo/")?.1;
-            valid_claude_time_zone(name).then(|| name.to_owned())
-        })
-        .or_else(|| {
-            let zone = fs::read_to_string("/etc/timezone").ok()?;
-            let name = zone.trim();
-            valid_claude_time_zone(name).then(|| name.to_owned())
-        })
+        .or_else(platform_time_zone)
         .unwrap_or_else(|| "UTC".into())
+}
+
+#[cfg(not(windows))]
+fn platform_time_zone() -> Option<String> {
+    (|| {
+        let zone = fs::canonicalize("/etc/localtime").ok()?;
+        let name = zone.to_str()?.rsplit_once("/zoneinfo/")?.1;
+        valid_claude_time_zone(name).then(|| name.to_owned())
+    })()
+    .or_else(|| {
+        let zone = fs::read_to_string("/etc/timezone").ok()?;
+        let name = zone.trim();
+        valid_claude_time_zone(name).then(|| name.to_owned())
+    })
+}
+
+#[cfg(windows)]
+fn platform_time_zone() -> Option<String> {
+    #[repr(C)]
+    struct DynamicTimeZoneInformation {
+        bias: i32,
+        standard_name: [u16; 32],
+        standard_date: [u16; 8],
+        standard_bias: i32,
+        daylight_name: [u16; 32],
+        daylight_date: [u16; 8],
+        daylight_bias: i32,
+        key_name: [u16; 128],
+        dynamic_daylight_time_disabled: u8,
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetDynamicTimeZoneInformation(information: *mut DynamicTimeZoneInformation) -> u32;
+    }
+
+    let mut information = std::mem::MaybeUninit::<DynamicTimeZoneInformation>::zeroed();
+    // SAFETY: The writable buffer matches DYNAMIC_TIME_ZONE_INFORMATION.
+    if unsafe { GetDynamicTimeZoneInformation(information.as_mut_ptr()) } == u32::MAX {
+        return None;
+    }
+    let information = unsafe { information.assume_init() };
+    let key = information.key_name.split(|unit| *unit == 0).next()?;
+    // China Standard Time includes the Windows mainland and Hong Kong zones
+    // covered by the agent's time zone policy.
+    (String::from_utf16_lossy(key) == "China Standard Time").then(|| "Asia/Shanghai".to_owned())
 }
 
 pub fn automatic_time_zone(system: &str, exit_country: Option<&str>) -> Option<&'static str> {

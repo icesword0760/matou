@@ -530,10 +530,11 @@ fn promotion_installs_and_repairs_plugin_and_projects_authenticated_activity() -
         SOURCE
     );
     first.run_statusline(SOURCE, "working")?;
-    graph(&host, |graph| {
+    let working = graph(&host, |graph| {
         node(graph, &session)["workStatus"] == "running"
     })
     .context("statusline running")?;
+    assert_eq!(node(&working, &session)["historyProviderSessionId"], SOURCE);
     first.hook("PreInvocation", SOURCE)?;
     first.hook("Stop", SOURCE)?;
     let stopped = graph(&host, |graph| {

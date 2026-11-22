@@ -1069,7 +1069,7 @@ fn card_write_count(db: &Connection) -> Result<(i64, i64)> {
     )?)
 }
 
-fn seed_catalog(root: &Path, workspace: &Path, id: &str) -> Result<()> {
+fn seed_catalog(root: &Path, workspace: &Path, id: &str) -> Result<PathBuf> {
     let cwd = workspace.to_str().context("workspace UTF-8")?;
     let bucket_name: String = cwd
         .encode_utf16()
@@ -1080,15 +1080,16 @@ fn seed_catalog(root: &Path, workspace: &Path, id: &str) -> Result<()> {
         .collect();
     let bucket = root.join("Shell 家目录/claude/projects").join(bucket_name);
     fs::create_dir_all(&bucket)?;
+    let transcript = bucket.join(format!("{id}.jsonl"));
     fs::write(
-        bucket.join(format!("{id}.jsonl")),
+        &transcript,
         serde_json::json!({
             "cwd": cwd, "timestamp": 1234,
             "message": {"role": "user", "content": "Synthetic command fixture"}
         })
         .to_string(),
     )?;
-    Ok(())
+    Ok(transcript)
 }
 
 #[test]
@@ -1473,7 +1474,7 @@ exec /bin/sleep 60
         let settings: Value = serde_json::from_slice(&fs::read(settings_path)?)?;
         assert_eq!(
             settings["hooks"]["SessionStart"][0]["hooks"][0]["type"],
-            "http"
+            "command"
         );
         let provider_id = "promoted-conversation";
         post_claude_identity(settings_path, provider_id, mode, "assigned-model")?;
@@ -4160,7 +4161,8 @@ esac
 }
 
 #[test]
-fn fork_uses_the_source_binding_with_an_opus_assignment_saved() -> Result<()> {
+fn claude_command_start_confirms_fresh_and_fork_and_exposes_active_history() -> Result<()> {
+    use matou_native_core::sessions::list_runs;
     use matou_native_runtime::host::{ForkPlacement, ForkWorktreeMode};
     use serde_json::json;
 
@@ -4183,12 +4185,87 @@ exec /bin/sleep 60
     fs::set_permissions(&stub, fs::Permissions::from_mode(0o700))?;
     let mut child = spawn_fresh_permission_card(root.path(), &stub, None, None)?;
     child.frame(|_, screen, _| screen_has_line(screen, "source ready"))?;
-    post_permission_identity(
+    let send_start = |settings_path: &Path, id| -> Result<()> {
+        let settings: serde_json::Value = serde_json::from_slice(&fs::read(settings_path)?)?;
+        let start = &settings["hooks"]["SessionStart"][0]["hooks"][0];
+        assert_eq!(start["type"], "command");
+        let command = start["command"].as_str().context("SessionStart command")?;
+        assert!(command.contains("--noproxy '*'"));
+        let mut hook = ProcessCommand::new("/bin/sh")
+            .args(["-c", command])
+            .env_clear()
+            .env("ALL_PROXY", "http://127.0.0.1:1")
+            .stdin(Stdio::piped())
+            .spawn()?;
+        serde_json::to_writer(
+            hook.stdin.take().context("SessionStart stdin")?,
+            &json!({"hook_event_name":"SessionStart","session_id":id,"permission_mode":"default"}),
+        )?;
+        ensure!(hook.wait()?.success(), "SessionStart command failed");
+        Ok(())
+    };
+    send_start(
         Path::new(&fs::read_to_string(stub.with_extension("settings"))?),
         "fork-source",
-        "default",
     )?;
     wait_permission_identity(&mut child)?;
+    let transcript = seed_catalog(root.path(), &child.workspace, "fork-source")?;
+    let mut transcript = fs::OpenOptions::new().append(true).open(transcript)?;
+    for row_type in [
+        "last-prompt",
+        "mode",
+        "permission-mode",
+        "atis-latch",
+        "attachment",
+        "api-request",
+        "api-request-start",
+        "api-request-end",
+        "cost-state",
+    ] {
+        writeln!(
+            transcript,
+            "\n{}",
+            json!({"type": row_type, "version": "2.1.330"})
+        )?;
+    }
+    for row in [
+        json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Before compaction"}]}}),
+        json!({"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"auto"}}),
+        json!({"type":"user","message":{"role":"user","content":[{"type":"text","text":"After compaction"}]}}),
+        json!({"type":"assistant","message":{"role":"assistant","content":"Text reply"}}),
+    ] {
+        writeln!(transcript, "{row}")?;
+    }
+    drop(transcript);
+    child.send(Command::GetProviderSession {
+        cwd: child.workspace.to_string_lossy().into_owned(),
+        provider_session_id: "fork-source".into(),
+        start_event_index: Some(1),
+        limit: None,
+    })?;
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        if let Event::Graph(graph) = child.event(deadline, true)?
+            && let Some(history) = graph["providerSessionDetailResults"].get(0)
+        {
+            assert_eq!(history["providerSessionId"], "fork-source");
+            assert_eq!(history["page"]["total"], 4);
+            let events = history["events"].as_array().unwrap();
+            assert_eq!(events.len(), 4);
+            for (event, (role, text)) in events.iter().zip([
+                ("user", "Synthetic command fixture"),
+                ("assistant", "Before compaction"),
+                ("user", "After compaction"),
+                ("assistant", "Text reply"),
+            ]) {
+                assert_eq!(event["role"], role);
+                assert_eq!(event["text"], text);
+            }
+            let source = codex_events::node(&graph, &child.session).context("source node")?;
+            assert_eq!(source["historyProviderSessionId"], "fork-source");
+            break;
+        }
+    }
     fs::write(
         child.data.join("provider-config.json"),
         json!({
@@ -4222,9 +4299,13 @@ exec /bin/sleep 60
     })?;
     let deadline = Instant::now() + TIMEOUT;
     let argv_path = stub.with_extension("fork");
-    loop {
+    let forked = loop {
         match child.event(deadline, true)? {
-            Event::Frame { screen, .. } if screen_has_line(&screen, "fork ready") => break,
+            Event::Frame {
+                session_id, screen, ..
+            } if screen_has_line(&screen, "fork ready") => {
+                break session_id;
+            }
             Event::Graph(graph) => {
                 if let Some(error) = graph["forkSessionResult"]["error"].as_str() {
                     bail!("fork was rejected: {error}");
@@ -4232,7 +4313,7 @@ exec /bin/sleep 60
             }
             _ => {}
         }
-    }
+    };
     let argv = fs::read_to_string(argv_path)?;
     assert_eq!(
         argv.lines().skip(2).collect::<Vec<_>>(),
@@ -4248,6 +4329,48 @@ exec /bin/sleep 60
         fs::read_to_string(stub.with_extension("endpoint"))?.trim(),
         "https://bound.example.invalid"
     );
+    assert_eq!(list_runs(&db, &child.session)?[0].status, "running");
+    assert_eq!(
+        db.query_row(
+            "SELECT stage FROM session_fork_intents WHERE session_id=?",
+            [&forked],
+            |row| row.get::<_, String>(0),
+        )?,
+        "restoring-provider"
+    );
+    send_start(
+        Path::new(argv.lines().nth(1).context("fork settings path")?),
+        "fork-child",
+    )?;
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        if let Event::Graph(graph) = child.event(deadline, true)?
+            && graph["providerIdentityEvents"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|event| {
+                    event["result"] == "confirmed"
+                        && event["sessionId"] == forked
+                        && event["providerSessionId"] == "fork-child"
+                })
+        {
+            let branch = codex_events::node(&graph, &forked).context("fork node")?;
+            assert_eq!(branch["historyProviderSessionId"], "fork-child");
+            assert_eq!(branch["providerRestoreState"], "none");
+            assert_eq!(branch["forkProgress"]["stage"], "succeeded");
+            break;
+        }
+    }
+    assert_eq!(
+        db.query_row(
+            "SELECT stage FROM session_fork_intents WHERE session_id=?",
+            [&forked],
+            |row| row.get::<_, String>(0),
+        )?,
+        "succeeded"
+    );
+    assert_eq!(list_runs(&db, &forked)?[0].status, "running");
     child.send(Command::Shutdown)?;
     child.closed()?;
     let (status, stderr) = child.wait()?;
