@@ -3010,14 +3010,16 @@ impl ShellOwner {
                 let path = &registration.settings_path;
                 let mut settings: Value = serde_json::from_slice(&std::fs::read(path)?)
                     .map_err(|_| anyhow::anyhow!("Read Claude gateway launch settings"))?;
+                if let Some(fable_alias) = env["ANTHROPIC_DEFAULT_FABLE_MODEL"].as_str() {
+                    settings["modelOverrides"] = json!({
+                        "claude-fable-5": fable_alias,
+                        "claude-fable-5-2": fable_alias,
+                        "claude-fable-5-5": fable_alias,
+                    });
+                }
                 settings["env"] = env;
                 if let Some(model_picker) = model_picker {
                     settings["modelPicker"] = model_picker;
-                    settings["modelOverrides"] = json!({
-                        "claude-fable-5": "matou-role/opus-fallback",
-                        "claude-fable-5-2": "matou-role/opus-fallback",
-                        "claude-fable-5-5": "matou-role/opus-fallback",
-                    });
                 }
                 std::fs::write(path, serde_json::to_vec(&settings)?)
                     .context("Write Claude gateway launch settings")?;

@@ -16,7 +16,10 @@
 use std::{cell::RefCell, rc::Rc};
 
 use gpui::{prelude::*, *};
-use matou_native_core::sessions::InterfaceLocale;
+use matou_native_core::{
+    claude_role_budget::{CLAUDE_ROLE_LABELS, CLAUDE_ROLES as ROLES},
+    sessions::InterfaceLocale,
+};
 
 use super::{
     ACCENT, DANGER_BG, DANGER_TEXT, FocusRingStyle, LINE, LINE_STRONG, MUTED, PANEL, PANEL_MUTED,
@@ -168,7 +171,7 @@ impl AssignmentColors {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AssignmentPanel {
     locale: InterfaceLocale,
-    pub(crate) rows: [AssignmentRow; 4],
+    pub(crate) rows: [AssignmentRow; ASSIGNMENT_ROWS],
     pub(crate) status: AssignmentStatus,
     pub(crate) can_save: bool,
     pub(crate) can_restore: bool,
@@ -185,7 +188,7 @@ pub(crate) enum AssignmentStatus {
     Ready,
 }
 
-/// One tier row. Index order is Opus / Sonnet / Haiku.
+/// One tier row. The web search row follows the model tiers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AssignmentRow {
     pub(crate) tier: &'static str,
@@ -279,30 +282,30 @@ pub(crate) struct AssignmentView {
     locale: InterfaceLocale,
     /// Colors resolved from the palette passed to the current frame.
     colors: AssignmentColors,
-    /// [row][provider / model / effort] trigger focus handles. Row 3 is web search.
-    controls: [[FocusHandle; 3]; 4],
-    /// Slot 0 is the disconnect retry; slots 1..=4 are the per-row catalog retry.
-    retry_focus: [FocusHandle; 5],
+    /// [row][provider / model / effort] trigger focus handles. The final row is web search.
+    controls: [[FocusHandle; 3]; ASSIGNMENT_ROWS],
+    /// Slot 0 is the disconnect retry; the remaining slots are per-row catalog retries.
+    retry_focus: [FocusHandle; ASSIGNMENT_ROWS + 1],
     restore_focus: FocusHandle,
     save_focus: FocusHandle,
-    manual_inputs: [Entity<RenameInput>; 4],
+    manual_inputs: [Entity<RenameInput>; ASSIGNMENT_ROWS],
     _manual_subscriptions: Vec<Subscription>,
-    manual_edit: [bool; 4],
-    manual_sync_suppress: [bool; 4],
+    manual_edit: [bool; ASSIGNMENT_ROWS],
+    manual_sync_suppress: [bool; ASSIGNMENT_ROWS],
     open_menu: Option<OpenAssignmentMenu>,
-    trigger_bounds: Rc<RefCell<[[Option<Bounds<Pixels>>; 3]; 4]>>,
+    trigger_bounds: Rc<RefCell<[[Option<Bounds<Pixels>>; 3]; ASSIGNMENT_ROWS]>>,
     menu_scroll: ScrollHandle,
     pending_focus: Option<FocusHandle>,
 }
 
 impl AssignmentView {
     pub(crate) fn new(cx: &mut Context<Self>) -> Self {
-        let controls: [[FocusHandle; 3]; 4] =
+        let controls: [[FocusHandle; 3]; ASSIGNMENT_ROWS] =
             std::array::from_fn(|_| std::array::from_fn(|_| cx.focus_handle().tab_stop(true)));
         let retry_focus = std::array::from_fn(|_| cx.focus_handle().tab_stop(true));
         let restore_focus = cx.focus_handle().tab_stop(true);
         let save_focus = cx.focus_handle().tab_stop(true);
-        let manual_inputs: [Entity<RenameInput>; 4] = std::array::from_fn(|_| {
+        let manual_inputs: [Entity<RenameInput>; ASSIGNMENT_ROWS] = std::array::from_fn(|_| {
             cx.new(|cx| {
                 let mut input = RenameInput::new(String::new(), cx);
                 // Model ids are routinely longer than the editor's 20-unit
@@ -313,7 +316,7 @@ impl AssignmentView {
             })
         });
 
-        let mut subscriptions = Vec::with_capacity(4);
+        let mut subscriptions = Vec::with_capacity(ASSIGNMENT_ROWS);
         for (index, input) in manual_inputs.iter().enumerate() {
             let model_focus = controls[index][AssignmentColumn::Model.index()].clone();
             subscriptions.push(cx.subscribe(input, move |this, _, event, cx| match event {
@@ -344,10 +347,10 @@ impl AssignmentView {
             save_focus,
             manual_inputs,
             _manual_subscriptions: subscriptions,
-            manual_edit: [false; 4],
-            manual_sync_suppress: [false; 4],
+            manual_edit: [false; ASSIGNMENT_ROWS],
+            manual_sync_suppress: [false; ASSIGNMENT_ROWS],
             open_menu: None,
-            trigger_bounds: Rc::new(RefCell::new([[None; 3]; 4])),
+            trigger_bounds: Rc::new(RefCell::new([[None; 3]; ASSIGNMENT_ROWS])),
             menu_scroll: ScrollHandle::new(),
             pending_focus: None,
         }
@@ -544,8 +547,8 @@ impl AssignmentView {
                 &colors,
                 cx,
                 |this, _, cx| {
-                    this.manual_edit = [false; 4];
-                    this.manual_sync_suppress = [false; 4];
+                    this.manual_edit = [false; ASSIGNMENT_ROWS];
+                    this.manual_sync_suppress = [false; ASSIGNMENT_ROWS];
                     cx.emit(AssignmentAction::Restore);
                     cx.notify();
                 },
@@ -1692,10 +1695,8 @@ use crate::{
     runtime_bridge::{Command, ConnectionPhase, RuntimeCommands},
 };
 
-const ROLES: [&str; 3] = ["opus", "sonnet", "haiku"];
-const TIERS: [&str; 4] = ["Opus", "Sonnet", "Haiku", VIEW_SEARCH_TIER];
-/// Index of the fourth (web search) row in [`AssignmentPanel::rows`].
-const SEARCH_INDEX: usize = 3;
+const SEARCH_INDEX: usize = ROLES.len();
+const ASSIGNMENT_ROWS: usize = SEARCH_INDEX + 1;
 const FOLLOW_PROVIDER: &str = "沿用默认供应商";
 const CHOOSE_MODEL: &str = "请选择模型";
 static NEXT_ASSIGNMENT_REQUEST: AtomicU64 = AtomicU64::new(1);
@@ -1826,8 +1827,9 @@ fn effort_choices(provider: &Value, model: &str, native: &[Value]) -> Vec<&'stat
         });
     let claude_family = !subscription(provider)
         || (provider["subscription"]["provider"] != "codex"
-            && ["claude", "opus", "sonnet", "haiku"]
-                .iter()
+            && ROLES
+                .into_iter()
+                .chain(["claude"])
                 .any(|role| label.contains(role)));
     choices.extend_from_slice(&EFFORTS[1..5]);
     if !gpt_family && claude_family {
@@ -2099,7 +2101,7 @@ pub(crate) struct ClaudeAssignments {
     draft: ClaudeRoleAssignments,
     search_baseline: Option<ClaudeRoleAssignment>,
     search_draft: Option<ClaudeRoleAssignment>,
-    manual: [bool; 4],
+    manual: [bool; ASSIGNMENT_ROWS],
     load_error: bool,
     save_error: bool,
     saved: bool,
@@ -2115,7 +2117,7 @@ impl ClaudeAssignments {
             draft: ClaudeRoleAssignments::new(),
             search_baseline: None,
             search_draft: None,
-            manual: [false; 4],
+            manual: [false; ASSIGNMENT_ROWS],
             load_error: false,
             save_error: false,
             saved: false,
@@ -2266,7 +2268,7 @@ impl ClaudeAssignments {
         };
         if saved || !self.dirty() {
             self.draft = assignments.clone();
-            self.manual = [false; 4];
+            self.manual = [false; ASSIGNMENT_ROWS];
             if let Some(search) = &search {
                 self.search_draft = search.clone();
             }
@@ -2361,6 +2363,17 @@ impl ClaudeAssignments {
         }
     }
 
+    fn follows_opus(&self, role: &str, providers: &ProviderSettings) -> bool {
+        role == "fable"
+            && !self.draft.contains_key(role)
+            && providers
+                .providers()
+                .iter()
+                .find(|provider| provider["id"].as_str() == providers.active_id())
+                .and_then(|provider| provider["modelMapping"][role].as_str())
+                .is_none_or(|model| model.trim().is_empty())
+    }
+
     fn row_provider<'a>(&self, index: usize, providers: &'a ProviderSettings) -> Option<&'a Value> {
         let (provider_id, fallback) = if index == SEARCH_INDEX {
             (
@@ -2370,9 +2383,14 @@ impl ClaudeAssignments {
                 None,
             )
         } else {
-            let role = ROLES.get(index)?;
+            let role = *ROLES.get(index)?;
+            let role = if self.follows_opus(role, providers) {
+                "opus"
+            } else {
+                role
+            };
             (
-                self.draft.get(*role).map(|row| row.provider_id.as_str()),
+                self.draft.get(role).map(|row| row.provider_id.as_str()),
                 providers.active_id(),
             )
         };
@@ -2399,7 +2417,7 @@ impl ClaudeAssignments {
             return self.search_row(providers, enabled, locale);
         }
         let role = ROLES[index];
-        let tier = TIERS[index];
+        let tier = CLAUDE_ROLE_LABELS[index];
         let assigned = self.draft.get(role);
         let provider_id = assigned.map(|row| row.provider_id.as_str());
         let provider = self.row_provider(index, providers);
@@ -2410,18 +2428,24 @@ impl ClaudeAssignments {
             .unwrap_or("—");
         let native = self.native_catalog.models();
         let models = catalog(provider_value, native).unwrap_or_default();
-        let default = default_model(provider_value, role, native);
+        let follows_opus = self.follows_opus(role, providers);
+        let effective_role = if follows_opus { "opus" } else { role };
+        let inherited = follows_opus.then(|| self.draft.get("opus")).flatten();
+        let default = inherited
+            .map(|row| row.model.as_str())
+            .or_else(|| default_model(provider_value, effective_role, native));
         let selected = assigned.map(|row| row.model.as_str()).unwrap_or_default();
         let effective_model = assigned.map(|_| selected).or(default).unwrap_or_default();
         let effort = assigned
+            .or(inherited)
             .and_then(|row| row.effort.as_deref())
-            .unwrap_or_else(|| inherited_effort(provider_value, role));
+            .unwrap_or_else(|| inherited_effort(provider_value, effective_role));
         let manual_allowed = provider.is_some_and(allows_manual);
         let choices = available_models(provider_value, native);
         let unavailable_model =
             !selected.is_empty() && !choices.iter().any(|model| model.value == selected);
         let manual = manual_allowed && (self.manual[index] || unavailable_model);
-        let problem = if self.draft.is_empty() {
+        let problem = if self.draft.is_empty() || follows_opus {
             None
         } else {
             row_problem(
@@ -2438,7 +2462,11 @@ impl ClaudeAssignments {
 
         let mut provider_items = vec![option(
             "",
-            locale.text(FOLLOW_PROVIDER, "Follow default provider"),
+            if follows_opus {
+                locale.text("沿用 Opus", "Follow Opus")
+            } else {
+                locale.text(FOLLOW_PROVIDER, "Follow default provider")
+            },
         )];
         if let Some(id) = provider_id.filter(|_| provider.is_none_or(subscription)) {
             provider_items.push(option(
@@ -2544,7 +2572,7 @@ impl ClaudeAssignments {
         }
     }
 
-    /// The fourth row is an independent web-search target. It is unassigned by
+    /// The final row is an independent web-search target. It is unassigned by
     /// default and does not fall back to the active provider in the editor.
     fn search_row(
         &self,
@@ -2697,7 +2725,7 @@ impl ClaudeAssignments {
         if matches!(action, AssignmentAction::Restore) && self.baseline.is_some() {
             self.draft.clear();
             self.search_draft = None;
-            self.manual = [false; 4];
+            self.manual = [false; ASSIGNMENT_ROWS];
         } else if !matches!(self.status(providers), AssignmentStatus::Ready) {
             return;
         } else {

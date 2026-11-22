@@ -10,14 +10,15 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use matou_native_core::provider_launch::resolve_claude_executable;
+use matou_native_core::{
+    claude_role_budget::CLAUDE_ROLES, provider_launch::resolve_claude_executable,
+};
 use serde_json::{Value, json};
 
 use crate::protocol::{ClaudeCatalogModel, write_message};
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(6);
 const CACHE_TTL: Duration = Duration::from_secs(60);
-const ALIASES: [&str; 5] = ["default", "opus", "sonnet", "haiku", "fable"];
 const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
 struct CachedCatalog {
@@ -174,7 +175,7 @@ fn collect_models(
         else {
             continue;
         };
-        if !ALIASES.contains(&alias) || id.is_empty() {
+        if (alias != "default" && !CLAUDE_ROLES.contains(&alias)) || id.is_empty() {
             continue;
         }
         let Some(base) = context_usage(stream, alias)? else {

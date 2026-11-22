@@ -12,8 +12,8 @@ use serde_json::{Map, Value, json};
 
 use crate::{
     claude_role_budget::{
-        CLAUDE_ROLES as ROLES, ClaudeBudgetCompaction, ClaudeBudgetTarget, ClaudeRoleBudget,
-        MAXIMUM_CONTEXT, claude_role_budget,
+        CLAUDE_ROLE_LABELS, CLAUDE_ROLES as ROLES, ClaudeBudgetCompaction, ClaudeBudgetTarget,
+        ClaudeRoleBudget, MAXIMUM_CONTEXT, claude_role_budget,
     },
     provider_config::custom_context_window,
     pty::{CALLER_SESSION_MARKERS, LaunchProfile, ShellLaunch, get_var, remove_var, set_var},
@@ -438,7 +438,7 @@ impl ClaudeLaunch {
 /// Never serialize or format it as part of a launch diagnostic.
 pub struct ClaudeGatewayProjection {
     pub source: Option<ClaudeGatewayConnection>,
-    pub roles: [Option<ClaudeGatewayRole>; 3],
+    pub roles: [Option<ClaudeGatewayRole>; ROLES.len()],
     pub web_search: Option<ClaudeGatewayRole>,
     pub compaction: Option<ClaudeGatewayCompaction>,
     pub unknown_compaction_context: bool,
@@ -447,8 +447,8 @@ pub struct ClaudeGatewayProjection {
     source_model: String,
     source_context_windows: BTreeMap<String, u64>,
     source_provider_id: String,
-    source_models: [Option<String>; 3],
-    source_efforts: [Option<String>; 3],
+    source_models: [Option<String>; ROLES.len()],
+    source_efforts: [Option<String>; ROLES.len()],
     source_effort: Option<String>,
     has_role_assignments: bool,
     startup_role: Option<&'static str>,
@@ -585,8 +585,16 @@ impl ClaudeGatewayProjection {
         })
     }
 
+    pub fn role_target(&self, index: usize) -> Option<&ClaudeGatewayRole> {
+        self.roles[index].as_ref().or_else(|| {
+            (ROLES[index] == "fable")
+                .then(|| self.roles[0].as_ref())
+                .flatten()
+        })
+    }
+
     pub fn literal_effort(&self, model: &str) -> Option<&str> {
-        api_role_index(model)
+        literal_role_index(model)
             .or_else(|| {
                 role_with_effort(model, |role| {
                     let index = ROLES.iter().position(|candidate| *candidate == role)?;
@@ -601,7 +609,7 @@ impl ClaudeGatewayProjection {
         if self.has_role_assignments {
             return None;
         }
-        self.source_models[api_role_index(model)?].as_deref()
+        self.source_models[literal_role_index(model)?].as_deref()
     }
 
     fn direct_gateway_required(&self) -> bool {
@@ -647,7 +655,7 @@ impl ClaudeGatewayProjection {
         if !self.stream_keep_alive {
             return false;
         }
-        let candidate = api_role_index(model)
+        let candidate = literal_role_index(model)
             .or_else(|| {
                 role_with_effort(model, |role| {
                     let index = ROLES.iter().position(|candidate| *candidate == role)?;
@@ -691,21 +699,20 @@ impl ClaudeGatewayProjection {
         if self.has_role_assignments {
             clear_role_model_environment(&mut launch.env);
         }
-        for (alias, index) in [("OPUS", 0), ("SONNET", 1), ("HAIKU", 2), ("FABLE", 0)] {
+        for (index, role) in ROLES.into_iter().enumerate() {
             let (prefix, name) = if self.has_role_assignments {
-                ("matou-role", self.catalog_model(index))
-            } else if alias != "FABLE"
-                && let Some(model) = self.source_models[index]
-                    .as_deref()
-                    .filter(|model| !model.is_empty())
+                ("matou-role", self.display_model(index))
+            } else if let Some(model) = self.source_models[index]
+                .as_deref()
+                .filter(|model| !model.is_empty())
             {
                 ("matou-api", model)
             } else {
                 continue;
             };
-            let key = format!("ANTHROPIC_DEFAULT_{alias}_MODEL");
+            let key = role_model_env_key(role);
             projected.insert(format!("{key}_NAME"), name.into());
-            projected.insert(key, format!("{prefix}/{}", ROLES[index]));
+            projected.insert(key, format!("{prefix}/{role}"));
         }
         for (name, value) in &projected {
             set_var(&mut launch.env, name.into(), value.into());
@@ -731,16 +738,16 @@ impl ClaudeGatewayProjection {
         }
         let options: [Value; ROLES.len()] = std::array::from_fn(|index| {
             let role = ROLES[index];
-            let (first, rest) = role.split_at(1);
-            let model = self.catalog_model(index);
-            let provider_id = self.roles[index]
-                .as_ref()
+            let label = CLAUDE_ROLE_LABELS[index];
+            let model = self.display_model(index);
+            let provider_id = self
+                .role_target(index)
                 .map_or(self.source_provider_id.as_str(), |target| {
                     &target.provider_id
                 });
             serde_json::json!({
                 "model": role,
-                "label": format!("{}{rest} · {model}", first.to_ascii_uppercase()),
+                "label": format!("{label} · {model}"),
                 "description": provider_id,
             })
         });
@@ -750,10 +757,9 @@ impl ClaudeGatewayProjection {
         }))
     }
 
-    fn catalog_model(&self, index: usize) -> &str {
-        self.roles[index]
-            .as_ref()
-            .map_or(ROLES[index], |target| &target.catalog_model)
+    fn display_model(&self, index: usize) -> &str {
+        self.role_target(index)
+            .map_or(ROLES[index], |target| &target.model)
     }
 }
 
@@ -1094,22 +1100,26 @@ fn prepare_claude(
             None,
         ),
     };
-    let model = match provider_binding["model"].as_str() {
+    let selected_model = match provider_binding["model"].as_str() {
         Some(bound)
             if bound.starts_with("matou-chatgpt/") || bound.starts_with("matou-antigravity/") =>
         {
             &provider.model
         }
-        Some(bound) => match bound
-            .strip_prefix("matou-api/")
-            .filter(|role| ROLES.contains(role))
-        {
-            // The native process connects directly to the configured endpoint.
-            // Translate a model ID previously used through the request gateway.
-            Some(role) => provider.model_mapping.get(role).unwrap_or(&provider.model),
-            None => bound,
-        },
+        Some(bound) => bound,
         None => &provider.model,
+    };
+    // Translate a model selected through the request gateway for direct launches.
+    let selected_role = literal_role_index(selected_model).map(|index| ROLES[index]);
+    let model = match selected_role {
+        Some(role) => effective_role_model(&provider, role).unwrap_or_else(|| {
+            if selected_model.starts_with("matou-api/") {
+                &provider.model
+            } else {
+                selected_model
+            }
+        }),
+        None => selected_model,
     };
     let (provider, model, effort, assigned_role) = match &assigned {
         Some((role, assignment, provider)) => {
@@ -1124,7 +1134,7 @@ fn prepare_claude(
             let effort = if bound_role.is_some() || remembered {
                 provider_binding["effort"].as_str()
             } else {
-                reasoning_effort(&provider, model)
+                reasoning_effort(&provider, model, selected_role)
             };
             (&provider, model, effort, bound_role)
         }
@@ -1135,6 +1145,7 @@ fn prepare_claude(
         || assigned_role.is_some()
         || assignments.is_some_and(|assignments| !assignments.is_empty())
         || (remembered && provider_binding["clearAssignmentEnvironment"] == true);
+    clear_role_model_environment(&mut environment);
     if clear_assignment_environment {
         clear_assigned_environment(provider, &mut environment);
     }
@@ -1214,10 +1225,12 @@ fn gateway_projection(
                     })))
         .then_some(projection);
     };
-    // A keyless source can only be replaced when all three selectors have API
-    // targets. Otherwise preserve the existing launch for this mixed setup.
+    // A keyless source needs API targets for every role. Fable can use Opus.
     if projection.source.is_none()
-        && (startup_role.is_none() || ROLES.iter().any(|role| !assignments.contains_key(*role)))
+        && (startup_role.is_none()
+            || ROLES
+                .into_iter()
+                .any(|role| !assignments.contains_key(fallback_role(source, assignments, role))))
     {
         return None;
     }
@@ -1252,14 +1265,11 @@ fn gateway_projection(
                 assignment.effort.as_deref(),
             )?)
         } else {
-            source
-                .model_mapping
-                .get(role)
-                .and_then(|model| target(source, role, model, None))
+            mapped_role_model(source, role).and_then(|model| target(source, role, model, None))
         };
     }
     if let Some(index) = ROLES.iter().position(|role| Some(*role) == startup_role)
-        && projection.roles[index].is_none()
+        && projection.role_target(index).is_none()
     {
         return None;
     }
@@ -1278,7 +1288,7 @@ pub fn is_gemini_model(model: &str) -> bool {
 fn api_projection(config: &Value, source: &Provider) -> ClaudeGatewayProjection {
     ClaudeGatewayProjection {
         source: gateway_connection(source),
-        roles: [None, None, None],
+        roles: [const { None }; ROLES.len()],
         web_search: None,
         compaction: None,
         unknown_compaction_context: false,
@@ -1289,8 +1299,13 @@ fn api_projection(config: &Value, source: &Provider) -> ClaudeGatewayProjection 
         source_model: source.model.clone(),
         source_context_windows: source_context_windows(config, &source.id, None),
         source_provider_id: source.id.clone(),
-        source_models: ROLES.map(|role| source.model_mapping.get(role).cloned()),
-        source_efforts: ROLES.map(|role| source.effort_mapping.get(role).cloned()),
+        source_models: ROLES.map(|role| effective_role_model(source, role).map(str::to_owned)),
+        source_efforts: ROLES.map(|role| {
+            source
+                .effort_mapping
+                .get(provider_mapping_role(source, role))
+                .cloned()
+        }),
         source_effort: source.reasoning_effort.clone(),
         has_role_assignments: false,
         startup_role: None,
@@ -1484,7 +1499,7 @@ fn independent_gateway_projection(
         unknown_compaction_context,
         ..
     } = claude_role_budget(
-        std::array::from_fn(|index| projection.roles[index].as_ref().unwrap().budget_target()),
+        std::array::from_fn(|index| projection.role_target(index).unwrap().budget_target()),
         compaction,
         &context_windows(config, preferences),
     )?;
@@ -1605,9 +1620,12 @@ fn snapshot_api_roles<'a>(
     source: &Provider,
     assignments: &ClaudeRoleAssignments,
     native_catalog: &impl Fn() -> &'a [Value],
-) -> Result<[Option<ClaudeGatewayRole>; 3]> {
-    let mut targets = [None, None, None];
+) -> Result<[Option<ClaudeGatewayRole>; ROLES.len()]> {
+    let mut targets = [const { None }; ROLES.len()];
     for (index, role) in ROLES.into_iter().enumerate() {
+        if fallback_role(source, assignments, role) != role {
+            continue;
+        }
         let assignment = assignments.get(role);
         let id = assignment.map_or(source.id.as_str(), |target| target.provider_id.as_str());
         let entry = provider_entry(config, id)
@@ -1875,21 +1893,15 @@ fn model_role(source: &Provider, model: &str) -> Option<&'static str> {
 }
 
 fn startup_role_alias(model: &str) -> Option<&'static str> {
-    if matches!(
-        model,
-        "matou-role/opus-fallback" | "claude-fable-5" | "claude-fable-5-2" | "claude-fable-5-5"
-    ) {
+    if model == "matou-role/opus-fallback" {
         return Some("opus");
     }
     let role_model = model
         .strip_prefix("matou-role/")
         .or_else(|| model.strip_prefix("matou-api/"))
         .unwrap_or(model);
-    match role_model {
-        "opus" | "fable" => return Some("opus"),
-        "sonnet" => return Some("sonnet"),
-        "haiku" => return Some("haiku"),
-        _ => {}
+    if let Some(role) = ROLES.into_iter().find(|role| *role == role_model) {
+        return Some(role);
     }
     let subscription_model = model.strip_prefix("matou-antigravity/").unwrap_or(model);
     match model
@@ -1897,9 +1909,13 @@ fn startup_role_alias(model: &str) -> Option<&'static str> {
         .unwrap_or(subscription_model)
     {
         "matou-opus" | "matou-opus-fallback" => return Some("opus"),
+        "matou-fable" => return Some("fable"),
         "matou-sonnet" => return Some("sonnet"),
         "matou-haiku" => return Some("haiku"),
         _ => {}
+    }
+    if subscription_model == "claude-fable-5" || subscription_model.starts_with("claude-fable-5-") {
+        return Some("fable");
     }
     match subscription_model {
         "claude-opus-5" | "claude-opus-5-5" => Some("opus"),
@@ -1917,6 +1933,7 @@ fn resolve_startup_assignment<'a>(
     let Some(role) = startup_role(source) else {
         return Ok(None);
     };
+    let role = fallback_role(source, assignments, role);
     let Some(assignment) = assignments.get(role) else {
         // Native has no built-in model catalog. Unassigned roles keep the source
         // launch without the frozen runtime's fallback target validation.
@@ -1934,6 +1951,7 @@ fn new_assigned_context_window(
 ) -> Result<Option<u64>> {
     let providers = provider_entries(config).unwrap_or_default();
     let roles = ROLES.map(|role| {
+        let role = fallback_role(source, &preferences.assignments, role);
         if let Some(assignment) = preferences.assignments.get(role) {
             return budget_target(providers, &assignment.provider_id, Some(&assignment.model));
         }
@@ -2039,17 +2057,60 @@ fn without_context_suffix(model: &str) -> &str {
         .map_or(model, |(base, _)| base)
 }
 
-fn reasoning_effort<'a>(provider: &'a Provider, model: &str) -> Option<&'a str> {
-    role_with_effort(model, |role| {
-        provider.model_mapping.get(role).map(String::as_str)
+fn mapped_role_model<'a>(provider: &'a Provider, role: &str) -> Option<&'a str> {
+    provider
+        .model_mapping
+        .get(role)
+        .map(String::as_str)
+        .filter(|model| !model.trim().is_empty())
+}
+
+fn provider_mapping_role<'a>(provider: &Provider, role: &'a str) -> &'a str {
+    if role == "fable" && mapped_role_model(provider, role).is_none() {
+        "opus"
+    } else {
+        role
+    }
+}
+
+fn effective_role_model<'a>(provider: &'a Provider, role: &str) -> Option<&'a str> {
+    mapped_role_model(provider, provider_mapping_role(provider, role))
+}
+
+fn fallback_role(
+    source: &Provider,
+    assignments: &ClaudeRoleAssignments,
+    role: &'static str,
+) -> &'static str {
+    if assignments.contains_key(role) {
+        role
+    } else {
+        provider_mapping_role(source, role)
+    }
+}
+
+fn reasoning_effort<'a>(
+    provider: &'a Provider,
+    model: &str,
+    role: Option<&str>,
+) -> Option<&'a str> {
+    role.or_else(|| {
+        role_with_effort(model, |role| mapped_role_model(provider, role)).map(|index| ROLES[index])
     })
-    .and_then(|index| provider.effort_mapping.get(ROLES[index]))
+    .and_then(|role| {
+        provider
+            .effort_mapping
+            .get(provider_mapping_role(provider, role))
+    })
     .map(String::as_str)
     .or(provider.reasoning_effort.as_deref())
 }
 
-fn api_role_index(model: &str) -> Option<usize> {
-    let role = model.strip_prefix("matou-api/")?;
+fn literal_role_index(model: &str) -> Option<usize> {
+    let model = without_context_suffix(model);
+    let role = model
+        .strip_prefix("matou-api/")
+        .or_else(|| startup_role_alias(model).filter(|role| *role == "fable"))?;
     ROLES.iter().position(|candidate| *candidate == role)
 }
 
@@ -2074,23 +2135,35 @@ fn role_with_effort<'a>(model: &str, mapping: impl Fn(&str) -> Option<&'a str>) 
     mapped.or_else(inferred)
 }
 
+pub fn is_claude_model_environment(key: &OsStr) -> bool {
+    #[cfg(windows)]
+    let key = key.to_ascii_uppercase();
+    let key = key.as_encoded_bytes();
+    key.starts_with(b"ANTHROPIC_DEFAULT_")
+        || matches!(
+            key,
+            b"ANTHROPIC_MODEL"
+                | b"ANTHROPIC_SMALL_FAST_MODEL"
+                | b"CLAUDE_CODE_GATEWAY_HINT_HEADERS"
+                | b"CLAUDE_CODE_SUBAGENT_MODEL_FORCE"
+        )
+        || (key.starts_with(b"CLAUDE_CODE_")
+            && key
+                .windows(b"SUBAGENT".len())
+                .position(|part| part == b"SUBAGENT")
+                .is_some_and(|start| {
+                    let suffix = &key[start + b"SUBAGENT".len()..];
+                    [b"MODEL".as_slice(), b"MODEL_FORCE", b"MODEL_OVERRIDE"]
+                        .into_iter()
+                        .any(|ending| suffix.ends_with(ending))
+                }))
+}
+
 fn clear_role_model_environment(environment: &mut BTreeMap<OsString, OsString>) {
-    environment.retain(|key, _| {
-        #[cfg(windows)]
-        let key = key.to_ascii_uppercase();
-        let key = key.as_encoded_bytes();
-        !(key.starts_with(b"ANTHROPIC_DEFAULT_")
-            || matches!(key, b"ANTHROPIC_MODEL" | b"ANTHROPIC_SMALL_FAST_MODEL")
-            || (key.starts_with(b"CLAUDE_CODE_")
-                && key.ends_with(b"MODEL")
-                && key
-                    .windows(b"SUBAGENT".len())
-                    .any(|part| part == b"SUBAGENT")))
-    });
+    environment.retain(|key, _| !is_claude_model_environment(key));
 }
 
 fn clear_assigned_environment(provider: &Provider, environment: &mut BTreeMap<OsString, OsString>) {
-    clear_role_model_environment(environment);
     for key in [
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_AUTH_TOKEN",
@@ -2108,32 +2181,25 @@ fn clear_assigned_environment(provider: &Provider, environment: &mut BTreeMap<Os
     }
 }
 
+pub fn role_model_env_key(role: &str) -> String {
+    format!("ANTHROPIC_DEFAULT_{}_MODEL", role.to_ascii_uppercase())
+}
+
+fn project_role_model(environment: &mut BTreeMap<OsString, OsString>, role: &str, model: &str) {
+    let key = role_model_env_key(role);
+    set_var(environment, format!("{key}_NAME").into(), model.into());
+    set_var(environment, key.into(), model.into());
+}
+
 fn project_assigned_role(
     provider: &Provider,
     role: &str,
     model: &str,
     environment: &mut BTreeMap<OsString, OsString>,
 ) {
-    let key = format!("ANTHROPIC_DEFAULT_{}_MODEL", role.to_ascii_uppercase());
-    set_var(environment, format!("{key}_NAME").into(), model.into());
-    set_var(environment, key.into(), model.into());
-
-    let opus = if role == "opus" {
-        Some(model)
-    } else {
-        provider
-            .model_mapping
-            .get("opus")
-            .map(String::as_str)
-            .filter(|model| !model.is_empty())
-    };
-    if let Some(opus) = opus {
-        for key in [
-            "ANTHROPIC_DEFAULT_FABLE_MODEL",
-            "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME",
-        ] {
-            set_var(environment, key.into(), opus.into());
-        }
+    project_role_model(environment, role, model);
+    if role == "opus" && mapped_role_model(provider, "fable").is_none() {
+        project_role_model(environment, "fable", model);
     }
 }
 
@@ -2149,13 +2215,9 @@ fn project_environment(provider: &Provider, environment: &mut BTreeMap<OsString,
     if !endpoint.is_empty() {
         set_var(environment, "ANTHROPIC_BASE_URL".into(), endpoint.into());
     }
-    for (role, model) in &provider.model_mapping {
-        if !model.is_empty() {
-            set_var(
-                environment,
-                format!("ANTHROPIC_DEFAULT_{}_MODEL", role.to_uppercase()).into(),
-                model.into(),
-            );
+    for role in ROLES {
+        if let Some(model) = effective_role_model(provider, role) {
+            project_role_model(environment, role, model);
         }
     }
     remove_var(environment, OsStr::new("NO_COLOR"));

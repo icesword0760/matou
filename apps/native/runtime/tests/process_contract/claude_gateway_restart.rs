@@ -61,17 +61,17 @@ fn started(
     assert_eq!(env["ANTHROPIC_DEFAULT_OPUS_MODEL"], "matou-role/opus");
     assert_eq!(env["ANTHROPIC_DEFAULT_SONNET_MODEL"], "matou-role/sonnet");
     assert_eq!(env["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "matou-role/haiku");
-    assert_eq!(env["ANTHROPIC_DEFAULT_FABLE_MODEL"], "matou-role/opus");
+    assert_eq!(env["ANTHROPIC_DEFAULT_FABLE_MODEL"], "matou-role/fable");
     assert_eq!(env["CLAUDE_CODE_GATEWAY_HINT_HEADERS"], "1");
     assert_eq!(env["NO_PROXY"], "fixture.invalid,127.0.0.1,localhost");
     assert_eq!(env["no_proxy"], env["NO_PROXY"]);
     assert_eq!(
         payload["modelPicker"]["options"].as_array().unwrap().len(),
-        3
+        4
     );
     assert_eq!(
         payload["modelOverrides"]["claude-fable-5"],
-        "matou-role/opus-fallback"
+        "matou-role/fable"
     );
     let parsed = url::Url::parse(url)?;
     assert_eq!(parsed.host_str(), Some("127.0.0.1"));
