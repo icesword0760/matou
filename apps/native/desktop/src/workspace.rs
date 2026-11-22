@@ -793,6 +793,21 @@ enum ProviderRestoreBanner<'a> {
     },
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LoadingBadge {
+    Recovering,
+    Loading,
+}
+
+impl LoadingBadge {
+    fn label(self, locale: &InterfaceLocale) -> &'static str {
+        match self {
+            Self::Recovering => locale.text("恢复中", "Recovering"),
+            Self::Loading => locale.text("加载中", "Loading"),
+        }
+    }
+}
+
 struct PendingProviderRestore {
     revision: Option<u64>,
     _watchdog: gpui::Task<()>,
@@ -1449,6 +1464,7 @@ pub struct Workspace {
     hovered_child_badge: Option<String>,
     terminals: HashMap<String, Entity<TerminalSurface>>,
     recovery: HashMap<String, RecoveryState>,
+    restoring_sessions: HashSet<String>,
     recovery_controls: HashMap<String, FocusHandle>,
     deferred_previews: HashMap<String, DeferredPreview>,
     deferred_controls: HashMap<String, [FocusHandle; 2]>,
@@ -1460,8 +1476,7 @@ pub struct Workspace {
     loader_request_id: u64,
     #[cfg(target_os = "macos")]
     recovery_water: HashMap<String, Entity<RecoveryWater>>,
-    #[cfg(target_os = "macos")]
-    recovery_water_content: HashSet<String>,
+    first_frame_content: HashSet<String>,
     #[cfg(target_os = "macos")]
     recovery_water_visibility: Option<gpui::Task<()>>,
     storage_fault_sessions: HashSet<String>,
@@ -2514,6 +2529,7 @@ impl Workspace {
             hovered_child_badge: None,
             terminals: HashMap::new(),
             recovery: HashMap::new(),
+            restoring_sessions: HashSet::new(),
             recovery_controls: HashMap::new(),
             deferred_previews: HashMap::new(),
             deferred_controls: HashMap::new(),
@@ -2525,8 +2541,7 @@ impl Workspace {
             loader_request_id: 0,
             #[cfg(target_os = "macos")]
             recovery_water: HashMap::new(),
-            #[cfg(target_os = "macos")]
-            recovery_water_content: HashSet::new(),
+            first_frame_content: HashSet::new(),
             #[cfg(target_os = "macos")]
             recovery_water_visibility: None,
             storage_fault_sessions: HashSet::new(),
@@ -3183,8 +3198,8 @@ impl Workspace {
         self.transport_connected = false;
         self.domain_ready = false;
         self.session_frames.clear();
-        #[cfg(target_os = "macos")]
-        self.recovery_water_content.clear();
+        self.first_frame_content.clear();
+        self.restoring_sessions.clear();
         self.recovery.clear();
         self.deferred_previews.clear();
         self.deferred_controls.clear();
@@ -3524,9 +3539,9 @@ impl Workspace {
                     self.pending_card_action = None;
                     self.pending_provider_restores.clear();
                     self.session_frames.clear();
-                    #[cfg(target_os = "macos")]
+                    self.restoring_sessions.clear();
                     if matches!(phase, ConnectionPhase::Reconnecting) {
-                        self.recovery_water_content.clear();
+                        self.first_frame_content.clear();
                     }
                     if matches!(
                         phase,
@@ -3973,6 +3988,7 @@ impl Workspace {
                 }
                 if fresh_ready {
                     self.session_frames.clear();
+                    self.restoring_sessions.clear();
                     self.recovery.clear();
                     self.deferred_previews.clear();
                     self.deferred_controls.clear();
@@ -3988,6 +4004,7 @@ impl Workspace {
                     {
                         self.recovery
                             .insert(id.to_owned(), RecoveryState::Restoring);
+                        self.restoring_sessions.insert(id.to_owned());
                     }
                     self.resend_terminal_sizes(cx);
                 }
@@ -4116,8 +4133,8 @@ impl Workspace {
                     self.card_motion.remove(&id);
                     self.resize_revisions.remove(&id);
                     self.session_frames.remove(&id);
-                    #[cfg(target_os = "macos")]
-                    self.recovery_water_content.remove(&id);
+                    self.first_frame_content.remove(&id);
+                    self.restoring_sessions.remove(&id);
                 }
             }
             Event::SceneClosePreview {
@@ -4368,19 +4385,19 @@ impl Workspace {
                         );
                     if valid {
                         self.session_frames.insert(session_id.clone());
-                        #[cfg(target_os = "macos")]
-                        if !self.recovery_water_content.contains(&session_id)
+                        // The first non-empty grid ends the handoff on every
+                        // platform. An accepted empty frame is not a visible
+                        // first frame.
+                        if !self.first_frame_content.contains(&session_id)
                             && screen.cells.iter().any(|cell| {
                                 cell.has_content
                                     && !cell.invisible
                                     && cell.text.chars().any(|ch| !ch.is_whitespace())
                             })
                         {
-                            // Qualify this card in the same update that gives the
-                            // surface its first visible grid. Ready and empty
-                            // resize frames do not end the visual handoff.
-                            self.recovery_water_content.insert(session_id.clone());
-                            #[cfg(debug_assertions)]
+                            self.first_frame_content.insert(session_id.clone());
+                            self.restoring_sessions.remove(&session_id);
+                            #[cfg(all(target_os = "macos", debug_assertions))]
                             if let Some(trace) = &self.motion_trace {
                                 record_motion(
                                     trace,
@@ -4427,7 +4444,20 @@ impl Workspace {
                 if self.is_stopped_session(&session_id) {
                     return;
                 }
-                #[cfg(target_os = "macos")]
+                match &state {
+                    // Remember the Restoring intent so a later Ready can still
+                    // label the card as recovery until its first visible frame.
+                    RecoveryState::Restoring => {
+                        self.restoring_sessions.insert(session_id.clone());
+                    }
+                    RecoveryState::Deferred
+                    | RecoveryState::Failed(_)
+                    | RecoveryState::StartFailed(_)
+                    | RecoveryState::Restarting(_) => {
+                        self.restoring_sessions.remove(&session_id);
+                    }
+                    RecoveryState::Ready => {}
+                }
                 if matches!(state, RecoveryState::Restoring)
                     && matches!(
                         self.recovery.get(&session_id),
@@ -4438,7 +4468,7 @@ impl Workspace {
                         )
                     )
                 {
-                    self.recovery_water_content.remove(&session_id);
+                    self.first_frame_content.remove(&session_id);
                 }
                 if !matches!(&state, RecoveryState::Ready)
                     || (self.recovery_blocked(&session_id)
@@ -4621,8 +4651,8 @@ impl Workspace {
                 self.deferred_previews.remove(id);
                 self.deferred_controls.remove(id);
                 self.session_frames.remove(id);
-                #[cfg(target_os = "macos")]
-                self.recovery_water_content.remove(id);
+                self.first_frame_content.remove(id);
+                self.restoring_sessions.remove(id);
                 self.resize_revisions.remove(id);
                 continue;
             }
@@ -5382,6 +5412,47 @@ impl Workspace {
         self.recovery.get(id) == Some(&RecoveryState::Deferred)
     }
 
+    /// The transient first-frame badge shared by the recovery water handoff and
+    /// ordinary card loading. Deferred/failed/archived cards own other surfaces.
+    fn loading_badge(
+        &self,
+        id: &str,
+        node: &Value,
+        awaiting_first_frame: bool,
+    ) -> Option<LoadingBadge> {
+        if !awaiting_first_frame || !self.recovery_water_needed(id, node) {
+            return None;
+        }
+        Some(
+            if matches!(self.recovery.get(id), Some(RecoveryState::Restoring))
+                || self.restoring_sessions.contains(id)
+            {
+                LoadingBadge::Recovering
+            } else {
+                LoadingBadge::Loading
+            },
+        )
+    }
+
+    /// Windows has no recovery water; the first non-empty grid recorded by the
+    /// shared frame handler is the equivalent visible-first-frame handoff.
+    /// `session_frames` alone is not enough because an accepted empty frame can
+    /// precede the first painted content.
+    #[cfg(not(target_os = "macos"))]
+    fn can_show_loading_badge(&self) -> bool {
+        !self.wiring.board_open
+            && self.read_only.is_none()
+            && self.active_path_valid()
+            && self
+                .hierarchy
+                .as_ref()
+                .is_some_and(|hierarchy| hierarchy.scene.is_some())
+            && !matches!(
+                self.commands.connection().1,
+                ConnectionPhase::Stopped | ConnectionPhase::Blocked(_)
+            )
+    }
+
     fn request_deferred_preview(&mut self, id: &str) {
         let Some(cwd) = self
             .graph_node(id)
@@ -5548,14 +5619,13 @@ impl Workspace {
         }
     }
 
-    #[cfg(target_os = "macos")]
     fn recovery_water_needed(&self, id: &str, node: &Value) -> bool {
         node["archivedAt"].is_null()
             && !self.environment_unavailable(id)
             && fork_failure_copy(node).is_none()
             && fork_progress_copy(node).is_none()
             && Self::provider_restore_state(node) != Some("failed")
-            && !self.recovery_water_content.contains(id)
+            && !self.first_frame_content.contains(id)
             && !self.storage_fault_sessions.contains(id)
             && !matches!(
                 self.recovery.get(id),
@@ -5571,7 +5641,7 @@ impl Workspace {
 
     #[cfg(target_os = "macos")]
     fn recovery_water_covers_terminal(&self, id: &str) -> bool {
-        self.recovery_water.contains_key(id) && !self.recovery_water_content.contains(id)
+        self.recovery_water.contains_key(id) && !self.first_frame_content.contains(id)
     }
 
     #[cfg(target_os = "macos")]
@@ -9243,6 +9313,9 @@ impl Workspace {
         id: &str,
         node: &'a Value,
     ) -> Option<ProviderRestoreBanner<'a>> {
+        if self.is_deferred(id) {
+            return None;
+        }
         if !node["archivedAt"].is_null() || node["forkState"] == "failed" {
             return None;
         }
@@ -11084,10 +11157,68 @@ impl Workspace {
     /// host render path uses `session_card_header_themed`.
     #[allow(dead_code)]
     fn session_card_header(title: UiText, actions: Div) -> Div {
-        Self::session_card_header_themed(title, actions, &matou_native_desktop::theme_tokens::LIGHT)
+        Self::session_card_header_themed(
+            title,
+            actions,
+            &matou_native_desktop::theme_tokens::LIGHT,
+            None,
+        )
     }
 
-    fn session_card_header_themed(title: UiText, actions: Div, palette: &ThemePalette) -> Div {
+    fn loading_badge_element(label: &'static str) -> Div {
+        let dot = div()
+            .flex_none()
+            .size(px(6.))
+            .rounded_full()
+            .bg(rgb(0x56a7ef))
+            .shadow(vec![loading_badge_ring(3.)]);
+        let dot: AnyElement = if reduced_motion() {
+            dot.into_any_element()
+        } else {
+            dot.with_animation(
+                // The card header's element id scopes this pulse per card.
+                "loading-badge-pulse",
+                Animation::new(Duration::from_millis(1350))
+                    .repeat()
+                    .with_easing(bounce(ease_in_out)),
+                |dot, pulse| {
+                    // CSS scales the whole dot, including its ring, and eases
+                    // back to the base state at the end of each CSS keyframe.
+                    let scale = 1. - 0.18 * pulse;
+                    dot.size(px(6. * scale))
+                        .opacity(1. - 0.55 * pulse)
+                        .shadow(vec![loading_badge_ring(3. * scale)])
+                },
+            )
+            .into_any_element()
+        };
+        div()
+            .flex_none()
+            .ml(px(8.))
+            .flex()
+            .items_center()
+            .gap(px(5.))
+            .text_size(px(9.))
+            .line_height(relative(1.2))
+            .text_color(rgb(0x87b9eb))
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(6.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(dot),
+            )
+            .child(div().whitespace_nowrap().child(ui_text(label)))
+    }
+
+    fn session_card_header_themed(
+        title: UiText,
+        actions: Div,
+        palette: &ThemePalette,
+        loading_badge: Option<Div>,
+    ) -> Div {
         let background = rgba(palette.cards.header);
         #[cfg(debug_assertions)]
         crate::settings_shell::probe_workspace_surfaces(|probe| {
@@ -11104,17 +11235,23 @@ impl Workspace {
             .text_color(rgba(palette.cards.title))
             .child(
                 // The percentage resolves against the space left after the actions.
-                div().flex_1().min_w_0().flex().items_center().child(
-                    div()
-                        .min_w_0()
-                        .max_w(relative(0.46))
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .text_size(px(12.))
-                        .font_weight(FontWeight::BOLD)
-                        .child(title),
-                ),
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .max_w(relative(0.46))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::BOLD)
+                            .child(title),
+                    )
+                    .children(loading_badge),
             )
             .child(actions)
     }
@@ -15031,6 +15168,26 @@ impl Render for Workspace {
             } else {
                 None
             };
+            // The water owns the card handoff on macOS; Windows uses the
+            // equivalent first-frame state so both platforms label the gap.
+            let loading_badge = node
+                .and_then(|node| {
+                    #[cfg(target_os = "macos")]
+                    let awaiting_first_frame = water.is_some();
+                    #[cfg(not(target_os = "macos"))]
+                    let awaiting_first_frame = self.can_show_loading_badge()
+                        && (!narrow || selected)
+                        && positions[id] < carousel_left + viewport_width
+                        && positions[id] + widths[id] > carousel_left;
+                    self.loading_badge(id, node, awaiting_first_frame)
+                })
+                .map(|badge| {
+                    Self::loading_badge_element(badge.label(&self.locale)).children(
+                        workspace_wiring::wiring_probe_bounds(format!(
+                            "session-loading-badge-{id}"
+                        )),
+                    )
+                });
             let card = card
                 .capture_any_mouse_down(cx.listener(
                     move |this, event: &MouseDownEvent, window, cx| {
@@ -15218,6 +15375,7 @@ impl Render for Workspace {
                         ui_text(title.replace(['\r', '\n'], " ")),
                         actions,
                         &palette,
+                        loading_badge,
                     )
                     .id(SharedString::from(format!("session-header-{id}")))
                     .children(workspace_wiring::wiring_probe_bounds(format!(
@@ -17229,6 +17387,15 @@ fn shadow(color: u32, alpha: f32, y: f32, blur: f32) -> BoxShadow {
         offset: point(px(0.), px(y)),
         blur_radius: px(blur),
         spread_radius: px(0.),
+    }
+}
+
+fn loading_badge_ring(spread: f32) -> BoxShadow {
+    BoxShadow {
+        color: Hsla::from(rgb(0x4699e7)).alpha(0.12),
+        offset: point(px(0.), px(0.)),
+        blur_radius: px(0.),
+        spread_radius: px(spread),
     }
 }
 

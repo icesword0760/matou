@@ -693,7 +693,9 @@ fn codex_title_follows_the_active_index_and_preserves_manual_priority() -> Resul
     ));
     child.send(Command::Refresh)?;
     graph(&mut child, "old run could not write", |_, card| {
-        card["providerRestoreState"] == "restoring" && card["providerTitle"] == "自动摘要三"
+        card["providerRestoreState"] == "none"
+            && card["workStatus"] == "starting"
+            && card["providerTitle"] == "自动摘要三"
     })?;
     assert_eq!(
         matou_native_core::sessions::get_session(&db, &session)?
@@ -792,10 +794,7 @@ fn codex_resume_cold_start_preserves_card_binding_and_legacy_material() -> Resul
     );
     let new = replacement(&db, &session, &old)?;
     assert_ne!(new.runtime_generation, old.runtime_generation);
-    assert_eq!(
-        codex_binding(&db, &session)?.unwrap().restore_state,
-        "restoring"
-    );
+    assert_eq!(codex_binding(&db, &session)?.unwrap().restore_state, "none");
     let deadline = Instant::now() + Duration::from_secs(14);
     let (mut ready, mut timed_out) = (false, false);
     while !ready || !timed_out {
@@ -824,7 +823,9 @@ fn codex_resume_cold_start_preserves_card_binding_and_legacy_material() -> Resul
         }
     }
     assert_eq!(codex_binding(&db, &session)?.unwrap().restore_state, "none");
-    println!("identity timeout cleared the banner; late SessionStart still owns the run");
+    println!(
+        "identity timeout released startup without a banner; late SessionStart still owns the run"
+    );
     emit(&mut child, &home, "restored-start", started(UUID, &rollout))?;
     let graph = confirmed(&mut child, UUID)?;
     assert_eq!(
@@ -891,10 +892,15 @@ fn codex_resume_confirms_without_a_rollout_and_attaches_it_later() -> Result<()>
         for path in [foreign, outside] {
             assert_eq!(post_hook(&url, started(UUID, &path))?, 200);
         }
-        assert_eq!(
-            codex_binding(&db, &session)?.unwrap().restore_state,
-            "restoring"
-        );
+        let binding = codex_binding(&db, &session)?.unwrap();
+        assert_eq!(binding.restore_state, "none");
+        assert_eq!(binding.id, binding_id);
+        let work_status: String = db.query_row(
+            "SELECT work_status FROM sessions WHERE id = ?",
+            [&session],
+            |row| row.get(0),
+        )?;
+        assert_eq!(work_status, "starting");
 
         let mut start = json!({"hook_event_name": "SessionStart", "session_id": UUID});
         if with_missing_path {
@@ -1325,13 +1331,17 @@ fn codex_permission_switches_keep_card_uuid_and_retire_each_replaced_run() -> Re
         let config = fs::read(&config_path)?;
         set_permission(&mut child, mode)?;
         set_permission(&mut child, mode)?;
-        graph(&mut child, "stopping or restoring", |graph, card| {
-            assert!(
-                permission_receipt(graph, mode).is_none(),
-                "confirmed before hook"
-            );
-            card["providerRestoreState"] == "restoring" && card["workStatus"] == "starting"
-        })?;
+        graph(
+            &mut child,
+            "permission restart before confirmation",
+            |graph, card| {
+                assert!(
+                    permission_receipt(graph, mode).is_none(),
+                    "confirmed before hook"
+                );
+                card["providerRestoreState"] == "none" && card["workStatus"] == "starting"
+            },
+        )?;
         child.frame(|_, screen, _| screen_has_line(screen, "FIXTURE CODEX RESUME"))?;
         let cwd = fs::read_to_string(home.join("cwd"))?;
         assert_eq!(
@@ -1353,10 +1363,18 @@ fn codex_permission_switches_keep_card_uuid_and_retire_each_replaced_run() -> Re
             post_hook(&old_url, started(UUID, &rollout))?,
             200 | 404
         ));
-        assert_eq!(
-            codex_binding(&db, &session)?.unwrap().restore_state,
-            "restoring"
-        );
+        let waiting = codex_binding(&db, &session)?.unwrap();
+        assert_eq!(waiting.restore_state, "none");
+        assert_eq!(waiting.id, binding.id);
+        child.send(Command::Refresh)?;
+        graph(
+            &mut child,
+            "retired hook could not confirm permission",
+            |graph, card| {
+                assert!(permission_receipt(graph, mode).is_none());
+                card["workStatus"] == "starting" && card["providerRestoreState"] == "none"
+            },
+        )?;
         assert_eq!(post_hook(&current_url, started(UUID, &rollout))?, 200);
         let (graph, receipt) = wait_permission(&mut child, mode)?;
         assert!(receipt.get("error").is_none(), "{receipt}");
@@ -1633,10 +1651,29 @@ fn codex_permission_requires_session_start_and_times_out_to_retryable_failure() 
         session_id: session.clone(),
     })?;
     first_screen(&mut child, &home, Some(UUID), false)?;
+    assert_eq!(
+        codex_binding(&db, &session)?.unwrap().restore_state,
+        "restoring"
+    );
     assert_permission_argv(
         &home,
         &["--ask-for-approval", "on-request", "--sandbox", "read-only"],
     )?;
+    let retried = replacement(&db, &session, &failed)?;
+    let deadline = Instant::now() + Duration::from_secs(14);
+    loop {
+        if let Event::Graph(graph) = child.event(deadline, true)?
+            && let Some(ready) = graph["providerIdentityEvents"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|event| event["result"] == "timed-out" && event["runId"] == retried.id)
+        {
+            assert_eq!(ready["restoreState"], "none");
+            break;
+        }
+    }
+    assert_eq!(codex_binding(&db, &session)?.unwrap().restore_state, "none");
     assert_eq!(
         post_hook(&current_hook_url(&home)?, started(UUID, &rollout))?,
         200
@@ -1853,6 +1890,10 @@ fn codex_catalog_load_replaces_same_card_and_rejects_duplicate_and_occupied() ->
         Some("正在载入当前卡片" | "已载入当前卡片")
     ));
     child.frame(|_, screen, _| screen_has_line(screen, "FIXTURE CODEX RESUME"))?;
+    assert_eq!(
+        codex_binding(&db, &session)?.unwrap().restore_state,
+        "restoring"
+    );
     let args = fs::read_to_string(home.join("argv"))?;
     let args: Vec<_> = args.split_terminator('\0').collect();
     assert!(args.ends_with(&["resume", UUID]));

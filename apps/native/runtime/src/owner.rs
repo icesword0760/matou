@@ -2622,7 +2622,6 @@ impl ShellOwner {
                     .antigravity_binding(session_id)?
                     .filter(|binding| binding.resumable && &binding.provider_session_id == expected)
                     .context("Antigravity restore binding changed")?;
-                self.change_antigravity_restore(session_id, ClaudeRestore::Begin(&binding.id))?;
                 Some(binding)
             }
             AntigravityMode::Fork(parent) => {
@@ -3611,7 +3610,7 @@ impl ShellOwner {
                     .resume
                     .as_mut()
                     .filter(|resume| resume.tracks_restore());
-                let restoring = restore.is_some();
+                let mut restore_state = "none".to_owned();
                 if let Some(resume) = restore {
                     if resume.fresh_permission() {
                         hook.permission_identity_error =
@@ -3629,9 +3628,20 @@ impl ShellOwner {
                         ));
                         continue;
                     }
-                    if resume.binding_id.is_none() {
+                    let Some(binding_id) = &resume.binding_id else {
                         expired_forks.push((session_id.clone(), shell.run_id.clone()));
                         continue;
+                    };
+                    match sessions::claude_binding(&self.connection, session_id) {
+                        Ok(Some(binding)) if binding.id == *binding_id => {
+                            restore_state = binding.restore_state;
+                        }
+                        Ok(_) => {}
+                        Err(error) => diagnostic(
+                            events,
+                            session_id,
+                            format!("Read Claude restore state: {error:#}"),
+                        ),
                     }
                     resume.release_readiness();
                 }
@@ -3639,7 +3649,7 @@ impl ShellOwner {
                     "result": "timed-out", "sessionId": session_id, "runId": shell.run_id,
                     "provider": hook.profile.kind(),
                     "providerSessionId": hook.resume.as_ref().and_then(|resume| resume.expected_id.as_deref()),
-                    "restoreState": if restoring { "restoring" } else { "none" },
+                    "restoreState": restore_state,
                     "restoreError": null, "spawnRevision": hook.launch_metadata.get("spawnRevision"),
                 })));
             }
@@ -3651,7 +3661,7 @@ impl ShellOwner {
             if ready {
                 // Keep the identity and failure monitor armed for a late
                 // SessionStart or an error after the CLI's interactive screen.
-                if let Err(error) = self.commit_codex_restore(
+                let result = self.commit_codex_restore(
                     &session_id,
                     ClaudeRestore::Ready {
                         binding_id: &binding_id,
@@ -3659,7 +3669,25 @@ impl ShellOwner {
                     },
                     Some(&run_id),
                     events,
-                ) {
+                );
+                let result = result.and_then(|changed| {
+                    // Automatic resumes already have no restore banner to clear.
+                    if !changed
+                        && let Some(binding) = self.codex_binding(&session_id)?
+                        && binding.id == binding_id
+                        && binding.restore_state == "none"
+                    {
+                        events.push(OwnerEvent::ProviderIdentity(json!({
+                            "result": "timed-out", "sessionId": session_id, "runId": run_id,
+                            "provider": "codex", "bindingId": binding.id,
+                            "providerSessionId": binding.provider_session_id,
+                            "restoreState": binding.restore_state, "restoreError": null,
+                            "spawnRevision": binding.metadata["spawnRevision"],
+                        })));
+                    }
+                    Ok(())
+                });
+                if let Err(error) = result {
                     diagnostic(
                         events,
                         &session_id,
@@ -7111,7 +7139,6 @@ mod provider_tests {
             .claude_binding(session)?
             .context("existing provider binding")?;
         assert!(binding.resumable);
-        assert!(owner.change_claude_restore(session, ClaudeRestore::Begin(&binding.id))?);
         owner.launch_claude(session.into(), terminal, plan(), Some(&binding))?;
         let resume = Scope {
             profile: LaunchProfile::ClaudeCode,
@@ -7159,7 +7186,7 @@ mod provider_tests {
         assert!(
             matches!(events.last(), Some(OwnerEvent::ProviderIdentity(event))
             if event["result"] == "timed-out"
-                && event["restoreState"] == "restoring"
+                && event["restoreState"] == "none"
                 && event["provider"] == "claude-code"
                 && event["sessionId"] == session
                 && event["runId"] == resume.run_id
