@@ -971,6 +971,7 @@ fn codex_resume_silent_timeout_parks_the_card_for_retry() -> Result<()> {
                 card["providerRestoreError"],
                 "provider resume identity confirmation timed out"
             );
+            assert_eq!(card["historyProviderSessionId"], UUID);
             assert!(
                 graph["providerIdentityEvents"]
                     .as_array()
@@ -983,6 +984,7 @@ fn codex_resume_silent_timeout_parks_the_card_for_retry() -> Result<()> {
     }
     let binding = codex_binding(&db, &session)?.unwrap();
     assert_eq!(binding.restore_state, "failed");
+    assert!(!binding.resumable);
     assert_eq!(binding.id, binding_id);
     shutdown(child)
 }

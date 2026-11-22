@@ -1515,8 +1515,8 @@ struct LiveEgress {
 }
 
 impl LiveEgress {
-    fn start() -> Result<Option<Self>> {
-        let Some(sampler) = LiveEgressSampler::start()? else {
+    fn start(data_root: PathBuf) -> Result<Option<Self>> {
+        let Some(sampler) = LiveEgressSampler::start(data_root)? else {
             return Ok(None);
         };
         let mut live = Self {
@@ -1569,7 +1569,7 @@ impl LiveEgress {
             Err(mpsc::TryRecvError::Empty) => {}
         }
         let time = Instant::now();
-        let periodic = self.next_check <= time;
+        let periodic = !self.in_flight && self.next_check <= time;
         if periodic {
             self.next_check = time + egress_probe::LIVE_RECHECK_INTERVAL;
         }
@@ -3915,6 +3915,7 @@ fn run_writable(
         });
     let (role_requests, role_commands) = mpsc::channel();
     let (role_results, role_replies) = mpsc::channel();
+    let (time_zone_changed, time_zone_changes) = mpsc::channel();
     let role_data_root = data_root.clone();
     let time_zone_events = send.clone();
     let role_worker = thread::Builder::new()
@@ -3974,6 +3975,9 @@ fn run_writable(
                         setting,
                     } => {
                         let result = time_zone_settings(&role_data_root, setting.as_ref());
+                        if setting.is_some() && result.is_ok() {
+                            let _ = time_zone_changed.send(());
+                        }
                         if time_zone_events
                             .send_blocking(Event::TimeZoneSettings(TimeZoneSettingsReply {
                                 request_id,
@@ -4042,7 +4046,7 @@ fn run_writable(
         None
     };
     if live_egress {
-        match LiveEgress::start() {
+        match LiveEgress::start(data_root.clone()) {
             Ok(live) => wiring.live_egress = live,
             Err(error) => send.send_blocking(Event::Diagnostic(format!(
                 "Start egress sampler: {error:#}"
@@ -4611,7 +4615,11 @@ fn run_writable(
         if let Err(error) = wiring.poll_egress(&mut owner) {
             send.send_blocking(Event::Diagnostic(format!("Egress recheck: {error:#}")))?;
         }
+        let time_zone_changed = time_zone_changes.try_iter().last().is_some();
         if let Some(live) = &mut wiring.live_egress {
+            if time_zone_changed {
+                live.next_check = Instant::now();
+            }
             let (replies, stopped) = match live.poll(&mut owner) {
                 Ok(Some(result)) => (live.replies(result), false),
                 Ok(None) => (Vec::new(), false),
@@ -8999,26 +9007,21 @@ fn active_graph(
                     let Some(id) = node["sessionId"].as_str() else {
                         continue;
                     };
+                    let profile = node["currentMode"].as_str().unwrap_or("shell");
                     let deferred = startup_deferred.contains(id);
-                    let codex = node["currentMode"] == "codex";
-                    let antigravity = node["currentMode"] == "antigravity";
-                    if !codex && !antigravity && !deferred {
+                    if profile == "shell" && !deferred {
                         continue;
                     }
                     let Some(session) = owner.session(id)? else {
                         continue;
                     };
-                    if deferred {
-                        let provider_session_id = if codex {
-                            owner.codex_binding(id)?
-                        } else if antigravity {
-                            owner.antigravity_binding(id)?
-                        } else {
-                            owner.claude_binding(id)?
-                        };
-                        node["historyProviderSessionId"] =
-                            json!(provider_session_id.map(|binding| binding.provider_session_id));
-                    }
+                    let codex = profile == "codex";
+                    // History stays readable even when the bound conversation cannot resume.
+                    let provider_session_id = owner
+                        .environment_provider_binding(id, profile)?
+                        .filter(|binding| !binding.provider_session_id.is_empty())
+                        .map(|binding| binding.provider_session_id);
+                    node["historyProviderSessionId"] = json!(provider_session_id);
                     if codex && let Some(hud) = owner.codex_hud(&session.id) {
                         node["codexHud"] = hud;
                     }
