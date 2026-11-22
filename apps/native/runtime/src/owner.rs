@@ -16,6 +16,7 @@ use matou_native_core::{
         self, HierarchyIds, HierarchyResult, Scene, Session as StoredSession, Task, Workspace,
         canvas, cards, tabs, tasks, workspaces,
     },
+    journal::checkpoint::CheckpointCandidate,
     ownership::DatabaseOwner,
     provider_launch::{ClaudeGatewayProjection, EFFORTS, attach_claude_settings},
     pty::{LaunchProfile, ShellLaunch, get_var, set_var},
@@ -31,7 +32,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::{
-    SessionEvent, SessionOptions,
+    ScreenRecoveryOptions, SessionEvent, SessionOptions,
     agent_hud_projection::{AgentHudProjection, ConfigCounts, HudProvider, project_teammates},
     agent_hud_sources::{self, ExternalAgents},
     antigravity_catalog::Catalog as AntigravityCatalog,
@@ -634,6 +635,7 @@ impl ShellOwner {
                 launch,
                 journal: Default::default(),
                 restored_history: Vec::new(),
+                screen_recovery: None,
                 collect_history: false,
             },
             false,
@@ -2590,6 +2592,7 @@ impl ShellOwner {
                 launch,
                 journal: Default::default(),
                 restored_history: Vec::new(),
+                screen_recovery: None,
                 collect_history: false,
             },
             false,
@@ -2703,6 +2706,7 @@ impl ShellOwner {
                 launch,
                 journal: Default::default(),
                 restored_history: Vec::new(),
+                screen_recovery: None,
                 collect_history: false,
             },
             false,
@@ -2749,6 +2753,7 @@ impl ShellOwner {
                 terminal,
                 journal: Default::default(),
                 restored_history: Vec::new(),
+                screen_recovery: None,
                 collect_history: false,
                 launch: matou_native_core::pty::ShellLaunch {
                     profile: LaunchProfile::Dsh,
@@ -2816,6 +2821,7 @@ impl ShellOwner {
                 terminal,
                 journal: Default::default(),
                 restored_history: Vec::new(),
+                screen_recovery: None,
                 collect_history: false,
                 launch: matou_native_core::pty::ShellLaunch {
                     profile: LaunchProfile::Antigravity,
@@ -2878,6 +2884,44 @@ impl ShellOwner {
             .unwrap()
             .deadline = Some(Instant::now() + IDENTITY_TIMEOUT);
         Ok(run_id)
+    }
+
+    fn screen_recovery_options(&self, session_id: &str) -> Result<ScreenRecoveryOptions> {
+        let initial_grid = self
+            .connection
+            .query_row(
+                "SELECT cols, rows FROM session_runs WHERE session_id = ? ORDER BY ordinal LIMIT 1",
+                [session_id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()?
+            .filter(|&(cols, rows)| cols >= 2 && rows > 0)
+            .and_then(|(cols, rows)| Some((cols.try_into().ok()?, rows.try_into().ok()?)));
+        let mut query = self.connection.prepare(
+            "SELECT id, generation, terminal_sequence, domain_event_sequence,
+                    screen_epoch, file_path, checksum
+             FROM journal_checkpoints WHERE session_id = ? AND valid = 1
+               AND min(generation, terminal_sequence, domain_event_sequence, screen_epoch) >= 0
+             ORDER BY generation DESC",
+        )?;
+        let checkpoints = query
+            .query_map([session_id], |row| {
+                Ok(CheckpointCandidate {
+                    id: row.get(0)?,
+                    session_id: session_id.to_owned(),
+                    generation: row.get::<_, i64>(1)? as u64,
+                    terminal_sequence: row.get::<_, i64>(2)? as u64,
+                    domain_event_sequence: row.get::<_, i64>(3)? as u64,
+                    screen_epoch: row.get::<_, i64>(4)? as u64,
+                    file_path: PathBuf::from(row.get::<_, String>(5)?),
+                    checksum: row.get(6)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(ScreenRecoveryOptions {
+            initial_grid,
+            checkpoints,
+        })
     }
 
     fn launch_run(
@@ -2959,6 +3003,9 @@ impl ShellOwner {
         } else {
             Vec::new()
         };
+        if !is_shell {
+            options.screen_recovery = Some(self.screen_recovery_options(&options.session_id)?);
+        }
         let session_id = options.session_id.clone();
         let cols = options.launch.cols.into();
         let rows = options.launch.rows.into();

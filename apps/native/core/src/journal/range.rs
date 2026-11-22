@@ -307,16 +307,9 @@ pub fn visit_frames(
     let directory = directory(data_root, session_id)?;
     let described = describe_segments(&directory)?;
     let grouped = groups(&described);
-    let bounds = read_bounds(&directory, &grouped)?;
     let mut previous = 0;
-    for entry in bounds {
-        if entry.last_sequence < from_sequence {
-            continue;
-        }
-        if through_sequence.is_some_and(|through| entry.first_sequence > through) {
-            break;
-        }
-        if !visit_preferred(&grouped[&entry.index], |record| {
+    let mut visit_segment = |variants: &[&Segment]| {
+        visit_preferred(variants, |record| {
             let sequence = record.frame.sequence();
             if sequence <= previous {
                 return Err(JournalCorruptionError::new(
@@ -333,7 +326,28 @@ pub fn visit_frames(
                 return visitor(record);
             }
             Ok(true)
-        })? {
+        })
+    };
+    let bounds = match read_bounds(&directory, &grouped) {
+        Ok(bounds) => bounds,
+        Err(_) => {
+            // An unindexed damaged segment can interrupt the bounds scan.
+            // Stream the segments so readers still receive the valid prefix.
+            for variants in grouped.values() {
+                if !visit_segment(variants)? {
+                    break;
+                }
+            }
+            return Ok(());
+        }
+    };
+    for entry in bounds {
+        if entry.last_sequence < from_sequence {
+            continue;
+        }
+        if through_sequence.is_some_and(|through| entry.first_sequence > through)
+            || !visit_segment(&grouped[&entry.index])?
+        {
             break;
         }
     }

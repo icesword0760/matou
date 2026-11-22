@@ -51,6 +51,7 @@ fn options(root: &Path, id: &str) -> Result<SessionOptions> {
             ..JournalOptions::default()
         },
         restored_history: Vec::new(),
+        screen_recovery: None,
         collect_history: true,
     })
 }

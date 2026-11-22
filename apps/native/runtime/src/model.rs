@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use matou_native_core::{
-    journal::JournalOptions,
+    journal::{JournalOptions, checkpoint::CheckpointCandidate},
     pty::{ProcessExit, ShellLaunch},
     shell_history::CollectedShellBlock,
 };
@@ -17,7 +17,15 @@ pub struct SessionOptions {
     /// Completed Shell blocks, formatted by the database owner before live launch.
     /// This is display history only; it must not be collected or journaled again.
     pub restored_history: Vec<u8>,
+    pub screen_recovery: Option<ScreenRecoveryOptions>,
     pub collect_history: bool,
+}
+
+#[derive(Default)]
+pub struct ScreenRecoveryOptions {
+    pub initial_grid: Option<(u16, u16)>,
+    /// Valid SQLite candidates, newest generation first, read by the owner.
+    pub checkpoints: Vec<CheckpointCandidate>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

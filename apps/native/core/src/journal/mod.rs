@@ -1,3 +1,4 @@
+pub mod checkpoint;
 pub mod codec;
 mod compression;
 mod index_writer;

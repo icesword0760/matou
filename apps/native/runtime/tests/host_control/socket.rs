@@ -2175,6 +2175,7 @@ fn frozen_write_validation_and_outlet_freeze_reject_before_input() -> Result<()>
             },
             journal: Default::default(),
             restored_history: Vec::new(),
+            screen_recovery: None,
             collect_history: false,
         },
         false,

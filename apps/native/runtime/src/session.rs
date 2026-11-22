@@ -8,6 +8,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
+use encoding_rs::UTF_8;
 #[cfg(unix)]
 use matou_native_core::pty::ForegroundProcessGroup;
 use matou_native_core::{
@@ -15,10 +16,12 @@ use matou_native_core::{
         DEFAULT_MAX_RETAINED_BYTES, Event as GateEvent, ExecutionPauser, Gate, PendingFrame, State,
     },
     journal::{Frame, Record, SegmentJournal, visit_frames},
-    pty::{ProcessExit, PtyProcess},
+    pty::{LaunchProfile, ProcessExit, PtyProcess},
     shell_history::Collector,
 };
-use matou_native_terminal::{GridSelection, InputModes, Screen, SelectionAction, Terminal, Theme};
+use matou_native_terminal::{
+    GridSelection, InputModes, Screen, SelectionAction, Terminal, TerminalOptions, Theme,
+};
 
 use crate::{
     SessionEvent, SessionOptions, StorageFaultCode,
@@ -260,25 +263,14 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn launch(options: SessionOptions) -> Result<Self> {
-        let journal = SegmentJournal::open(
+    pub fn launch(mut options: SessionOptions) -> Result<Self> {
+        let mut journal = SegmentJournal::open(
             &options.launch.data_root,
             &options.session_id,
-            options.journal,
+            std::mem::take(&mut options.journal),
         )?;
-        let sequence = journal.last_sequence();
-        let gate = Gate::new(sequence, DEFAULT_MAX_RETAINED_BYTES)?;
         let batcher = OutputBatcher::new(BATCH_DELAY, MAX_CODE_UNITS)?;
         let credit = CreditWindow::new(CREDIT_HIGH_WATERMARK_BYTES, CREDIT_LOW_WATERMARK_BYTES)?;
-        let mut protocol_terminal = Terminal::new(options.terminal)?;
-        let mut display_terminal = Terminal::new(options.terminal)?;
-        for terminal in [&mut protocol_terminal, &mut display_terminal] {
-            // The restored history seeds each parser without replaying its side effects.
-            terminal.feed(&options.restored_history);
-            terminal.drain_responses();
-            terminal.drain_clipboard();
-        }
-        let visible_screen = display_terminal.screen()?;
         let geometry = (
             options.terminal.cols,
             options.terminal.rows,
@@ -289,12 +281,60 @@ impl Session {
             (geometry.0, geometry.1) == (options.launch.cols, options.launch.rows),
             "initial Shell PTY and terminal geometry differ"
         );
+        let mut recovery_diagnostic = None;
+        let [protocol_terminal, mut display_terminal] =
+            if options.launch.profile != LaunchProfile::Shell && journal.last_sequence() > 0 {
+                let mut recovered = recover_screen(&options, &journal)?;
+                recovery_diagnostic = recovered.diagnostic;
+                if recovered.resized {
+                    journal
+                        .append(&Record {
+                            timestamp: unix_millis(),
+                            frame: Frame::Resize {
+                                sequence: journal.last_sequence() + 1,
+                                cols: geometry.0.into(),
+                                rows: geometry.1.into(),
+                            },
+                        })
+                        .context("persist terminal startup resize")?;
+                }
+                if recovered.has_history {
+                    let data = terminal_run_boundary(geometry.1);
+                    feed_recovered(&mut recovered.terminals, &data);
+                    journal
+                        .append(&Record {
+                            timestamp: unix_millis(),
+                            frame: Frame::Output {
+                                sequence: journal.last_sequence() + 1,
+                                data,
+                            },
+                        })
+                        .context("persist terminal run boundary")?;
+                }
+                if recovered.resized || recovered.has_history {
+                    journal.flush().context("flush terminal startup frames")?;
+                }
+                recovered.terminals
+            } else {
+                let mut terminals = [
+                    Terminal::new(options.terminal)?,
+                    Terminal::new(options.terminal)?,
+                ];
+                // D01 display history is seeded without replaying its side effects.
+                feed_recovered(&mut terminals, &options.restored_history);
+                terminals
+            };
+        let visible_screen = display_terminal.screen()?;
+        let sequence = journal.last_sequence();
+        let gate = Gate::new(sequence, DEFAULT_MAX_RETAINED_BYTES)?;
         let (process, reader) = PtyProcess::spawn(&options.launch)?;
         let pid = process
             .process_id()
             .context("the Shell PTY did not report a process ID")?;
         let read_control = Arc::new(ReadControl::default());
         let (reader, waker) = start_reader(reader, read_control.clone())?;
+        let mut events = vec![SessionEvent::Started { pid, sequence }];
+        events.extend(recovery_diagnostic);
         Ok(Self {
             data_root: options.launch.data_root,
             session_id: options.session_id,
@@ -322,7 +362,7 @@ impl Session {
                 credit,
                 replay_from: None,
             },
-            events: vec![SessionEvent::Started { pid, sequence }],
+            events,
             exit_enqueued: false,
             disposed: false,
             closed: false,
@@ -1140,6 +1180,160 @@ impl Drop for Session {
         // PtyProcess owns bounded termination and deferred reaping.
         self.process.take();
     }
+}
+
+struct RecoveredScreen {
+    terminals: [Terminal; 2],
+    has_history: bool,
+    resized: bool,
+    diagnostic: Option<SessionEvent>,
+}
+
+fn recover_screen(options: &SessionOptions, journal: &SegmentJournal) -> Result<RecoveredScreen> {
+    let through = journal.last_sequence();
+    let domain_watermark = journal.domain_event_sequence_at_or_before(through);
+    let target = options.terminal;
+    let recovery = options.screen_recovery.as_ref();
+    let checkpoint = recovery.and_then(|recovery| {
+        recovery.checkpoints.iter().find_map(|candidate| {
+            if candidate.session_id != options.session_id
+                || candidate.terminal_sequence > through
+                || candidate.domain_event_sequence > domain_watermark
+            {
+                return None;
+            }
+            let checkpoint = candidate.read().ok()?;
+            Some((candidate.terminal_sequence, checkpoint))
+        })
+    });
+    // A readable checkpoint without a grid requires replay from the beginning.
+    let checkpoint = checkpoint
+        .and_then(|(sequence, checkpoint)| Some((sequence, checkpoint.grid?, checkpoint)));
+    let mut grid = checkpoint
+        .as_ref()
+        .map(|(_, grid, _)| *grid)
+        .or_else(|| recovery.and_then(|recovery| recovery.initial_grid))
+        .unwrap_or((target.cols, target.rows));
+    let terminals_at = |(cols, rows)| {
+        let options = TerminalOptions {
+            cols,
+            rows,
+            ..target
+        };
+        Ok::<_, anyhow::Error>([Terminal::new(options)?, Terminal::new(options)?])
+    };
+    let mut terminals = terminals_at(grid)?;
+    let mut has_history = false;
+    let mut from = 1;
+    if let Some((sequence, _, checkpoint)) = checkpoint {
+        from = sequence + 1;
+        let snapshot = checkpoint.snapshot();
+        has_history = !snapshot.is_empty();
+        feed_recovered(
+            &mut terminals,
+            UTF_8.decode_with_bom_removal(snapshot).0.as_bytes(),
+        );
+    }
+
+    // Like the reference's streaming TextDecoder, retain a split UTF-8
+    // character across output frames and resizes, and discard it on reset.
+    let mut decoder = UTF_8.new_decoder_with_bom_removal();
+    let mut decoded = String::new();
+    let mut feed_output =
+        |terminals: &mut [Terminal; 2], decoder: &mut encoding_rs::Decoder, bytes: &[u8], last| {
+            decoded.clear();
+            decoded.reserve(
+                decoder
+                    .max_utf8_buffer_length(bytes.len())
+                    .context("recovery output too large")?,
+            );
+            let (status, read, _) = decoder.decode_to_string(bytes, &mut decoded, last);
+            debug_assert_eq!(status, encoding_rs::CoderResult::InputEmpty);
+            debug_assert_eq!(read, bytes.len());
+            feed_recovered(terminals, decoded.as_bytes());
+            Ok::<_, anyhow::Error>(())
+        };
+    let mut replay_diagnostic = None;
+    if from <= through {
+        let replay = visit_frames(
+            &options.launch.data_root,
+            &options.session_id,
+            from,
+            Some(through),
+            |record| {
+                match record.frame {
+                    Frame::Output { data, .. } => {
+                        has_history |= !data.is_empty();
+                        feed_output(&mut terminals, &mut decoder, &data, false)?;
+                    }
+                    Frame::Resize { cols, rows, .. } => {
+                        let next = (cols.try_into()?, rows.try_into()?);
+                        resize_recovered(&mut terminals, next, target)?;
+                        grid = next;
+                    }
+                    Frame::Reset { .. } => {
+                        terminals = terminals_at(grid)?;
+                        decoder = UTF_8.new_decoder_with_bom_removal();
+                        has_history = false;
+                    }
+                    _ => {}
+                }
+                Ok(true)
+            },
+        );
+        if let Err(error) = replay {
+            replay_diagnostic = Some(diagnostic(format!("recover terminal screen: {error:#}")));
+        }
+        feed_output(&mut terminals, &mut decoder, &[], true)?;
+    }
+
+    let launch_grid = (target.cols, target.rows);
+    let resized = grid != launch_grid;
+    if resized {
+        resize_recovered(&mut terminals, launch_grid, target)?;
+    }
+    Ok(RecoveredScreen {
+        terminals,
+        has_history,
+        resized,
+        diagnostic: replay_diagnostic,
+    })
+}
+
+fn feed_recovered(terminals: &mut [Terminal; 2], data: &[u8]) {
+    for terminal in terminals {
+        terminal.feed(data);
+        terminal.drain_responses();
+        terminal.drain_clipboard();
+    }
+}
+
+fn resize_recovered(
+    terminals: &mut [Terminal; 2],
+    (cols, rows): (u16, u16),
+    options: TerminalOptions,
+) -> Result<()> {
+    for terminal in terminals {
+        terminal.resize(cols, rows, options.cell_width_px, options.cell_height_px)?;
+        terminal.drain_responses();
+        terminal.drain_clipboard();
+    }
+    Ok(())
+}
+
+fn terminal_run_boundary(rows: u16) -> Vec<u8> {
+    let mut boundary = concat!(
+        "\x18\x1b[?1049l\x1b[!p",
+        "\x1b[?9;1000;1002;1003;1004;1005;1006;1015;1007;2004;2026l\x1b[?25h",
+        "\x1b[?6l\x1b[r\x1b[0m\x1b[9999;1H",
+    )
+    .as_bytes()
+    .to_vec();
+    for _ in 0..rows {
+        boundary.extend_from_slice(b"\r\n");
+    }
+    boundary.extend_from_slice(b"\x1b[H");
+    boundary
 }
 
 fn diagnostic(message: impl Into<String>) -> SessionEvent {

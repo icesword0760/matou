@@ -43,7 +43,7 @@ pub mod subscription_launch;
 mod subscription_service;
 pub mod worker;
 
-pub use model::{SessionEvent, SessionOptions, StorageFaultCode};
+pub use model::{ScreenRecoveryOptions, SessionEvent, SessionOptions, StorageFaultCode};
 mod readonly_export;
 pub mod update_download;
 pub mod workspace_paths;
