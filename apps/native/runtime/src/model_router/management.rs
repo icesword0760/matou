@@ -7,7 +7,7 @@ use hyper_util::rt::TokioIo;
 use serde_json::{Value, json};
 use tokio::net::TcpStream;
 
-use super::{RouterConnection, VERSION};
+use super::{RouterConnection, VERSION, config::codex_user_agent};
 use crate::subscription_launch::{ModelAlias, SubscriptionProvider};
 
 const DEFAULT_LIMIT: usize = 1024 * 1024;
@@ -45,12 +45,154 @@ impl<'a> ManagementClient<'a> {
         self.model_list(&format!("/credentials/models?{query}"))
     }
 
-    #[allow(dead_code)] // Also used by explicit catalog refresh in the settings flow.
     pub fn model_definitions(&self, provider: SubscriptionProvider) -> Result<Vec<Value>> {
         self.model_list(&format!(
             "/routing/model-definitions/{}",
             provider.router_provider()
         ))
+    }
+
+    pub fn start_oauth(&self, provider: SubscriptionProvider) -> Result<Value> {
+        self.json(
+            Method::GET,
+            &query("/oauth/auth-url", "provider", provider.router_provider()),
+            None,
+            DEFAULT_LIMIT,
+        )
+    }
+
+    pub fn oauth_status(&self, state: &str) -> Result<Value> {
+        self.json(
+            Method::GET,
+            &query("/oauth/status", "state", state),
+            None,
+            DEFAULT_LIMIT,
+        )
+    }
+
+    pub fn cancel_oauth(&self, state: &str) -> Result<bool> {
+        let response = self.json(
+            Method::DELETE,
+            &query("/oauth/session", "state", state),
+            None,
+            DEFAULT_LIMIT,
+        )?;
+        Ok(response["cancelled"] == true)
+    }
+
+    pub fn oauth_callback(
+        &self,
+        provider: SubscriptionProvider,
+        state: &str,
+        parameter: &str,
+        value: &str,
+    ) -> Result<()> {
+        let mut body = json!({"provider": provider.router_provider(), "state": state});
+        body[parameter] = json!(value);
+        self.json(Method::POST, "/oauth/callback", Some(body), DEFAULT_LIMIT)?;
+        Ok(())
+    }
+
+    pub fn delete_credential(&self, name: &str) -> Result<()> {
+        self.json(
+            Method::DELETE,
+            &query("/credentials", "name", name),
+            None,
+            DEFAULT_LIMIT,
+        )?;
+        Ok(())
+    }
+
+    pub fn set_headers(&self, name: &str, headers: Value) -> Result<()> {
+        self.json(
+            Method::PATCH,
+            "/credentials/fields",
+            Some(json!({"name": name, "headers": headers})),
+            DEFAULT_LIMIT,
+        )?;
+        Ok(())
+    }
+
+    pub fn account_probe(
+        &self,
+        probe: AccountProbe,
+        file: &Value,
+        project: Option<&str>,
+    ) -> Result<Option<Value>> {
+        use AccountProbe::*;
+        let (url, data) = match probe {
+            CodexUsage => ("https://chatgpt.com/backend-api/wham/usage", None),
+            CodexModels => (
+                "https://chatgpt.com/backend-api/codex/models?client_version=0.162.1",
+                None,
+            ),
+            AntigravityAccount => (
+                "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist",
+                Some(json!({"metadata": {"ideType": "ANTIGRAVITY"}})),
+            ),
+            AntigravityQuota => (
+                "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+                Some(project.map_or_else(|| json!({}), |id| json!({"project": id}))),
+            ),
+            AntigravityModels => (
+                "https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels",
+                Some(project.map_or_else(|| json!({}), |id| json!({"project": id}))),
+            ),
+        };
+        let codex = matches!(probe, CodexUsage | CodexModels);
+        ensure!(
+            file["provider"] == if codex { "codex" } else { "antigravity" },
+            "Subscription probe does not match account"
+        );
+        let index = file["auth_index"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .context("Subscription credential is unavailable")?;
+        let mut headers = json!({
+            "Authorization": "Bearer $TOKEN$",
+            "Content-Type": "application/json",
+            "User-Agent": if codex { codex_user_agent().to_owned() } else { antigravity_user_agent() },
+        });
+        if codex {
+            headers["originator"] = json!("codex-tui");
+            if let Some(account) = file["account_id"]
+                .as_str()
+                .or_else(|| file["id_token"]["chatgpt_account_id"].as_str())
+            {
+                headers["ChatGPT-Account-Id"] = json!(account);
+            }
+        }
+        let mut input = json!({"url": url, "method": if data.is_some() { "POST" } else { "GET" }, "auth_index": index, "header": headers});
+        if let Some(data) = data {
+            input["data"] = json!(data.to_string());
+        }
+        let limit = if matches!(probe, CodexModels | AntigravityModels) {
+            MODEL_LIMIT
+        } else {
+            DEFAULT_LIMIT
+        };
+        let envelope = self.json(
+            Method::POST,
+            "/requests/api-call",
+            Some(input),
+            limit * 2 + 64 * 1024,
+        )?;
+        if envelope["status_code"] == 401 {
+            return Ok(None);
+        }
+        ensure!(
+            envelope["status_code"]
+                .as_u64()
+                .is_some_and(|status| (200..300).contains(&status)),
+            "Subscription account service is unavailable"
+        );
+        let body = envelope["body"]
+            .as_str()
+            .filter(|body| body.len() <= limit)
+            .context("Invalid subscription account response")?;
+        Ok(Some(serde_json::from_str(body).map_err(|_| {
+            anyhow!("Invalid subscription account response")
+        })?))
     }
 
     fn model_list(&self, path: &str) -> Result<Vec<Value>> {
@@ -61,7 +203,6 @@ impl<'a> ManagementClient<'a> {
             .context("Invalid model router model list")
     }
 
-    #[allow(dead_code)] // Used when changing the saved credential.
     pub fn set_disabled(&self, name: &str, disabled: bool) -> Result<()> {
         self.json(
             Method::PATCH,
@@ -194,6 +335,35 @@ impl<'a> ManagementClient<'a> {
             .to_bytes();
         Ok((status, pinned, bytes))
     }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum AccountProbe {
+    CodexUsage,
+    CodexModels,
+    AntigravityAccount,
+    AntigravityQuota,
+    AntigravityModels,
+}
+
+pub(crate) fn antigravity_user_agent() -> String {
+    let os = match std::env::consts::OS {
+        "macos" => "darwin",
+        value => value,
+    };
+    let arch = if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else {
+        std::env::consts::ARCH
+    };
+    format!("antigravity/hub/2.29.0 (aidev_client; os_type={os}; arch={arch}; cl=1013060670)")
+}
+
+fn query(path: &str, key: &str, value: &str) -> String {
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair(key, value)
+        .finish();
+    format!("{path}?{query}")
 }
 
 fn check_status(status: StatusCode, pinned: bool) -> Result<()> {

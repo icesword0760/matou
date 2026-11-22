@@ -36,7 +36,7 @@ use matou_native_runtime::host::{
     database_recovery_request_id, deferred_summary_text, save_locale_preference,
 };
 use matou_native_runtime::protocol::{
-    ClaudeModelCatalogReply, ClaudeRoleAssignmentsReply, ProviderSettingsReply,
+    ClaudeModelCatalogReply, ClaudeModelPreferencesReply, ProviderSettingsReply,
 };
 use matou_native_terminal::Theme;
 use serde_json::Value;
@@ -2893,9 +2893,10 @@ impl Workspace {
     }
 
     fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.settings.take().is_none() {
+        let Some((settings, _)) = self.settings.take() else {
             return;
-        }
+        };
+        settings.update(cx, |shell, cx| shell.close_subscription_page(window, cx));
         self.sync_terminal_input(window, cx);
         let focus = self
             .active_level_focus()
@@ -4356,9 +4357,13 @@ impl Workspace {
                     .as_object_mut()
                     .and_then(|graph| graph.remove("claudeRoleAssignmentsResult"))
                     && let Some((settings, _)) = &self.settings
-                    && let Ok(reply) = serde_json::from_value::<ClaudeRoleAssignmentsReply>(reply)
+                    && let Ok(reply) = serde_json::from_value::<ClaudeModelPreferencesReply>(reply)
                 {
-                    settings.update(cx, |settings, cx| settings.receive_assignments(reply, cx));
+                    settings.update(cx, |settings, cx| {
+                        if !settings.receive_model_preferences(&reply, cx) {
+                            settings.receive_assignments(reply.roles, cx);
+                        }
+                    });
                 }
                 if let Some(reply) = graph
                     .as_object_mut()

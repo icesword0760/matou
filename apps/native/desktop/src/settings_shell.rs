@@ -42,8 +42,8 @@ use matou_native_desktop::theme_tokens::{
     AppTheme, ThemePalette, ThemePreference, ThemeState, theme_preference_picker,
 };
 use matou_native_runtime::protocol::{
-    ClaudeModelCatalogReply, ClaudeRoleAssignmentsReply, TimeZoneSettingsReply,
-    TimeZoneSettingsSnapshot,
+    ClaudeModelCatalogReply, ClaudeModelPreferencesReply, ClaudeRoleAssignmentsReply,
+    TimeZoneSettingsReply, TimeZoneSettingsSnapshot,
 };
 use serde_json::{Value, json};
 use unicode_segmentation::UnicodeSegmentation;
@@ -56,9 +56,21 @@ use crate::terminal_input::read_clipboard_text;
 // The desktop probes compile the settings shell directly alongside a test transport.
 #[path = "claude_role_assignments.rs"]
 pub mod claude_role_assignments;
+#[path = "compaction_settings.rs"]
+pub mod compaction_settings;
+#[path = "subscription_settings.rs"]
+pub mod subscription_settings;
 #[cfg(any(test, debug_assertions))]
 use self::claude_role_assignments::AssignmentPanel;
 use self::claude_role_assignments::{AssignmentAction, AssignmentView, ClaudeAssignments};
+use self::compaction_settings::{
+    CompactionDraft, CompactionOption, effort_fallback, effort_label as compaction_effort_label,
+    effort_values, model_name as compaction_model_name, model_options, provider_available,
+    provider_options, selected_provider, validation as compaction_validation,
+};
+use self::subscription_settings::{
+    normalize_subscription_draft, quota_text, quota_title, subscription_kind,
+};
 
 // Frozen light palette (`hierarchy.css` / `provider-setup.css`).
 pub(super) const PANEL: u32 = 0xffffff;
@@ -1075,11 +1087,15 @@ impl SettingsPage {
 pub(crate) enum EditorStep {
     Pick,
     Form,
+    /// The OAuth/risk dialog before an account draft exists. The phase itself
+    /// lives in `ProviderSettings`; this step only selects the renderer.
+    Subscription,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PickChoice {
     Preset(&'static str),
+    Subscription(&'static str),
     Custom,
 }
 
@@ -1125,6 +1141,7 @@ struct EditorFocus {
     close: FocusHandle,
     back: FocusHandle,
     presets: [FocusHandle; 4],
+    subscription_choices: [FocusHandle; 2],
     custom: FocusHandle,
     change: FocusHandle,
     cancel: FocusHandle,
@@ -1149,10 +1166,18 @@ struct EditorFocus {
     keep_editing: FocusHandle,
     confirm_action: FocusHandle,
     error: FocusHandle,
+    subscription_risk: FocusHandle,
+    subscription_primary: FocusHandle,
+    subscription_cancel: FocusHandle,
+    subscription_reopen: FocusHandle,
+    subscription_system_browser: FocusHandle,
 }
 
 struct Editor {
     step: EditorStep,
+    /// Present only while the dialog belongs to a subscription sign-in or the
+    /// draft that sign-in produced. `None` keeps the ordinary API editor.
+    subscription: Option<SubscriptionFlow>,
     query: Entity<RenameInput>,
     selection: Option<PickChoice>,
     draft: ProviderDraft,
@@ -1184,6 +1209,146 @@ struct Editor {
     focus: EditorFocus,
     body_scroll: ScrollHandle,
     _subscriptions: Vec<Subscription>,
+}
+
+/// UI-only state of one subscription dialog. Risk acceptance and the current
+/// phase live in `ProviderSettings`; this struct keeps the checkbox, provider
+/// kind and the single polling chain's generation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SubscriptionFlow {
+    provider: String,
+    existing: bool,
+    /// Saved identity kept while re-authenticating. The runtime preserves the
+    /// effective models and name too; keeping these lets a late or partial
+    /// draft still update the same row.
+    existing_id: Option<String>,
+    existing_name: Option<String>,
+    risk_checked: bool,
+    /// Incremented whenever the dialog closes or becomes a different attempt so
+    /// a late timer cannot apply a reply to the next flow.
+    generation: u64,
+    /// One chain per dialog: true from scheduling until the timer runs.
+    polling: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CompactionSelect {
+    Provider,
+    Model,
+    Effort,
+}
+
+impl CompactionSelect {
+    fn index(self) -> usize {
+        match self {
+            Self::Provider => 0,
+            Self::Model => 1,
+            Self::Effort => 2,
+        }
+    }
+
+    fn menu_min_width(self) -> f32 {
+        match self {
+            Self::Provider => 240.,
+            Self::Model => 220.,
+            Self::Effort => 150.,
+        }
+    }
+}
+
+struct CompactionMenu {
+    select: CompactionSelect,
+    active: usize,
+    items: Vec<CompactionOption>,
+    selected: String,
+    trigger_focus: FocusHandle,
+}
+
+/// Editable state for the compaction block. Persistence belongs to
+/// `ProviderSettings`; this keeps the user's in-progress choices until a reply
+/// confirms them.
+struct CompactionUi {
+    draft: Option<CompactionDraft>,
+    baseline: Option<Value>,
+    manual_model: bool,
+    saved: bool,
+    was_saving: bool,
+    open: Option<CompactionMenu>,
+    bounds: Rc<RefCell<[Option<Bounds<Pixels>>; 3]>>,
+    scroll: ScrollHandle,
+    focus: [FocusHandle; 3],
+    mode_focus: [FocusHandle; 2],
+    save_focus: FocusHandle,
+    retry_focus: FocusHandle,
+    relogin_focus: FocusHandle,
+    manual_input: Entity<RenameInput>,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl CompactionUi {
+    fn new(window: &mut Window, cx: &mut Context<SettingsShell>) -> Self {
+        let manual_input = cx.new(|cx| {
+            let mut input = RenameInput::new(String::new(), cx);
+            input.search_style = true;
+            input.placeholder = "填写模型 ID".into();
+            input
+        });
+        let mut subscriptions = Vec::new();
+        subscriptions.push(
+            cx.subscribe_in(
+                &manual_input,
+                window,
+                |this, _, event, window, cx| match event {
+                    RenameInputEvent::Changed => {
+                        let text = this.compaction.manual_input.read(cx).text.clone();
+                        if let Some(draft) = &mut this.compaction.draft
+                            && draft.model != text
+                        {
+                            draft.model = text;
+                            this.compaction.saved = false;
+                            cx.notify();
+                        }
+                    }
+                    RenameInputEvent::Confirm => {
+                        let focus = this.compaction.save_focus.clone();
+                        window.focus(&focus);
+                        cx.notify();
+                    }
+                    RenameInputEvent::Cancel => {
+                        let focus = this.compaction.focus[CompactionSelect::Model.index()].clone();
+                        window.focus(&focus);
+                        cx.notify();
+                    }
+                },
+            ),
+        );
+        Self {
+            draft: None,
+            baseline: None,
+            manual_model: false,
+            saved: false,
+            was_saving: false,
+            open: None,
+            bounds: Rc::new(RefCell::new([None; 3])),
+            scroll: ScrollHandle::new(),
+            focus: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
+            mode_focus: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
+            save_focus: cx.focus_handle().tab_stop(true),
+            retry_focus: cx.focus_handle().tab_stop(true),
+            relogin_focus: cx.focus_handle().tab_stop(true),
+            manual_input,
+            _subscriptions: subscriptions,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.draft = None;
+        self.baseline = None;
+        self.manual_model = false;
+        self.saved = false;
+        self.was_saving = false;
+        self.open = None;
+    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -1316,13 +1481,42 @@ impl Editor {
         window: &mut Window,
         cx: &mut Context<SettingsShell>,
     ) -> Self {
-        let mut draft = if let Some(provider) = &existing {
+        let draft = if let Some(provider) = &existing {
             ProviderDraft::from_provider(provider)
         } else if step == EditorStep::Form {
             preset_draft(preset_id)
         } else {
             ProviderDraft::default()
         };
+        let mut editor = Self::from_draft(locale, draft, opener, window, cx);
+        editor.step = step;
+        editor.selection = selection;
+        if !query_text.is_empty() {
+            editor.query.update(cx, |input, _| input.text = query_text);
+        }
+        let focus = if step == EditorStep::Pick {
+            editor.query.read(cx).focus.clone()
+        } else if step == EditorStep::Subscription {
+            editor.focus.subscription_primary.clone()
+        } else if editor.draft.subscription_kind.is_some() {
+            editor.name.read(cx).focus.clone()
+        } else {
+            editor.focus.key.clone()
+        };
+        window.focus(&focus);
+        editor
+    }
+
+    /// Build the shared four-tier editor around a draft supplied by the
+    /// subscription sign-in. The caller chooses the step and focus target.
+    fn from_draft(
+        locale: InterfaceLocale,
+        mut draft: ProviderDraft,
+        opener: FocusHandle,
+        window: &mut Window,
+        cx: &mut Context<SettingsShell>,
+    ) -> Self {
+        normalize_subscription_draft(&mut draft);
         for effort in &mut draft.effort_mapping {
             if effort.is_empty() {
                 *effort = "follow".into();
@@ -1343,7 +1537,7 @@ impl Editor {
         };
         let baseline_metadata = draft.model_metadata.clone();
         let query = input_entity(
-            query_text,
+            String::new(),
             locale.text("搜索供应商", "Search providers"),
             cx,
         );
@@ -1398,6 +1592,7 @@ impl Editor {
             close: cx.focus_handle().tab_stop(true),
             back: cx.focus_handle().tab_stop(true),
             presets: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
+            subscription_choices: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
             custom: cx.focus_handle().tab_stop(true),
             change: cx.focus_handle().tab_stop(true),
             cancel: cx.focus_handle().tab_stop(true),
@@ -1424,11 +1619,17 @@ impl Editor {
             keep_editing: cx.focus_handle().tab_stop(true),
             confirm_action: cx.focus_handle().tab_stop(true),
             error: cx.focus_handle().tab_stop(false),
+            subscription_risk: cx.focus_handle().tab_stop(true),
+            subscription_primary: cx.focus_handle().tab_stop(true),
+            subscription_cancel: cx.focus_handle().tab_stop(true),
+            subscription_reopen: cx.focus_handle().tab_stop(true),
+            subscription_system_browser: cx.focus_handle().tab_stop(true),
         };
-        let editor = Self {
-            step,
+        Self {
+            step: EditorStep::Form,
+            subscription: None,
             query,
-            selection,
+            selection: None,
             draft,
             baseline,
             baseline_metadata,
@@ -1458,16 +1659,7 @@ impl Editor {
             focus,
             body_scroll: ScrollHandle::new(),
             _subscriptions: subscriptions,
-        };
-        let focus = if step == EditorStep::Pick {
-            editor.query.read(cx).focus.clone()
-        } else if editor.draft.subscription_kind.is_some() {
-            editor.name.read(cx).focus.clone()
-        } else {
-            editor.focus.key.clone()
-        };
-        window.focus(&focus);
-        editor
+        }
     }
 
     fn values(&self, cx: &App) -> FormValues {
@@ -1697,6 +1889,8 @@ pub struct SettingsShell {
     time_zone_menu_open: bool,
     language_zone_focus: LanguageZoneFocus,
     providers: ProviderSettings,
+    compaction: CompactionUi,
+    subscription_settings_open: bool,
     assignments: ClaudeAssignments,
     assignment_view: Entity<AssignmentView>,
     _assignment_subscriptions: [Subscription; 2],
@@ -1719,7 +1913,7 @@ pub struct SettingsShell {
     load_retry_focus: FocusHandle,
     dispatch_retry_focus: FocusHandle,
     new_provider_focus: FocusHandle,
-    card_controls: HashMap<String, [FocusHandle; 2]>,
+    card_controls: HashMap<String, [FocusHandle; 3]>,
 }
 
 impl SettingsShell {
@@ -1727,10 +1921,11 @@ impl SettingsShell {
         let mut providers = ProviderSettings::new(commands.clone());
         // First read on mount; the shared selection is kept by ProviderSettings.
         providers.load();
+        providers.load_compaction();
         let assignment_view = cx.new(AssignmentView::new);
         let assignment_actions =
-            cx.subscribe_in(&assignment_view, window, |shell, _, action, _, cx| {
-                shell.assignment_action(action, cx)
+            cx.subscribe_in(&assignment_view, window, |shell, _, action, window, cx| {
+                shell.assignment_action(action, Some(window), cx)
             });
         let assignment_updates = cx.observe(&assignment_view, |_, _, cx| cx.notify());
         let mut shell = Self {
@@ -1749,6 +1944,8 @@ impl SettingsShell {
             time_zone_menu_open: false,
             language_zone_focus: LanguageZoneFocus::new(cx),
             providers,
+            compaction: CompactionUi::new(window, cx),
+            subscription_settings_open: false,
             assignments: ClaudeAssignments::new(commands),
             assignment_view,
             _assignment_subscriptions: [assignment_actions, assignment_updates],
@@ -1775,11 +1972,1484 @@ impl SettingsShell {
             card_controls: HashMap::new(),
         };
         shell.load_assignments(cx);
+        shell.open_subscription_settings_round(cx);
         shell
     }
 
     pub fn can_close(&self) -> bool {
         self.editor.is_none() && self.providers.switching().is_none()
+    }
+
+    fn subscription_connected(&self) -> bool {
+        self.commands.connection().1 == ConnectionPhase::Ready
+    }
+
+    /// The Claude Code pane holds one settings round while it is visible. The
+    /// runtime reads account details and quota once for this lease; repeated
+    /// calls from the same view are ignored until it is released.
+    fn open_subscription_settings_round(&mut self, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.subscription_settings_open) {
+            // Already open: keep the existing round instead of reopening it.
+            self.subscription_settings_open = true;
+            return;
+        }
+        if !self.subscription_connected() {
+            return;
+        }
+        let _ = self.providers.open_subscription_settings();
+        self.subscription_settings_open = true;
+        cx.notify();
+    }
+
+    fn release_subscription_settings_round(&mut self, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.subscription_settings_open) {
+            let _ = self.providers.close_subscription_settings();
+            cx.notify();
+        }
+    }
+
+    /// Called by the workspace before it drops this shell, whether the user
+    /// closes settings, switches away from the pane or the window goes away.
+    /// Cancels a pending OAuth attempt, discards the unsaved draft and releases
+    /// the settings round so the runtime stops holding a model-router lease.
+    pub(crate) fn close_subscription_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_subscription_flow();
+        self.editor = None;
+        self.keyboard_focus = false;
+        self.release_subscription_settings_round(cx);
+        window.refresh();
+        cx.notify();
+    }
+
+    /// One chain per subscription dialog. The timer only reads status while
+    /// the flow is waiting; closing, cancelling or switching phase invalidates
+    /// the generation so a late tick cannot touch the next dialog.
+    fn schedule_subscription_poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.providers.subscription_login().phase != "waiting" {
+            return;
+        }
+        let Some(editor) = &mut self.editor else {
+            return;
+        };
+        let Some(flow) = &mut editor.subscription else {
+            return;
+        };
+        if flow.polling {
+            return;
+        }
+        flow.polling = true;
+        let generation = flow.generation;
+        let timer = cx.background_executor().timer(Duration::from_millis(800));
+        cx.spawn_in(window, async move |shell, cx| {
+            timer.await;
+            let _ = cx.update(|window, cx| {
+                let _ = shell.update(cx, |shell, cx| {
+                    shell.subscription_poll(generation, window, cx)
+                });
+            });
+        })
+        .detach();
+    }
+
+    fn subscription_poll(&mut self, generation: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self.editor.as_ref().and_then(|editor| {
+            editor
+                .subscription
+                .as_ref()
+                .filter(|flow| flow.generation == generation && flow.polling)
+        });
+        if current.is_none() {
+            return;
+        }
+        if let Some(flow) = self
+            .editor
+            .as_mut()
+            .and_then(|editor| editor.subscription.as_mut())
+        {
+            flow.polling = false;
+        }
+        if self.providers.subscription_login().phase != "waiting" {
+            return;
+        }
+        let update = self.providers.poll_subscription_login();
+        let waiting = self.providers.subscription_login().phase == "waiting";
+        let _ = self.apply_subscription_update(update, window, cx);
+        if waiting
+            && self.editor.as_ref().is_some_and(|editor| {
+                editor
+                    .subscription
+                    .as_ref()
+                    .is_some_and(|flow| flow.generation == generation)
+            })
+        {
+            self.schedule_subscription_poll(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn apply_subscription_update(
+        &mut self,
+        update: ProviderUpdate,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> ProviderUpdate {
+        match update {
+            ProviderUpdate::SubscriptionDraft(draft) => {
+                self.adopt_subscription_draft(draft, window, cx);
+                ProviderUpdate::None
+            }
+            ProviderUpdate::SaveFailed(message) => {
+                if let Some(editor) = &mut self.editor {
+                    editor.error = Some(message.clone());
+                    editor.body_scroll.scroll_to_bottom();
+                }
+                self.apply_update(ProviderUpdate::SaveFailed(message), window, cx);
+                ProviderUpdate::None
+            }
+            other => {
+                self.apply_update(other, window, cx);
+                ProviderUpdate::None
+            }
+        }
+    }
+
+    fn adopt_subscription_draft(
+        &mut self,
+        mut draft: ProviderDraft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let previous = self.editor.as_ref();
+        let opener = previous
+            .map(|editor| editor.opener.clone())
+            .unwrap_or_else(|| self.new_provider_focus.clone());
+        let flow = previous
+            .and_then(|editor| editor.subscription.clone())
+            .or_else(|| {
+                draft
+                    .subscription_kind
+                    .clone()
+                    .map(|provider| SubscriptionFlow {
+                        provider,
+                        existing: draft.id.is_some(),
+                        existing_id: draft.id.clone(),
+                        existing_name: Some(draft.name.clone())
+                            .filter(|name| !name.trim().is_empty()),
+                        risk_checked: false,
+                        generation: 1,
+                        polling: false,
+                    })
+            });
+        let Some(flow) = flow else {
+            return;
+        };
+        normalize_subscription_draft(&mut draft);
+        if draft.id.is_none() {
+            draft.id = flow.existing_id.clone();
+        }
+        if draft.name.trim().is_empty() {
+            draft.name = flow.existing_name.clone().unwrap_or_else(|| {
+                if flow.provider == "antigravity" {
+                    "Antigravity".into()
+                } else {
+                    "ChatGPT".into()
+                }
+            });
+        }
+        self.editor = None;
+        let mut editor = Editor::from_draft(self.locale, draft, opener, window, cx);
+        editor.step = EditorStep::Form;
+        editor.subscription = Some(SubscriptionFlow {
+            polling: false,
+            generation: flow.generation + 1,
+            risk_checked: flow.risk_checked,
+            ..flow
+        });
+        let focus = editor.name.read(cx).focus.clone();
+        self.editor = Some(editor);
+        window.focus(&focus);
+        cx.notify();
+    }
+
+    fn start_subscription_from_pick(
+        &mut self,
+        kind: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.providers.saving() || !self.subscription_connected() {
+            return;
+        }
+        let existing = self
+            .providers
+            .providers()
+            .iter()
+            .find(|provider| subscription_kind(provider) == Some(kind))
+            .cloned();
+        self.begin_subscription_flow(kind, existing.as_ref(), window, cx);
+    }
+
+    fn begin_subscription_flow(
+        &mut self,
+        kind: &str,
+        existing: Option<&Value>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = &mut self.editor else {
+            return;
+        };
+        let generation = editor
+            .subscription
+            .as_ref()
+            .map_or(1, |flow| flow.generation + 1);
+        editor.step = EditorStep::Subscription;
+        editor.error = None;
+        editor.confirm = None;
+        editor.subscription = Some(SubscriptionFlow {
+            provider: kind.to_owned(),
+            existing: existing.is_some(),
+            existing_id: existing
+                .and_then(|provider| provider["id"].as_str())
+                .map(str::to_owned),
+            existing_name: existing
+                .and_then(|provider| provider["name"].as_str())
+                .map(str::to_owned),
+            risk_checked: false,
+            generation,
+            polling: false,
+        });
+        let _ = self.providers.begin_subscription(kind);
+        let phase = self.providers.subscription_login().phase;
+        let focus = self.editor.as_ref().map(|editor| {
+            if phase == "risk" {
+                editor.focus.subscription_risk.clone()
+            } else {
+                editor.focus.subscription_primary.clone()
+            }
+        });
+        if let Some(focus) = focus {
+            window.focus(&focus);
+        }
+        if phase == "waiting" {
+            self.schedule_subscription_poll(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn open_subscription_relogin(
+        &mut self,
+        provider: Value,
+        opener: FocusHandle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.editor.is_some() || self.providers.saving() || !self.subscription_connected() {
+            return;
+        }
+        let Some(kind) = subscription_kind(&provider).map(str::to_owned) else {
+            return;
+        };
+        self.editor = Some(Editor::new(
+            self.locale,
+            Some(provider.clone()),
+            EditorStep::Subscription,
+            None,
+            String::new(),
+            None,
+            opener,
+            window,
+            cx,
+        ));
+        self.begin_subscription_flow(&kind, Some(&provider), window, cx);
+    }
+
+    fn toggle_subscription_risk(&mut self, cx: &mut Context<Self>) {
+        if !self.subscription_connected() || self.providers.subscription_login().busy {
+            return;
+        }
+        if let Some(flow) = self
+            .editor
+            .as_mut()
+            .and_then(|editor| editor.subscription.as_mut())
+        {
+            flow.risk_checked = !flow.risk_checked;
+            cx.notify();
+        }
+    }
+
+    fn confirm_subscription_risk(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(flow) = self
+            .editor
+            .as_ref()
+            .and_then(|editor| editor.subscription.as_ref())
+        else {
+            return;
+        };
+        if !flow.risk_checked
+            || !self.subscription_connected()
+            || self.providers.subscription_login().busy
+        {
+            return;
+        }
+        let _ = self.providers.confirm_subscription_risk();
+        let phase = self.providers.subscription_login().phase;
+        let focus = self.editor.as_ref().map(|editor| {
+            if phase == "risk" {
+                editor.focus.subscription_risk.clone()
+            } else {
+                editor.focus.subscription_primary.clone()
+            }
+        });
+        if let Some(focus) = focus {
+            window.focus(&focus);
+        }
+        cx.notify();
+    }
+
+    fn start_subscription_login(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.subscription_connected() || self.providers.subscription_login().busy {
+            return;
+        }
+        let _ = self
+            .providers
+            .start_subscription_login_localized(self.locale != InterfaceLocale::English);
+        if self.providers.subscription_login().phase == "waiting" {
+            if let Some(editor) = &self.editor {
+                window.focus(&editor.focus.subscription_cancel);
+            }
+            self.schedule_subscription_poll(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn reopen_subscription_login(&mut self, cx: &mut Context<Self>) {
+        let login = self.providers.subscription_login();
+        if !self.subscription_connected() || login.busy || !login.can_reopen {
+            return;
+        }
+        let _ = self.providers.reopen_subscription_login();
+        if self.providers.subscription_login().phase == "waiting" {
+            // The running status chain stays in charge; never start another.
+            cx.notify();
+        }
+    }
+
+    fn reopen_subscription_in_system_browser(&mut self, cx: &mut Context<Self>) {
+        let login = self.providers.subscription_login();
+        if !self.subscription_connected()
+            || login.busy
+            || !login.can_reopen
+            || !login.system_browser_available
+        {
+            return;
+        }
+        let _ = self.providers.reopen_subscription_in_system_browser();
+        cx.notify();
+    }
+
+    fn cancel_subscription_login_ui(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let _ = self.providers.cancel_subscription_login();
+        if let Some(editor) = &mut self.editor
+            && let Some(flow) = &mut editor.subscription
+        {
+            flow.polling = false;
+            flow.generation = flow.generation.wrapping_add(1);
+        }
+        if let Some(editor) = &self.editor {
+            window.focus(&editor.focus.subscription_primary);
+        }
+        cx.notify();
+    }
+
+    /// Discard the pending flow and its draft. Called on close, page leave and
+    /// workspace shutdown. A saved flow is cleared before `close_editor` so a
+    /// successful commit is never followed by an attempt cancellation.
+    fn cancel_subscription_flow(&mut self) {
+        let had_flow = self
+            .editor
+            .as_ref()
+            .and_then(|editor| editor.subscription.as_ref())
+            .is_some();
+        if !had_flow {
+            return;
+        }
+        if let Some(editor) = &mut self.editor
+            && let Some(flow) = &mut editor.subscription
+        {
+            flow.polling = false;
+            flow.generation = flow.generation.wrapping_add(1);
+            editor.subscription = None;
+        }
+        let _ = self.providers.cancel_subscription_login();
+    }
+
+    // ------------------------------------------------------------------
+    // Compaction model block
+    // ------------------------------------------------------------------
+
+    fn dismiss_compaction_menu(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.compaction.open.take().is_none() {
+            return false;
+        }
+        cx.notify();
+        true
+    }
+
+    fn sync_compaction(&mut self, cx: &mut Context<Self>) {
+        let saving = self.providers.saving_compaction();
+        let error = self.providers.compaction_error();
+        if self.compaction.was_saving && !saving {
+            self.compaction.saved = error.is_none();
+        }
+        self.compaction.was_saving = saving;
+        let Some(persisted) = self.providers.compaction().cloned() else {
+            return;
+        };
+        let normalized = CompactionDraft::from_value(&persisted).input();
+        let dirty = self
+            .compaction
+            .draft
+            .as_ref()
+            .is_some_and(|draft| draft.is_dirty(&persisted));
+        let baseline_changed = self.compaction.baseline.as_ref() != Some(&normalized);
+        if self.compaction.draft.is_none() || (baseline_changed && !dirty) {
+            self.compaction.draft = Some(CompactionDraft::from_value(&persisted));
+            self.compaction.baseline = Some(normalized);
+            self.compaction.manual_model = false;
+        } else if baseline_changed {
+            self.compaction.baseline = Some(normalized);
+        }
+        let _ = cx;
+    }
+
+    fn compaction_selected(&self, select: CompactionSelect) -> String {
+        let Some(draft) = &self.compaction.draft else {
+            return String::new();
+        };
+        match select {
+            CompactionSelect::Provider => draft.provider_id.clone().unwrap_or_default(),
+            CompactionSelect::Model if self.compaction.manual_model => "__manual__".into(),
+            CompactionSelect::Model => draft.model.clone(),
+            CompactionSelect::Effort => draft.effort.clone(),
+        }
+    }
+
+    fn compaction_options(&self, select: CompactionSelect) -> Vec<CompactionOption> {
+        let Some(draft) = &self.compaction.draft else {
+            return Vec::new();
+        };
+        match select {
+            CompactionSelect::Provider => provider_options(self.providers.providers(), self.locale),
+            CompactionSelect::Model => {
+                let Some(provider) = selected_provider(draft, self.providers.providers()) else {
+                    return Vec::new();
+                };
+                if !provider_available(provider) {
+                    return Vec::new();
+                }
+                let mut options = model_options(provider);
+                let current = draft.model.trim();
+                if !current.is_empty() && !options.iter().any(|option| option.value == current) {
+                    let label = if self.locale == InterfaceLocale::Chinese {
+                        format!("{current}（不在当前列表中）")
+                    } else {
+                        format!("{current} (not in this list)")
+                    };
+                    options.push(CompactionOption {
+                        value: current.to_owned(),
+                        label,
+                        enabled: true,
+                    });
+                }
+                options.push(CompactionOption {
+                    value: "__manual__".into(),
+                    label: self
+                        .locale
+                        .text("手动填写模型 ID…", "Enter model ID manually…")
+                        .into(),
+                    enabled: true,
+                });
+                options
+            }
+            CompactionSelect::Effort => {
+                let Some(provider) = selected_provider(draft, self.providers.providers()) else {
+                    return Vec::new();
+                };
+                if !provider_available(provider) {
+                    return Vec::new();
+                }
+                effort_values(provider, draft.model.trim(), &draft.effort)
+                    .into_iter()
+                    .map(|effort| CompactionOption {
+                        value: effort.clone(),
+                        label: compaction_effort_label(&effort, self.locale).to_owned(),
+                        enabled: true,
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    fn compaction_trigger_enabled(&self, select: CompactionSelect) -> bool {
+        if self.providers.saving_compaction() {
+            return false;
+        }
+        let Some(draft) = &self.compaction.draft else {
+            return false;
+        };
+        match select {
+            CompactionSelect::Provider => true,
+            CompactionSelect::Model | CompactionSelect::Effort => {
+                selected_provider(draft, self.providers.providers()).is_some_and(provider_available)
+            }
+        }
+    }
+
+    fn compaction_label(&self, select: CompactionSelect) -> String {
+        let selected = self.compaction_selected(select);
+        let options = self.compaction_options(select);
+        if let Some(option) = options.iter().find(|option| option.value == selected) {
+            return option.label.clone();
+        }
+        if !selected.is_empty() && selected != "__manual__" {
+            if select == CompactionSelect::Model
+                && let Some(draft) = &self.compaction.draft
+                && let Some(provider) = selected_provider(draft, self.providers.providers())
+            {
+                return compaction_model_name(provider, &selected);
+            }
+            return selected;
+        }
+        match select {
+            CompactionSelect::Provider => {
+                self.locale.text("请选择供应商", "Choose a provider").into()
+            }
+            CompactionSelect::Model => self
+                .locale
+                .text("请选择压缩模型", "Choose a compaction model")
+                .into(),
+            CompactionSelect::Effort => compaction_effort_label("follow", self.locale).into(),
+        }
+    }
+
+    fn open_compaction_menu(
+        &mut self,
+        select: CompactionSelect,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.compaction_trigger_enabled(select) {
+            return;
+        }
+        if self
+            .compaction
+            .open
+            .as_ref()
+            .is_some_and(|menu| menu.select == select)
+        {
+            self.compaction.open = None;
+            cx.notify();
+            return;
+        }
+        let items = self.compaction_options(select);
+        if items.is_empty() {
+            return;
+        }
+        let selected = self.compaction_selected(select);
+        let active = items
+            .iter()
+            .position(|item| item.value == selected)
+            .unwrap_or(0);
+        let trigger_focus = self.compaction.focus[select.index()].clone();
+        window.focus(&trigger_focus);
+        self.compaction.scroll.scroll_to_item(active);
+        self.compaction.open = Some(CompactionMenu {
+            select,
+            active,
+            items,
+            selected,
+            trigger_focus,
+        });
+        window.refresh();
+        cx.notify();
+    }
+
+    fn compaction_menu_key(
+        &mut self,
+        select: CompactionSelect,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let open_here = self
+            .compaction
+            .open
+            .as_ref()
+            .is_some_and(|menu| menu.select == select);
+        if !open_here {
+            if matches!(event.keystroke.key.as_str(), "enter" | "space" | "down")
+                && !event.keystroke.modifiers.modified()
+            {
+                self.open_compaction_menu(select, window, cx);
+                cx.stop_propagation();
+            }
+            return;
+        }
+        let Some((len, active)) = self
+            .compaction
+            .open
+            .as_ref()
+            .map(|menu| (menu.items.len(), menu.active))
+        else {
+            return;
+        };
+        let key = event.keystroke.key.as_str();
+        match key {
+            "escape" => {
+                self.dismiss_compaction_menu(cx);
+                cx.stop_propagation();
+            }
+            "tab" => {
+                self.dismiss_compaction_menu(cx);
+            }
+            "down" => {
+                let next = if len == 0 { 0 } else { (active + 1) % len };
+                self.set_compaction_active(next, window, cx);
+                cx.stop_propagation();
+            }
+            "up" => {
+                let next = if len == 0 {
+                    0
+                } else {
+                    (active + len - 1) % len
+                };
+                self.set_compaction_active(next, window, cx);
+                cx.stop_propagation();
+            }
+            "home" => {
+                self.set_compaction_active(0, window, cx);
+                cx.stop_propagation();
+            }
+            "end" => {
+                self.set_compaction_active(len.saturating_sub(1), window, cx);
+                cx.stop_propagation();
+            }
+            "enter" | "space" => {
+                let value = self
+                    .compaction
+                    .open
+                    .as_ref()
+                    .and_then(|menu| menu.items.get(menu.active))
+                    .filter(|item| item.enabled)
+                    .map(|item| item.value.clone());
+                if let Some(value) = value {
+                    self.choose_compaction_option(select, value, window, cx);
+                }
+                cx.stop_propagation();
+            }
+            _ => {
+                cx.stop_propagation();
+            }
+        }
+    }
+
+    fn set_compaction_active(
+        &mut self,
+        active: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(menu) = self.compaction.open.as_mut() else {
+            return;
+        };
+        if menu.items.is_empty() {
+            return;
+        }
+        menu.active = active.min(menu.items.len() - 1);
+        let active = menu.active;
+        self.compaction.scroll.scroll_to_item(active);
+        window.refresh();
+        cx.notify();
+    }
+
+    fn choose_compaction_option(
+        &mut self,
+        select: CompactionSelect,
+        value: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(menu) = self.compaction.open.take() else {
+            return;
+        };
+        if let Some(draft) = &mut self.compaction.draft {
+            match select {
+                CompactionSelect::Provider => {
+                    draft.provider_id = Some(value.clone());
+                    self.compaction.manual_model = false;
+                    let first = self
+                        .providers
+                        .providers()
+                        .iter()
+                        .find(|provider| provider["id"].as_str() == Some(value.as_str()))
+                        .and_then(|provider| model_options(provider).into_iter().next())
+                        .map(|option| option.value)
+                        .unwrap_or_default();
+                    draft.model = first;
+                }
+                CompactionSelect::Model if value == "__manual__" => {
+                    self.compaction.manual_model = true;
+                    let current = draft.model.clone();
+                    self.seed_compaction_manual(&current, cx);
+                    let focus = self.compaction.manual_input.read(cx).focus.clone();
+                    window.focus(&focus);
+                }
+                CompactionSelect::Model => {
+                    draft.model = value;
+                    self.compaction.manual_model = false;
+                }
+                CompactionSelect::Effort => {
+                    draft.effort = value;
+                }
+            }
+        }
+        self.compaction.saved = false;
+        window.focus(&menu.trigger_focus);
+        window.refresh();
+        cx.notify();
+    }
+
+    fn seed_compaction_manual(&mut self, text: &str, cx: &mut Context<Self>) {
+        let input = self.compaction.manual_input.clone();
+        input.update(cx, |input, cx| {
+            if input.text != text {
+                input.text = text.to_owned();
+                cx.notify();
+            }
+        });
+    }
+
+    fn select_compaction_mode(&mut self, mode: &str, cx: &mut Context<Self>) {
+        if self.providers.saving_compaction() {
+            return;
+        }
+        let Some(draft) = &mut self.compaction.draft else {
+            return;
+        };
+        if draft.mode == mode {
+            return;
+        }
+        let previous = draft.mode.clone();
+        draft.mode = mode.to_owned();
+        self.compaction.saved = false;
+        let persisted_custom = self
+            .providers
+            .compaction()
+            .is_some_and(|value| value["mode"] == "custom");
+        if mode == "follow" && (previous == "custom" || persisted_custom) {
+            self.save_compaction_now(cx);
+        }
+        cx.notify();
+    }
+
+    fn save_compaction_now(&mut self, cx: &mut Context<Self>) {
+        if self.providers.saving_compaction() {
+            return;
+        }
+        let Some(draft) = self.compaction.draft.clone() else {
+            return;
+        };
+        if self.providers.compaction().is_none() {
+            return;
+        }
+        if compaction_validation(&draft, self.providers.providers(), self.locale).is_some() {
+            return;
+        }
+        self.compaction.saved = false;
+        self.compaction.was_saving = true;
+        self.compaction.open = None;
+        self.providers.save_compaction(&draft.input());
+        cx.notify();
+    }
+
+    fn render_compaction(&mut self, window: &Window, cx: &mut Context<Self>) -> Div {
+        let palette = *self.theme.effective().palette();
+        let colors = EditorColors::new(&palette, self.is_dark());
+        let saving = self.providers.saving_compaction();
+        let error = self.providers.compaction_error().map(str::to_owned);
+        let persisted = self.providers.compaction().is_some();
+        let draft = self.compaction.draft.clone();
+        if !persisted {
+            let text = if let Some(error) = error {
+                let mut row = div()
+                    .mt(px(8.))
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .p(px(12.))
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(rgba(colors.error_line))
+                    .bg(rgba(colors.error_bg))
+                    .text_size(px(11.))
+                    .text_color(rgba(colors.error_text))
+                    .child(div().flex_1().whitespace_normal().child(error));
+                row = row.child(link_button(
+                    "compaction-load-retry",
+                    self.locale.text("重试", "Retry"),
+                    &self.compaction.retry_focus,
+                    self.keyboard_focus,
+                    FocusRingStyle::Shell,
+                    &colors,
+                    cx,
+                    |this, _, cx| {
+                        this.providers.load_compaction();
+                        cx.notify();
+                    },
+                ));
+                row
+            } else {
+                div()
+                    .mt(px(8.))
+                    .text_size(px(11.))
+                    .text_color(rgba(colors.muted))
+                    .child(self.locale.text(
+                        "正在加载压缩模型设置…",
+                        "Loading compaction model settings…",
+                    ))
+            };
+            return div()
+                .mt(px(24.))
+                .pt(px(18.))
+                .border_t_1()
+                .border_color(rgba(colors.line))
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .font_weight(FontWeight(680.))
+                        .text_color(rgba(colors.label))
+                        .child(self.locale.text("对话压缩模型", "Compaction model")),
+                )
+                .child(text);
+        }
+        let Some(draft) = draft else {
+            return div();
+        };
+        let providers = self.providers.providers();
+        let validation = compaction_validation(&draft, providers, self.locale);
+        let dirty = self
+            .providers
+            .compaction()
+            .is_some_and(|persisted| draft.is_dirty(persisted));
+        let provider = selected_provider(&draft, providers);
+        let needs_sign_in = provider.is_some_and(|provider| {
+            provider["subscription"].is_object()
+                && provider["subscription"]["account"]["status"] == "needs-sign-in"
+        });
+        let cross_provider = draft.mode == "custom"
+            && draft.provider_id.as_deref().is_some_and(|id| {
+                self.providers
+                    .active_id()
+                    .is_some_and(|active| active != id)
+            });
+        let fallback = draft.mode == "custom"
+            && provider.is_some_and(|provider| {
+                provider_available(provider) && effort_fallback(provider, draft.model.trim())
+            });
+        let mut section = div()
+            .mt(px(24.))
+            .pt(px(18.))
+            .border_t_1()
+            .border_color(rgba(colors.line))
+            .flex()
+            .flex_col()
+            .w_full()
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .gap(px(10.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .font_weight(FontWeight(680.))
+                                    .text_color(rgba(colors.label))
+                                    .child(self.locale.text("对话压缩模型", "Compaction model")),
+                            )
+                            .child(
+                                div()
+                                    .mt(px(4.))
+                                    .text_size(px(11.))
+                                    .line_height(relative(1.65))
+                                    .text_color(rgba(colors.muted))
+                                    .whitespace_normal()
+                                    .child(self.locale.text(
+                                        "长对话触发 /compact 时，默认跟随会话模型；也可单独指定轻量快模型生成摘要，减少高推理档位下的等待。",
+                                        "Follows the session model during /compact by default, or use a lighter model for faster summaries without changing your working model.",
+                                    )),
+                            ),
+                    )
+                    .when(
+                        self.compaction.saved && draft.mode == "follow",
+                        |row| {
+                            row.child(
+                                div()
+                                    .flex_none()
+                                    .text_size(px(10.))
+                                    .font_weight(FontWeight(600.))
+                                    .text_color(rgb(0x16794b))
+                                    .child(self.locale.text(
+                                        "已保存，新会话生效",
+                                        "Saved · applies to new sessions",
+                                    )),
+                            )
+                        },
+                    ),
+            );
+        let mut card = div()
+            .mt(px(10.))
+            .p(px(14.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(rgba(colors.line))
+            .bg(rgba(colors.panel))
+            .flex()
+            .flex_col()
+            .gap(px(12.));
+        // Two mode choices.
+        let mut choices = div().flex().flex_wrap().gap(px(8.));
+        for (index, (mode, title, subtitle)) in [
+            (
+                "follow",
+                self.locale.text("跟随会话", "Follow session"),
+                self.locale.text(
+                    "使用会话当前的模型和推理强度",
+                    "Use the session model and reasoning effort",
+                ),
+            ),
+            (
+                "custom",
+                self.locale.text("独立配置", "Separate configuration"),
+                self.locale.text(
+                    "仅影响压缩请求，不改变工作模型",
+                    "Affects compaction requests only",
+                ),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let selected = draft.mode == mode;
+            let mut choice = div()
+                .id(SharedString::from(format!("compaction-mode-{mode}")))
+                .flex_1()
+                .min_w(px(190.))
+                .flex()
+                .items_start()
+                .gap(px(9.))
+                .p(px(11.))
+                .rounded(px(8.))
+                .border_1()
+                .border_color(rgba(if selected {
+                    colors.focus
+                } else {
+                    colors.line_strong
+                }))
+                .bg(rgba(if selected {
+                    colors.menu_selected_bg
+                } else {
+                    colors.panel
+                }))
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(px(13.))
+                        .text_color(rgba(if selected { colors.link } else { colors.muted }))
+                        .child(if selected { "◉" } else { "○" }),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .min_w_0()
+                        .gap(px(3.))
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .font_weight(FontWeight(650.))
+                                .text_color(rgba(colors.label))
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(10.))
+                                .line_height(relative(1.5))
+                                .text_color(rgba(colors.muted))
+                                .whitespace_normal()
+                                .child(subtitle),
+                        ),
+                );
+            if saving {
+                choice = choice.opacity(0.55);
+            } else {
+                choice = choice.cursor_pointer();
+                choice = wire_button(
+                    choice,
+                    &self.compaction.mode_focus[index],
+                    8.,
+                    self.keyboard_focus,
+                    move |this, _, cx| this.select_compaction_mode(mode, cx),
+                    cx,
+                );
+            }
+            choices = choices.child(mark_provider(
+                choice,
+                format!("compaction-mode-{mode}"),
+                title,
+                !saving,
+            ));
+        }
+        card = card.child(choices);
+        if draft.mode == "custom" {
+            let mut grid = div().flex().flex_wrap().gap(px(12.));
+            let mut provider_field = div().flex().flex_col().gap(px(5.)).flex_1().min_w(px(170.));
+            provider_field = provider_field.child(
+                div()
+                    .text_size(px(10.))
+                    .font_weight(FontWeight(650.))
+                    .text_color(rgba(colors.muted))
+                    .child(self.locale.text("压缩供应商", "Compaction provider")),
+            );
+            provider_field = provider_field.child(self.render_compaction_trigger(
+                CompactionSelect::Provider,
+                &colors,
+                window,
+                cx,
+            ));
+            if needs_sign_in {
+                let label = self.locale.text("重新登录", "Sign in again");
+                provider_field = provider_field.child(link_button(
+                    "compaction-relogin",
+                    label,
+                    &self.compaction.relogin_focus,
+                    self.keyboard_focus,
+                    FocusRingStyle::Shell,
+                    &colors,
+                    cx,
+                    |this, window, cx| {
+                        let Some(provider) = this
+                            .compaction
+                            .draft
+                            .as_ref()
+                            .and_then(|draft| selected_provider(draft, this.providers.providers()))
+                            .cloned()
+                        else {
+                            return;
+                        };
+                        let opener = this.compaction.relogin_focus.clone();
+                        this.open_subscription_relogin(provider, opener, window, cx);
+                    },
+                ));
+            }
+            grid = grid.child(provider_field);
+            let mut model_field = div().flex().flex_col().gap(px(5.)).flex_1().min_w(px(190.));
+            model_field = model_field.child(
+                div()
+                    .text_size(px(10.))
+                    .font_weight(FontWeight(650.))
+                    .text_color(rgba(colors.muted))
+                    .child(self.locale.text("压缩模型", "Compaction model")),
+            );
+            if self.compaction.manual_model {
+                let list_label = self.locale.text("从列表选择", "Choose from list");
+                let manual = rename_field(
+                    self.compaction.manual_input.clone(),
+                    34.,
+                    10.,
+                    window,
+                    &colors,
+                    cx,
+                );
+                model_field = model_field.child(manual).child(link_button(
+                    "compaction-model-list",
+                    list_label,
+                    &self.compaction.focus[CompactionSelect::Model.index()],
+                    self.keyboard_focus,
+                    FocusRingStyle::Shell,
+                    &colors,
+                    cx,
+                    |this, window, cx| {
+                        this.compaction.manual_model = false;
+                        let focus = this.compaction.focus[CompactionSelect::Model.index()].clone();
+                        window.focus(&focus);
+                        cx.notify();
+                    },
+                ));
+            } else {
+                model_field = model_field.child(self.render_compaction_trigger(
+                    CompactionSelect::Model,
+                    &colors,
+                    window,
+                    cx,
+                ));
+            }
+            grid = grid.child(model_field);
+            let mut effort_field = div().flex().flex_col().gap(px(5.)).flex_1().min_w(px(150.));
+            effort_field = effort_field.child(
+                div()
+                    .text_size(px(10.))
+                    .font_weight(FontWeight(650.))
+                    .text_color(rgba(colors.muted))
+                    .child(self.locale.text("推理强度", "Reasoning effort")),
+            );
+            effort_field = effort_field.child(self.render_compaction_trigger(
+                CompactionSelect::Effort,
+                &colors,
+                window,
+                cx,
+            ));
+            grid = grid.child(effort_field);
+            card = card.child(grid);
+            if fallback {
+                card = card.child(
+                    div()
+                        .text_size(px(10.))
+                        .line_height(relative(1.5))
+                        .text_color(rgba(colors.muted))
+                        .child(self.locale.text(
+                            "推理强度选项为候选，实际可用性以供应商支持为准。",
+                            "Reasoning effort options are candidates; actual availability depends on provider support.",
+                        )),
+                );
+            }
+            if let Some(problem) = validation {
+                card = card.child(mark_provider(
+                    div()
+                        .text_size(px(11.))
+                        .line_height(relative(1.55))
+                        .text_color(rgba(colors.error_text))
+                        .child(problem),
+                    "compaction-validation",
+                    problem,
+                    true,
+                ));
+            }
+            card = card.child(
+                div()
+                    .text_size(px(10.))
+                    .line_height(relative(1.6))
+                    .text_color(rgba(colors.muted))
+                    .whitespace_normal()
+                    .child(if cross_provider {
+                        self.locale.text(
+                            "跨供应商压缩时，当前对话历史会交给所选供应商；不会修改会话的工作模型。",
+                            "With another provider, the current conversation history is sent to that provider; the session working model stays unchanged.",
+                        )
+                    } else {
+                        self.locale.text(
+                            "仅压缩请求使用所选模型与推理强度，不会修改会话的工作模型。",
+                            "Only compaction requests use the chosen model and effort; the session working model stays unchanged.",
+                        )
+                    }),
+            );
+        }
+        let can_save = draft.mode == "custom"
+            && dirty
+            && validation.is_none()
+            && !saving
+            && self.providers.compaction().is_some();
+        if draft.mode == "custom" || dirty {
+            let mut actions = div()
+                .flex()
+                .items_center()
+                .justify_end()
+                .gap(px(10.))
+                .mt(px(2.));
+            let mut save = div()
+                .id("compaction-save")
+                .h(px(32.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .px(px(14.))
+                .rounded(px(7.))
+                .border_1()
+                .border_color(rgba(colors.primary))
+                .bg(rgba(colors.primary))
+                .text_size(px(11.))
+                .font_weight(FontWeight(650.))
+                .text_color(rgb(0xffffff))
+                .child(if saving {
+                    self.locale.text("保存中…", "Saving…")
+                } else {
+                    self.locale.text("保存", "Save")
+                });
+            if can_save || (draft.mode == "follow" && dirty && !saving) {
+                save = save
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(rgba(colors.primary_hover)));
+                save = wire_button(
+                    save,
+                    &self.compaction.save_focus,
+                    7.,
+                    self.keyboard_focus,
+                    |this, _, cx| this.save_compaction_now(cx),
+                    cx,
+                );
+            } else {
+                save = save.opacity(0.55).cursor(CursorStyle::OperationNotAllowed);
+            }
+            actions = actions.child(mark_provider(
+                save,
+                "compaction-save",
+                self.locale.text("保存", "Save"),
+                can_save || (draft.mode == "follow" && dirty && !saving),
+            ));
+            if self.compaction.saved && draft.mode == "custom" {
+                actions = actions.child(
+                    div()
+                        .text_size(px(10.))
+                        .line_height(relative(1.5))
+                        .text_color(rgb(0x16794b))
+                        .whitespace_normal()
+                        .child(self.locale.text(
+                            "已保存，下次启动或恢复会话时生效；正在运行的会话不会被打断。",
+                            "Saved. Applies to the next launched or resumed session; running sessions are not interrupted.",
+                        )),
+                );
+            }
+            card = card.child(actions);
+        }
+        section = section.child(card);
+        if let Some(error) = self
+            .providers
+            .compaction_error()
+            .filter(|_| !saving && self.providers.compaction().is_some())
+        {
+            section = section.child(
+                div()
+                    .mt(px(8.))
+                    .text_size(px(11.))
+                    .text_color(rgba(colors.error_text))
+                    .whitespace_normal()
+                    .child(error.to_owned()),
+            );
+        }
+        section
+    }
+
+    fn render_compaction_trigger(
+        &self,
+        select: CompactionSelect,
+        colors: &EditorColors,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let enabled = self.compaction_trigger_enabled(select);
+        let focus = self.compaction.focus[select.index()].clone();
+        let open_here = self
+            .compaction
+            .open
+            .as_ref()
+            .is_some_and(|menu| menu.select == select);
+        let label = self.compaction_label(select);
+        let mut trigger = div()
+            .id(SharedString::from(format!(
+                "compaction-trigger-{}",
+                select.index()
+            )))
+            .w_full()
+            .h(px(34.))
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(6.))
+            .px(px(9.))
+            .rounded(px(7.))
+            .border_1()
+            .border_color(rgba(if open_here || focus.is_focused(window) {
+                colors.focus
+            } else {
+                colors.input_line
+            }))
+            .bg(rgba(colors.input_background))
+            .text_size(px(12.))
+            .text_color(rgba(colors.label))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(label.clone()),
+            )
+            .child(icon("chevron-down", 12., colors.muted >> 8));
+        let bounds = self.compaction.bounds.clone();
+        trigger = trigger.child(
+            canvas(
+                |_, _, _| (),
+                move |painted, _, _, _| {
+                    bounds.borrow_mut()[select.index()] = Some(painted);
+                },
+            )
+            .absolute()
+            .inset_0()
+            .size_full(),
+        );
+        let marker = match select {
+            CompactionSelect::Provider => "compaction-provider",
+            CompactionSelect::Model => "compaction-model",
+            CompactionSelect::Effort => "compaction-effort",
+        };
+        let trigger = if enabled {
+            trigger
+                .track_focus(&focus)
+                .cursor_pointer()
+                .on_mouse_down(MouseButton::Left, {
+                    let focus = focus.clone();
+                    move |_, window, cx| {
+                        window.focus(&focus);
+                        cx.stop_propagation();
+                    }
+                })
+                .on_click(cx.listener(move |this, event, window, cx| {
+                    if matches!(event, ClickEvent::Keyboard(_)) {
+                        return;
+                    }
+                    cx.stop_propagation();
+                    this.open_compaction_menu(select, window, cx);
+                }))
+                .on_key_down(cx.listener(move |this, event, window, cx| {
+                    this.compaction_menu_key(select, event, window, cx);
+                }))
+                .child(focus_ring_with(
+                    focus,
+                    7.,
+                    self.keyboard_focus,
+                    FocusRingStyle::Shell,
+                ))
+        } else {
+            trigger
+                .opacity(0.55)
+                .cursor(CursorStyle::OperationNotAllowed)
+        };
+        mark_provider(trigger, marker, label, enabled).into_any_element()
+    }
+
+    fn render_compaction_menu(&self, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let Some(menu) = &self.compaction.open else {
+            return Vec::new();
+        };
+        let Some(bounds) = (*self.compaction.bounds.borrow())[menu.select.index()] else {
+            return Vec::new();
+        };
+        let palette = *self.theme.effective().palette();
+        let colors = EditorColors::new(&palette, self.is_dark());
+        let viewport = window.viewport_size();
+        let backdrop = deferred(
+            anchored().position(point(px(0.), px(0.))).child(
+                div()
+                    .id("compaction-menu-backdrop")
+                    .w(viewport.width)
+                    .h(viewport.height)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.compaction.open = None;
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
+                    )
+                    .on_scroll_wheel(|_, _, cx| cx.stop_propagation()),
+            ),
+        )
+        .with_priority(100)
+        .into_any_element();
+        let width = f32::from(bounds.size.width).max(menu.select.menu_min_width());
+        let mut items = div()
+            .id("compaction-menu")
+            .w(px(width))
+            .max_h(px(280.))
+            .flex()
+            .flex_col()
+            .p(px(4.))
+            .rounded(px(8.))
+            .border_1()
+            .border_color(rgba(colors.line))
+            .bg(rgba(colors.panel))
+            .shadow(vec![shadow(0x1a304b, 0.16, 8., 24.)])
+            .overflow_y_scroll()
+            .track_scroll(&self.compaction.scroll)
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation());
+        for (index, option) in menu.items.iter().enumerate() {
+            let selected = option.value == menu.selected;
+            let active = index == menu.active;
+            let enabled = option.enabled;
+            let label = option.label.clone();
+            let value = option.value.clone();
+            let select = menu.select;
+            let mut item = div()
+                .id(SharedString::from(format!(
+                    "compaction-option-{}-{index}",
+                    menu.select.index()
+                )))
+                .flex_none()
+                .min_h(px(30.))
+                .flex()
+                .items_center()
+                .px(px(9.))
+                .py(px(4.))
+                .rounded(px(5.))
+                .text_size(px(12.))
+                .text_color(rgba(if !enabled {
+                    colors.muted
+                } else if selected {
+                    colors.link
+                } else {
+                    colors.label
+                }))
+                .bg(rgba(if selected || active {
+                    colors.menu_selected_bg
+                } else {
+                    colors.panel
+                }))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(label);
+            if enabled {
+                item = item
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(rgba(colors.menu_selected_bg)))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(move |this, event, window, cx| {
+                        if matches!(event, ClickEvent::Keyboard(_)) {
+                            return;
+                        }
+                        cx.stop_propagation();
+                        this.choose_compaction_option(select, value.clone(), window, cx);
+                    }));
+            } else {
+                item = item.opacity(0.65);
+            }
+            items = items.child(item);
+        }
+        let menu = deferred(
+            anchored()
+                .position(point(bounds.left(), bounds.bottom() + px(4.)))
+                .snap_to_window_with_margin(px(8.))
+                .child(items),
+        )
+        .with_priority(101)
+        .into_any_element();
+        vec![backdrop, menu]
     }
 
     fn load_dispatch(&mut self, cx: &mut Context<Self>) {
@@ -2068,6 +3738,17 @@ impl SettingsShell {
             window.focus(&self.language_zone_focus.time_zone_trigger);
             return;
         }
+        if self.dismiss_compaction_menu(cx) {
+            return;
+        }
+        if self
+            .editor
+            .as_ref()
+            .is_some_and(|editor| editor.step == EditorStep::Subscription)
+        {
+            self.editor_request_close(window, cx);
+            return;
+        }
         if let Some(editor) = &mut self.editor {
             if self.providers.saving() || self.providers.deleting() {
                 return;
@@ -2136,8 +3817,30 @@ impl SettingsShell {
         }
     }
 
-    fn assignment_action(&mut self, action: &AssignmentAction, cx: &mut Context<Self>) {
+    fn assignment_action(
+        &mut self,
+        action: &AssignmentAction,
+        window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
         match action {
+            AssignmentAction::Relogin(provider_id) => {
+                let Some(window) = window else {
+                    return;
+                };
+                let Some(provider) = self
+                    .providers
+                    .providers()
+                    .iter()
+                    .find(|provider| provider["id"] == provider_id.as_str())
+                    .cloned()
+                else {
+                    return;
+                };
+                let opener = self.new_provider_focus.clone();
+                self.open_subscription_relogin(provider, opener, window, cx);
+                return;
+            }
             AssignmentAction::RetryCatalog(index)
                 if self
                     .assignments
@@ -2185,6 +3888,23 @@ impl SettingsShell {
         cx.notify();
     }
 
+    /// Workspace routes the shared Claude model-preferences reply here. Only a
+    /// matching compaction request updates the block; assignment replies are
+    /// still consumed by the existing assignment path.
+    pub fn receive_model_preferences(
+        &mut self,
+        reply: &ClaudeModelPreferencesReply,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.providers.receive_compaction(reply) {
+            self.sync_compaction(cx);
+            cx.notify();
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn receive(
         &mut self,
         reply: matou_native_runtime::protocol::ProviderSettingsReply,
@@ -2203,6 +3923,13 @@ impl SettingsShell {
             cx.emit(SettingsShellEvent::ProviderActivated);
         }
         self.apply_update(update, window, cx);
+        // A start/reopen reply can move the flow back to waiting without any
+        // timer running; restart the single chain here.
+        if self.editor.as_ref().is_some_and(|editor| {
+            editor.subscription.is_some() && self.providers.subscription_login().phase == "waiting"
+        }) {
+            self.schedule_subscription_poll(window, cx);
+        }
         self.load_assignment_catalog(false, cx);
         cx.notify();
     }
@@ -2227,6 +3954,16 @@ impl SettingsShell {
             } else {
                 self.diagnostics_generation = None;
                 self.runtime_diagnostics.clear();
+            }
+        }
+        if self.page == SettingsPage::ClaudeCode {
+            if self.subscription_connected() {
+                self.providers.load_compaction();
+                self.open_subscription_settings_round(cx);
+            } else {
+                // The runtime may already have dropped the round with the
+                // generation; re-open it after reconnecting.
+                self.subscription_settings_open = false;
             }
         }
         if self.page == SettingsPage::Language {
@@ -2255,13 +3992,24 @@ impl SettingsShell {
     ) {
         match update {
             ProviderUpdate::None => {}
+            ProviderUpdate::SubscriptionDraft(draft) => {
+                self.adopt_subscription_draft(draft, window, cx);
+            }
             ProviderUpdate::Models(result) => {
                 self.apply_model_fetch(result, window, cx);
             }
             ProviderUpdate::Saved => {
+                // The commit already adopted and cleaned its draft; clear the
+                // flow first so closing never cancels the saved attempt.
+                if let Some(editor) = &mut self.editor {
+                    editor.subscription = None;
+                }
                 self.close_editor(window, cx);
             }
             ProviderUpdate::Deleted => {
+                if let Some(editor) = &mut self.editor {
+                    editor.subscription = None;
+                }
                 self.editor = None;
                 self.keyboard_focus = false;
                 window.focus(&self.new_provider_focus);
@@ -2391,6 +4139,10 @@ impl SettingsShell {
 
     fn close_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.providers.discard_fetch();
+        // An unsaved subscription draft owns a temporarily disabled credential
+        // in the runtime; closing must release it. A saved flow is cleared in
+        // `apply_update` before this runs.
+        self.cancel_subscription_flow();
         if let Some(editor) = self.editor.take() {
             let opener = editor.opener.clone();
             window.focus(&opener);
@@ -2407,6 +4159,16 @@ impl SettingsShell {
             return;
         };
         if editor.confirm.is_some() {
+            return;
+        }
+        if editor.step == EditorStep::Subscription {
+            // A start/confirm request in flight blocks closing; the waiting
+            // phase keeps its close path because it can still be cancelled.
+            let phase = self.providers.subscription_login().phase;
+            if self.providers.subscription_login().busy && phase != "waiting" {
+                return;
+            }
+            self.close_editor(window, cx);
             return;
         }
         if editor.step == EditorStep::Form && editor.is_dirty(cx) {
@@ -2466,11 +4228,16 @@ impl SettingsShell {
             self.editor = Some(current);
             return;
         };
+        if let PickChoice::Subscription(kind) = selection {
+            self.editor = Some(current);
+            self.start_subscription_from_pick(kind, window, cx);
+            return;
+        }
         let query = current.query.read(cx).text.clone();
         let opener = current.opener.clone();
         let preset_id = match selection {
             PickChoice::Preset(id) => Some(id),
-            PickChoice::Custom => None,
+            PickChoice::Subscription(_) | PickChoice::Custom => None,
         };
         let editor = Editor::new(
             self.locale,
@@ -2500,11 +4267,59 @@ impl SettingsShell {
             return;
         }
         let mut draft = editor.working_draft(cx);
-        if !editor.context_touched || draft.is_codex() {
+        if draft.subscription_kind.is_some() {
+            // A new Codex account keeps the frozen 512K request by omitting the
+            // override; an existing account keeps its saved window unless the
+            // user edits the picker in this dialog.
+            if draft.is_codex() || (!editor.context_touched && editor.draft.id.is_none()) {
+                draft.context_window_mode = None;
+            }
+        } else if !editor.context_touched {
             draft.context_window_mode = None;
         }
         if editor.connection_changed && draft.fetched_metadata.is_none() {
             draft.fetched_metadata = Some(json!([]));
+        }
+        if editor.subscription.is_some() {
+            if draft.name.trim().is_empty() {
+                if let Some(editor) = &mut self.editor {
+                    editor.error = Some(
+                        self.locale
+                            .text("请填写显示名称。", "Enter a display name.")
+                            .into(),
+                    );
+                    editor.body_scroll.scroll_to_bottom();
+                    let focus = editor.focus.name.clone();
+                    window.focus(&focus);
+                }
+                cx.notify();
+                return;
+            }
+            if !provider_editor_can_save(&draft) {
+                if let Some(editor) = &mut self.editor {
+                    editor.error = Some(
+                        self.locale
+                            .text(
+                                "没有读到可用的模型，请重新选择。",
+                                "No available models were found. Choose another model.",
+                            )
+                            .into(),
+                    );
+                    editor.body_scroll.scroll_to_bottom();
+                }
+                cx.notify();
+                return;
+            }
+            let _ = self.providers.commit_subscription(&draft, activate);
+            let validation_error = self.providers.subscription_login().error.clone();
+            if let Some(editor) = &mut self.editor {
+                editor.error = validation_error;
+                if editor.error.is_some() {
+                    editor.body_scroll.scroll_to_bottom();
+                }
+            }
+            cx.notify();
+            return;
         }
         match self.providers.save(&draft, activate) {
             Ok(()) => {
@@ -2589,7 +4404,10 @@ impl SettingsShell {
         if self.page == SettingsPage::ClaudeCode {
             // Leaving the provider page discards page-local editor/picker state
             // and the loaded provider projection; returning reads it again.
+            self.cancel_subscription_flow();
+            self.compaction.reset();
             self.providers.discard_fetch();
+            self.release_subscription_settings_round(cx);
             self.editor = None;
             self.card_controls.clear();
             self.keyboard_focus = false;
@@ -2609,6 +4427,8 @@ impl SettingsShell {
         match page {
             SettingsPage::ClaudeCode => {
                 self.providers.load();
+                self.providers.load_compaction();
+                self.open_subscription_settings_round(cx);
                 self.load_assignments(cx);
             }
             SettingsPage::Language => {
@@ -2656,7 +4476,21 @@ impl SettingsShell {
         action: &AssignmentAction,
         cx: &mut Context<Self>,
     ) {
-        self.assignment_action(action, cx);
+        if matches!(action, AssignmentAction::Relogin(_)) {
+            return;
+        }
+        self.assignment_action(action, None, cx);
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    #[allow(dead_code)]
+    pub(crate) fn diagnostics_assignment_action_with_window(
+        &mut self,
+        action: &AssignmentAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.assignment_action(action, Some(window), cx);
     }
 
     #[cfg(any(test, debug_assertions))]
@@ -3915,7 +5749,9 @@ impl SettingsShell {
             }
         });
         content = content.child(provider_switch_impact_row(self.locale, app_name, dark));
-        content.child(assignments)
+        content = content.child(assignments);
+        self.sync_compaction(cx);
+        content.child(self.render_compaction(window, cx))
     }
 
     fn notice_block(&self, title: &str, body: &str, error: bool, cx: &mut Context<Self>) -> Div {
@@ -4221,13 +6057,17 @@ impl SettingsShell {
             let is_last = index + 1 == card_count;
             let card = if provider["kind"] == "subscription" && provider["subscription"].is_object()
             {
+                let details = self.providers.subscription_details(&id).cloned();
+                let refreshing = self.providers.refreshing_subscription(&id);
                 self.subscription_card(
                     &provider,
+                    details.as_ref(),
                     current,
                     is_last,
                     viewport_width,
                     switching.as_deref(),
                     busy,
+                    refreshing,
                     &controls,
                     cx,
                 )
@@ -4255,7 +6095,8 @@ impl SettingsShell {
         current: bool,
         switching: Option<&str>,
         busy: bool,
-        controls: &[FocusHandle; 2],
+        controls: &[FocusHandle; 3],
+        relogin: bool,
         cx: &mut Context<Self>,
     ) -> (Stateful<Div>, Stateful<Div>) {
         let palette = self.theme.effective().palette();
@@ -4296,6 +6137,8 @@ impl SettingsShell {
         }
 
         let switch_id = provider["id"].as_str().unwrap_or_default().to_owned();
+        let relogin_provider = provider.clone();
+        let relogin_opener = controls[1].clone();
         let switching_this = switching == Some(switch_id.as_str());
         let mut switch = div()
             .id(SharedString::from(format!(
@@ -4309,7 +6152,7 @@ impl SettingsShell {
             .px(px(10.))
             .rounded(px(6.))
             .border_1()
-            .border_color(if current || busy {
+            .border_color(if (current && !relogin) || busy {
                 rgba(0x00000000)
             } else {
                 rgba(palette.workspace.accent_line)
@@ -4318,12 +6161,14 @@ impl SettingsShell {
             .font_weight(FontWeight(650.))
             .child(if switching_this {
                 self.locale.text("切换中…", "Switching…")
+            } else if relogin {
+                self.locale.text("重新登录", "Sign in again")
             } else if current {
                 self.locale.text("默认使用", "Default")
             } else {
                 self.locale.text("切换", "Switch")
             });
-        if current || busy {
+        if (current && !relogin) || busy {
             switch = switch
                 .text_color(rgb(FAINT))
                 .bg(rgba(palette.settings.provider_disabled_background))
@@ -4338,9 +6183,18 @@ impl SettingsShell {
                 &controls[1],
                 6.,
                 true,
-                move |this, _, cx| {
-                    this.providers.switch(&switch_id);
-                    cx.notify();
+                move |this, window, cx| {
+                    if relogin {
+                        this.open_subscription_relogin(
+                            relogin_provider.clone(),
+                            relogin_opener.clone(),
+                            window,
+                            cx,
+                        );
+                    } else {
+                        this.providers.switch(&switch_id);
+                        cx.notify();
+                    }
                 },
                 cx,
             );
@@ -4356,7 +6210,7 @@ impl SettingsShell {
         is_last: bool,
         switching: Option<&str>,
         busy: bool,
-        controls: &[FocusHandle; 2],
+        controls: &[FocusHandle; 3],
         container_width: f32,
         viewport_width: f32,
         cx: &mut Context<Self>,
@@ -4404,7 +6258,7 @@ impl SettingsShell {
         };
 
         let (edit, switch) =
-            self.provider_actions(provider, current, switching, busy, controls, cx);
+            self.provider_actions(provider, current, switching, busy, controls, false, cx);
         let card = self
             .provider_list_row(provider, current, is_last)
             .flex_col()
@@ -4538,18 +6392,28 @@ impl SettingsShell {
     fn subscription_card(
         &self,
         provider: &Value,
+        details: Option<&Value>,
         current: bool,
         is_last: bool,
         viewport_width: f32,
         switching: Option<&str>,
         busy: bool,
-        controls: &[FocusHandle; 2],
+        refreshing: bool,
+        controls: &[FocusHandle; 3],
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let palette = *self.theme.effective().palette();
         let subscription = &provider["subscription"];
-        let account = &subscription["account"];
+        let account = if subscription["account"].is_object() {
+            &subscription["account"]
+        } else {
+            details
+                .and_then(|details| details.get("account"))
+                .unwrap_or(&subscription["account"])
+        };
         let status = account["status"].as_str().unwrap_or("ready");
+        let kind = subscription["provider"].as_str().unwrap_or("codex");
+        let quota = quota_text(kind, details, self.locale);
         let status_label = match status {
             "needs-sign-in" => self.locale.text("需要重新登录", "Sign in again"),
             "account-unavailable" => self.locale.text("账号不可用", "Account unavailable"),
@@ -4650,6 +6514,19 @@ impl SettingsShell {
                     .child(account_line),
             );
         }
+        if !quota.is_empty() {
+            details = details.child(mark_provider(
+                div()
+                    .text_size(px(10.))
+                    .line_height(px(14.))
+                    .text_color(rgba(palette.workspace.muted))
+                    .whitespace_normal()
+                    .child(quota.clone()),
+                "quota",
+                quota,
+                true,
+            ));
+        }
         if status == "account-unavailable"
             && let Some(reason) = account["reason"].as_str()
         {
@@ -4668,7 +6545,7 @@ impl SettingsShell {
             .min_h(px(if status == "account-unavailable" {
                 120.
             } else {
-                62.
+                80.
             }))
             .gap(px(11.))
             .px(px(12.))
@@ -4719,24 +6596,72 @@ impl SettingsShell {
                     ),
             );
         }
-        let (edit, switch) =
-            self.provider_actions(provider, current, switching, busy, controls, cx);
+        let (edit, switch) = self.provider_actions(
+            provider,
+            current,
+            switching,
+            busy,
+            controls,
+            status == "needs-sign-in",
+            cx,
+        );
+        let refresh_disabled = busy
+            || refreshing
+            || switching.is_some()
+            || matches!(
+                status,
+                "needs-sign-in" | "account-unavailable" | "router-not-running"
+            );
+        let refresh_label = if refreshing {
+            self.locale.text("刷新中…", "Refreshing…")
+        } else {
+            self.locale.text("刷新模型", "Refresh models")
+        };
+        let mut refresh = div()
+            .id("subscription-refresh-models")
+            .h(px(34.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .px(px(8.))
+            .rounded(px(6.))
+            .text_size(px(12.))
+            .font_weight(FontWeight(600.))
+            .text_color(rgba(palette.workspace.muted))
+            .child(refresh_label);
+        if refresh_disabled {
+            refresh = refresh
+                .opacity(0.55)
+                .cursor(CursorStyle::OperationNotAllowed);
+        } else {
+            let provider_id = provider["id"].as_str().unwrap_or_default().to_owned();
+            refresh = refresh
+                .cursor_pointer()
+                .hover(|style| style.bg(rgba(palette.workspace.panel)));
+            refresh = wire_button(
+                refresh,
+                &controls[2],
+                6.,
+                true,
+                move |this, _, cx| {
+                    this.providers.dismiss_notice();
+                    let _ = this.providers.refresh_subscription_models(&provider_id);
+                    cx.notify();
+                },
+                cx,
+            );
+        }
         card.child(
             div()
                 .flex()
                 .flex_none()
                 .gap(px(5.))
-                .child(
-                    div()
-                        .id("subscription-refresh-models")
-                        .flex()
-                        .items_center()
-                        .px(px(5.))
-                        .text_size(px(11.))
-                        .text_color(rgba(palette.workspace.muted))
-                        .cursor(CursorStyle::OperationNotAllowed)
-                        .child(self.locale.text("刷新模型", "Refresh models")),
-                )
+                .child(mark_provider(
+                    refresh,
+                    "refresh-models",
+                    refresh_label,
+                    !refresh_disabled,
+                ))
                 .child(edit)
                 .child(switch),
         )
@@ -4867,6 +6792,36 @@ impl SettingsShell {
                 order.push(editor.focus.close.clone());
                 order.push(editor.query.read(cx).focus.clone());
                 let query = editor.query.read(cx).text.clone();
+                let query_lower = query.trim().to_lowercase();
+                for (index, (kind, title, description)) in [
+                    (
+                        "codex",
+                        self.locale.text("ChatGPT 账号", "ChatGPT account"),
+                        self.locale.text(
+                            "使用你的 ChatGPT 订阅额度，不需要 API Key",
+                            "Use your ChatGPT subscription. No API key needed.",
+                        ),
+                    ),
+                    (
+                        "antigravity",
+                        self.locale.text("Antigravity 账号", "Antigravity account"),
+                        self.locale.text(
+                            "使用 Google AI 订阅中的 Claude 与 Gemini 模型",
+                            "Use Claude and Gemini models from your Google AI subscription.",
+                        ),
+                    ),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    if query_lower.is_empty()
+                        || format!("{title} {description} {kind}")
+                            .to_lowercase()
+                            .contains(&query_lower)
+                    {
+                        order.push(editor.focus.subscription_choices[index].clone());
+                    }
+                }
                 for (index, preset) in PRESETS.iter().enumerate() {
                     if preset_matches(preset, &query) {
                         order.push(editor.focus.presets[index].clone());
@@ -4878,12 +6833,33 @@ impl SettingsShell {
                     order.push(editor.focus.next.clone());
                 }
             }
+            EditorStep::Subscription => {
+                order.push(editor.focus.close.clone());
+                let phase = self.providers.subscription_login().phase;
+                if phase == "risk" {
+                    order.push(editor.focus.subscription_risk.clone());
+                    order.push(editor.focus.subscription_cancel.clone());
+                    order.push(editor.focus.subscription_primary.clone());
+                } else if phase == "waiting" {
+                    order.push(editor.focus.subscription_reopen.clone());
+                    if self.providers.subscription_login().system_browser_available {
+                        order.push(editor.focus.subscription_system_browser.clone());
+                    }
+                    order.push(editor.focus.subscription_cancel.clone());
+                } else if phase == "error" {
+                    order.push(editor.focus.subscription_cancel.clone());
+                    order.push(editor.focus.subscription_primary.clone());
+                } else {
+                    order.push(editor.focus.subscription_cancel.clone());
+                    order.push(editor.focus.subscription_primary.clone());
+                }
+            }
             EditorStep::Form => {
-                if editor.draft.id.is_none() {
+                if editor.draft.id.is_none() && editor.subscription.is_none() {
                     order.push(editor.focus.back.clone());
                 }
                 order.push(editor.focus.close.clone());
-                if editor.draft.id.is_none() {
+                if editor.draft.id.is_none() && editor.subscription.is_none() {
                     order.push(editor.focus.change.clone());
                 }
                 let work = editor.working_draft(cx);
@@ -4976,8 +6952,19 @@ impl SettingsShell {
         // that area for the `min(520px, 100%)` width so it also fits the
         // 720px minimum window instead of overflowing into the sidebar.
         let panel_width = 520.0_f32.min((self.shell_width(window) - 44.).max(0.));
-        let panel_height = 820.0_f32.min((viewport_height - 44.).max(0.));
-        let busy = self.editor_busy();
+        let subscription_step = editor.step == EditorStep::Subscription;
+        let login = self.providers.subscription_login();
+        let login_phase = if subscription_step { login.phase } else { "" };
+        let login_busy = subscription_step && login.busy;
+        let connected = self.subscription_connected();
+        let busy = self.editor_busy() || login_busy;
+        // The frozen subscription dialog keeps one height across risk, waiting
+        // and the four-tier form so the modal does not jump between phases.
+        let panel_height = if subscription_step || editor.subscription.is_some() {
+            620.0_f32.min((viewport_height - 44.).max(0.))
+        } else {
+            820.0_f32.min((viewport_height - 44.).max(0.))
+        };
         let editing = editor.draft.id.is_some();
         let pick = editor.step == EditorStep::Pick;
         let app = if editor.draft.is_codex() {
@@ -4987,6 +6974,29 @@ impl SettingsShell {
         };
         let title = if pick {
             self.locale.text("添加供应商", "Add provider").to_owned()
+        } else if subscription_step {
+            if login_phase == "risk" {
+                self.locale
+                    .text(
+                        "使用 Antigravity 账号有封号风险",
+                        "Using an Antigravity account may get it suspended",
+                    )
+                    .to_owned()
+            } else if editor
+                .subscription
+                .as_ref()
+                .is_some_and(|flow| flow.existing)
+            {
+                self.locale.text("重新登录", "Sign in again").to_owned()
+            } else {
+                self.locale.text("添加供应商", "Add provider").to_owned()
+            }
+        } else if editor.subscription.is_some() {
+            if editing {
+                self.locale.text("编辑供应商", "Edit provider").to_owned()
+            } else {
+                self.locale.text("添加供应商", "Add provider").to_owned()
+            }
         } else if editing {
             self.locale.text("编辑供应商", "Edit provider").to_owned()
         } else {
@@ -5043,7 +7053,8 @@ impl SettingsShell {
             .line_height(relative(1.))
             .text_color(rgba(colors.header_icon))
             .child("×");
-        if busy {
+        let close_locked = busy && !(subscription_step && login_phase == "waiting");
+        if close_locked {
             close = close.opacity(0.55);
         } else {
             close = close.hover(move |style| style.bg(rgba(colors.header_icon_hover)));
@@ -5066,7 +7077,7 @@ impl SettingsShell {
             .pb(px(20.))
             .border_b_1()
             .border_color(rgba(colors.header_line));
-        if !pick && !editing {
+        if !pick && !editing && editor.subscription.is_none() {
             header = header.child(back);
         }
         let subtitle = format!("{} {app}", self.locale.text("用于", "For"));
@@ -5103,6 +7114,8 @@ impl SettingsShell {
         let work = editor.working_draft(cx);
         let body = if pick {
             self.render_pick_body(editor, panel_width, window, cx)
+        } else if subscription_step {
+            self.render_subscription_body(editor, &colors, connected, window, cx)
         } else {
             self.render_form_body(editor, &work, window, cx)
         };
@@ -5117,7 +7130,9 @@ impl SettingsShell {
             .child(body);
 
         let save_enabled = !busy && provider_editor_can_save(&work);
-        let footer = if pick {
+        let footer = if subscription_step {
+            self.render_subscription_footer(editor, &colors, connected, window, cx)
+        } else if pick {
             let cancel = dialog_button(
                 "provider-setup-cancel",
                 self.locale.text("取消", "Cancel"),
@@ -5153,6 +7168,8 @@ impl SettingsShell {
                 .child(div().flex_1())
                 .child(cancel)
                 .child(next)
+        } else if editor.subscription.is_some() {
+            self.subscription_models_footer(editor, &work, save_enabled, &colors, cx)
         } else if editing {
             let delete = self
                 .providers
@@ -5326,7 +7343,8 @@ impl SettingsShell {
             .child(header)
             .child(body)
             .child(footer);
-        if busy {
+        let overlay_busy = busy && !(subscription_step && login_phase == "waiting");
+        if overlay_busy {
             panel = panel.child(
                 div()
                     .absolute()
@@ -5381,6 +7399,589 @@ impl SettingsShell {
         Some(div().absolute().inset_0().child(layer).into_any_element())
     }
 
+    fn render_subscription_body(
+        &self,
+        editor: &Editor,
+        colors: &EditorColors,
+        connected: bool,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let login = self.providers.subscription_login();
+        let fl = editor.subscription.as_ref();
+        let phase = login.phase;
+        let existing = fl.is_some_and(|flow| flow.existing);
+        let risk_checked = fl.is_some_and(|flow| flow.risk_checked);
+        let busy = login.busy;
+        let mut body = div().flex().flex_col().w_full();
+        if phase == "risk" {
+            let text = self.locale.text(
+                "Google 的 Antigravity 条款不允许第三方工具使用该账号。被判定违规时，Antigravity 与 Gemini CLI 账号可能被停用，申诉机会有限。",
+                "Google's Antigravity terms do not allow third-party tools to use the account. If a violation is detected, your Antigravity and Gemini CLI accounts may be suspended, with limited appeals.",
+            );
+            body = body.child(mark_provider(
+                div()
+                    .mb(px(16.))
+                    .text_size(px(13.))
+                    .line_height(px(22.75))
+                    .text_color(rgba(colors.secondary_text))
+                    .whitespace_normal()
+                    .child(text),
+                "subscription-risk-body",
+                text,
+                true,
+            ));
+            let label = self.locale.text(
+                "我了解风险，仍要继续",
+                "I understand the risk and want to continue",
+            );
+            let mut check = div()
+                .id("subscription-risk-check")
+                .flex()
+                .items_start()
+                .gap(px(10.))
+                .p(px(13.))
+                .rounded(px(10.))
+                .border_1()
+                .border_color(rgba(colors.line_strong))
+                .bg(rgba(colors.info_bg))
+                .text_size(px(13.))
+                .font_weight(FontWeight(600.))
+                .line_height(px(20.15))
+                .text_color(rgba(colors.label))
+                .child(
+                    div()
+                        .size(px(18.))
+                        .flex_none()
+                        .mt(px(1.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(4.))
+                        .border_1()
+                        .border_color(rgba(if risk_checked {
+                            colors.primary
+                        } else {
+                            colors.line_strong
+                        }))
+                        .bg(rgba(if risk_checked {
+                            colors.primary
+                        } else {
+                            colors.panel
+                        }))
+                        .text_size(px(12.))
+                        .text_color(rgb(0xffffff))
+                        .child(if risk_checked { "✓" } else { "" }),
+                )
+                .child(div().flex_1().min_w_0().child(label));
+            if busy {
+                check = check.opacity(0.55);
+            } else {
+                check = check.cursor_pointer();
+                check = wire_dialog_button(
+                    check,
+                    &editor.focus.subscription_risk,
+                    10.,
+                    self.keyboard_focus,
+                    |this, _, cx| this.toggle_subscription_risk(cx),
+                    cx,
+                );
+            }
+            body = body.child(mark_provider(
+                check,
+                "subscription-risk-check",
+                label,
+                !busy,
+            ));
+        } else {
+            let kind = fl.map(|flow| flow.provider.as_str()).unwrap_or("codex");
+            let app = if kind == "antigravity" {
+                "Antigravity"
+            } else {
+                "ChatGPT"
+            };
+            let description = if kind == "antigravity" {
+                self.locale.text(
+                    "使用 Google AI 订阅中的 Claude 与 Gemini 模型",
+                    "Use Claude and Gemini models from your Google AI subscription.",
+                )
+            } else {
+                self.locale.text(
+                    "使用你的 ChatGPT 订阅额度，不需要 API Key",
+                    "Use your ChatGPT subscription. No API key needed.",
+                )
+            };
+            let account_label = format!("{app} {}", self.locale.text("账号", "account"));
+            let tone = if kind == "antigravity" {
+                linear_gradient(
+                    145.,
+                    linear_color_stop(rgb(0x4a96e5), 0.),
+                    linear_color_stop(rgb(0x7169df), 1.),
+                )
+            } else {
+                linear_gradient(
+                    145.,
+                    linear_color_stop(rgb(0x198875), 0.),
+                    linear_color_stop(rgb(0x0d7a69), 1.),
+                )
+            };
+            body = body.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .p(px(12.))
+                    .rounded(px(10.))
+                    .border_1()
+                    .border_color(rgba(colors.line))
+                    .bg(rgba(colors.panel_muted))
+                    .child(
+                        div()
+                            .size(px(38.))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(9.))
+                            .text_size(px(20.))
+                            .font_weight(FontWeight(650.))
+                            .text_color(rgb(0xffffff))
+                            .bg(tone)
+                            .child(if kind == "antigravity" { "A" } else { "C" }),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .font_weight(FontWeight(650.))
+                                    .text_color(rgba(colors.label))
+                                    .child(account_label),
+                            )
+                            .child(
+                                div()
+                                    .mt(px(4.))
+                                    .text_size(px(11.))
+                                    .line_height(px(15.4))
+                                    .text_color(rgba(colors.hint_text))
+                                    .whitespace_normal()
+                                    .child(description),
+                            ),
+                    ),
+            );
+            if phase == "waiting" {
+                let waiting = self.locale.text(
+                    "等待浏览器完成登录…",
+                    "Waiting for the browser to finish signing in…",
+                );
+                let dot = div()
+                    .size(px(8.))
+                    .flex_none()
+                    .rounded_full()
+                    .bg(rgba(0x3284edff));
+                let dot = if reduced_motion() {
+                    dot.into_any_element()
+                } else {
+                    dot.with_animation(
+                        "subscription-waiting-pulse",
+                        Animation::new(Duration::from_millis(1100)).repeat(),
+                        |dot, pulse| dot.opacity(1. - 0.75 * pulse),
+                    )
+                    .into_any_element()
+                };
+                body = body.child(mark_provider(
+                    div()
+                        .mt(px(18.))
+                        .flex()
+                        .items_center()
+                        .gap(px(9.))
+                        .text_size(px(13.))
+                        .font_weight(FontWeight(600.))
+                        .text_color(rgba(colors.label))
+                        .child(dot)
+                        .child(waiting),
+                    "subscription-waiting",
+                    waiting,
+                    true,
+                ));
+                let reopen_enabled = connected && login.can_reopen && !login.busy;
+                let reopen_label = self.locale.text("重新打开浏览器", "Open browser again");
+                body = body.child(mark_provider(
+                    self.subscription_reopen_row(editor, colors, connected, cx),
+                    "subscription-reopen",
+                    reopen_label,
+                    reopen_enabled,
+                ));
+            }
+            if phase == "error" {
+                let message = login
+                    .error
+                    .clone()
+                    .map(|error| {
+                        if error == "Sign-in was cancelled" {
+                            self.locale
+                                .text("登录已取消。", "Sign-in was cancelled.")
+                                .to_owned()
+                        } else {
+                            error
+                        }
+                    })
+                    .unwrap_or_else(|| {
+                        self.locale
+                            .text("登录未完成，请重试。", "Sign-in did not finish. Try again.")
+                            .to_owned()
+                    });
+                body = body.child(self.subscription_error_box(&message, editor, colors));
+                if login.can_reopen {
+                    body = body.child(self.subscription_reopen_row(editor, colors, connected, cx));
+                }
+            } else if let Some(message) = login.error.as_deref() {
+                // A failed browser launch keeps the attempt alive; show the
+                // reason while the waiting chain continues.
+                body = body.child(self.subscription_error_box(message, editor, colors));
+            }
+            if existing {
+                let text = self.locale.text(
+                    "已有该类账号，重新登录会替换它，模型设置会保留。",
+                    "You already have this account type. Signing in again replaces it and keeps your model settings.",
+                );
+                body = body.child(mark_provider(
+                    div()
+                        .mt(px(18.))
+                        .text_size(px(12.))
+                        .line_height(px(19.2))
+                        .text_color(rgba(colors.muted))
+                        .whitespace_normal()
+                        .child(text),
+                    "subscription-replacement",
+                    text,
+                    true,
+                ));
+            }
+        }
+        if !connected {
+            let text = self.locale.text(
+                "供应商配置服务正在连接，请稍后重试",
+                "The provider service is connecting. Try again shortly.",
+            );
+            body = body.child(
+                div()
+                    .mt(px(12.))
+                    .text_size(px(11.))
+                    .line_height(px(18.15))
+                    .text_color(rgba(colors.muted))
+                    .child(text),
+            );
+        }
+        body
+    }
+
+    /// "Open browser again" plus the explicit system-browser fallback. Shown
+    /// while waiting and after a recoverable browser failure, matching the
+    /// frozen dialog's recovery path.
+    fn subscription_reopen_row(
+        &self,
+        editor: &Editor,
+        colors: &EditorColors,
+        connected: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let login = self.providers.subscription_login();
+        let reopen_enabled = connected && login.can_reopen && !login.busy;
+        let reopen_label = self.locale.text("重新打开浏览器", "Open browser again");
+        let reopen = if reopen_enabled {
+            link_button(
+                "subscription-reopen",
+                reopen_label,
+                &editor.focus.subscription_reopen,
+                self.keyboard_focus,
+                FocusRingStyle::Dialog,
+                colors,
+                cx,
+                |this, _, cx| this.reopen_subscription_login(cx),
+            )
+        } else {
+            div()
+                .text_size(px(12.))
+                .font_weight(FontWeight(600.))
+                .text_color(rgba(colors.muted))
+                .child(reopen_label)
+                .into_any_element()
+        };
+        let system_label = self.locale.text("使用系统浏览器", "Use system browser");
+        let system_browser =
+            if login.system_browser_available && connected && login.can_reopen && !login.busy {
+                Some(link_button(
+                    "subscription-system-browser",
+                    system_label,
+                    &editor.focus.subscription_system_browser,
+                    self.keyboard_focus,
+                    FocusRingStyle::Dialog,
+                    colors,
+                    cx,
+                    |this, _, cx| this.reopen_subscription_in_system_browser(cx),
+                ))
+            } else if login.system_browser_available {
+                Some(
+                    div()
+                        .text_size(px(12.))
+                        .font_weight(FontWeight(600.))
+                        .text_color(rgba(colors.muted))
+                        .child(system_label)
+                        .into_any_element(),
+                )
+            } else {
+                None
+            };
+        div()
+            .mt(px(10.))
+            .flex()
+            .items_center()
+            .gap(px(14.))
+            .flex_wrap()
+            .child(reopen)
+            .children(system_browser)
+    }
+
+    fn subscription_error_box(&self, message: &str, editor: &Editor, colors: &EditorColors) -> Div {
+        mark_provider(
+            div()
+                .mt(px(14.))
+                .p(px(12.))
+                .rounded(px(8.))
+                .border_1()
+                .border_color(rgba(colors.error_line))
+                .bg(rgba(colors.error_bg))
+                .text_size(px(12.))
+                .line_height(px(19.2))
+                .text_color(rgba(colors.error_text))
+                .whitespace_normal()
+                .child(message.to_owned())
+                .track_focus(&editor.focus.error)
+                .child(dialog_focus_ring(
+                    editor.focus.error.clone(),
+                    8.,
+                    self.keyboard_focus,
+                )),
+            "subscription-error",
+            message,
+            true,
+        )
+    }
+
+    fn render_subscription_footer(
+        &self,
+        editor: &Editor,
+        colors: &EditorColors,
+        connected: bool,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let login = self.providers.subscription_login();
+        let phase = login.phase;
+        let busy = login.busy || self.providers.saving() || self.providers.deleting();
+        let mut footer = div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .px(px(26.))
+            .py(px(16.))
+            .border_t_1()
+            .border_color(rgba(colors.footer_line))
+            .bg(rgba(colors.dialog));
+        if phase == "waiting" {
+            return footer.child(dialog_button(
+                "subscription-cancel",
+                self.locale.text("取消", "Cancel"),
+                false,
+                true,
+                &editor.focus.subscription_cancel,
+                self.keyboard_focus,
+                colors,
+                cx,
+                |this, window, cx| this.cancel_subscription_login_ui(window, cx),
+            ));
+        }
+        let cancel = dialog_button(
+            "subscription-cancel",
+            self.locale.text("取消", "Cancel"),
+            false,
+            !busy,
+            &editor.focus.subscription_cancel,
+            self.keyboard_focus,
+            colors,
+            cx,
+            |this, window, cx| this.editor_request_close(window, cx),
+        );
+        footer = footer.child(div().flex_1()).child(cancel);
+        if phase == "risk" {
+            let enabled = !busy
+                && connected
+                && editor
+                    .subscription
+                    .as_ref()
+                    .is_some_and(|flow| flow.risk_checked);
+            footer = footer.child(mark_provider(
+                div().child(dialog_button(
+                    "subscription-continue",
+                    if busy {
+                        self.locale.text("处理中…", "Working…")
+                    } else {
+                        self.locale.text("继续", "Continue")
+                    },
+                    true,
+                    enabled,
+                    &editor.focus.subscription_primary,
+                    self.keyboard_focus,
+                    colors,
+                    cx,
+                    |this, window, cx| this.confirm_subscription_risk(window, cx),
+                )),
+                "subscription-continue",
+                self.locale.text("继续", "Continue"),
+                enabled,
+            ));
+        } else if phase == "error" {
+            let enabled = !busy && connected;
+            footer = footer.child(mark_provider(
+                div().child(dialog_button(
+                    "subscription-retry",
+                    if busy {
+                        self.locale.text("处理中…", "Working…")
+                    } else {
+                        self.locale.text("重试", "Retry")
+                    },
+                    true,
+                    enabled,
+                    &editor.focus.subscription_primary,
+                    self.keyboard_focus,
+                    colors,
+                    cx,
+                    |this, window, cx| this.start_subscription_login(window, cx),
+                )),
+                "subscription-retry",
+                self.locale.text("重试", "Retry"),
+                enabled,
+            ));
+        } else {
+            let enabled = !busy && connected;
+            footer = footer.child(mark_provider(
+                div().child(dialog_button(
+                    "subscription-login",
+                    self.locale.text("在浏览器中登录", "Sign in with browser"),
+                    true,
+                    enabled,
+                    &editor.focus.subscription_primary,
+                    self.keyboard_focus,
+                    colors,
+                    cx,
+                    |this, window, cx| this.start_subscription_login(window, cx),
+                )),
+                "subscription-login",
+                self.locale.text("在浏览器中登录", "Sign in with browser"),
+                enabled,
+            ));
+        }
+        footer
+    }
+
+    fn subscription_models_footer(
+        &self,
+        editor: &Editor,
+        work: &ProviderDraft,
+        save_enabled: bool,
+        colors: &EditorColors,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let busy = self.providers.saving();
+        let editing = work.id.is_some();
+        let delete = self
+            .providers
+            .deletable_provider(editor.draft.id.as_deref())
+            .map(|_| {
+                let button = div()
+                    .id("subscription-delete")
+                    .min_h(px(42.))
+                    .flex()
+                    .items_center()
+                    .pr(px(12.))
+                    .text_size(px(13.))
+                    .font_weight(FontWeight(600.))
+                    .text_color(rgba(colors.error_text))
+                    .child(self.locale.text("删除", "Delete"));
+                let button = if busy {
+                    button
+                        .opacity(0.55)
+                        .cursor(CursorStyle::OperationNotAllowed)
+                } else {
+                    wire_dialog_button(
+                        button.cursor_pointer().hover(|style| style.underline()),
+                        &editor.focus.delete,
+                        7.,
+                        self.keyboard_focus,
+                        |this, window, cx| this.editor_request_delete(window, cx),
+                        cx,
+                    )
+                };
+                mark_provider(button, "delete", self.locale.text("删除", "Delete"), !busy)
+            });
+        let save_label = if busy {
+            self.locale.text("保存中…", "Saving…")
+        } else {
+            self.locale.text("保存", "Save")
+        };
+        let save = dialog_button(
+            "subscription-save",
+            save_label,
+            editing,
+            save_enabled,
+            &editor.focus.save,
+            self.keyboard_focus,
+            colors,
+            cx,
+            |this, window, cx| this.editor_save(false, window, cx),
+        );
+        let save_switch = dialog_button(
+            "subscription-save-switch",
+            save_label,
+            !editing,
+            save_enabled,
+            &editor.focus.save_switch,
+            self.keyboard_focus,
+            colors,
+            cx,
+            |this, window, cx| this.editor_save(true, window, cx),
+        );
+        div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .px(px(26.))
+            .py(px(16.))
+            .border_t_1()
+            .border_color(rgba(colors.footer_line))
+            .bg(rgba(colors.dialog))
+            .children(delete)
+            .child(div().flex_1())
+            .child(mark_provider(
+                div().child(save),
+                "save",
+                save_label,
+                save_enabled,
+            ))
+            .child(mark_provider(
+                div().child(save_switch),
+                "save-switch",
+                self.locale.text("保存并切换", "Save and switch"),
+                save_enabled,
+            ))
+    }
+
     fn render_pick_body(
         &self,
         editor: &Editor,
@@ -5402,6 +8003,163 @@ impl SettingsShell {
         body = body.child(
             rename_field(editor.query.clone(), 44., 13., window, &colors, cx).w(px(body_width)),
         );
+        let query_lower = query.trim().to_lowercase();
+        let matches = |title: &str, description: &str, id: &str| {
+            query_lower.is_empty()
+                || format!("{title} {description} {id}")
+                    .to_lowercase()
+                    .contains(&query_lower)
+        };
+        let mut any_subscription = false;
+        let mut subscription_grid = div().flex().flex_wrap().w_full().gap(px(12.));
+        for (kind, title, description, icon, tone) in [
+            (
+                "codex",
+                self.locale.text("ChatGPT 账号", "ChatGPT account"),
+                self.locale.text(
+                    "使用你的 ChatGPT 订阅额度，不需要 API Key",
+                    "Use your ChatGPT subscription. No API key needed.",
+                ),
+                "C",
+                linear_gradient(
+                    145.,
+                    linear_color_stop(rgb(0x198875), 0.),
+                    linear_color_stop(rgb(0x0d7a69), 1.),
+                ),
+            ),
+            (
+                "antigravity",
+                self.locale.text("Antigravity 账号", "Antigravity account"),
+                self.locale.text(
+                    "使用 Google AI 订阅中的 Claude 与 Gemini 模型",
+                    "Use Claude and Gemini models from your Google AI subscription.",
+                ),
+                "A",
+                linear_gradient(
+                    145.,
+                    linear_color_stop(rgb(0x4a96e5), 0.),
+                    linear_color_stop(rgb(0x7169df), 1.),
+                ),
+            ),
+        ] {
+            if !matches(title, description, kind) {
+                continue;
+            }
+            any_subscription = true;
+            let selected = editor.selection == Some(PickChoice::Subscription(kind));
+            let mut card = div()
+                .id(SharedString::from(format!("provider-subscription-{kind}")))
+                .w(px(card_width))
+                .min_h(px(83.))
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .p(px(13.))
+                .rounded(px(10.))
+                .border_1()
+                .border_color(rgba(if selected {
+                    colors.card_selected_line
+                } else {
+                    colors.card_line
+                }))
+                .bg(rgba(if selected {
+                    colors.card_selected_bg
+                } else {
+                    colors.panel
+                }))
+                .hover(move |style| {
+                    style
+                        .border_color(rgba(colors.card_hover_line))
+                        .bg(rgba(colors.card_hover_bg))
+                })
+                .child(
+                    div()
+                        .size(px(38.))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(9.))
+                        .text_size(px(20.))
+                        .font_weight(FontWeight(650.))
+                        .text_color(rgb(0xffffff))
+                        .bg(tone)
+                        .child(icon),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .font_weight(FontWeight(650.))
+                                .text_color(rgba(colors.label))
+                                .whitespace_normal()
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .mt(px(5.))
+                                .text_size(px(11.))
+                                .line_height(px(15.4))
+                                .text_color(rgba(colors.hint_text))
+                                .whitespace_normal()
+                                .child(description),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_size(px(17.))
+                        .text_color(rgba(if selected {
+                            colors.check
+                        } else {
+                            colors.card_marker
+                        }))
+                        .child(if selected { "✓" } else { "○" }),
+                );
+            if busy {
+                card = card.opacity(0.55);
+            } else {
+                card = wire_dialog_button(
+                    card,
+                    if kind == "codex" {
+                        &editor.focus.subscription_choices[0]
+                    } else {
+                        &editor.focus.subscription_choices[1]
+                    },
+                    10.,
+                    self.keyboard_focus,
+                    move |this, _, cx| {
+                        if let Some(editor) = &mut this.editor {
+                            editor.selection = Some(PickChoice::Subscription(kind));
+                        }
+                        cx.notify();
+                    },
+                    cx,
+                );
+            }
+            subscription_grid = subscription_grid.child(mark_provider(
+                card,
+                format!("subscription-{kind}"),
+                title,
+                !busy,
+            ));
+        }
+        if any_subscription {
+            body = body.child(
+                div()
+                    .mt(px(22.))
+                    .mb(px(10.))
+                    .text_size(px(12.))
+                    .font_weight(FontWeight(600.))
+                    .text_color(rgba(colors.section_title))
+                    .child(self.locale.text("订阅账号", "Subscription accounts")),
+            );
+            body = body.child(subscription_grid);
+        }
         body = body.child(
             div()
                 .mt(px(22.))
@@ -5519,7 +8277,7 @@ impl SettingsShell {
             grid = grid.child(card);
         }
         body = body.child(grid);
-        if !any && !query.trim().is_empty() {
+        if !any && !any_subscription && !query.trim().is_empty() {
             body = body.child(
                 div()
                     .mt(px(8.))
@@ -7253,6 +10011,190 @@ impl SettingsShell {
     }
 
     #[allow(dead_code)]
+    pub(crate) fn probe_open_subscription_flow(
+        &mut self,
+        provider: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.page = SettingsPage::ClaudeCode;
+        self.open_new_editor(window, cx);
+        if let Some(editor) = &mut self.editor {
+            editor.selection = Some(PickChoice::Subscription(provider));
+        }
+        self.editor_next(window, cx);
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn probe_subscription_state(&self) -> Option<(&'static str, bool, bool, bool)> {
+        let login = self.providers.subscription_login();
+        self.editor
+            .as_ref()
+            .and_then(|editor| editor.subscription.as_ref())
+            .map(|flow| {
+                (
+                    login.phase,
+                    flow.risk_checked,
+                    login.can_reopen,
+                    login.system_browser_available,
+                )
+            })
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn probe_subscription_text(&self) -> (String, String) {
+        let login = self.providers.subscription_login();
+        (
+            login.phase.to_owned(),
+            login.error.clone().unwrap_or_default(),
+        )
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn probe_apply_subscription_draft(
+        &mut self,
+        draft: ProviderDraft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let _ =
+            self.apply_subscription_update(ProviderUpdate::SubscriptionDraft(draft), window, cx);
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn probe_subscription_card_focus(
+        &self,
+        provider_id: &str,
+        control: &str,
+        window: &mut Window,
+    ) {
+        let controls = &self.card_controls[provider_id];
+        window.focus(match control {
+            "refresh" => &controls[2],
+            "edit" => &controls[0],
+            "relogin" => &controls[1],
+            _ => panic!("Unknown subscription card control: {control}"),
+        });
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn probe_subscription_quota(&self, provider_id: &str) -> String {
+        let kind = self
+            .providers
+            .providers()
+            .iter()
+            .find(|provider| provider["id"] == provider_id)
+            .and_then(subscription_kind)
+            .unwrap_or("codex");
+        quota_text(
+            kind,
+            self.providers.subscription_details(provider_id),
+            self.locale,
+        )
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn probe_subscription_quota_title(&self, provider_id: &str) -> String {
+        quota_title(
+            self.providers.subscription_details(provider_id),
+            self.locale,
+        )
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn probe_subscription_settings_open(&self) -> bool {
+        self.subscription_settings_open
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn probe_compaction_state(
+        &self,
+    ) -> Option<(String, String, Option<String>, String, bool, bool)> {
+        self.compaction.draft.as_ref().map(|draft| {
+            (
+                draft.mode.clone(),
+                draft.effort.clone(),
+                draft.provider_id.clone(),
+                draft.model.clone(),
+                self.compaction.manual_model,
+                self.compaction.saved,
+            )
+        })
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn probe_compaction_validation(&self) -> Option<&'static str> {
+        let draft = self.compaction.draft.as_ref()?;
+        compaction_validation(draft, self.providers.providers(), self.locale)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn probe_compaction_focus(&self, control: &str, window: &mut Window, cx: &App) {
+        let focus = match control {
+            "provider" => &self.compaction.focus[CompactionSelect::Provider.index()],
+            "model" => &self.compaction.focus[CompactionSelect::Model.index()],
+            "effort" => &self.compaction.focus[CompactionSelect::Effort.index()],
+            "follow" => &self.compaction.mode_focus[0],
+            "custom" => &self.compaction.mode_focus[1],
+            "save" => &self.compaction.save_focus,
+            "retry" => &self.compaction.retry_focus,
+            "relogin" => &self.compaction.relogin_focus,
+            "manual" => &self.compaction.manual_input.read(cx).focus,
+            _ => panic!("Unknown compaction control: {control}"),
+        };
+        window.focus(focus);
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn probe_compaction_mode(&mut self, mode: &str, cx: &mut Context<Self>) {
+        self.select_compaction_mode(mode, cx);
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn probe_compaction_save(&mut self, cx: &mut Context<Self>) {
+        self.save_compaction_now(cx);
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn probe_compaction_set_provider(
+        &mut self,
+        provider_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(draft) = &mut self.compaction.draft {
+            draft.provider_id = Some(provider_id.to_owned());
+            self.compaction.manual_model = false;
+            let first = self
+                .providers
+                .providers()
+                .iter()
+                .find(|provider| provider["id"].as_str() == Some(provider_id))
+                .and_then(|provider| model_options(provider).into_iter().next())
+                .map(|option| option.value)
+                .unwrap_or_default();
+            draft.model = first;
+            cx.notify();
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn probe_compaction_set_model(&mut self, model: &str, cx: &mut Context<Self>) {
+        if let Some(draft) = &mut self.compaction.draft {
+            draft.model = model.to_owned();
+            self.compaction.manual_model = false;
+            cx.notify();
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn probe_compaction_set_effort(&mut self, effort: &str, cx: &mut Context<Self>) {
+        if let Some(draft) = &mut self.compaction.draft {
+            draft.effort = effort.to_owned();
+            cx.notify();
+        }
+    }
+
+    #[allow(dead_code)]
     pub(crate) fn probe_provider_editor_focus(&self, control: &str, window: &mut Window) {
         if control == "new" {
             window.focus(&self.new_provider_focus);
@@ -7274,6 +10216,13 @@ impl SettingsShell {
             "manual-1" => &focus.mappings[1],
             "mapping-list-0" => &focus.manual_links[0],
             "mapping-list-1" => &focus.manual_links[1],
+            "subscription-risk" => &focus.subscription_risk,
+            "subscription-continue" | "subscription-login" | "subscription-retry" => {
+                &focus.subscription_primary
+            }
+            "subscription-cancel" => &focus.subscription_cancel,
+            "subscription-reopen" => &focus.subscription_reopen,
+            "subscription-system-browser" => &focus.subscription_system_browser,
             "effort-0" => &focus.efforts[0],
             "effort-1" => &focus.efforts[1],
             "context-512k" => &focus.context_modes[1],
@@ -7494,6 +10443,7 @@ impl Render for SettingsShell {
             |surface, delta| surface.opacity(delta).top(px(3. * (1. - delta))),
         );
         let dialog = self.render_editor(window, cx);
+        let compaction_menu = self.render_compaction_menu(window, cx);
         let menu = self.render_provider_select(cx);
         div()
             .id("settings-shell")
@@ -7519,6 +10469,7 @@ impl Render for SettingsShell {
             .child(surface)
             .children(dialog)
             .children(menu)
+            .children(compaction_menu)
     }
 }
 

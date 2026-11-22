@@ -227,7 +227,7 @@ impl Directory {
     }
 }
 
-fn codex_user_agent() -> &'static str {
+pub(super) fn codex_user_agent() -> &'static str {
     use std::sync::LazyLock;
     static USER_AGENT: LazyLock<String> = LazyLock::new(|| {
         let platform = if cfg!(target_os = "macos") {

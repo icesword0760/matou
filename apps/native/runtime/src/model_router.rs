@@ -16,7 +16,7 @@ use anyhow::{Context, Result, anyhow, ensure};
 use crate::subscription_launch::ModelAlias;
 pub(crate) use config::credential_path;
 pub(crate) use config::macos_version;
-pub(crate) use management::ManagementClient;
+pub(crate) use management::{AccountProbe, ManagementClient, antigravity_user_agent};
 
 const VERSION: &str = "8.0.69";
 const POLL: Duration = Duration::from_millis(25);
@@ -86,6 +86,11 @@ impl ModelRouterManager {
     }
 
     pub fn acquire(&self) -> Result<(RouterConnection, RouterLease)> {
+        let lease = self.reserve()?;
+        Ok((self.wait_for_connection()?, lease))
+    }
+
+    pub fn reserve(&self) -> Result<RouterLease> {
         let mut state = self.shared.state.lock().unwrap();
         ensure!(!state.stopped, "Model router is shutting down");
         if state.leases == 0 {
@@ -93,22 +98,23 @@ impl ModelRouterManager {
         }
         state.leases += 1;
         state.idle_since = None;
-        let lease = RouterLease(Arc::clone(&self.shared));
         self.shared.changed.notify_all();
-        let result = loop {
-            if state.stopped {
-                break Err(anyhow!("Model router is shutting down"));
-            }
+        Ok(RouterLease(Arc::clone(&self.shared)))
+    }
+
+    pub fn wait_for_connection(&self) -> Result<RouterConnection> {
+        let mut state = self.shared.state.lock().unwrap();
+        loop {
+            ensure!(!state.stopped, "Model router is shutting down");
+            ensure!(state.leases > 0, "Model router lease was released");
             if let Some(connection) = &state.connection {
-                break Ok(connection.clone());
+                return Ok(connection.clone());
             }
             if let Some(error) = &state.failure {
-                break Err(anyhow!("{error}"));
+                return Err(anyhow!("{error}"));
             }
             state = self.shared.changed.wait(state).unwrap();
-        };
-        drop(state);
-        Ok((result?, lease))
+        }
     }
 
     pub fn current_connection(&self) -> Option<RouterConnection> {

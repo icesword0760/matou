@@ -7,6 +7,7 @@ from pathlib import Path
 import sys
 import time
 import urllib.parse
+import uuid
 
 config_path = Path(sys.argv[sys.argv.index("-config") + 1])
 config = json.loads(config_path.read_text())
@@ -26,6 +27,12 @@ assert management != client and len(management) == len(client) == 64
 mode_path = directory / "fixture-mode"
 mode = mode_path.read_text().strip() if mode_path.exists() else ""
 port = config["server"]["port"]
+oauth = {}
+model_catalog = {
+    "codex": ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna", "fixture-fable"],
+    "antigravity": ["claude-opus-thinking", "claude-fable-5-2", "claude-sonnet", "gemini-flash"],
+}
+
 
 
 def audit(event, **values):
@@ -50,7 +57,7 @@ def write_credential(name, credential):
 
 class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    do_GET = do_POST = do_PATCH = do_PUT = lambda self: self.handle_request()
+    do_GET = do_POST = do_PATCH = do_PUT = do_DELETE = lambda self: self.handle_request()
 
     def log_message(self, *_args):
         pass
@@ -91,8 +98,94 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if mode == "never-ready":
                 return self.response(503, {})
             if route == "credentials":
+                if self.command == "DELETE":
+                    name = urllib.parse.parse_qs(path.query)["name"][0]
+                    assert name == Path(name).name
+                    (credentials / name).unlink(missing_ok=True)
+                    return self.response(200, {})
                 files = [dict(read_credential(p.name), name=p.name, id=p.name) for p in credentials.glob("*.json")]
                 return self.response(200, {"files": files})
+            if route == "oauth/auth-url":
+                provider = urllib.parse.parse_qs(path.query)["provider"][0]
+                callback_ports = json.loads((directory / "fixture-oauth-ports").read_text())
+                callback_path = "/auth/callback" if provider == "codex" else "/oauth-callback"
+                redirect = f"http://localhost:{callback_ports[provider]}{callback_path}"
+                state = uuid.uuid4().hex
+                oauth[state] = {"status": "wait", "provider": provider}
+                base = "https://auth.openai.com/oauth/authorize" if provider == "codex" else "https://accounts.google.com/o/oauth2/v2/auth"
+                if mode == "invalid-auth-url":
+                    base = "https://accounts.google.com.invalid/o/oauth2/v2/auth"
+                params = urllib.parse.urlencode({"redirect_uri": redirect, "state": state})
+                return self.response(200, {"state": state, "url": base + "?" + params})
+            if route == "oauth/status":
+                state = urllib.parse.parse_qs(path.query)["state"][0]
+                return self.response(200, oauth.get(state, {"status": "error"}))
+            if route == "oauth/session":
+                state = urllib.parse.parse_qs(path.query)["state"][0]
+                if oauth.get(state, {}).get("status") != "wait":
+                    return self.response(200, {"cancelled": False})
+                oauth[state]["status"] = "error"
+                return self.response(200, {"cancelled": True})
+            if route == "oauth/callback":
+                record = oauth.get(body["state"], {})
+                if record.get("status") != "wait" or record["provider"] != body["provider"]:
+                    return self.response(409, {})
+                if "error" in body:
+                    record.update(status="error", error=body["error"])
+                    return self.response(200, {})
+                provider = record["provider"]
+                code = body["code"]
+                if code not in ("first", "second", "ambiguous"):
+                    return self.response(400, {})
+                names = ["second", "third"] if code == "ambiguous" else [code]
+                for name in names:
+                    ref = f"{provider}-{name}.json"
+                    write_credential(ref, dict(
+                        provider=provider, status="active", disabled=False,
+                        auth_index=f"{provider}-{name}-index", email=f"{name}@test.invalid",
+                        models=model_catalog[provider], updated_at="first-read", project_id="test-project",
+                        access_token="fixture-secret-token-never-exposed",
+                    ))
+                record.update(status="ok")
+                if provider == "codex":
+                    record["auth_id"] = ref
+                return self.response(200, {})
+            if route == "requests/api-call":
+                account = next((read_credential(p.name) for p in credentials.glob("*.json")
+                                if read_credential(p.name)["auth_index"] == body["auth_index"]), None)
+                assert body["header"]["Authorization"] == "Bearer $TOKEN$"
+                url = body["url"]
+                audit("account-probe", route=url.split("?")[0])
+                if account is None:
+                    return self.response(200, {"status_code": 401, "body": "{}"})
+                if url == "https://chatgpt.com/backend-api/wham/usage":
+                    assert body["method"] == "GET" and account["provider"] == "codex"
+                    assert body["header"]["originator"] == "codex-tui"
+                    payload = {"plan_type": "pro", "rate_limit": {"primary_window": {
+                        "limit_window_seconds": 18000, "used_percent": 35, "reset_at": 2000000000}}}
+                elif url.endswith(":loadCodeAssist"):
+                    assert body["method"] == "POST" and account["provider"] == "antigravity"
+                    assert json.loads(body["data"]) == {"metadata": {"ideType": "ANTIGRAVITY"}}
+                    payload = {"cloudaicompanionProject": {"id": "test-project"}, "paidTier": {"name": "Google AI Pro"}}
+                elif url.endswith(":retrieveUserQuotaSummary"):
+                    assert json.loads(body["data"]) == {"project": "test-project"}
+                    payload = {"groups": [{"buckets": [{"bucketId": "3p-5h", "remainingFraction": 0.25}]}]}
+                elif url.startswith("https://chatgpt.com/backend-api/codex/models?client_version=") or url.endswith(":fetchAvailableModels"):
+                    kind = directory / "fixture-catalog-mode"
+                    catalog = kind.read_text().strip() if kind.exists() else ""
+                    if catalog == "failure":
+                        return self.response(200, {"status_code": 503, "body": "{}"})
+                    if catalog == "unauthorized":
+                        return self.response(200, {"status_code": 401, "body": "{}"})
+                    models = account["models"]
+                    if catalog == "updated":
+                        models = [*models, "fixture-updated-model"]
+                    payload = {"models": [{"id": model, "context_window": 600000,
+                                           "supportedEfforts": ["low", "high"]} for model in models],
+                               "fixtureSecret": "fixture-secret-token-never-exposed"}
+                else:
+                    return self.response(400, {})
+                return self.response(200, {"status_code": 200, "body": json.dumps(payload)})
             if route == "credentials/models":
                 name = urllib.parse.parse_qs(path.query)["name"][0]
                 credential = read_credential(name)

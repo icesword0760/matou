@@ -19,8 +19,10 @@ use url::Url;
 
 use crate::dsh_events::js_whitespace;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum SubscriptionProvider {
+    #[serde(rename = "codex")]
     ChatGpt,
     Antigravity,
 }
@@ -552,6 +554,7 @@ fn parse_catalog_entries(
         .chain(
             map.into_iter()
                 .flatten()
+                .filter(|(_, entry)| entry.is_object())
                 .map(|(key, entry)| (entry, Some(key.as_str()))),
         )
         .filter_map(|(entry, fallback)| catalog_entry(entry, fallback, prefix))
