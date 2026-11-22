@@ -74,11 +74,10 @@ use matou_native_core::{
     provider_launch::{
         CLAUDE_PERMISSION_MODES, ClaudeLaunch, ClaudeTarget, automatic_time_zone,
         available_time_zones, official_time_zone_endpoint, prepare_claude_fork,
-        prepare_claude_fork_rebuild, prepare_claude_launch, prepare_claude_permission_restart,
-        prepare_managed_claude_launch, prepare_new_claude_launch_with_budget,
-        project_cli_time_zone, system_time_zone, valid_claude_time_zone,
-        validate_claude_compaction, validate_claude_role_assignments, validate_claude_web_search,
-        validate_cwd,
+        prepare_claude_launch, prepare_claude_permission_restart, prepare_managed_claude_launch,
+        prepare_new_claude_launch_with_budget, project_cli_time_zone, system_time_zone,
+        valid_claude_time_zone, validate_claude_compaction, validate_claude_role_assignments,
+        validate_claude_web_search, validate_cwd,
     },
     pty::{LaunchProfile, ShellLaunch},
     sessions::{
@@ -2582,12 +2581,7 @@ struct LaunchRetry {
     validated: bool,
     recovering: bool,
     fresh_codex: bool,
-    claude_rebuild: Option<ClaudeForkRetry>,
-}
-
-enum ClaudeForkRetry {
-    Manual(String),
-    Automatic(Box<ClaudeForkRebuild>),
+    claude_rebuild: Option<Box<ClaudeForkRebuild>>,
 }
 
 #[derive(Clone)]
@@ -4615,24 +4609,20 @@ fn run_writable(
             }
             eligible.insert(session_id.clone());
             if !launch_preparations.contains_key(&session_id) {
-                let claude_rebuild = launch_retries
+                if let Some(rebuild) = launch_retries
                     .get_mut(&session_id)
-                    .and_then(|retry| retry.claude_rebuild.take());
-                let rebuild_parent = match claude_rebuild {
-                    Some(ClaudeForkRetry::Automatic(rebuild)) => {
-                        completed_launches.push((
-                            session_id,
-                            Ok(PreparedLaunch::ClaudeCode {
-                                launch: rebuild.plan,
-                                fork_source: None,
-                                rebuild: Some((rebuild.parent, rebuild.child)),
-                            }),
-                        ));
-                        continue;
-                    }
-                    Some(ClaudeForkRetry::Manual(parent)) => Some(parent),
-                    None => None,
-                };
+                    .and_then(|retry| retry.claude_rebuild.take())
+                {
+                    completed_launches.push((
+                        session_id,
+                        Ok(PreparedLaunch::ClaudeCode {
+                            launch: rebuild.plan,
+                            fork_source: None,
+                            rebuild: Some((rebuild.parent, rebuild.child)),
+                        }),
+                    ));
+                    continue;
+                }
                 if let Err(error) = owner.prepare_control_fork_worktree(&session_id) {
                     completed_launches.push((session_id, Err(error)));
                     continue;
@@ -4645,18 +4635,12 @@ fn run_writable(
                         LaunchIntent::Environment
                     } else if fresh_codex {
                         LaunchIntent::FreshCodex
-                    } else if let Some(parent) = &rebuild_parent {
-                        LaunchIntent::RebuildClaudeFork(parent)
                     } else {
                         LaunchIntent::Start
                     },
                     &role_requests,
                 ) {
                     Ok(result) => {
-                        if let Some(parent) = rebuild_parent {
-                            launch_retries.get_mut(&session_id).unwrap().claude_rebuild =
-                                Some(ClaudeForkRetry::Manual(parent));
-                        }
                         launch_preparations.insert(session_id, result);
                     }
                     Err(error) => completed_launches.push((session_id, Err(error))),
@@ -6361,12 +6345,6 @@ fn run_writable(
                             continue;
                         }
                     }
-                    let claude_rebuild_parent =
-                        if !blocked && !fresh && stored.kind == "claude-code" {
-                            owner.failed_claude_fork_parent(session_id)?
-                        } else {
-                            None
-                        };
                     let accepted = if blocked {
                         false
                     } else if codex {
@@ -6419,7 +6397,7 @@ fn run_writable(
                             recovering: matches!(change, ClaudeRestore::Retry),
                             validated: false,
                             fresh_codex: codex && fresh,
-                            claude_rebuild: claude_rebuild_parent.map(ClaudeForkRetry::Manual),
+                            claude_rebuild: None,
                         },
                     );
                     continue;
@@ -7063,7 +7041,7 @@ fn run_writable(
                                 recovering: true,
                                 validated: false,
                                 fresh_codex: false,
-                                claude_rebuild: Some(ClaudeForkRetry::Automatic(rebuild)),
+                                claude_rebuild: Some(rebuild),
                             },
                         );
                     }
@@ -8935,7 +8913,6 @@ enum LaunchIntent<'a> {
     Start,
     Environment,
     FreshCodex,
-    RebuildClaudeFork(&'a str),
     ShellPromotion(InteractiveLaunch),
     PermissionRestart {
         fresh_mode: Option<&'a str>,
@@ -9168,18 +9145,6 @@ fn prepare_launch(
                         | LaunchIntent::Environment
                         | LaunchIntent::ShellPromotion(_)
                 );
-            let rebuild = if let LaunchIntent::RebuildClaudeFork(parent) = intent {
-                ensure!(
-                    fork.is_none(),
-                    "Fork rebuild requires an already confirmed child"
-                );
-                Some((
-                    parent.to_owned(),
-                    resume_id.clone().context("Fork rebuild has no child ID")?,
-                ))
-            } else {
-                None
-            };
             let (reply, role_preferences) = mpsc::channel();
             // Every new PTY captures its own preferences. Use the save queue
             // so a prior save is visible before its reply reaches the client.
@@ -9208,8 +9173,6 @@ fn prepare_launch(
                         let mut launch = if subscriptions.is_some() {
                             let (binding, target) = if let Some(fork) = &fork {
                                 (&fork.metadata, Some(ClaudeTarget::Fork(&fork.source_id)))
-                            } else if let Some((parent, child)) = &rebuild {
-                                (&metadata, Some(ClaudeTarget::RebuildFork { parent, child }))
                             } else if fresh_launch {
                                 (
                                     &metadata,
@@ -9244,16 +9207,6 @@ fn prepare_launch(
                                 cwd,
                                 &fork.metadata,
                                 &fork.source_id,
-                                environment,
-                                terminal.cols,
-                                terminal.rows,
-                            )
-                        } else if let Some((parent, child)) = &rebuild {
-                            prepare_claude_fork_rebuild(
-                                &data_root,
-                                cwd,
-                                &metadata,
-                                (parent, child),
                                 environment,
                                 terminal.cols,
                                 terminal.rows,
@@ -9307,7 +9260,7 @@ fn prepare_launch(
                         Ok(PreparedLaunch::ClaudeCode {
                             launch,
                             fork_source: fork.map(|fork| fork.source_id),
-                            rebuild,
+                            rebuild: None,
                         })
                     })();
                     let _ = send.send(result);
