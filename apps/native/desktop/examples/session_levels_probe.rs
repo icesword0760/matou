@@ -70,6 +70,7 @@ mod ui_text {
     thread_local! {
         static TEXT: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
         static WORKSPACE_LABEL: TextGeometryHandle = TextGeometryHandle::default();
+        static RESTORE_REASON: RefCell<Option<(String, TextGeometryHandle)>> = const { RefCell::new(None) };
     }
 
     pub(crate) fn ui_text(text: impl Into<SharedString>) -> UiText {
@@ -81,12 +82,31 @@ mod ui_text {
             }
             false
         });
+        let restore_reason = RESTORE_REASON.with_borrow(|probe| {
+            probe
+                .as_ref()
+                .filter(|(reason, _)| reason == text.as_ref())
+                .map(|(_, geometry)| geometry.clone())
+        });
         let element = crate::product_ui_text::ui_text(text);
         if track_workspace {
             element.track_geometry(WORKSPACE_LABEL.with(Clone::clone))
+        } else if let Some(geometry) = restore_reason {
+            element.track_geometry(geometry)
         } else {
             element
         }
+    }
+
+    pub(super) fn capture_restore_reason<T>(
+        reason: &str,
+        draw: impl FnOnce() -> T,
+    ) -> (T, Option<TextGeometry>) {
+        let geometry = TextGeometryHandle::default();
+        RESTORE_REASON.set(Some((reason.to_owned(), geometry.clone())));
+        let result = draw();
+        RESTORE_REASON.take();
+        (result, geometry.take())
     }
 
     pub(super) fn capture(draw: impl FnOnce()) -> Vec<String> {
@@ -4088,13 +4108,57 @@ mod probe {
         deliver(window, cx, fixture.graph_event());
         inspect(cx, Some(&reason), false, NO_BLOCK);
 
-        let [retry_position, fresh_position] = AnyWindowHandle::from(window)
-            .update(cx, |_, window, cx| {
-                let bounds = Workspace::capture_render_bounds(window, cx);
-                ["retry-provider-restore", "start-fresh-provider"]
-                    .map(|key| bounds[&format!("{key}-{PEER}")].center())
+        let reason_style = gpui::TextStyle {
+            font_family: ".AppleSystemUIFont".into(),
+            ..Default::default()
+        };
+        let ellipsis = window
+            .update(cx, |_, window, _| {
+                window.text_system().layout_line(
+                    "…",
+                    px(11.),
+                    &[reason_style.to_run("…".len())],
+                    None,
+                )
             })
             .unwrap();
+        let capture_reason = |window, cx: &mut AsyncApp| {
+            crate::ui_text::capture_restore_reason(&reason, || {
+                AnyWindowHandle::from(window)
+                    .update(cx, |_, window, cx| {
+                        Workspace::capture_render_bounds(window, cx)
+                    })
+                    .unwrap()
+            })
+        };
+        let assert_truncated =
+            |geometry: Option<crate::ui_text::TextGeometry>, width, case: &str| {
+                if width < ellipsis.width {
+                    assert!(
+                        geometry.is_none(),
+                        "{case}: reason must fit within {width:?}"
+                    );
+                } else {
+                    let geometry = geometry.expect("reason must paint when the ellipsis fits");
+                    assert!(geometry.layout.width <= width && geometry.layout.len < reason.len());
+                    let last_run = geometry.layout.runs.last().unwrap();
+                    assert_eq!(last_run.font_id, ellipsis.runs[0].font_id, "{case}");
+                    assert_eq!(
+                        last_run.glyphs.last().unwrap().id,
+                        ellipsis.runs[0].glyphs[0].id,
+                        "{case}: reason must end with an ellipsis"
+                    );
+                }
+            };
+        let (bounds, rendered_reason) = capture_reason(window, cx);
+        let reason_width = bounds[&format!("provider-restore-reason-{PEER}")]
+            .size
+            .width;
+        assert!(reason_width >= ellipsis.width);
+        assert_truncated(rendered_reason, reason_width, "900 pt window");
+        println!("Restore reason paints an ellipsis when there is room | width={reason_width:?}");
+        let [retry_position, fresh_position] = ["retry-provider-restore", "start-fresh-provider"]
+            .map(|key| bounds[&format!("{key}-{PEER}")].center());
         deliver(
             window,
             cx,
@@ -4314,21 +4378,21 @@ mod probe {
             .unwrap();
         println!("Failed CLI frame did not paint or accept keys | history opens | same terminal paints recovered frame");
 
-        for (width, focused) in [(610., true), (1125., false)] {
+        // Wrapping the action group below the title used to count as a fit.
+        // The reference keeps the actions beside the text at both widths.
+        for (window_width, card_width, focused) in [(610., 260., true), (1125., 274., false)] {
             let mut narrow_fixture = Fixture::new();
             narrow_fixture.set_provider_restore("failed", Some(&reason), 0);
             if !focused {
                 narrow_fixture.focus(SCENE, PARENT);
             }
-            let (narrow, _sink) = open_hidden(cx, width);
+            let (narrow, _sink) = open_hidden(cx, window_width);
             deliver(narrow, cx, narrow_fixture.event(true));
             for dark in [false, true] {
                 narrow
                     .update(cx, |view, _, cx| view.provider_restore_probe_theme(dark, focused, cx))
                     .unwrap();
-                let bounds = AnyWindowHandle::from(narrow)
-                    .update(cx, |_, window, cx| Workspace::capture_render_bounds(window, cx))
-                    .unwrap();
+                let (bounds, rendered_reason) = capture_reason(narrow, cx);
                 let [banner, title, reason, retry, fresh] = [
                     "provider-restore-banner",
                     "provider-restore-title",
@@ -4337,20 +4401,39 @@ mod probe {
                     "start-fresh-provider",
                 ]
                 .map(|key| bounds[&format!("{key}-{PEER}")]);
+                let case = format!("{card_width} pt | focused={focused} | dark={dark}");
+                assert_eq!(banner.size.width, px(card_width), "{case}");
+                assert!(title.size.height > px(14.), "{case}: title did not wrap");
                 assert!(
-                    banner.size.width <= px(300.),
-                    "tested a wide card: {banner:?}"
+                    retry.top().max(fresh.top()) < retry.bottom().min(fresh.bottom())
+                        && retry.right() <= fresh.left(),
+                    "{case}: actions are not side by side: {retry:?}, {fresh:?}"
                 );
-                assert!(title.size.width >= px(90.) && title.size.height <= px(15.));
-                assert!(title.right() <= reason.left());
                 for part in [title, reason, retry, fresh] {
-                    assert!(part.left() >= banner.left() && part.right() <= banner.right());
+                    assert!(
+                        part.left() >= banner.left()
+                            && part.right() <= banner.right()
+                            && part.top() >= banner.top()
+                            && part.bottom() <= banner.bottom(),
+                        "{case}: {part:?} escaped {banner:?}"
+                    );
                 }
-                assert!(retry.top() == fresh.top() && retry.right() <= fresh.left());
-                assert!(reason.right() <= retry.left() || reason.bottom() <= retry.top());
+                assert!(
+                    title.right() <= reason.left() && reason.right() <= retry.left(),
+                    "{case}: text must stay to the left of the actions: {title:?}, {reason:?}, {retry:?}"
+                );
+                assert!(
+                    title.top() < retry.bottom() && retry.top() < title.bottom(),
+                    "{case}: actions moved to a different row from the title: {title:?}, {retry:?}"
+                );
+                assert!(
+                    reason.size.height <= px(14.),
+                    "{case}: reason wrapped: {reason:?}"
+                );
+                assert_truncated(rendered_reason, reason.size.width, &case);
                 println!(
-                    "Narrow restore layout | width={} | focused={focused} | dark={dark}",
-                    f32::from(banner.size.width)
+                    "Narrow restore layout | {case} | title={:?} | reason={:?}",
+                    title.size, reason.size,
                 );
             }
             narrow

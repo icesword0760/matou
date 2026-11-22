@@ -11767,9 +11767,7 @@ impl Workspace {
             .text_size(px(11.))
             .line_height(relative(1.2))
             .when(restoring, |row| row.justify_start())
-            .when(!restoring, |row| {
-                row.flex_wrap().justify_between().gap_y(px(4.))
-            })
+            .when(!restoring, |row| row.justify_between())
             .children(workspace_wiring::wiring_probe_bounds(format!(
                 "provider-restore-banner-{id}"
             )));
@@ -11802,8 +11800,12 @@ impl Workspace {
                     )
                 };
                 let controls = &self.provider_restore_controls[id];
-                let reason = SharedString::from(reason.to_owned());
-                let reason_tooltip = reason.clone();
+                let reason_tooltip = SharedString::from(reason.to_owned());
+                let reason = if reason.contains(['\r', '\n']) {
+                    SharedString::from(reason.replace(['\r', '\n'], " "))
+                } else {
+                    reason_tooltip.clone()
+                };
                 let mut action = |name: &str, label, blocked: Option<&'static str>, fresh: bool| {
                     let button = div()
                         .id(SharedString::from(format!("{name}-{id}")))
@@ -11848,10 +11850,10 @@ impl Workspace {
                         .gap(px(8.))
                         .child(
                             div()
-                                .flex_none()
+                                .flex_initial()
+                                .min_w_0()
                                 .max_w_full()
                                 .font_weight(FontWeight::BOLD)
-                                .truncate()
                                 .children(workspace_wiring::wiring_probe_bounds(format!(
                                     "provider-restore-title-{id}"
                                 )))
@@ -11871,19 +11873,17 @@ impl Workspace {
                                 .tooltip(move |_, cx| {
                                     cx.new(|_| CardTooltip(reason_tooltip.clone())).into()
                                 })
-                                .child(reason),
+                                .child(ui_text(reason)),
                         ),
                 )
                 .child(
                     div()
                         .flex()
                         .flex_none()
-                        .flex_wrap()
                         .max_w_full()
                         .ml_auto()
                         .justify_end()
                         .gap(px(12.))
-                        .gap_y(px(4.))
                         .child(retry_button)
                         .child(fresh_button),
                 )
