@@ -668,10 +668,15 @@ fn edits_subscription_and_context_mode_without_replacing_the_account() -> Result
     assert_eq!(edited["modelMapping"], input["modelMapping"]);
     assert_eq!(edited["effortMapping"], input["effortMapping"]);
     assert_eq!(edited["contextWindowMode"], "maximum");
-    let active = &runtime.reply(5)?["snapshot"];
-    assert_eq!(active["activeProviderIds"][CLAUDE], id);
-    assert_eq!(active["providers"][CLAUDE][2], edited);
+    // This settings fixture has a stored reference and no credential file.
+    // A missing credential must fail the activation without undoing the edit.
+    assert!(
+        runtime.reply(5)?["error"].as_str().is_some_and(|message| {
+            message.contains("Subscription credential is missing or no longer valid")
+        })
+    );
     let disk: Value = serde_json::from_slice(&fs::read(&path)?)?;
+    assert_eq!(disk["activeProviderIds"][CLAUDE], seed["activeProviderIds"][CLAUDE]);
     assert_eq!(
         disk["providers"][CLAUDE][2]["subscription"],
         original_account

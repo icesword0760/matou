@@ -665,7 +665,10 @@ pub(crate) struct LiveEgressSampler {
 }
 
 impl LiveEgressSampler {
-    pub(crate) fn start(data_root: PathBuf) -> anyhow::Result<Option<Self>> {
+    pub(crate) fn start(
+        data_root: PathBuf,
+        subscriptions: Option<std::sync::Arc<crate::subscription_service::SubscriptionService>>,
+    ) -> anyhow::Result<Option<Self>> {
         if std::env::var_os("MATOU_DISABLE_LIVE_EGRESS").is_some_and(|value| value == "1") {
             return Ok(None);
         }
@@ -690,8 +693,21 @@ impl LiveEgressSampler {
             .name("matou-egress-probe".into())
             .spawn(move || {
                 while incoming.recv().is_ok() {
-                    let Some(sample) = sample_live_batch(base.as_ref(), &incoming, &data_root)
-                    else {
+                    let route = subscriptions
+                        .as_ref()
+                        .map(|service| service.codex_egress_proxy());
+                    let (route, proxy) = match route {
+                        Some(Ok(Some(proxy))) => (SubscriptionRoute::Enabled, proxy),
+                        Some(Err(_)) => (SubscriptionRoute::Invalid, None),
+                        _ => (SubscriptionRoute::Disabled, None),
+                    };
+                    let Some(sample) = sample_live_batch(
+                        base.as_ref(),
+                        &incoming,
+                        &data_root,
+                        route,
+                        proxy.as_deref(),
+                    ) else {
                         break;
                     };
                     if completed.send(sample).is_err() {
@@ -728,6 +744,8 @@ fn sample_live_batch(
     base: Option<&Url>,
     incoming: &mpsc::Receiver<()>,
     data_root: &Path,
+    subscription: SubscriptionRoute,
+    router_proxy: Option<&str>,
 ) -> Option<EgressSample> {
     let local_deadline = Instant::now() + LOCAL_PROBE_TIMEOUT;
     let (local_results, local_signals) = mpsc::sync_channel(1);
@@ -765,7 +783,7 @@ fn sample_live_batch(
                 sample_browser_path(&url, read_system_proxy)
             })
         });
-        let mut sample = sample_trace_batch(base, incoming)?;
+        let mut sample = sample_trace_batch(base, incoming, subscription, router_proxy)?;
         if let Some((enabled, login)) = browser.and_then(|worker| worker.join().ok()) {
             sample.system_proxy_enabled = enabled;
             sample.browser_login = login;
@@ -787,16 +805,19 @@ fn trace_url(base: Option<&Url>, host: &str) -> Url {
     }
 }
 
-fn sample_trace_batch(base: Option<&Url>, incoming: &mpsc::Receiver<()>) -> Option<EgressSample> {
+fn sample_trace_batch(
+    base: Option<&Url>,
+    incoming: &mpsc::Receiver<()>,
+    subscription: SubscriptionRoute,
+    router_proxy: Option<&str>,
+) -> Option<EgressSample> {
     let env = proxy_environment();
     let anthropic = if base.is_none() {
         anthropic_proxy_environment(env.clone())
     } else {
         env.clone()
     };
-    let plan = SamplingPlan {
-        subscription: SubscriptionRoute::Disabled,
-    };
+    let plan = SamplingPlan { subscription };
     let mut samples = BTreeMap::new();
     let mut pending = BTreeMap::new();
     for target in plan.full_targets() {
@@ -809,7 +830,12 @@ fn sample_trace_batch(base: Option<&Url>, incoming: &mpsc::Receiver<()>) -> Opti
         } else {
             &env
         };
-        let proxy = proxy_for_trace(env, &url).filter(|proxy| {
+        let proxy = if target.family == Family::ChatgptSubscription {
+            router_proxy
+        } else {
+            proxy_for_trace(env, &url)
+        }
+        .filter(|proxy| {
             base.is_none()
                 || Url::parse(&normalized_curl_proxy(proxy))
                     .is_ok_and(|url| matches!(url.host_str(), Some("127.0.0.1" | "[::1]")))
@@ -884,14 +910,14 @@ fn sample_browser_path(
 }
 
 #[cfg(target_os = "macos")]
-fn read_system_proxy(deadline: Instant) -> Option<String> {
+pub(crate) fn read_system_proxy(deadline: Instant) -> Option<String> {
     let mut command = Command::new("/usr/sbin/scutil");
     command.arg("--proxy");
     parse_scutil_proxy(&local_command_output(command, deadline)?)
 }
 
 #[cfg(windows)]
-fn read_system_proxy(deadline: Instant) -> Option<String> {
+pub(crate) fn read_system_proxy(deadline: Instant) -> Option<String> {
     use std::os::windows::process::CommandExt;
 
     let mut command = Command::new("reg.exe");
@@ -903,7 +929,7 @@ fn read_system_proxy(deadline: Instant) -> Option<String> {
 }
 
 #[cfg(not(any(target_os = "macos", windows)))]
-fn read_system_proxy(_: Instant) -> Option<String> {
+pub(crate) fn read_system_proxy(_: Instant) -> Option<String> {
     None
 }
 
@@ -1739,6 +1765,13 @@ impl EgressMonitor {
 
     pub fn recovery_deadline(&self) -> Option<u64> {
         self.recovery_deadline
+    }
+
+    pub(crate) fn exit_country(&self, family: Family) -> Option<&str> {
+        self.evaluated_family(family)?
+            .exit
+            .as_ref()
+            .map(|exit| exit.country.as_str())
     }
 
     pub fn status(&self) -> Status {

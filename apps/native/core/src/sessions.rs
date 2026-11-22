@@ -274,6 +274,12 @@ pub struct ClaudeRoleLaunchPreferences {
     pub compaction: Value,
 }
 
+impl ClaudeRoleLaunchPreferences {
+    pub fn context_preference(&self, provider_id: &str) -> Option<&Value> {
+        self.context_windows.get(provider_id)
+    }
+}
+
 impl Default for ClaudeRoleLaunchPreferences {
     fn default() -> Self {
         Self {
