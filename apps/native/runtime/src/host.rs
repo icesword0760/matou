@@ -4369,12 +4369,6 @@ fn run_writable(
                             source_id,
                         );
                     }
-                    if let Some(binding) = resume {
-                        owner.change_claude_restore(
-                            &session_id,
-                            ClaudeRestore::Begin(&binding.id),
-                        )?;
-                    }
                     owner.launch_claude(session_id.clone(), terminal, launch, binding.as_ref())
                 }
                 PreparedLaunch::Antigravity(launch, permission) => {
@@ -4400,9 +4394,6 @@ fn run_writable(
                 PreparedLaunch::Dsh(launch) => {
                     waits_for_identity = launch.plan.mode.expected_session_id().is_some();
                     uses_recovery_slot = waits_for_identity;
-                    if waits_for_identity && let Some(binding) = owner.dsh_binding(&session_id)? {
-                        owner.change_dsh_restore(&session_id, ClaudeRestore::Begin(&binding.id))?;
-                    }
                     let terminal = terminal_layouts
                         .get(&session_id)
                         .copied()
@@ -4422,12 +4413,6 @@ fn run_writable(
                 PreparedLaunch::Codex(launch, resume) => {
                     waits_for_identity = resume.is_some();
                     uses_recovery_slot = waits_for_identity;
-                    if let Some(resume) = &resume {
-                        owner.change_codex_restore(
-                            &session_id,
-                            ClaudeRestore::Begin(&resume.binding_id),
-                        )?;
-                    }
                     let terminal = terminal_layouts
                         .get(&session_id)
                         .copied()
@@ -7587,14 +7572,12 @@ impl PermissionChange {
                             && self.binding.as_ref().is_some_and(|binding| {
                                 resume.binding_id == binding.id
                                     && resume.provider_session_id == binding.provider_session_id
+                            })
+                            && owner.codex_binding(session_id)?.is_some_and(|binding| {
+                                binding.id == resume.binding_id
+                                    && binding.resumable
+                                    && binding.restore_state == "none"
                             }),
-                        "AI Session permission respawn lost its binding"
-                    );
-                    ensure!(
-                        owner.change_codex_restore(
-                            session_id,
-                            ClaudeRestore::Begin(&resume.binding_id)
-                        )?,
                         "AI Session permission respawn lost its binding"
                     );
                     resume.permission_respawn = true;
