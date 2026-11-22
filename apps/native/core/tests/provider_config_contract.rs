@@ -637,6 +637,83 @@ fn increments_same_active_and_enforces_delete_order_and_subscription_boundary() 
 }
 
 #[test]
+fn context_mode_save_keeps_other_preferences_and_rolls_back_both_writes() -> Result<()> {
+    let temp = temp();
+    let root = root(&temp);
+    let store = store(&root);
+    let mut db = rusqlite::Connection::open_in_memory()?;
+    db.execute_batch(
+        "PRAGMA foreign_keys = ON;
+         CREATE TABLE preferences (key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_at INTEGER);
+         CREATE TABLE parent (id INTEGER PRIMARY KEY);
+         CREATE TABLE child (id INTEGER REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED);",
+    )?;
+    let prior_preferences = json!({
+        "contextWindows": {"another-provider": "default"},
+        "compaction": {"mode": "follow", "effort": "follow"},
+        "claudeRoleAssignments": {},
+        "otherField": true,
+    });
+    db.execute(
+        "INSERT INTO preferences VALUES ('agent.modelPreferences', ?, 1)",
+        [prior_preferences.to_string()],
+    )?;
+    let prefs = |db: &rusqlite::Connection| -> Result<Value> {
+        let raw: String = db.query_row(
+            "SELECT value_json FROM preferences WHERE key = 'agent.modelPreferences'",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(serde_json::from_str(&raw)?)
+    };
+    let mut input = api();
+    input["contextWindowMode"] = json!("512k");
+
+    db.execute_batch(
+        "CREATE TRIGGER reject_commit AFTER UPDATE ON preferences
+         BEGIN INSERT INTO child VALUES (1); END;",
+    )?;
+    assert!(
+        store
+            .upsert_with_context_window(&mut db, &input, 2)
+            .is_err()
+    );
+    assert!(!root.join(FILE).exists());
+    assert_eq!(prefs(&db)?, prior_preferences);
+    let existing = store.upsert(&api())?;
+    let before = file(&root);
+    input["id"] = existing["id"].clone();
+    input["name"] = json!("Draft");
+    assert!(
+        store
+            .upsert_with_context_window(&mut db, &input, 2)
+            .is_err()
+    );
+    assert_eq!(file(&root), before);
+    assert_eq!(prefs(&db)?, prior_preferences);
+    db.execute_batch("DROP TRIGGER reject_commit")?;
+
+    fs::create_dir(root.join(TEMP))?;
+    assert!(
+        store
+            .upsert_with_context_window(&mut db, &input, 2)
+            .is_err()
+    );
+    assert_eq!(file(&root), before);
+    assert_eq!(prefs(&db)?, prior_preferences);
+    fs::remove_dir(root.join(TEMP))?;
+
+    let result = store.upsert_with_context_window(&mut db, &input, 2)?;
+    assert_eq!(result["contextWindowMode"], "512k");
+    assert_eq!(result["name"], "Draft");
+    let mut expected = prior_preferences;
+    expected["contextWindows"][existing["id"].as_str().unwrap()] = json!("512k");
+    assert_eq!(prefs(&db)?, expected);
+    assert!(state(&root)["providers"][CLAUDE][1]["contextWindowMode"].is_null());
+    Ok(())
+}
+
+#[test]
 fn old_revision_values_follow_javascript_addition_without_read_repair() -> Result<()> {
     let temp = temp();
     let root = root(&temp);

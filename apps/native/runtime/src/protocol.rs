@@ -139,6 +139,7 @@ pub struct ProviderSettingsReply {
 pub enum ProviderSettingsResult {
     Snapshot(serde_json::Value),
     Provider(serde_json::Value),
+    Models(serde_json::Value),
     Accepted(bool),
     Error(String),
 }

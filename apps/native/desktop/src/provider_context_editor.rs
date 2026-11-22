@@ -6,6 +6,7 @@ use gpui::{
     App, BoxShadow, Context, Div, Entity, FocusHandle, FontWeight, HighlightStyle, StyledText,
     Subscription, Window, div, px, rgb, rgba,
 };
+use serde_json::Value;
 
 use crate::rename_input::{RenameInput, RenameInputEvent};
 
@@ -138,22 +139,229 @@ pub fn context_window_badge(tokens: Option<u64>, locale: InterfaceLocale) -> Str
     let Some(tokens) = tokens else {
         return locale.text("默认窗口", "Default window").into();
     };
-    let compact = if tokens.is_multiple_of(1_000_000) {
+    format!(
+        "{}{}",
+        compact_tokens(tokens),
+        locale.text(" 窗口", " window")
+    )
+}
+
+/// `formatCompactTokens` from `context-window-ui.tsx:53–57`.
+pub fn compact_tokens(tokens: u64) -> String {
+    if tokens.is_multiple_of(1_000_000) {
         format!("{}M", tokens / 1_000_000)
     } else if tokens.is_multiple_of(1_000) {
         format!("{}K", tokens / 1_000)
     } else {
-        let digits = tokens.to_string();
-        let mut grouped = String::new();
-        for (index, digit) in digits.chars().enumerate() {
-            if index > 0 && (digits.len() - index).is_multiple_of(3) {
-                grouped.push(',');
-            }
-            grouped.push(digit);
+        format_tokens(tokens)
+    }
+}
+
+/// `toLocaleString('en-US')` without pulling a locale database into the UI.
+pub fn format_tokens(tokens: u64) -> String {
+    let digits = tokens.to_string();
+    let mut grouped = String::new();
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            grouped.push(',');
         }
-        grouped
-    };
-    format!("{compact}{}", locale.text(" 窗口", " window"))
+        grouped.push(digit);
+    }
+    grouped
+}
+
+pub const TARGET_512K_TOKENS: u64 = 512_000;
+
+/// Frozen `ContextWindowPicker` defaults: a saved mode wins, a Codex
+/// subscription defaults to the fixed 512K request, and everything else keeps
+/// the model/CLI default.
+pub fn provider_context_mode(provider: &Value) -> &str {
+    provider["contextWindowMode"].as_str().unwrap_or_else(|| {
+        if provider["kind"] == "subscription" && provider["subscription"]["provider"] == "codex" {
+            "512k"
+        } else {
+            "default"
+        }
+    })
+}
+
+/// `providerRoleModelIds` from `context-window-ui.tsx:47–51`. Subscription
+/// providers resolve through their role mapping only; API providers also count
+/// the default model.
+pub fn provider_context_model_ids(provider: &Value) -> Vec<String> {
+    let mapped = ["opus", "sonnet", "haiku"]
+        .into_iter()
+        .filter_map(|role| provider["modelMapping"][role].as_str())
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if provider["kind"] == "subscription" {
+        mapped
+    } else {
+        let model = provider["model"].as_str().unwrap_or_default().trim();
+        std::iter::once(model)
+            .chain(mapped.iter().map(String::as_str))
+            .filter(|id| !id.is_empty() && *id != "CLI 默认" && *id != "__cli_default__")
+            .map(str::to_owned)
+            .collect()
+    }
+}
+
+fn mode_tokens(mode: &str, row: &Value) -> Option<u64> {
+    let default = row["contextWindow"].as_u64().filter(|tokens| *tokens > 0);
+    let maximum = row["maxContextWindow"]
+        .as_u64()
+        .filter(|tokens| *tokens > 0);
+    if mode == "maximum" {
+        maximum.or(default)
+    } else {
+        default
+    }
+}
+
+/// `resolveProviderWindow` from `context-window-ui.tsx:19–45`: only a window
+/// known for every selected model is usable; otherwise the CLI default remains.
+pub fn resolve_context_tokens(mode: &str, models: &[Value], selected: &[String]) -> Option<u64> {
+    if mode == "512k" {
+        return Some(TARGET_512K_TOKENS);
+    }
+    let mut ids = Vec::new();
+    for id in selected {
+        let id = id.trim();
+        if !id.is_empty() && id != "CLI 默认" && id != "__cli_default__" && !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    let pick = |id: &str| models.iter().find(|row| row["id"] == id);
+    if !ids.is_empty() {
+        let resolved = ids
+            .iter()
+            .map(|id| pick(id).and_then(|row| mode_tokens(mode, row)))
+            .collect::<Vec<_>>();
+        return resolved
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .map(|tokens| tokens.into_iter().min().unwrap_or_default());
+    }
+    let fallback = models
+        .iter()
+        .find(|row| row["id"] == "default")
+        .or_else(|| models.iter().find(|row| row["id"] == "opus"))
+        .or_else(|| models.first());
+    fallback.and_then(|row| mode_tokens(mode, row))
+}
+
+/// `formatContextWindowBadge` from `context-window-ui.tsx:59–73`.
+pub fn format_context_window_badge(
+    mode: &str,
+    models: &[Value],
+    selected: &[String],
+    locale: InterfaceLocale,
+) -> String {
+    let zh = locale == InterfaceLocale::Chinese;
+    if mode == "512k" {
+        return if zh { "512K 窗口" } else { "512K window" }.into();
+    }
+    let tokens = resolve_context_tokens(mode, models, selected);
+    if mode == "maximum" {
+        return match tokens {
+            Some(tokens) => {
+                if zh {
+                    format!("最大 {} 窗口", compact_tokens(tokens))
+                } else {
+                    format!("Max {}", compact_tokens(tokens))
+                }
+            }
+            None if zh => "最大可扩展".into(),
+            None => "Max extensible".into(),
+        };
+    }
+    match tokens {
+        Some(tokens) => {
+            if zh {
+                format!("默认 {} 窗口", compact_tokens(tokens))
+            } else {
+                format!("Default {}", compact_tokens(tokens))
+            }
+        }
+        None if zh => "默认窗口".into(),
+        None => "Default window".into(),
+    }
+}
+
+/// Card badge that reads the concrete mode plus the provider's model directory.
+/// Rows written before the mode selector existed keep their numeric capacity so
+/// old saved data does not silently lose its label.
+pub fn provider_window_badge(provider: &Value, locale: InterfaceLocale) -> Div {
+    if provider["contextWindowMode"].as_str().is_none()
+        && let Some(tokens) = provider["contextWindow"]
+            .as_u64()
+            .filter(|tokens| *tokens > 0)
+    {
+        return context_window_badge_view(format!(
+            "{}{}",
+            locale.text("最大 ", "Max "),
+            context_window_badge(Some(tokens), locale)
+        ));
+    }
+    let models = provider["modelMetadata"]
+        .as_array()
+        .or_else(|| provider["subscription"]["modelMetadata"].as_array())
+        .cloned()
+        .unwrap_or_default();
+    let selected = provider_context_model_ids(provider);
+    context_window_badge_view(format_context_window_badge(
+        provider_context_mode(provider),
+        &models,
+        &selected,
+        locale,
+    ))
+}
+
+pub fn context_mode_title(mode: &str, locale: InterfaceLocale) -> &'static str {
+    match mode {
+        "512k" => "512K",
+        "maximum" => locale.text("最大可扩展", "Max extensible"),
+        _ => locale.text("默认窗口", "Default"),
+    }
+}
+
+pub fn context_mode_subtitle(mode: &str, locale: InterfaceLocale) -> &'static str {
+    match mode {
+        "512k" => locale.text("固定请求；需通道支持", "Fixed request; channel-dependent"),
+        "maximum" => locale.text("使用模型已知最大上限", "Largest known model window"),
+        _ => locale.text("沿用模型与 CLI 默认", "Model & CLI default"),
+    }
+}
+
+pub fn context_mode_tokens(
+    mode: &str,
+    models: &[Value],
+    selected: &[String],
+    locale: InterfaceLocale,
+) -> String {
+    match resolve_context_tokens(mode, models, selected) {
+        Some(tokens) => format!("{} tokens", format_tokens(tokens)),
+        None if mode == "maximum" => locale
+            .text("未提供（沿用默认）", "Not provided (uses default)")
+            .into(),
+        None => locale.text("由 CLI 决定", "Decided by CLI").into(),
+    }
+}
+
+pub fn context_unknown_hint(locale: InterfaceLocale) -> &'static str {
+    locale.text(
+        "服务未提供完整的窗口信息，将沿用 CLI 默认设置。",
+        "The service did not provide complete window information; CLI default settings will be used.",
+    )
+}
+
+pub fn context_multi_model_hint(locale: InterfaceLocale) -> &'static str {
+    locale.text(
+        "映射多个模型时，仅当所有模型都有窗口数据才取最小值；任一未知时保留 CLI 默认。",
+        "When multiple models are mapped, the smallest known window applies only if all models provide data.",
+    )
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -573,6 +781,7 @@ impl ContextRowColors {
 mod tests {
     use super::*;
     use InterfaceLocale::{Chinese, English};
+    use serde_json::json;
 
     #[test]
     fn saves_custom_window_and_clears_to_default_without_duplicate_writes() {
@@ -646,6 +855,81 @@ mod tests {
         }));
         assert_eq!(form.badge(English), "123,456 window");
         assert_eq!(form.error(English), None);
+    }
+
+    #[test]
+    fn mode_badges_and_picker_tokens_follow_the_frozen_resolution() {
+        let models = vec![
+            json!({"id": "opus-a", "contextWindow": 272_000, "maxContextWindow": 872_000}),
+            json!({"id": "haiku-a", "contextWindow": 272_000, "maxContextWindow": 400_000}),
+            json!({"id": "unknown-a"}),
+        ];
+        let pair = vec!["opus-a".to_owned(), "haiku-a".to_owned()];
+        assert_eq!(
+            resolve_context_tokens("default", &models, &pair),
+            Some(272_000)
+        );
+        assert_eq!(
+            resolve_context_tokens("maximum", &models, &pair),
+            Some(400_000)
+        );
+        assert_eq!(
+            resolve_context_tokens("512k", &models, &pair),
+            Some(512_000)
+        );
+        assert_eq!(
+            resolve_context_tokens("maximum", &models, &["opus-a".into(), "unknown-a".into()]),
+            None
+        );
+        assert_eq!(
+            format_context_window_badge("512k", &models, &["opus-a".into()], Chinese),
+            "512K 窗口"
+        );
+        assert_eq!(
+            format_context_window_badge("default", &models, &["opus-a".into()], Chinese),
+            "默认 272K 窗口"
+        );
+        assert_eq!(
+            format_context_window_badge("maximum", &models, &pair, Chinese),
+            "最大 400K 窗口"
+        );
+        assert_eq!(
+            format_context_window_badge("default", &models, &["unknown-a".into()], English),
+            "Default window"
+        );
+        assert_eq!(
+            context_mode_tokens("default", &models, &pair, Chinese),
+            "272,000 tokens"
+        );
+        assert_eq!(
+            context_mode_tokens("maximum", &models, &["unknown-a".into()], Chinese),
+            "未提供（沿用默认）"
+        );
+    }
+
+    #[test]
+    fn provider_mode_and_role_ids_match_the_frozen_defaults() {
+        let codex = json!({
+            "kind": "subscription", "model": "CLI 默认",
+            "subscription": {"provider": "codex"},
+            "modelMapping": {"opus": "a", "sonnet": "b", "haiku": "c"}
+        });
+        assert_eq!(provider_context_mode(&codex), "512k");
+        assert_eq!(provider_context_model_ids(&codex), ["a", "b", "c"]);
+        let antigravity = json!({
+            "kind": "subscription", "subscription": {"provider": "antigravity"},
+            "modelMapping": {"opus": "a"}
+        });
+        assert_eq!(provider_context_mode(&antigravity), "default");
+        let api = json!({
+            "model": "default-model", "contextWindowMode": "maximum",
+            "modelMapping": {"opus": "role-model", "sonnet": "", "haiku": "CLI 默认"}
+        });
+        assert_eq!(provider_context_mode(&api), "maximum");
+        assert_eq!(
+            provider_context_model_ids(&api),
+            ["default-model", "role-model"]
+        );
     }
 
     #[test]

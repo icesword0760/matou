@@ -10,6 +10,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
@@ -24,6 +25,8 @@ const RISK_POLICY: &str = "antigravityRiskAcceptedAt";
 const DEFAULT_MODEL_INPUT: &str = "__cli_default__";
 const DEFAULT_MODEL_VIEW: &str = "CLI 默认";
 const CONTEXT_WINDOW: &str = "contextWindow";
+const CONTEXT_WINDOW_MODE: &str = "contextWindowMode";
+const MODEL_PREFERENCES: &str = "agent.modelPreferences";
 const NOT_FOUND: [&str; 2] = [
     "供应商配置不存在",
     "That provider configuration does not exist",
@@ -113,7 +116,43 @@ impl ProviderConfigStore {
         snapshot(&self.read()?)
     }
 
-    /// Save an API-key input or a context-window patch and return a redacted view.
+    /// Resolve a key for a discovery request without exposing it in a settings reply.
+    pub fn model_discovery_key(
+        &self,
+        cli: &str,
+        provider_id: Option<&str>,
+        endpoint: &str,
+        draft_key: &str,
+    ) -> Result<Option<String>> {
+        let cli = self.cli(cli)?;
+        let Some(id) = provider_id else {
+            return Ok((!draft_key.is_empty()).then(|| draft_key.to_owned()));
+        };
+        let state = self.read()?;
+        let saved = state["providers"][cli]
+            .as_array()
+            .and_then(|rows| rows.iter().find(|row| row["id"] == id));
+        if saved.is_some_and(|row| row["kind"] == "subscription") {
+            return Ok(None);
+        }
+        if !draft_key.is_empty() {
+            return Ok(Some(draft_key.to_owned()));
+        }
+        Ok(saved
+            .filter(|row| {
+                row["endpoint"].as_str().is_some_and(|saved_endpoint| {
+                    strip_one_slash(saved_endpoint) == strip_one_slash(endpoint)
+                })
+            })
+            .and_then(|row| row["apiKey"].as_str())
+            .map(str::to_owned))
+    }
+
+    pub fn normalize_model_metadata(value: &Value) -> Option<Value> {
+        normalize_metadata(value)
+    }
+
+    /// Save an API-key input, subscription edit, or numeric context-window patch.
     /// The JSON shape allows legacy optional fields to keep their V1 semantics.
     pub fn upsert(&self, input: &Value) -> Result<Value> {
         if let Some(value) = input.get(CONTEXT_WINDOW) {
@@ -125,85 +164,250 @@ impl ProviderConfigStore {
             return self.set_context_window(input["id"].as_str().unwrap_or_default(), value);
         }
         ensure!(
-            input["kind"] != "subscription",
+            input.get(CONTEXT_WINDOW_MODE).is_none(),
+            "Context window mode requires model preferences storage"
+        );
+        self.mutate(|state| self.apply_upsert(state, input))
+    }
+
+    /// Save the draft and its selected window together. The preferences transaction
+    /// rolls back if the configuration file cannot be published. If the transaction
+    /// cannot commit, restore the exact previous file while still holding the lock.
+    pub fn upsert_with_context_window(
+        &self,
+        db: &mut Connection,
+        input: &Value,
+        updated_at: i64,
+    ) -> Result<Value> {
+        let mode = input[CONTEXT_WINDOW_MODE]
+            .as_str()
+            .filter(|mode| valid_context_mode(mode))
+            .context("Invalid provider context window mode")?;
+        ensure!(
+            input["cli"] == CLIS[0] && input.get(CONTEXT_WINDOW).is_none(),
+            "Invalid provider context window mode"
+        );
+        let _guard = self
+            .writes
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Provider configuration write lock failed"))?;
+        let previous = self.read_bytes()?;
+        let mut state = self.decode(previous.as_deref())?;
+        let mut public = self.apply_upsert(&mut state, input)?;
+        let id = public["id"]
+            .as_str()
+            .filter(|id| !id.is_empty() && id.encode_utf16().count() <= 256)
+            .context("Invalid provider ID")?
+            .to_owned();
+        // An explicit preset replaces an older numeric override for this row.
+        let row = list_mut(&mut state, CLIS[0])
+            .iter_mut()
+            .find(|row| row["id"] == id)
+            .context("Missing updated provider")?;
+        row.as_object_mut().unwrap().shift_remove(CONTEXT_WINDOW);
+        public.as_object_mut().unwrap().shift_remove(CONTEXT_WINDOW);
+
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut preferences = read_model_preferences(&tx)?;
+        let windows = preferences
+            .entry("contextWindows")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .context("Invalid context window preferences")?;
+        windows.insert(id, json!(mode));
+        preferences
+            .entry("compaction")
+            .or_insert_with(|| json!({"mode": "follow", "effort": "follow"}));
+        tx.execute(
+            "INSERT INTO preferences (key, value_json, updated_at) VALUES (?, ?, ?)
+             ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json,
+                                           updated_at = excluded.updated_at",
+            params![
+                MODEL_PREFERENCES,
+                serde_json::to_string(&preferences)?,
+                updated_at
+            ],
+        )?;
+        self.write(&state)?;
+        if let Err(error) = tx.commit() {
+            match previous {
+                Some(bytes) => write_atomic(&self.root, &bytes),
+                None => fs::remove_file(self.root.join(CONFIG_FILE)),
+            }
+            .context("Could not restore provider configuration after preferences save failed")?;
+            return Err(error).context("Could not save provider context window preferences");
+        }
+        public[CONTEXT_WINDOW_MODE] = json!(mode);
+        Ok(public)
+    }
+
+    /// Include persisted modes in the settings view without changing the V1 file.
+    pub fn project_context_windows(db: &Connection, snapshot: &mut Value) {
+        let preferences = crate::sessions::read_claude_role_launch_preferences(db);
+        if let Some(providers) = snapshot["providers"][CLIS[0]].as_array_mut() {
+            for provider in providers {
+                if let Some(mode) = provider["id"]
+                    .as_str()
+                    .and_then(|id| preferences.context_windows.get(id))
+                {
+                    provider[CONTEXT_WINDOW_MODE] = mode.clone();
+                }
+            }
+        }
+    }
+
+    fn apply_upsert(&self, state: &mut Value, input: &Value) -> Result<Value> {
+        if input["kind"] == "subscription" {
+            return self.edit_subscription(state, input);
+        }
+        validate_efforts(input)?;
+        let cli = self.cli(input["cli"].as_str().unwrap_or_default())?;
+        let name = self.name(input)?;
+        let model = trim(input["model"].as_str().unwrap_or_default());
+        ensure!(
+            !model.is_empty(),
+            self.locale
+                .text(["默认模型不能为空", "The default model must not be empty"])
+        );
+        let model = if model == DEFAULT_MODEL_INPUT {
+            ""
+        } else {
+            model
+        };
+        let endpoint = self.endpoint(input["endpoint"].as_str().unwrap_or_default())?;
+        let key = match input.get("apiKey") {
+            None | Some(Value::Null) => "",
+            Some(value) => trim(
+                value
+                    .as_str()
+                    .context("API Key contains invalid characters")?,
+            ),
+        };
+        ensure!(
+            key.bytes().all(|byte| (0x21..=0x7e).contains(&byte)),
+            "API Key contains invalid characters"
+        );
+        let mapping = input
+            .get("modelMapping")
+            .map(normalize_mapping)
+            .transpose()?;
+        let list = list_mut(state, cli);
+        let existing = matching_input(list, input.get("id"), self.locale)?;
+        let mut row = existing
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        ensure!(
+            row.get("kind").is_none_or(|kind| kind != "subscription"),
+            "Cannot change a subscription into an API key provider"
+        );
+        let same_endpoint = row.get("endpoint").and_then(Value::as_str) == Some(&endpoint);
+        ensure!(
+            same_endpoint || !key.is_empty() || !row.get("apiKey").is_some_and(truthy),
+            "Endpoint changed: enter the API key for the new service"
+        );
+        let same_key = key.is_empty() || row.get("apiKey").and_then(Value::as_str) == Some(key);
+        let metadata = normalize_metadata(&input["modelMetadata"]);
+        let id = self.id_for(&row);
+        row.insert("id".into(), id);
+        row.insert("cli".into(), json!(cli));
+        row.insert("name".into(), json!(name));
+        row.insert("endpoint".into(), json!(endpoint));
+        row.insert("model".into(), json!(model));
+        copy_present(&mut row, input, &["reasoningEffort", "effortMapping"]);
+        if let Some(mapping) = mapping {
+            row.insert("modelMapping".into(), mapping);
+        }
+        if row.get("builtIn").is_some_and(truthy) {
+            row.insert("builtIn".into(), json!(true));
+        }
+        if !key.is_empty() {
+            row.insert("apiKey".into(), json!(key));
+        }
+        if let Some(metadata) = metadata {
+            row.insert("modelMetadata".into(), metadata);
+        } else if !same_endpoint || !same_key {
+            row.shift_remove("modelMetadata");
+        }
+        let row = Value::Object(row);
+        let public = view(&row)?;
+        replace_row(list, row);
+        bump_revision(state);
+        Ok(public)
+    }
+
+    fn edit_subscription(&self, state: &mut Value, input: &Value) -> Result<Value> {
+        ensure!(
+            input["id"].as_str().is_some_and(|id| !id.is_empty()),
             "Subscription requires a completed sign-in"
         );
-        self.mutate(|state| {
-            validate_efforts(input)?;
-            let cli = self.cli(input["cli"].as_str().unwrap_or_default())?;
-            let name = self.name(input)?;
-            let model = trim(input["model"].as_str().unwrap_or_default());
-            ensure!(
-                !model.is_empty(),
-                self.locale
-                    .text(["默认模型不能为空", "The default model must not be empty"])
-            );
-            let model = if model == DEFAULT_MODEL_INPUT {
-                ""
-            } else {
-                model
-            };
-            let endpoint = self.endpoint(input["endpoint"].as_str().unwrap_or_default())?;
-            let key = match input.get("apiKey") {
-                None | Some(Value::Null) => "",
-                Some(value) => trim(
-                    value
-                        .as_str()
-                        .context("API Key contains invalid characters")?,
-                ),
-            };
-            ensure!(
-                key.bytes().all(|byte| (0x21..=0x7e).contains(&byte)),
-                "API Key contains invalid characters"
-            );
-            let mapping = input
-                .get("modelMapping")
-                .map(normalize_mapping)
-                .transpose()?;
-            let list = list_mut(state, cli);
-            let existing = matching_input(list, input.get("id"), self.locale)?;
-            let mut row = existing
-                .and_then(Value::as_object)
-                .cloned()
-                .unwrap_or_default();
-            ensure!(
-                row.get("kind").is_none_or(|kind| kind != "subscription"),
-                "Cannot change a subscription into an API key provider"
-            );
-            let same_endpoint = row.get("endpoint").and_then(Value::as_str) == Some(&endpoint);
-            ensure!(
-                same_endpoint || !key.is_empty() || !row.get("apiKey").is_some_and(truthy),
-                "Endpoint changed: enter the API key for the new service"
-            );
-            let same_key = key.is_empty() || row.get("apiKey").and_then(Value::as_str) == Some(key);
-            let metadata = normalize_metadata(&input["modelMetadata"]);
-            let id = self.id_for(&row);
-            row.insert("id".into(), id);
-            row.insert("cli".into(), json!(cli));
-            row.insert("name".into(), json!(name));
-            row.insert("endpoint".into(), json!(endpoint));
-            row.insert("model".into(), json!(model));
-            copy_present(&mut row, input, &["reasoningEffort", "effortMapping"]);
-            if let Some(mapping) = mapping {
-                row.insert("modelMapping".into(), mapping);
+        ensure!(
+            input["cli"] == CLIS[0]
+                && input
+                    .as_object()
+                    .is_some_and(|fields| fields.keys().all(|key| {
+                        matches!(
+                            key.as_str(),
+                            "cli"
+                                | "id"
+                                | "kind"
+                                | "name"
+                                | "modelMapping"
+                                | "effortMapping"
+                                | "contextWindowMode"
+                        )
+                    })),
+            "Invalid subscription edit"
+        );
+        let name = self.name(input)?;
+        ensure!(name.encode_utf16().count() <= 256, "Invalid provider name");
+        let mapping = normalize_mapping(&input["modelMapping"])?;
+        validate_efforts(input)?;
+        let list = list_mut(state, CLIS[0]);
+        let existing = matching_input(list, input.get("id"), self.locale)?
+            .filter(|row| row["kind"] == "subscription")
+            .context("Subscription requires a completed sign-in")?;
+        let subscription = &existing["subscription"];
+        let models = subscription["modelMetadata"]
+            .as_array()
+            .context("Invalid subscription model directory")?;
+        for role in ROLES {
+            let id = mapping[role].as_str().unwrap_or_default();
+            let normalized = id.to_ascii_lowercase();
+            let model = models
+                .iter()
+                .find(|model| model["id"] == id)
+                .filter(|_| {
+                    !id.is_empty()
+                        && !["image", "video", "codex-auto-review"]
+                            .iter()
+                            .any(|part| normalized.contains(part))
+                })
+                .context("Selected model is not available")?;
+            if let Some(effort) = input["effortMapping"][role].as_str()
+                && effort != "follow"
+            {
+                let supported = model["supportedEfforts"].as_array().map_or_else(
+                    || effort != "max" || subscription_max_effort(subscription, model),
+                    |values| values.iter().any(|value| value == effort),
+                );
+                ensure!(
+                    supported && (effort != "max" || subscription["provider"] != "codex"),
+                    "Selected model does not support this reasoning effort"
+                );
             }
-            if row.get("builtIn").is_some_and(truthy) {
-                row.insert("builtIn".into(), json!(true));
-            }
-            if !key.is_empty() {
-                row.insert("apiKey".into(), json!(key));
-            }
-            if let Some(metadata) = metadata {
-                row.insert("modelMetadata".into(), metadata);
-            } else if !same_endpoint || !same_key {
-                row.shift_remove("modelMetadata");
-            }
-            let row = Value::Object(row);
-            let public = view(&row)?;
-            replace_row(list, row);
-            bump_revision(state);
-            Ok(public)
-        })
+        }
+        let mut row = existing.clone();
+        row["name"] = json!(name);
+        row["model"] = mapping["sonnet"].clone();
+        row["modelMapping"] = mapping;
+        if let Some(effort) = input.get("effortMapping") {
+            row["effortMapping"] = effort.clone();
+        }
+        let public = view(&row)?;
+        replace_row(list, row);
+        bump_revision(state);
+        Ok(public)
     }
 
     fn set_context_window(&self, id: &str, value: &Value) -> Result<Value> {
@@ -438,15 +642,23 @@ impl ProviderConfigStore {
     }
 
     fn read(&self) -> Result<Value> {
-        let data = match fs::read(self.root.join(CONFIG_FILE)) {
-            Ok(data) => data,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return Ok(self.locale.seeds());
-            }
-            Err(error) => return Err(error).context("Could not read provider configuration"),
+        self.decode(self.read_bytes()?.as_deref())
+    }
+
+    fn read_bytes(&self) -> Result<Option<Vec<u8>>> {
+        match fs::read(self.root.join(CONFIG_FILE)) {
+            Ok(data) => Ok(Some(data)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error).context("Could not read provider configuration"),
+        }
+    }
+
+    fn decode(&self, data: Option<&[u8]>) -> Result<Value> {
+        let Some(data) = data else {
+            return Ok(self.locale.seeds());
         };
         // Hiding the parser error keeps malformed keys and credential text out of diagnostics.
-        let mut state = format::parse(&data)?;
+        let mut state = format::parse(data)?;
         ensure!(!state.is_null(), "Provider configuration is null");
         if state["version"].as_f64() != Some(1.0)
             || !truthy(&state["providers"])
@@ -491,6 +703,24 @@ impl ProviderConfigStore {
     fn write(&self, state: &Value) -> Result<()> {
         let bytes = format::stringify(state);
         write_atomic(&self.root, bytes.as_bytes()).context("Could not write provider configuration")
+    }
+}
+
+fn valid_context_mode(mode: &str) -> bool {
+    matches!(mode, "default" | "maximum" | "512k")
+}
+
+fn read_model_preferences(db: &Connection) -> Result<Map<String, Value>> {
+    let raw: Option<String> = db
+        .query_row(
+            "SELECT value_json FROM preferences WHERE key = ?",
+            [MODEL_PREFERENCES],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match raw {
+        Some(raw) => serde_json::from_str(&raw).context("Invalid model preferences"),
+        None => Ok(Map::new()),
     }
 }
 
@@ -649,6 +879,28 @@ fn copy_strings(output: &mut Map<String, Value>, input: &Value, keys: &[&str]) {
             output.insert(key.into(), json!(text));
         }
     }
+}
+
+fn strip_one_slash(value: &str) -> &str {
+    value.strip_suffix('/').unwrap_or(value)
+}
+
+fn subscription_max_effort(subscription: &Value, model: &Value) -> bool {
+    let label = format!(
+        "{} {}",
+        model["id"].as_str().unwrap_or_default(),
+        model["displayName"].as_str().unwrap_or_default(),
+    )
+    .to_ascii_lowercase();
+    subscription["provider"] != "codex"
+        && !label
+            .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+            .any(|word| {
+                matches!(word, "gpt" | "codex") || matches!(word.as_bytes(), [b'o', b'1'..=b'9'])
+            })
+        && ["claude", "opus", "sonnet", "haiku"]
+            .iter()
+            .any(|part| label.contains(part))
 }
 
 fn snapshot(state: &Value) -> Result<Value> {

@@ -216,7 +216,10 @@ mod probe {
         provider_settings::{ProviderDraft, ProviderSettings, ProviderUpdate},
         runtime_bridge::{self, Command, ProbeReceiver},
         settings_shell::claude_role_assignments::{AssignmentAction, AssignmentStatus},
-        settings_shell::{EditorStep, SettingsPage, SettingsShell, probe_language_zone},
+        settings_shell::{
+            EditorStep, ProviderEditorProbe, SettingsPage, SettingsShell, probe_language_zone,
+            probe_provider_editor,
+        },
         workspace::Workspace,
     };
 
@@ -424,6 +427,47 @@ mod probe {
                 );
             })
             .unwrap();
+    }
+
+    fn click_hidden_view(
+        window: WindowHandle<Workspace>,
+        position: Point<Pixels>,
+        cx: &mut AsyncApp,
+    ) {
+        use cocoa::{
+            appkit::{NSEvent, NSEventModifierFlags, NSEventType},
+            base::{id, nil},
+            foundation::{NSInteger, NSPoint},
+        };
+        use objc::{msg_send, sel, sel_impl};
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+        let (view, location) = window
+            .update(cx, |_, window, _| {
+                let RawWindowHandle::AppKit(handle) =
+                    HasWindowHandle::window_handle(window).unwrap().as_raw()
+                else {
+                    unreachable!("hidden macOS window")
+                };
+                let location = NSPoint::new(
+                    f64::from(position.x),
+                    f64::from(window.viewport_size().height - position.y),
+                );
+                (handle.ns_view.as_ptr() as id, location)
+            })
+            .unwrap();
+        // Send to the hidden view directly, bypassing the desktop event queue.
+        unsafe {
+            let native: id = msg_send![view, window];
+            let number: NSInteger = msg_send![native, windowNumber];
+            let event = |kind| {
+                NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure_(
+                    nil, kind, location, NSEventModifierFlags::empty(), 0., number, nil, 0, 1, 1.,
+                )
+            };
+            let _: () = msg_send![view, mouseDown: event(NSEventType::NSLeftMouseDown)];
+            let _: () = msg_send![view, mouseUp: event(NSEventType::NSLeftMouseUp)];
+        }
     }
 
     fn open_window(
@@ -689,188 +733,309 @@ mod probe {
         );
     }
 
-    async fn verify_provider_context_window(cx: &mut AsyncApp) {
-        let root = probe_root("provider-context");
-        let store = ProviderConfigStore::new(&root, ProviderConfigLocale::ZhCn);
-        let provider = store
-            .upsert(&json!({
-                "cli": "claude-code", "name": "隔离窗口供应商",
-                "endpoint": "https://context.example.invalid", "apiKey": "fixture-key",
-                "model": "probe-model"
-            }))
-            .unwrap();
-        let id = provider["id"].as_str().unwrap();
-        store.set_active("claude-code", id).unwrap();
+    fn verify_provider_editors(cx: &mut AsyncApp) {
         let (window, sink) = cx.update(|cx| open_window(None, cx)).unwrap();
-        window
-            .update(cx, |view, window, cx| {
-                view.set_locale_data_root(root.clone());
-                view.open_settings(window, cx);
-            })
-            .unwrap();
-
-        let reload = |cx: &mut AsyncApp| {
-            let provider_request = request_id(&sink);
-            let assignments_request = assignment_request_id(&sink);
+        let api = json!({
+            "id": "api", "name": "隔离 API", "cli": "claude-code", "hasApiKey": true,
+            "endpoint": "https://api.deepseek.com/anthropic", "model": "saved-model",
+            "modelMapping": {"opus": "saved-model", "sonnet": "", "haiku": "unlisted-model"},
+            "modelMetadata": [{"id": "saved-model", "displayName": "Saved name", "contextWindow": 200000}],
+        });
+        let subscription = json!({
+            "id": "subscription", "name": "隔离 ChatGPT", "cli": "claude-code", "kind": "subscription",
+            "model": "chat-a",
+            "modelMapping": {"opus": "chat-a", "sonnet": "chat-b", "haiku": "chat-a"},
+            "effortMapping": {"opus": "max", "sonnet": "low", "haiku": "follow"},
+            "subscription": {
+                "provider": "codex",
+                "account": {"status": "ready"},
+                "modelMetadata": [
+                    {"id": "chat-a", "displayName": "Chat A", "contextWindow": 272000,
+                     "maxContextWindow": 512000, "supportedEfforts": ["high"]},
+                    {"id": "chat-b", "displayName": "Chat B", "contextWindow": 400000,
+                     "supportedEfforts": ["low", "high", "max"]},
+                    {"id": "image-only"}, {"id": "codex-auto-review"},
+                ],
+            },
+        });
+        let reply = |cx: &mut AsyncApp, request, response| {
             window
                 .update(cx, |view, window, cx| {
-                    view.provider_reply(
-                        result(
-                            provider_request,
-                            ProviderSettingsResult::Snapshot(store.snapshot().unwrap()),
-                        ),
-                        window,
-                        cx,
-                    );
-                    view.assignment_reply(
-                        ClaudeRoleAssignmentsReply {
-                            request_id: assignments_request,
-                            assignments: Some(Default::default()),
-                            web_search: None,
-                            error: None,
-                        },
-                        window,
-                        cx,
-                    );
+                    view.provider_reply(result(request, response), window, cx);
                 })
                 .unwrap();
         };
-        let open_context_editor = |cx: &mut AsyncApp| {
+        window
+            .update(cx, |view, window, cx| view.open_settings(window, cx))
+            .unwrap();
+        let request = request_id(&sink);
+        assignment_request_id(&sink);
+        reply(
+            cx,
+            request,
+            snapshot(vec![api.clone(), subscription.clone()], "api"),
+        );
+
+        let frame = |cx: &mut AsyncApp| probe_provider_editor(|| draw(window, cx));
+        let open = |cx: &mut AsyncApp, id: &str| {
             draw(window, cx);
             update_shell(window, cx, |shell, window, _| {
                 shell.diagnostics_focus_provider_edit(id, window)
             });
             press(window, "enter", cx);
-            draw(window, cx);
+            frame(cx)
         };
-        let status = |cx: &mut AsyncApp| {
-            window
-                .update(cx, |view, _, cx| {
-                    let shell = view.settings_entity().unwrap();
-                    let row = shell.read(cx).probe_provider_context(id).read(cx);
-                    let (badge, error, pending) = row.probe_status();
-                    (badge, error.map(str::to_owned), pending)
-                })
-                .unwrap()
-        };
-        let edit = |cx: &mut AsyncApp, keys: &[&str]| {
-            check_shell_for_context_input(window, id, cx);
+        let focus = |cx: &mut AsyncApp, control| {
             draw(window, cx);
-            press(window, "cmd-a", cx);
-            for key in keys {
-                press(window, key, cx);
-            }
+            update_shell(window, cx, |shell, window, _| {
+                shell.probe_provider_editor_focus(control, window)
+            });
+        };
+        let activate = |cx: &mut AsyncApp, control| {
+            focus(cx, control);
             press(window, "enter", cx);
+            frame(cx)
         };
-        let write = |tokens: Value| {
-            let Command::SaveProvider { request_id, input } = sink.try_recv().unwrap() else {
-                panic!("expected context-only provider write");
-            };
-            assert_eq!(
-                input,
-                json!({"cli": "claude-code", "id": id, "contextWindow": tokens})
+        let click = |cx: &mut AsyncApp, view: &ProviderEditorProbe, control: &str| {
+            click_hidden_view(window, view.bounds[control].center(), cx);
+            frame(cx)
+        };
+        let text = |view: &ProviderEditorProbe, control: &str, expected: &str| {
+            assert!(
+                view.labels
+                    .get(control)
+                    .is_some_and(|label| label.contains(expected)),
+                "expected {control} to include {expected:?}, got {:?}",
+                view.labels.get(control)
             );
-            (request_id, input)
         };
-        let confirm = |cx: &mut AsyncApp, request_id, reply| {
-            window
-                .update(cx, |view, window, cx| {
-                    view.provider_reply(result(request_id, reply), window, cx);
-                })
-                .unwrap();
-            draw(window, cx);
+        let save_command = || match sink.try_recv().unwrap() {
+            Command::SaveProvider { request_id, input } => (request_id, input),
+            _ => panic!("expected provider write"),
         };
-        reload(cx);
-        let chinese = probe_language_zone(|| draw(window, cx));
+
+        let view = open(cx, "api");
+        text(&view, "subtitle", "用于 Claude Code");
+        text(&view, "protocol", "Anthropic Messages");
+        text(&view, "key-label", "API Key");
+        text(&view, "key-link", "获取密钥");
         assert!(
-            chinese
-                .labels
-                .iter()
-                .any(|label| label.starts_with("所有 Claude Code 会话跟随全局供应商"))
+            (f32::from(view.bounds["key-label"].center().y - view.bounds["key-link"].center().y))
+                .abs()
+                <= 1.0,
+            "API Key and its link must share one heading row"
         );
-        open_context_editor(cx);
-        assert_eq!(status(cx).0, "默认窗口");
-        edit(cx, &["9"]);
-        assert!(status(cx).1.unwrap().contains("100,000"));
-        assert!(sink.try_recv().is_err());
+        assert!(view.bounds["key-link"].left() > view.bounds["key-label"].left());
+        text(&view, "model-detail", "Saved name");
+        text(&view, "model-detail", "200,000 tokens");
+        assert!(view.bounds["context"].top() > view.bounds["mapping-2"].bottom());
+        text(&view, "context-unknown", "沿用 CLI 默认设置");
 
-        edit(cx, &["3", "2", "0", "0", "0", "0"]);
-        let (request_id, _) = write(json!(320_000));
-        assert_eq!(status(cx), ("默认窗口".into(), None, true));
-        confirm(
-            cx,
-            request_id,
-            ProviderSettingsResult::Error("隔离窗口写入失败".into()),
-        );
+        let view = activate(cx, "fetch");
+        text(&view, "fetch", "正在获取");
+        let Command::FetchProviderModels { request_id, input } = sink.try_recv().unwrap() else {
+            panic!("expected model discovery request");
+        };
         assert_eq!(
-            status(cx),
-            ("默认窗口".into(), Some("隔离窗口写入失败".into()), false)
+            input,
+            json!({
+                "cli": "claude-code", "providerId": "api", "endpoint": "https://api.deepseek.com/anthropic"
+            })
         );
+        reply(
+            cx,
+            request_id,
+            ProviderSettingsResult::Models(json!({
+                "models": ["saved-model", "other-model"],
+                "modelMetadata": [
+                    {"id": "saved-model", "displayName": "Saved name", "contextWindow": 200000},
+                    {"id": "other-model", "displayName": "Unique display", "contextWindow": 512000,
+                     "supportedEfforts": ["high"]},
+                ]
+            })),
+        );
+        let view = frame(cx);
+        text(&view, "option-saved-model", "✓");
+        let view = activate(cx, "close");
+        text(&view, "confirmation", "有尚未保存的修改");
+        activate(cx, "keep-editing");
+        focus(cx, "search");
+        for key in ["u", "n", "i", "q"] {
+            press(window, key, cx);
+        }
+        let view = frame(cx);
+        assert!(!view.bounds.contains_key("option-saved-model"));
+        text(&view, "option-other-model", "Unique display");
         press(window, "enter", cx);
-        let (request_id, input) = write(json!(320_000));
-        confirm(
+        let view = frame(cx);
+        assert!(!view.bounds.contains_key("option-other-model"));
+        text(&view, "model-detail", "other-model");
+        text(&view, "model-detail", "512,000 tokens");
+        text(&view, "model-source", "本次获取");
+
+        let view = activate(cx, "mapping-0");
+        text(&view, "mapping-option-manual", "手动填写模型 ID");
+        let view = click(cx, &view, "mapping-option-manual");
+        text(&view, "mapping-list-0", "从列表选择");
+        focus(cx, "manual-0");
+        press(window, "cmd-a", cx);
+        for key in ["u", "n", "k"] {
+            press(window, key, cx);
+        }
+        let view = activate(cx, "mapping-list-0");
+        text(&view, "mapping-0", "unk");
+        text(&view, "mapping-0", "未在列表中");
+        activate(cx, "context-512k");
+        let view = activate(cx, "close");
+        text(&view, "confirmation", "有尚未保存的修改");
+        activate(cx, "keep-editing");
+        activate(cx, "save");
+        let (request, input) = save_command();
+        assert_eq!(input["model"], "other-model");
+        assert_eq!(input["modelMapping"]["opus"], "unk");
+        assert_eq!(input["contextWindowMode"], "512k");
+        assert_eq!(input["modelMetadata"].as_array().unwrap().len(), 2);
+        let mut saved_api = api;
+        saved_api["model"] = input["model"].clone();
+        saved_api["contextWindowMode"] = input["contextWindowMode"].clone();
+        reply(
+            cx,
+            request,
+            ProviderSettingsResult::Provider(saved_api.clone()),
+        );
+
+        let view = open(cx, "subscription");
+        text(&view, "title", "编辑供应商");
+        text(&view, "subtitle", "用于 Claude Code");
+        text(&view, "provider-name", "供应商名称");
+        for role in 0..3 {
+            assert!(view.bounds.contains_key(format!("mapping-{role}").as_str()));
+            assert!(view.bounds.contains_key(format!("effort-{role}").as_str()));
+        }
+        assert!(!view.bounds.contains_key("key-label"));
+        assert!(
+            !view
+                .labels
+                .values()
+                .any(|label| label.contains("暂不支持修改订阅"))
+        );
+        text(&view, "effort-invalid-0", "该模型不支持当前推理强度");
+        assert!(!view.enabled["save"] && !view.enabled["save-switch"]);
+        assert_eq!(view.context_mode.as_deref(), Some("512k"));
+        assert!(view.bounds.contains_key("delete"));
+        let view = activate(cx, "delete");
+        text(&view, "confirmation", "删除");
+        activate(cx, "keep-editing");
+        let view = activate(cx, "mapping-0");
+        text(&view, "mapping-option-chat-a", "Chat A");
+        text(&view, "mapping-option-chat-a", "chat-a");
+        text(&view, "mapping-option-chat-a", "272,000 tokens");
+        assert!(!view.bounds.contains_key("mapping-option-image-only"));
+        assert!(!view.bounds.contains_key("mapping-option-codex-auto-review"));
+        assert!(!view.bounds.contains_key("mapping-option-manual"));
+        click(cx, &view, "mapping-option-chat-b");
+        let view = activate(cx, "effort-0");
+        click(cx, &view, "effort-option-high");
+        focus(cx, "name");
+        press(window, "end", cx);
+        press(window, "x", cx);
+        let view = activate(cx, "context-maximum");
+        assert!(view.enabled["save"] && view.enabled["save-switch"]);
+        let view = activate(cx, "close");
+        text(&view, "confirmation", "有尚未保存的修改");
+        activate(cx, "keep-editing");
+        activate(cx, "save-switch");
+        let (request, input) = save_command();
+        assert_eq!(input["name"], "隔离 ChatGPTx");
+        assert_eq!(input["kind"], "subscription");
+        assert_eq!(input["modelMapping"]["opus"], "chat-b");
+        assert_eq!(input["effortMapping"]["opus"], "high");
+        assert_eq!(input["contextWindowMode"], "maximum");
+        assert!(input.get("subscription").is_none() && input.get("apiKey").is_none());
+        let mut saved_subscription = subscription;
+        for key in ["name", "modelMapping", "effortMapping", "contextWindowMode"] {
+            saved_subscription[key] = input[key].clone();
+        }
+        reply(
+            cx,
+            request,
+            ProviderSettingsResult::Provider(saved_subscription.clone()),
+        );
+        let Command::SetActiveProvider {
+            request_id,
+            cli,
+            id,
+        } = sink.try_recv().unwrap()
+        else {
+            panic!("expected subscription switch after saving");
+        };
+        assert_eq!((cli.as_str(), id.as_str()), ("claude-code", "subscription"));
+        reply(
             cx,
             request_id,
-            ProviderSettingsResult::Provider(store.upsert(&input).unwrap()),
+            snapshot(vec![saved_api, saved_subscription], "subscription"),
         );
-        assert_eq!(status(cx), ("320K 窗口".into(), None, false));
+        assert!(!open(cx, "subscription").bounds.contains_key("delete"));
+        activate(cx, "close");
 
-        edit(cx, &["backspace"]);
-        let (request_id, input) = write(Value::Null);
-        assert_eq!(status(cx), ("320K 窗口".into(), None, true));
-        confirm(
-            cx,
-            request_id,
-            ProviderSettingsResult::Provider(store.upsert(&input).unwrap()),
-        );
-        assert_eq!(status(cx), ("默认窗口".into(), None, false));
+        activate(cx, "new");
+        activate(cx, "custom");
+        let view = activate(cx, "next");
+        assert!(view.bounds["context"].top() > view.bounds["mapping-2"].bottom());
+        assert_eq!(view.context_mode.as_deref(), Some("default"));
+        activate(cx, "context-maximum");
+        let view = activate(cx, "back");
+        text(&view, "confirmation", "有尚未保存的修改");
+        activate(cx, "discard");
+        assert!(frame(cx).bounds.get("context").is_none());
+        activate(cx, "close");
 
-        press(window, "escape", cx);
-        draw(window, cx);
+        let codex = json!({
+            "id": "codex-api", "cli": "codex", "name": "Codex API", "hasApiKey": true,
+            "endpoint": "https://api.example.invalid/v1", "model": "codex-example",
+            "reasoningEffort": "high",
+        });
         update_shell(window, cx, |shell, window, cx| {
-            shell.probe_language_page(window, cx)
+            shell.probe_open_provider_value(codex, window, cx)
         });
-        assert!(matches!(
-            sink.try_recv().unwrap(),
-            Command::GetTimeZoneSettings { .. }
-        ));
-        draw(window, cx);
-        update_shell(window, cx, |shell, window, _| {
-            shell.probe_language_focus("english", window)
-        });
-        press(window, "enter", cx);
-        wait_for_language_frame(window, cx, "Language & time zone").await;
-        update_shell(window, cx, |shell, window, _| {
-            shell.probe_settings_nav_focus(SettingsPage::ClaudeCode, window)
-        });
-        press(window, "enter", cx);
-        reload(cx);
-        let english = probe_language_zone(|| draw(window, cx));
-        assert!(english.labels.iter().any(|label| {
-            label.starts_with("All Claude Code sessions follow the global provider.")
-        }));
-        open_context_editor(cx);
-        assert_eq!(status(cx), ("Default window".into(), None, false));
+        let view = frame(cx);
+        text(&view, "subtitle", "用于 Codex");
+        text(&view, "protocol", "OpenAI Responses");
+        text(&view, "codex-effort", "推理强度");
+        assert!(!view.bounds.contains_key("mapping-0") && !view.bounds.contains_key("context"));
+        let view = activate(cx, "fetch");
+        text(&view, "fetch", "正在获取");
+        let Command::FetchProviderModels { request_id, input } = sink.try_recv().unwrap() else {
+            panic!("expected Codex model discovery request");
+        };
+        assert_eq!(
+            input,
+            json!({"cli": "codex", "providerId": "codex-api", "endpoint": "https://api.example.invalid/v1"})
+        );
+        reply(
+            cx,
+            request_id,
+            ProviderSettingsResult::Models(json!({
+                "models": ["codex-example"],
+                "modelMetadata": [{"id": "codex-example", "displayName": "Codex Example", "contextWindow": 272000,
+                    "supportedEfforts": ["low", "high"]}],
+            })),
+        );
+        text(&frame(cx), "model-detail", "272,000 tokens");
+        press(window, "escape", cx);
+        let view = activate(cx, "effort-0");
+        click(cx, &view, "effort-option-low");
+        activate(cx, "save");
+        let (_, input) = save_command();
+        assert_eq!(input["cli"], "codex");
+        assert_eq!(input["reasoningEffort"], "low");
+        assert!(input.get("modelMapping").is_none() && input.get("contextWindowMode").is_none());
         window
             .update(cx, |_, window, _| window.remove_window())
             .unwrap();
-        std::fs::remove_dir_all(root).unwrap();
         println!(
-            "Hidden GPUI context window: validation, confirmed save, rejected save and retry, clear to default, Chinese/English impact and re-read"
+            "Hidden GPUI provider editors: API headings, discovery, search, model details, manual mapping, dirty window choice, subscription validation and save/switch, Codex fields"
         );
-    }
-
-    fn check_shell_for_context_input(window: WindowHandle<Workspace>, id: &str, cx: &mut AsyncApp) {
-        window
-            .update(cx, |view, window, cx| {
-                view.settings_entity()
-                    .unwrap()
-                    .read(cx)
-                    .probe_provider_context(id)
-                    .read(cx)
-                    .probe_focus_input(window, cx);
-            })
-            .unwrap();
     }
 
     fn verify_window(cx: &mut AsyncApp) {
@@ -2010,7 +2175,7 @@ mod probe {
                 cx.spawn(async |cx| {
                     verify_dispatch_window(cx);
                     verify_theme_window(cx);
-                    verify_provider_context_window(cx).await;
+                    verify_provider_editors(cx);
                     verify_window(cx);
                     verify_delete_window(cx);
                     verify_assignments_window(cx);

@@ -3,6 +3,9 @@
 //! No SQLite, PTY, or Ghostty handle is accessed on the GPUI thread. The current
 //! vertical slice hosts the owner in a background thread; standalone runtime
 //! transport and additional windows remain separate migration work.
+#[path = "provider_model_discovery.rs"]
+mod provider_model_discovery;
+
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     ffi::OsString,
@@ -499,6 +502,10 @@ pub enum Command {
         request_id: u64,
     },
     SaveProvider {
+        request_id: u64,
+        input: Value,
+    },
+    FetchProviderModels {
         request_id: u64,
         input: Value,
     },
@@ -2848,6 +2855,7 @@ enum RoleAssignmentsRequest {
 enum ProviderSettingsRequest {
     Get(u64),
     Save(u64, Value),
+    FetchModels(u64, Value),
     Delete(u64, String, String),
     SetActive(u64, String, String),
     ConfirmRisk(u64),
@@ -2873,20 +2881,42 @@ impl ProviderSettingsWorker {
                 // The host's owner lease excludes another native runtime for this root.
                 // Legacy or external processes writing the file outside that lease can race.
                 // Store construction does no I/O, so a bad file cannot block runtime startup.
-                let store = ProviderConfigStore::new(data_root, locale);
-                use ProviderSettingsResult::{Accepted, Error, Provider, Snapshot};
+                let store = ProviderConfigStore::new(&data_root, locale);
+                let project_windows = |mut snapshot: Value| {
+                    if let Ok(db) = startup::open_read_only(&data_root.join("matou.sqlite")) {
+                        ProviderConfigStore::project_context_windows(&db, &mut snapshot);
+                    }
+                    Snapshot(snapshot)
+                };
+                use ProviderSettingsResult::{Accepted, Error, Models, Provider, Snapshot};
                 for request in incoming {
                     let (request_id, result) = match request {
-                        ProviderSettingsRequest::Get(id) => (id, store.snapshot().map(Snapshot)),
+                        ProviderSettingsRequest::Get(id) => {
+                            (id, store.snapshot().map(&project_windows))
+                        }
+                        ProviderSettingsRequest::Save(id, input)
+                            if input.get("contextWindowMode").is_some() =>
+                        {
+                            let saved =
+                                open_role_assignments_writer(&data_root).and_then(|mut db| {
+                                    store.upsert_with_context_window(&mut db, &input, now())
+                                });
+                            (id, saved.map(Provider))
+                        }
                         ProviderSettingsRequest::Save(id, input) => {
                             (id, store.upsert(&input).map(Provider))
                         }
+                        ProviderSettingsRequest::FetchModels(id, input) => (
+                            id,
+                            Ok(Models(provider_model_discovery::fetch(&store, &input))),
+                        ),
                         ProviderSettingsRequest::Delete(id, cli, provider_id) => {
-                            (id, store.delete(&cli, &provider_id).map(Snapshot))
+                            (id, store.delete(&cli, &provider_id).map(&project_windows))
                         }
-                        ProviderSettingsRequest::SetActive(id, cli, provider_id) => {
-                            (id, store.set_active(&cli, &provider_id).map(Snapshot))
-                        }
+                        ProviderSettingsRequest::SetActive(id, cli, provider_id) => (
+                            id,
+                            store.set_active(&cli, &provider_id).map(&project_windows),
+                        ),
                         ProviderSettingsRequest::ConfirmRisk(id) => (
                             id,
                             store.confirm_antigravity_risk().map(|()| Accepted(true)),
@@ -3042,6 +3072,7 @@ pub fn storage_command_rejected(command: Command, code: &str, message: &str) -> 
         | Command::SetClaudeModelPreferences { request_id, .. }
         | Command::GetProviderSettings { request_id }
         | Command::SaveProvider { request_id, .. }
+        | Command::FetchProviderModels { request_id, .. }
         | Command::DeleteProvider { request_id, .. }
         | Command::SetActiveProvider { request_id, .. }
         | Command::ConfirmAntigravityRisk { request_id }
@@ -5148,6 +5179,11 @@ fn run_writable(
                 }
                 Command::SaveProvider { request_id, input } => {
                     provider_settings.send(ProviderSettingsRequest::Save(request_id, input))?;
+                    continue;
+                }
+                Command::FetchProviderModels { request_id, input } => {
+                    provider_settings
+                        .send(ProviderSettingsRequest::FetchModels(request_id, input))?;
                     continue;
                 }
                 Command::DeleteProvider {
