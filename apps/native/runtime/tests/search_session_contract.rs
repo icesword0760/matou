@@ -60,6 +60,7 @@ fn worker_search_selects_cycles_and_refreshes_without_scrolling() -> Result<()> 
                 ..JournalOptions::default()
             },
             restored_history: restored_history.into_bytes(),
+            screen_recovery: None,
             collect_history: false,
         },
         send,

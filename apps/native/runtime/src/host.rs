@@ -9510,6 +9510,7 @@ fn launch_shell(
             terminal,
             journal: JournalOptions::default(),
             restored_history: Vec::new(),
+            screen_recovery: None,
             collect_history: true,
         },
         true,
@@ -10721,6 +10722,7 @@ mod tests {
                     ..JournalOptions::default()
                 },
                 restored_history: Vec::new(),
+                screen_recovery: None,
                 collect_history: false,
             },
             false,

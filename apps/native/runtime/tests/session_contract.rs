@@ -57,6 +57,7 @@ fn shell_options(root: &Path, id: &str, segment_bytes: u64) -> Result<SessionOpt
         },
         terminal: TerminalOptions::new(80, 24, 9, 18),
         restored_history: Vec::new(),
+        screen_recovery: None,
         collect_history: true,
         journal: JournalOptions {
             max_segment_bytes: segment_bytes,

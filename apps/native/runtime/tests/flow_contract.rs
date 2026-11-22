@@ -140,15 +140,20 @@ mod fixed_delivery {
 mod gate {
     use super::*;
     use matou_native_core::{
-        journal::{Frame, JournalOptions, Record, SegmentJournal, for_each_frame},
+        journal::{
+            Frame, JournalOptions, Record, SegmentJournal, checkpoint::CheckpointCandidate,
+            for_each_frame,
+        },
         pty::{LaunchProfile, ShellLaunch},
     };
     use matou_native_runtime::{
-        host::Command, protocol::ClientMessage, session::Session as RuntimeSession,
+        ScreenRecoveryOptions, host::Command, protocol::ClientMessage,
+        session::Session as RuntimeSession,
     };
     use matou_native_terminal::{Screen, TerminalOptions};
     use serde::Deserialize;
     use serde_json::json;
+    use sha2::{Digest, Sha256};
     use std::{
         env, fs,
         path::{Path, PathBuf},
@@ -292,13 +297,22 @@ mod gate {
 
     fn launch(root: &Path, grid: Grid, profile: LaunchProfile) -> Result<ShellLaunch> {
         let executable = PathBuf::from(env::var_os("MATOU_FLOW_PROBE").context("PTY probe")?);
+        Ok(pty_launch(root, grid, profile, executable))
+    }
+
+    fn pty_launch(
+        root: &Path,
+        grid: Grid,
+        profile: LaunchProfile,
+        executable: PathBuf,
+    ) -> ShellLaunch {
         let child_env = [
             ("HOME".into(), root.as_os_str().to_owned()),
             ("PATH".into(), "/usr/bin:/bin".into()),
             ("SHELL".into(), executable.as_os_str().to_owned()),
             ("LANG".into(), "en_US.UTF-8".into()),
         ];
-        Ok(ShellLaunch {
+        ShellLaunch {
             profile,
             executable,
             argv: Vec::new(),
@@ -308,7 +322,7 @@ mod gate {
             env: child_env.into(),
             cols: grid.cols,
             rows: grid.rows,
-        })
+        }
     }
 
     fn journal_options() -> JournalOptions {
@@ -324,14 +338,19 @@ mod gate {
         grid: Grid,
         profile: LaunchProfile,
     ) -> Result<matou_native_runtime::SessionOptions> {
-        Ok(matou_native_runtime::SessionOptions {
+        Ok(options_for_launch(id, launch(root, grid, profile)?))
+    }
+
+    fn options_for_launch(id: &str, launch: ShellLaunch) -> matou_native_runtime::SessionOptions {
+        matou_native_runtime::SessionOptions {
             session_id: id.into(),
-            launch: launch(root, grid, profile)?,
-            terminal: TerminalOptions::new(grid.cols, grid.rows, 9, 18),
+            terminal: TerminalOptions::new(launch.cols, launch.rows, 9, 18),
+            launch,
             journal: journal_options(),
             restored_history: Vec::new(),
+            screen_recovery: None,
             collect_history: false,
-        })
+        }
     }
 
     fn wait_until(check: impl Fn() -> bool) -> Result<()> {
@@ -430,6 +449,7 @@ mod gate {
             terminal: TerminalOptions::new(grid.cols, grid.rows, 9, 18),
             journal: journal_options(),
             restored_history: Vec::new(),
+            screen_recovery: None,
             collect_history: false,
         })?;
         let mut steps = Vec::new();
@@ -521,12 +541,7 @@ mod gate {
         Ok(json!({"ranges": frames}))
     }
 
-    fn screen(timeline: &Value, root: &Path, id: &str) -> Result<Value> {
-        let last = seed_journal(timeline, root, id)?;
-        let grid = serde_json::from_value(timeline["launchGrid"].clone())?;
-        let mut session =
-            RuntimeSession::launch(runtime_options(root, id, grid, LaunchProfile::ClaudeCode)?)?;
-        let screen = session.screen()?;
+    fn viewport(screen: &Screen) -> String {
         let mut rows: Vec<String> = screen
             .cells
             .chunks_exact(screen.cols)
@@ -549,19 +564,393 @@ mod gate {
         while rows.last().is_some_and(String::is_empty) {
             rows.pop();
         }
-        let viewport = hex(rows.join("\n").as_bytes());
-        let launch_grid = Grid::capture(&screen);
+        rows.join("\n")
+    }
+
+    fn seed_checkpoint(
+        root: &Path,
+        session_id: &str,
+        generation: u64,
+        domain_event_sequence: u64,
+        mut header: Value,
+    ) -> Result<CheckpointCandidate> {
+        let snapshot = header
+            .as_object_mut()
+            .context("checkpoint fixture")?
+            .remove("snapshotHex")
+            .context("checkpoint snapshot")?;
+        let snapshot = unhex(snapshot.as_str().context("checkpoint snapshot bytes")?)?;
+        let id = format!("checkpoint-{generation}");
+        header["id"] = json!(id);
+        header["sessionId"] = json!(session_id);
+        header["generation"] = json!(generation);
+        header["domainEventSequence"] = json!(domain_event_sequence);
+        header["snapshotLength"] = json!(snapshot.len());
+        let header_bytes = serde_json::to_vec(&header)?;
+        let mut encoded = b"MTCPV4\n".to_vec();
+        encoded.extend_from_slice(&u32::try_from(header_bytes.len())?.to_be_bytes());
+        encoded.extend(header_bytes);
+        encoded.extend(snapshot);
+        let file_path = root.join(&id);
+        fs::write(&file_path, &encoded)?;
+        Ok(CheckpointCandidate {
+            id,
+            session_id: session_id.into(),
+            generation,
+            terminal_sequence: header["terminalSequence"]
+                .as_u64()
+                .context("checkpoint sequence")?,
+            domain_event_sequence,
+            screen_epoch: header["screenEpoch"].as_u64().context("checkpoint epoch")?,
+            file_path,
+            checksum: format!("{:x}", Sha256::digest(&encoded)),
+        })
+    }
+
+    fn screen(test: &Value, timeline: &Value, root: &Path, id: &str) -> Result<Value> {
+        let last = seed_journal(timeline, root, id)?;
+        let grid: Grid = serde_json::from_value(timeline["launchGrid"].clone())?;
+        let initial: Grid = serde_json::from_value(timeline["initialGrid"].clone())?;
+        let mut checkpoints = Vec::new();
+        if let Some(checkpoint) = test.get("checkpoint") {
+            let sequence = checkpoint["terminalSequence"]
+                .as_u64()
+                .context("checkpoint sequence")?;
+            let mut domain = 0;
+            for_each_frame(root, id, 1, Some(sequence), |record| {
+                if let Some(cursor) = record.frame.domain_cursor() {
+                    domain = cursor;
+                }
+                Ok(())
+            })?;
+            checkpoints.push(seed_checkpoint(root, id, 1, domain, checkpoint.clone())?);
+        }
+        let mut options = runtime_options(root, id, grid, LaunchProfile::ClaudeCode)?;
+        options.screen_recovery = Some(ScreenRecoveryOptions {
+            initial_grid: Some((initial.cols, initial.rows)),
+            checkpoints,
+        });
+        let mut session = RuntimeSession::launch(options)?;
+        let launch_screen = session.screen()?;
+        // The run boundary moved the pre-launch viewport up by the launch height.
+        session.scroll(i32::from(grid.rows))?;
+        let restored_screen = session.screen()?;
         let startup_frames = replay_range(root, id, last + 1, Some(session.last_sequence()))?;
         let after_boundary_sequence = session.last_sequence();
         session.shutdown()?;
         Ok(json!({
             "fields": {
-                "restoredViewportHex": viewport, "restoredGrid": launch_grid,
-                "startupFrames": startup_frames, "launchGrid": launch_grid,
-                "launchViewportHex": viewport,
+                "restoredViewportHex": hex(viewport(&restored_screen).as_bytes()),
+                "restoredGrid": Grid::capture(&restored_screen),
+                "startupFrames": startup_frames, "launchGrid": Grid::capture(&launch_screen),
+                "launchViewportHex": hex(viewport(&launch_screen).as_bytes()),
             },
-            "details": {"afterBoundarySequence": after_boundary_sequence, "scrollbackRows": screen.history_lines},
+            "details": {"afterBoundarySequence": after_boundary_sequence, "scrollbackRows": launch_screen.history_lines},
         }))
+    }
+
+    const RESTART_ID: &str = "restart";
+    const RESTART_GRID: Grid = Grid { cols: 24, rows: 5 };
+
+    fn restart_options(
+        root: &Path,
+        profile: LaunchProfile,
+        command: &str,
+    ) -> matou_native_runtime::SessionOptions {
+        let mut launch = pty_launch(root, RESTART_GRID, profile, "/bin/sh".into());
+        launch.argv = vec!["-c".into(), command.into()];
+        options_for_launch(RESTART_ID, launch)
+    }
+
+    fn scroll_to_previous_viewport(session: &mut RuntimeSession) -> Result<String> {
+        session.scroll(i32::from(RESTART_GRID.rows))?;
+        Ok(viewport(&session.screen()?))
+    }
+
+    fn live_output(
+        session: &mut RuntimeSession,
+        started_at: u64,
+    ) -> Result<Vec<matou_native_runtime::SessionEvent>> {
+        use matou_native_runtime::SessionEvent;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut events = Vec::new();
+        while !events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::SavedExit { .. }))
+        {
+            anyhow::ensure!(
+                Instant::now() < deadline,
+                "timed out waiting for PTY output and exit"
+            );
+            events.extend(session.poll(Duration::from_millis(20))?);
+        }
+        assert!(
+            matches!(events.first(), Some(SessionEvent::Started { sequence, .. }) if *sequence == started_at)
+        );
+        Ok(events)
+    }
+
+    #[test]
+    fn recovers_reset_and_resized_viewport_before_the_first_live_pty_output() -> Result<()> {
+        use matou_native_runtime::SessionEvent;
+        let root = tempfile::tempdir()?;
+        let root = root.path();
+        let discarded = hex("DISCARDED\r\n".repeat(8).as_bytes());
+        let old = hex(b"OLD-A\r\nOLD-B\x1b[6n\x1b]52;c;T0xE\x07");
+        seed_journal(
+            &json!({"frames": [
+                {"kind": "output", "sequence": 1, "dataHex": discarded},
+                {"kind": "resize", "sequence": 2, "cols": 18, "rows": 4},
+                {"kind": "reset", "sequence": 3, "screenEpoch": 1},
+                {"kind": "output", "sequence": 4, "dataHex": old},
+            ]}),
+            root,
+            RESTART_ID,
+        )?;
+
+        let options = restart_options(root, LaunchProfile::ClaudeCode, "printf LIVE");
+        let mut session = RuntimeSession::launch(options)?;
+        let initial = session.screen()?;
+        assert_eq!(viewport(&initial), "");
+        assert_eq!(initial.history_lines, 5);
+        assert_eq!(scroll_to_previous_viewport(&mut session)?, "OLD-A\nOLD-B");
+        let events = live_output(&mut session, 6)?;
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            SessionEvent::Diagnostic { .. } | SessionEvent::ClipboardWrite { .. }
+        )));
+        let saved: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                SessionEvent::SavedOutput { sequence, data, .. } => {
+                    Some((*sequence, data.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(saved, [(7, "LIVE")]);
+        let frames = replay_range(root, RESTART_ID, 5, Some(7))?;
+        assert_eq!(
+            frames[0],
+            json!({"kind": "resize", "sequence": 5, "cols": 24, "rows": 5})
+        );
+        assert_eq!(frames[1]["sequence"], 6);
+        assert!(
+            frames[1]["data"]["hex"]
+                .as_str()
+                .unwrap()
+                .starts_with("181b5b3f313034396c")
+        );
+        assert_eq!(
+            frames[2],
+            json!({"kind": "output", "sequence": 7, "data": {"hex": "4c495645"}})
+        );
+        session.shutdown()
+    }
+
+    #[test]
+    fn selects_an_older_checkpoint_or_replays_everything_if_all_candidates_fail() -> Result<()> {
+        for use_older in [true, false] {
+            let root = tempfile::tempdir()?;
+            let root = root.path();
+            seed_journal(
+                &json!({"frames": [
+                    {"kind": "output", "sequence": 1, "dataHex": hex(b"JOURNAL\r\n")},
+                    {"kind": "domain-cursor", "sequence": 2, "domainEventSequence": 10},
+                    {"kind": "output", "sequence": 3, "dataHex": hex(b"SUFFIX")},
+                ]}),
+                root,
+                RESTART_ID,
+            )?;
+            let mut options = restart_options(root, LaunchProfile::Codex, "exec /bin/sleep 30");
+            let make = |generation, sequence, domain, snapshot: &[u8]| {
+                seed_checkpoint(
+                    root,
+                    RESTART_ID,
+                    generation,
+                    domain,
+                    json!({
+                        "terminalSequence": sequence, "screenEpoch": 0, "snapshotHex": hex(snapshot),
+                        "cols": 24, "rows": 5,
+                    }),
+                )
+            };
+            let mut bad_checksum = make(3, 2, 10, b"BAD")?;
+            bad_checksum.checksum = "wrong".into();
+            let missing = make(2, 2, 10, b"MISSING")?;
+            fs::remove_file(&missing.file_path)?;
+            let mut checkpoints = vec![
+                make(5, 2, 11, b"DOMAIN AHEAD")?,
+                make(4, 4, 10, b"TERMINAL AHEAD")?,
+                bad_checksum,
+                missing,
+            ];
+            if use_older {
+                checkpoints.push(make(1, 2, 10, b"CHECKPOINT\r\n")?);
+            }
+            options.screen_recovery = Some(ScreenRecoveryOptions {
+                initial_grid: Some((24, 5)),
+                checkpoints,
+            });
+            let mut session = RuntimeSession::launch(options)?;
+            assert_eq!(session.last_sequence(), 4, "only the boundary was appended");
+            assert_eq!(viewport(&session.screen()?), "");
+            assert_eq!(
+                scroll_to_previous_viewport(&mut session)?,
+                if use_older {
+                    "CHECKPOINT\nSUFFIX"
+                } else {
+                    "JOURNAL\nSUFFIX"
+                },
+            );
+            session.shutdown()?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn newest_readable_checkpoint_without_dimensions_replays_the_full_journal() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let root = root.path();
+        seed_journal(
+            &json!({"frames": [
+                {"kind": "output", "sequence": 1, "dataHex": hex(b"JOURNAL\r\n")},
+                {"kind": "output", "sequence": 2, "dataHex": hex(b"SUFFIX")},
+            ]}),
+            root,
+            RESTART_ID,
+        )?;
+        let without_grid = seed_checkpoint(
+            root,
+            RESTART_ID,
+            2,
+            0,
+            json!({"terminalSequence": 1, "screenEpoch": 0, "snapshotHex": hex(b"NO GRID\r\n")}),
+        )?;
+        assert_eq!(without_grid.read()?.grid, None);
+        let older = seed_checkpoint(
+            root,
+            RESTART_ID,
+            1,
+            0,
+            json!({
+                "terminalSequence": 1, "screenEpoch": 0, "snapshotHex": hex(b"OLDER\r\n"),
+                "cols": 24, "rows": 5,
+            }),
+        )?;
+        let mut options = restart_options(root, LaunchProfile::Codex, "exec /bin/sleep 30");
+        options.screen_recovery = Some(ScreenRecoveryOptions {
+            initial_grid: Some((20, 5)),
+            checkpoints: vec![without_grid, older],
+        });
+
+        let mut session = RuntimeSession::launch(options)?;
+        assert_eq!(
+            scroll_to_previous_viewport(&mut session)?,
+            "JOURNAL\nSUFFIX"
+        );
+        assert_eq!(
+            replay_range(root, RESTART_ID, 3, Some(session.last_sequence()))?[0],
+            json!({"kind": "resize", "sequence": 3, "cols": 24, "rows": 5}),
+        );
+        session.shutdown()
+    }
+
+    #[test]
+    fn damaged_unindexed_segment_keeps_its_valid_prefix_and_allows_launch() -> Result<()> {
+        use matou_native_runtime::SessionEvent;
+        let root = tempfile::tempdir()?;
+        let root = root.path();
+        let mut options = restart_options(root, LaunchProfile::Antigravity, "exec /bin/sleep 30");
+        options.journal.max_segment_bytes = 210;
+        let mut journal = SegmentJournal::open(root, RESTART_ID, options.journal.clone())?;
+        for (index, data) in [
+            b"VALID PREFIX".to_vec(),
+            b"DAMAGED".to_vec(),
+            vec![b'X'; 100],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            journal.append(&Record {
+                timestamp: 1,
+                frame: Frame::Output {
+                    sequence: index as u64 + 1,
+                    data,
+                },
+            })?;
+        }
+        let directory = journal.directory().to_owned();
+        journal.close()?;
+        let sealed = directory.join("segment-000001.mtj");
+        let mut bytes = fs::read(&sealed)?;
+        assert!(bytes.ends_with(b"DAMAGED"));
+        *bytes.last_mut().unwrap() ^= 1;
+        fs::write(&sealed, bytes)?;
+        fs::remove_file(directory.join("range-index.json"))?;
+
+        let mut session = RuntimeSession::launch(options)?;
+        assert_eq!(session.last_sequence(), 4);
+        assert_eq!(scroll_to_previous_viewport(&mut session)?, "VALID PREFIX");
+        let events = session.poll(Duration::ZERO)?;
+        assert!(matches!(
+            events.first(),
+            Some(SessionEvent::Started { sequence: 4, .. })
+        ));
+        assert!(events.iter().any(|event| matches!(event, SessionEvent::Diagnostic { message } if message.contains("checksum"))));
+        session.shutdown()
+    }
+
+    #[test]
+    fn successive_non_shell_restarts_keep_both_runs_in_scrollback() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let root = root.path();
+        seed_journal(
+            &json!({"frames": [
+                {"kind": "output", "sequence": 1, "dataHex": hex(b"FIRST")},
+            ]}),
+            root,
+            RESTART_ID,
+        )?;
+        let mut session =
+            RuntimeSession::launch(restart_options(root, LaunchProfile::Dsh, "printf SECOND"))?;
+        assert_eq!(scroll_to_previous_viewport(&mut session)?, "FIRST");
+        live_output(&mut session, 2)?;
+        session.shutdown()?;
+
+        let mut session = RuntimeSession::launch(restart_options(
+            root,
+            LaunchProfile::Dsh,
+            "exec /bin/sleep 30",
+        ))?;
+        assert_eq!(session.last_sequence(), 5);
+        assert_eq!(viewport(&session.screen()?), "");
+        assert_eq!(scroll_to_previous_viewport(&mut session)?, "SECOND");
+        assert_eq!(scroll_to_previous_viewport(&mut session)?, "FIRST");
+        session.shutdown()
+    }
+
+    #[test]
+    fn shell_restarts_continue_to_seed_d01_history_without_startup_frames() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let root = root.path();
+        let mut last = seed_journal(
+            &json!({"frames": [
+                {"kind": "output", "sequence": 1, "dataHex": hex(b"UNRELATED JOURNAL")},
+            ]}),
+            root,
+            RESTART_ID,
+        )?;
+        for _ in 0..2 {
+            let mut options = restart_options(root, LaunchProfile::Shell, "exec /bin/sleep 30");
+            options.restored_history = b"D01 HISTORY".to_vec();
+            let mut session = RuntimeSession::launch(options)?;
+            assert_eq!(session.last_sequence(), last);
+            assert_eq!(viewport(&session.screen()?), "D01 HISTORY");
+            session.shutdown()?;
+            last = session.last_sequence();
+        }
+        Ok(())
     }
 
     #[test]
@@ -585,7 +974,7 @@ mod gate {
                 "sendText" => send_text(test, id)?,
                 "delivery" => delivery(test, &root, id)?,
                 "replay" => json!({"fields": replay(test, timeline()?, &root, id)?}),
-                "screen" => screen(timeline()?, &root, id)?,
+                "screen" => screen(test, timeline()?, &root, id)?,
                 kind => bail!("unknown flow case {kind}"),
             };
             capture["id"] = json!(id);
