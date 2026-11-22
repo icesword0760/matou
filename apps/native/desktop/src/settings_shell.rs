@@ -8,9 +8,7 @@
 //! - the API provider picker and add/edit dialog.
 //!
 //! Deferred by the assignment and deliberately not rendered as fake controls:
-//! - model discovery / refresh (`provider-config.models` and subscription
-//!   `models-refresh`) is left for the next level;
-//! - subscription sign-in/refresh and subscription interaction;
+//! - subscription sign-in and refresh;
 //! - the compaction block below the Claude model assignments.
 //!
 //! GPUI has no ARIA surface; keyboard-operable buttons and the selected/pressed
@@ -33,7 +31,9 @@ use matou_native_core::dispatch_config::{
 use matou_native_core::sessions::{InterfaceLocale, LocalePreference};
 use matou_native_desktop::dispatch_settings::DispatchSettingsPanel;
 use matou_native_desktop::provider_context_editor::{
-    ACTIVE_PROVIDER_BOTTOM_EDGE_RGB, ProviderContextEditorRow, provider_switch_impact_row,
+    ACTIVE_PROVIDER_BOTTOM_EDGE_RGB, context_mode_subtitle, context_mode_title,
+    context_mode_tokens, context_multi_model_hint, context_unknown_hint, format_tokens,
+    provider_switch_impact_row, provider_window_badge, resolve_context_tokens,
 };
 use matou_native_desktop::theme_tokens::{
     AppTheme, ThemePalette, ThemePreference, ThemeState, theme_preference_picker,
@@ -410,6 +410,9 @@ struct SecretInput {
     focus: FocusHandle,
     placeholder: SharedString,
     text: String,
+    /// Dialog-only visibility toggle. The runtime contract still redacts saved
+    /// keys; this flag never changes what is stored or sent.
+    revealed: bool,
     /// Optional paint overrides for the themed settings dialog. `None` keeps
     /// the frozen light values.
     text_color: Option<Rgba>,
@@ -432,6 +435,7 @@ impl SecretInput {
             focus: cx.focus_handle().tab_stop(true),
             placeholder: SharedString::default(),
             text: String::new(),
+            revealed: false,
             text_color: None,
             placeholder_color: None,
             selection: 0..0,
@@ -547,6 +551,8 @@ impl SecretInput {
     fn display(&self) -> String {
         if self.text.is_empty() {
             self.placeholder.to_string()
+        } else if self.revealed {
+            self.text.clone()
         } else {
             // One bullet per user-perceived character, never the real key.
             "\u{2022}".repeat(self.text.graphemes(true).count())
@@ -554,7 +560,11 @@ impl SecretInput {
     }
 
     fn display_index(&self, byte: usize) -> usize {
-        self.grapheme_count_before(byte) * '\u{2022}'.len_utf8()
+        if self.revealed {
+            byte.min(self.text.len())
+        } else {
+            self.grapheme_count_before(byte) * '\u{2022}'.len_utf8()
+        }
     }
 
     fn key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -724,8 +734,11 @@ impl EntityInputHandler for SecretInput {
     ) -> Option<String> {
         let range = self.bytes(range);
         *actual = Some(self.to_utf16(range.start)..self.to_utf16(range.end));
-        // Never hand the key to the OS text query / IME. Keep the same UTF-16
-        // length so platform ranges remain aligned; each bullet is one unit.
+        if self.revealed {
+            return Some(self.text[range].to_owned());
+        }
+        // Never hand the masked key to the OS text query / IME. Keep the same
+        // UTF-16 length so platform ranges remain aligned; each bullet is one unit.
         Some("\u{2022}".repeat(self.text[range].encode_utf16().count()))
     }
 
@@ -943,6 +956,62 @@ const PRESETS: [ProviderPreset; 4] = [
     },
 ];
 
+const CODEX_PRESETS: [ProviderPreset; 4] = [
+    ProviderPreset {
+        endpoint: "https://api.deepseek.com",
+        model: "deepseek-flash",
+        ..PRESETS[0]
+    },
+    ProviderPreset {
+        endpoint: "https://open.bigmodel.cn/api/v1",
+        ..PRESETS[1]
+    },
+    ProviderPreset {
+        endpoint: "https://api.moonshot.cn/v1",
+        model: "kimi-k3",
+        ..PRESETS[2]
+    },
+    ProviderPreset {
+        endpoint: "https://api.minimax.cn/v1",
+        model: "MiniMax-M3",
+        ..PRESETS[3]
+    },
+];
+
+fn provider_preset_for_endpoint(codex: bool, endpoint: &str) -> Option<&'static ProviderPreset> {
+    let presets = if codex { &CODEX_PRESETS } else { &PRESETS };
+    let endpoint = endpoint.trim().strip_suffix('/').unwrap_or(endpoint.trim());
+    presets.iter().find(|preset| preset.endpoint == endpoint)
+}
+
+fn provider_preset_badge(preset: Option<&ProviderPreset>, name: &str) -> Div {
+    let (background, text) = match preset.map(|preset| preset.id) {
+        Some("deepseek") => (0x4a85ee, 0xffffff),
+        Some("glm") => (0xeeeaff, 0x6756de),
+        Some("kimi") => (0x26303a, 0xffffff),
+        Some("minimax") => (0xed386e, 0xffffff),
+        _ => (PRESET_ICON_BG, PRESET_ICON_FG),
+    };
+    let glyph = preset
+        .map_or(name, |preset| preset.name)
+        .trim()
+        .chars()
+        .next()
+        .unwrap_or('＋');
+    div()
+        .size(px(38.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(9.))
+        .bg(rgb(background))
+        .text_size(px(24.))
+        .font_weight(FontWeight(650.))
+        .text_color(rgb(text))
+        .child(glyph.to_string())
+}
+
 fn preset_by_id(id: &str) -> Option<&'static ProviderPreset> {
     PRESETS.iter().find(|preset| preset.id == id)
 }
@@ -1019,15 +1088,36 @@ enum ConfirmKind {
     Delete,
 }
 
-#[derive(Clone, PartialEq)]
-struct FormBaseline {
-    name: String,
-    endpoint: String,
-    model: String,
-    key: String,
-    mappings: [String; 3],
-    efforts: [String; 3],
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProviderSelect {
+    Mapping(usize),
+    Effort(usize),
 }
+
+impl ProviderSelect {
+    fn slot(self) -> usize {
+        match self {
+            Self::Mapping(index) => index,
+            Self::Effort(index) => index + 3,
+        }
+    }
+}
+
+enum ProviderChoice {
+    Model(String),
+    Manual,
+    Effort(String),
+}
+
+struct SelectOption {
+    choice: ProviderChoice,
+    label: String,
+    detail: Option<String>,
+    selected: bool,
+    enabled: bool,
+}
+
+const CONTEXT_MODES: [&str; 3] = ["default", "512k", "maximum"];
 
 struct EditorFocus {
     close: FocusHandle,
@@ -1038,12 +1128,19 @@ struct EditorFocus {
     cancel: FocusHandle,
     next: FocusHandle,
     key: FocusHandle,
+    reveal: FocusHandle,
     key_link: FocusHandle,
     endpoint: FocusHandle,
     model: FocusHandle,
+    fetch: FocusHandle,
+    chooser: FocusHandle,
+    model_search: FocusHandle,
     name: FocusHandle,
     mappings: [FocusHandle; 3],
+    mapping_choices: [FocusHandle; 3],
+    manual_links: [FocusHandle; 3],
     efforts: [FocusHandle; 3],
+    context_modes: [FocusHandle; 3],
     delete: FocusHandle,
     save: FocusHandle,
     save_switch: FocusHandle,
@@ -1057,18 +1154,30 @@ struct Editor {
     query: Entity<RenameInput>,
     selection: Option<PickChoice>,
     draft: ProviderDraft,
-    subscription: Option<Value>,
-    baseline: FormBaseline,
+    baseline: FormValues,
+    baseline_metadata: Value,
+    context_touched: bool,
+    connection_changed: bool,
     key: Entity<SecretInput>,
     endpoint: Entity<RenameInput>,
     model: Entity<RenameInput>,
     name: Entity<RenameInput>,
     mappings: [Entity<RenameInput>; 3],
     efforts: [String; 3],
-    effort_open: Option<usize>,
-    effort_bounds: Rc<RefCell<[Option<Bounds<Pixels>>; 3]>>,
+    manual_mappings: [bool; 3],
+    model_query: Entity<RenameInput>,
+    model_chooser: bool,
+    fetch_error: Option<String>,
+    fetch_snapshot: Option<(String, String)>,
+    revealed_key: bool,
+    select_open: Option<(ProviderSelect, usize)>,
+    select_bounds: Rc<RefCell<[Option<Bounds<Pixels>>; 6]>>,
+    select_scroll: ScrollHandle,
+    model_scroll: ScrollHandle,
+    model_cursor: usize,
     error: Option<String>,
     confirm: Option<ConfirmKind>,
+    confirm_return: Option<(Option<FocusHandle>, Point<Pixels>)>,
     opener: FocusHandle,
     focus: EditorFocus,
     body_scroll: ScrollHandle,
@@ -1083,6 +1192,8 @@ struct FormValues {
     key: String,
     mappings: [String; 3],
     efforts: [String; 3],
+    reasoning_effort: String,
+    context_mode: String,
 }
 
 fn input_entity(
@@ -1137,9 +1248,56 @@ fn subscribe_secret(
 ) {
     subscriptions.push(
         cx.subscribe_in(input, window, |this, _, event, window, cx| match event {
-            SecretInputEvent::Changed => this.clear_editor_error(cx),
+            SecretInputEvent::Changed => {
+                this.provider_connection_field_changed(cx);
+            }
             SecretInputEvent::Cancel => this.escape(window, cx),
             SecretInputEvent::Confirm => {}
+        }),
+    );
+}
+
+fn subscribe_provider_connection(
+    input: &Entity<RenameInput>,
+    window: &mut Window,
+    cx: &mut Context<SettingsShell>,
+    subscriptions: &mut Vec<Subscription>,
+) {
+    subscriptions.push(
+        cx.subscribe_in(input, window, |this, _, event, window, cx| match event {
+            RenameInputEvent::Changed => this.provider_connection_field_changed(cx),
+            RenameInputEvent::Cancel => this.escape(window, cx),
+            RenameInputEvent::Confirm => {}
+        }),
+    );
+}
+
+fn subscribe_model_query(
+    input: &Entity<RenameInput>,
+    window: &mut Window,
+    cx: &mut Context<SettingsShell>,
+    subscriptions: &mut Vec<Subscription>,
+) {
+    subscriptions.push(
+        cx.subscribe_in(input, window, |this, _, event, window, cx| match event {
+            RenameInputEvent::Changed => {
+                if let Some(editor) = &mut this.editor {
+                    editor.model_cursor = 0;
+                    editor.model_scroll.set_offset(Point::default());
+                }
+                cx.notify();
+            }
+            RenameInputEvent::Confirm => this.choose_first_visible_model(window, cx),
+            RenameInputEvent::Cancel => {
+                let focus = if let Some(editor) = &mut this.editor {
+                    editor.model_chooser = false;
+                    editor.focus.model.clone()
+                } else {
+                    return;
+                };
+                window.focus(&focus);
+                cx.notify();
+            }
         }),
     );
 }
@@ -1168,7 +1326,20 @@ impl Editor {
                 *effort = "follow".into();
             }
         }
-        let baseline = values_from_draft(&draft);
+        if draft.reasoning_effort.is_empty() {
+            draft.reasoning_effort = "follow".into();
+        }
+        let baseline = FormValues {
+            name: draft.name.clone(),
+            endpoint: draft.endpoint.clone(),
+            model: draft.model.clone(),
+            key: String::new(),
+            mappings: draft.model_mapping.clone(),
+            efforts: draft.effort_mapping.clone(),
+            reasoning_effort: draft.reasoning_effort.clone(),
+            context_mode: draft.context_mode().to_owned(),
+        };
+        let baseline_metadata = draft.model_metadata.clone();
         let query = input_entity(
             query_text,
             locale.text("搜索供应商", "Search providers"),
@@ -1195,6 +1366,11 @@ impl Editor {
             },
             cx,
         );
+        let model_query = input_entity(
+            String::new(),
+            locale.text("搜索模型名称或 ID", "Search model name or ID"),
+            cx,
+        );
         let name = input_entity(draft.name.clone(), "", cx);
         let mappings = std::array::from_fn(|index| {
             input_entity(
@@ -1207,8 +1383,9 @@ impl Editor {
 
         let mut subscriptions = Vec::new();
         subscribe_rename(&query, window, cx, &mut subscriptions);
-        subscribe_rename(&endpoint, window, cx, &mut subscriptions);
+        subscribe_provider_connection(&endpoint, window, cx, &mut subscriptions);
         subscribe_rename(&model, window, cx, &mut subscriptions);
+        subscribe_model_query(&model_query, window, cx, &mut subscriptions);
         subscribe_rename(&name, window, cx, &mut subscriptions);
         for input in &mappings {
             subscribe_rename(input, window, cx, &mut subscriptions);
@@ -1224,14 +1401,21 @@ impl Editor {
             cancel: cx.focus_handle().tab_stop(true),
             next: cx.focus_handle().tab_stop(true),
             key: key.read(cx).focus.clone(),
+            reveal: cx.focus_handle().tab_stop(true),
             key_link: cx.focus_handle().tab_stop(true),
             endpoint: endpoint.read(cx).focus.clone(),
             model: model.read(cx).focus.clone(),
+            fetch: cx.focus_handle().tab_stop(true),
+            chooser: cx.focus_handle().tab_stop(true),
+            model_search: model_query.read(cx).focus.clone(),
             name: name.read(cx).focus.clone(),
             mappings: mappings
                 .each_ref()
                 .map(|input| input.read(cx).focus.clone()),
+            mapping_choices: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
+            manual_links: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
             efforts: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
+            context_modes: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
             delete: cx.focus_handle().tab_stop(true),
             save: cx.focus_handle().tab_stop(true),
             save_switch: cx.focus_handle().tab_stop(true),
@@ -1244,18 +1428,30 @@ impl Editor {
             query,
             selection,
             draft,
-            subscription: existing.filter(|provider| provider["kind"] == "subscription"),
             baseline,
+            baseline_metadata,
+            context_touched: false,
+            connection_changed: false,
             key,
             endpoint,
             model,
             name,
             mappings,
             efforts,
-            effort_open: None,
-            effort_bounds: Rc::new(RefCell::new([None, None, None])),
+            manual_mappings: [false; 3],
+            model_query,
+            model_chooser: false,
+            fetch_error: None,
+            fetch_snapshot: None,
+            revealed_key: false,
+            select_open: None,
+            select_bounds: Rc::new(RefCell::new([None; 6])),
+            select_scroll: ScrollHandle::new(),
+            model_scroll: ScrollHandle::new(),
+            model_cursor: 0,
             error: None,
             confirm: None,
+            confirm_return: None,
             opener,
             focus,
             body_scroll: ScrollHandle::new(),
@@ -1263,6 +1459,8 @@ impl Editor {
         };
         let focus = if step == EditorStep::Pick {
             editor.query.read(cx).focus.clone()
+        } else if editor.draft.subscription_kind.is_some() {
+            editor.name.read(cx).focus.clone()
         } else {
             editor.focus.key.clone()
         };
@@ -1281,122 +1479,100 @@ impl Editor {
                 .each_ref()
                 .map(|input| input.read(cx).text.clone()),
             efforts: self.efforts.clone(),
+            reasoning_effort: self.draft.reasoning_effort.clone(),
+            context_mode: self.draft.context_mode().to_owned(),
         }
+    }
+
+    fn working_draft(&self, cx: &App) -> ProviderDraft {
+        let values = self.values(cx);
+        let mut draft = self.draft.clone();
+        draft.name = values.name;
+        draft.endpoint = values.endpoint;
+        draft.model = values.model;
+        draft.api_key = values.key;
+        draft.model_mapping = values.mappings;
+        draft.effort_mapping = values.efforts;
+        draft.ignore_model_efforts = self.fetch_error.is_some();
+        draft
     }
 
     fn is_dirty(&self, cx: &App) -> bool {
-        self.values(cx) != baseline_values(&self.baseline)
-    }
-
-    fn metadata_for(&self, model: &str, cx: &App) -> Option<Value> {
-        if self.draft.model_metadata.as_array().is_none() {
-            return None;
-        }
-        let key = self.key.read(cx).text();
-        let endpoint = self.endpoint.read(cx).text.clone();
-        if !key.trim().is_empty() || endpoint_changed(&self.draft.original_endpoint, &endpoint) {
-            return None;
-        }
-        self.draft
-            .model_metadata
-            .as_array()
-            .and_then(|models| models.iter().find(|row| row["id"] == model.trim()))
-            .cloned()
-    }
-
-    fn efforts_for(&self, index: usize, cx: &App) -> Vec<String> {
-        let values = self.values(cx);
-        let model = values.mappings[index].trim().to_owned();
-        let metadata = self.metadata_for(&model, cx);
-        let supported = metadata
+        let metadata = self
+            .draft
+            .fetched_metadata
             .as_ref()
-            .and_then(|row| row.get("supportedEfforts"))
-            .and_then(Value::as_array)
-            .map(|rows| {
-                rows.iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_owned)
-                    .collect::<Vec<_>>()
-            });
-        let mut choices: Vec<String> = vec!["follow".into()];
-        if let Some(supported) = supported {
-            for effort in supported {
-                if !choices.iter().any(|choice| choice == &effort) {
-                    choices.push(effort);
-                }
-            }
-        } else {
-            for effort in ["low", "medium", "high", "xhigh"] {
-                choices.push(effort.into());
-            }
-            if !gpt_family(&model) {
-                choices.push("max".into());
-            }
-        }
-        let current = &self.efforts[index];
-        if !current.is_empty() && !choices.iter().any(|choice| choice == current) {
-            choices.push(current.clone());
-        }
-        choices
+            .unwrap_or(&self.draft.model_metadata);
+        self.values(cx) != self.baseline
+            || *metadata != self.baseline_metadata
+            || (self.context_touched
+                && self.baseline.context_mode == self.draft.context_mode()
+                && self.draft.legacy_context_window)
     }
 
-    fn effort_supported(&self, index: usize, cx: &App) -> bool {
-        let current = &self.efforts[index];
-        if matches!(current.as_str(), "" | "follow") {
-            return true;
-        }
-        // `efforts_for` appends an unsupported current value for display, so
-        // validate against the authoritative base set instead.
-        self.base_efforts_for(index, cx).contains(current)
-    }
-
-    fn base_efforts_for(&self, index: usize, cx: &App) -> Vec<String> {
-        let values = self.values(cx);
-        let model = values.mappings[index].trim().to_owned();
-        let metadata = self.metadata_for(&model, cx);
-        if let Some(rows) = metadata
+    fn visible_fetched_models(&self, cx: &App) -> Vec<&Value> {
+        let query = self.model_query.read(cx).text.trim().to_lowercase();
+        let Some(rows) = self
+            .draft
+            .fetched_metadata
             .as_ref()
-            .and_then(|row| row.get("supportedEfforts"))
             .and_then(Value::as_array)
-        {
-            return rows
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect();
-        }
-        let mut choices = vec![
-            "low".to_owned(),
-            "medium".into(),
-            "high".into(),
-            "xhigh".into(),
-        ];
-        if !gpt_family(&model) {
-            choices.push("max".into());
-        }
-        choices
+        else {
+            return Vec::new();
+        };
+        rows.iter()
+            .filter(|row| {
+                let Some(id) = row["id"].as_str() else {
+                    return false;
+                };
+                let name = row["displayName"].as_str().unwrap_or_default();
+                query.is_empty()
+                    || id.to_lowercase().contains(&query)
+                    || name.to_lowercase().contains(&query)
+            })
+            .collect()
     }
-}
 
-fn values_from_draft(draft: &ProviderDraft) -> FormBaseline {
-    FormBaseline {
-        name: draft.name.clone(),
-        endpoint: draft.endpoint.clone(),
-        model: draft.model.clone(),
-        key: String::new(),
-        mappings: draft.model_mapping.clone(),
-        efforts: draft.effort_mapping.clone(),
+    fn ask_confirmation(
+        &mut self,
+        kind: ConfirmKind,
+        window: &mut Window,
+        cx: &mut Context<SettingsShell>,
+    ) {
+        self.confirm_return = Some((window.focused(cx), self.body_scroll.offset()));
+        self.confirm = Some(kind);
+        self.select_open = None;
+        self.body_scroll.scroll_to_bottom();
+        window.focus(&self.focus.keep_editing);
+        cx.notify();
     }
-}
 
-fn baseline_values(baseline: &FormBaseline) -> FormValues {
-    FormValues {
-        name: baseline.name.clone(),
-        endpoint: baseline.endpoint.clone(),
-        model: baseline.model.clone(),
-        key: baseline.key.clone(),
-        mappings: baseline.mappings.clone(),
-        efforts: baseline.efforts.clone(),
+    fn select_focus(&self, select: ProviderSelect) -> &FocusHandle {
+        match select {
+            ProviderSelect::Mapping(index) => &self.focus.mapping_choices[index],
+            ProviderSelect::Effort(index) => &self.focus.efforts[index],
+        }
+    }
+
+    fn choose_model(&mut self, id: String, window: &mut Window, cx: &mut Context<SettingsShell>) {
+        let model_focus = self.model.read(cx).focus.clone();
+        self.model.update(cx, |input, cx| {
+            input.text.clone_from(&id);
+            cx.notify();
+        });
+        self.model_chooser = false;
+        window.focus(&model_focus);
+        cx.notify();
+    }
+
+    fn choose_first_visible_model(&mut self, window: &mut Window, cx: &mut Context<SettingsShell>) {
+        let first = self
+            .visible_fetched_models(cx)
+            .get(self.model_cursor)
+            .and_then(|row| row["id"].as_str().map(str::to_owned));
+        if let Some(id) = first {
+            self.choose_model(id, window, cx);
+        }
     }
 }
 
@@ -1414,24 +1590,6 @@ fn preset_draft(preset_id: Option<&'static str>) -> ProviderDraft {
     }
 }
 
-fn endpoint_changed(original: &str, current: &str) -> bool {
-    without_trailing_slash(original) != without_trailing_slash(current)
-}
-
-fn without_trailing_slash(value: &str) -> &str {
-    value.strip_suffix('/').unwrap_or(value)
-}
-
-fn gpt_family(model: &str) -> bool {
-    model
-        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
-        .any(|word| {
-            let word = word.to_ascii_lowercase();
-            matches!(word.as_str(), "gpt" | "codex")
-                || matches!(word.as_bytes(), [b'o', b'1'..=b'9'])
-        })
-}
-
 pub(super) fn effort_name(effort: &str) -> &'static str {
     match effort {
         "low" => "低",
@@ -1443,29 +1601,27 @@ pub(super) fn effort_name(effort: &str) -> &'static str {
     }
 }
 
-fn supported_efforts_text(row: &Value) -> Option<String> {
-    let rows = row.get("supportedEfforts")?.as_array()?;
-    if rows.is_empty() {
-        return Some("跟随会话".into());
+fn editor_effort_name(effort: &str, locale: InterfaceLocale) -> &'static str {
+    if locale == InterfaceLocale::Chinese {
+        return effort_name(effort);
     }
-    Some(
-        std::iter::once("跟随会话".to_owned())
-            .chain(
-                rows.iter()
-                    .filter_map(Value::as_str)
-                    .map(|effort| effort_name(effort).to_owned()),
-            )
-            .collect::<Vec<_>>()
-            .join("、"),
-    )
+    match effort {
+        "low" => "Low",
+        "medium" => "Medium",
+        "high" => "High",
+        "xhigh" => "XHigh",
+        "max" => "Max",
+        _ => "Follow session",
+    }
 }
 
-fn window_text(row: &Value) -> String {
-    row.get("contextWindow")
-        .and_then(Value::as_u64)
-        .or_else(|| row.get("maxContextWindow").and_then(Value::as_u64))
-        .map(|tokens| format!("{tokens} tokens"))
-        .unwrap_or_else(|| "窗口未知".into())
+fn window_text(row: &Value, locale: InterfaceLocale) -> String {
+    row["contextWindow"]
+        .as_u64()
+        .or_else(|| row["maxContextWindow"].as_u64())
+        .filter(|tokens| *tokens > 0)
+        .map(|tokens| format!("{} tokens", format_tokens(tokens)))
+        .unwrap_or_else(|| locale.text("窗口未知", "Window unknown").into())
 }
 
 fn short_endpoint(value: &str) -> String {
@@ -1474,45 +1630,6 @@ fn short_endpoint(value: &str) -> String {
         .or_else(|| value.strip_prefix("http://"))
         .unwrap_or(value);
     value.strip_suffix('/').unwrap_or(value).to_owned()
-}
-
-fn provider_window_badge(provider: &Value, locale: InterfaceLocale) -> Div {
-    let metadata = provider["modelMetadata"]
-        .as_array()
-        .or_else(|| provider["subscription"]["modelMetadata"].as_array());
-    let model = provider["model"].as_str().unwrap_or_default();
-    let selected = metadata.and_then(|rows| {
-        rows.iter()
-            .find(|row| row["id"] == model)
-            .or_else(|| rows.iter().find(|row| row["id"] == "default"))
-            .or_else(|| rows.first())
-    });
-    let custom = provider["contextWindow"]
-        .as_u64()
-        .filter(|tokens| *tokens > 0);
-    let maximum = metadata
-        .into_iter()
-        .flatten()
-        .filter_map(|row| row["maxContextWindow"].as_u64())
-        .filter(|tokens| *tokens > 0)
-        .max();
-    let default = selected
-        .and_then(|row| row["contextWindow"].as_u64())
-        .filter(|tokens| *tokens > 0);
-    let (capacity, prefix) = if let Some(tokens) = custom.or(maximum) {
-        (Some(tokens), locale.text("最大 ", "Max "))
-    } else if let Some(tokens) = default {
-        (Some(tokens), locale.text("默认 ", "Default "))
-    } else if provider["subscription"]["provider"] == "codex" {
-        (Some(512_000), "")
-    } else {
-        (None, "")
-    };
-    let value =
-        matou_native_desktop::provider_context_editor::context_window_badge(capacity, locale);
-    matou_native_desktop::provider_context_editor::context_window_badge_view(format!(
-        "{prefix}{value}"
-    ))
 }
 
 fn provider_tone(name: &str) -> u8 {
@@ -1601,7 +1718,6 @@ pub struct SettingsShell {
     dispatch_retry_focus: FocusHandle,
     new_provider_focus: FocusHandle,
     card_controls: HashMap<String, [FocusHandle; 2]>,
-    provider_context_rows: HashMap<String, Entity<ProviderContextEditorRow>>,
 }
 
 impl SettingsShell {
@@ -1655,7 +1771,6 @@ impl SettingsShell {
             dispatch_retry_focus: cx.focus_handle().tab_stop(true),
             new_provider_focus: cx.focus_handle().tab_stop(true),
             card_controls: HashMap::new(),
-            provider_context_rows: HashMap::new(),
         };
         shell.load_assignments(cx);
         shell
@@ -1960,28 +2075,18 @@ impl SettingsShell {
             self.keyboard_focus = true;
             // Frozen order: cancel the confirmation first, then close
             // the effort picker, then request the dialog close.
-            if editor.confirm == Some(ConfirmKind::Delete) {
+            if editor.confirm.is_some() {
                 self.editor_keep_editing(window, cx);
                 return;
             }
-            if editor.confirm.take().is_some() {
-                let focus = editor.focus.keep_editing.clone();
-                window.focus(&focus);
-                cx.notify();
-                return;
-            }
-            if let Some(index) = editor.effort_open.take() {
-                let focus = editor.focus.efforts[index].clone();
+            if let Some((select, _)) = editor.select_open.take() {
+                let focus = editor.select_focus(select).clone();
                 window.focus(&focus);
                 cx.notify();
                 return;
             }
             if editor.step == EditorStep::Form && editor.is_dirty(cx) {
-                editor.confirm = Some(ConfirmKind::Close);
-                editor.body_scroll.scroll_to_bottom();
-                let focus = editor.focus.keep_editing.clone();
-                window.focus(&focus);
-                cx.notify();
+                editor.ask_confirmation(ConfirmKind::Close, window, cx);
                 return;
             }
             self.close_editor(window, cx);
@@ -2148,17 +2253,14 @@ impl SettingsShell {
     ) {
         match update {
             ProviderUpdate::None => {}
+            ProviderUpdate::Models(result) => {
+                self.apply_model_fetch(result, window, cx);
+            }
             ProviderUpdate::Saved => {
                 self.close_editor(window, cx);
             }
             ProviderUpdate::Deleted => {
                 self.editor = None;
-                let providers = self.providers.providers();
-                self.provider_context_rows.retain(|id, _| {
-                    providers
-                        .iter()
-                        .any(|provider| provider["id"] == id.as_str())
-                });
                 self.keyboard_focus = false;
                 window.focus(&self.new_provider_focus);
             }
@@ -2190,12 +2292,72 @@ impl SettingsShell {
                     window.focus(&focus);
                 }
             }
-            ProviderUpdate::ContextWindow { id, result } => {
-                if let Some(row) = self.provider_context_rows.get(&id) {
-                    row.update(cx, |row, cx| row.complete_save(result, cx));
-                }
-            }
         }
+    }
+
+    fn apply_model_fetch(&mut self, result: Value, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = &mut self.editor else {
+            return;
+        };
+        let Some((sent_key, sent_endpoint)) = editor.fetch_snapshot.take() else {
+            return;
+        };
+        let key = editor.key.read(cx).text().trim().to_owned();
+        let endpoint = editor.endpoint.read(cx).text.trim().to_owned();
+        if sent_key != key || sent_endpoint != endpoint {
+            // The request belonged to the previous connection fields.
+            return;
+        }
+        if let Some(error) = result["error"].as_str() {
+            editor.fetch_error = Some(error.to_owned());
+            editor.model_chooser = false;
+            cx.notify();
+            return;
+        }
+        let metadata = result["modelMetadata"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let ids = result["models"]
+            .as_array()
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|| {
+                metadata
+                    .iter()
+                    .filter_map(|row| row["id"].as_str().map(str::to_owned))
+                    .collect()
+            });
+        let mut by_id: HashMap<_, _> = metadata
+            .into_iter()
+            .filter_map(|row| Some((row["id"].as_str()?.to_owned(), row)))
+            .collect();
+        let rows: Vec<_> = ids
+            .into_iter()
+            .map(|id| by_id.remove(&id).unwrap_or_else(|| json!({ "id": id })))
+            .collect();
+        if rows.is_empty() {
+            editor.fetch_error = Some("empty".into());
+            editor.model_chooser = false;
+            cx.notify();
+            return;
+        }
+        editor.draft.fetched_metadata = Some(Value::Array(rows));
+        editor.fetch_error = None;
+        editor.model_chooser = true;
+        editor.model_cursor = 0;
+        editor.model_scroll.set_offset(Point::default());
+        editor.model_query.update(cx, |input, cx| {
+            input.text.clear();
+            cx.notify();
+        });
+        let search = editor.focus.model_search.clone();
+        window.focus(&search);
+        cx.notify();
     }
 
     fn clear_editor_error(&mut self, cx: &mut Context<Self>) {
@@ -2205,7 +2367,28 @@ impl SettingsShell {
         }
     }
 
+    fn provider_connection_field_changed(&mut self, cx: &mut Context<Self>) {
+        self.providers.discard_fetch();
+        if let Some(editor) = &mut self.editor {
+            editor.error = None;
+            editor.fetch_snapshot = None;
+            editor.fetch_error = None;
+            editor.model_chooser = false;
+            editor.draft.fetched_metadata = None;
+            editor.draft.model_metadata = json!([]);
+            editor.connection_changed = true;
+        }
+        cx.notify();
+    }
+
+    fn choose_first_visible_model(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(editor) = &mut self.editor {
+            editor.choose_first_visible_model(window, cx);
+        }
+    }
+
     fn close_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.providers.discard_fetch();
         if let Some(editor) = self.editor.take() {
             let opener = editor.opener.clone();
             window.focus(&opener);
@@ -2225,11 +2408,7 @@ impl SettingsShell {
             return;
         }
         if editor.step == EditorStep::Form && editor.is_dirty(cx) {
-            editor.confirm = Some(ConfirmKind::Close);
-            editor.body_scroll.scroll_to_bottom();
-            let focus = editor.focus.keep_editing.clone();
-            window.focus(&focus);
-            cx.notify();
+            editor.ask_confirmation(ConfirmKind::Close, window, cx);
             return;
         }
         self.close_editor(window, cx);
@@ -2246,17 +2425,14 @@ impl SettingsShell {
             return;
         }
         if editor.is_dirty(cx) {
-            editor.confirm = Some(ConfirmKind::Back);
-            editor.body_scroll.scroll_to_bottom();
-            let focus = editor.focus.keep_editing.clone();
-            window.focus(&focus);
-            cx.notify();
+            editor.ask_confirmation(ConfirmKind::Back, window, cx);
             return;
         }
         self.editor_back_to_pick(window, cx);
     }
 
     fn editor_back_to_pick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.providers.discard_fetch();
         let Some(current) = self.editor.take() else {
             return;
         };
@@ -2318,21 +2494,19 @@ impl SettingsShell {
         let Some(editor) = &self.editor else {
             return;
         };
-        if editor.step != EditorStep::Form || editor.subscription.is_some() {
+        if editor.step != EditorStep::Form {
             return;
         }
-        let values = editor.values(cx);
-        let mut draft = editor.draft.clone();
-        draft.name = values.name.trim().to_owned();
-        draft.endpoint = values.endpoint;
-        draft.model = values.model.trim().to_owned();
-        draft.api_key = values.key;
-        draft.model_mapping = values.mappings.map(|value| value.trim().to_owned());
-        draft.effort_mapping = values.efforts;
+        let mut draft = editor.working_draft(cx);
+        if !editor.context_touched || draft.is_codex() {
+            draft.context_window_mode = None;
+        }
+        if editor.connection_changed && draft.fetched_metadata.is_none() {
+            draft.fetched_metadata = Some(json!([]));
+        }
         match self.providers.save(&draft, activate) {
             Ok(()) => {
                 if let Some(editor) = &mut self.editor {
-                    editor.draft = draft;
                     editor.error = None;
                 }
             }
@@ -2380,9 +2554,6 @@ impl SettingsShell {
         if self.providers.saving() || self.editor.is_some() {
             return;
         }
-        if provider["kind"] != "subscription" {
-            self.provider_context_row(&provider, window, cx);
-        }
         let preset_id = preset_by_endpoint(provider["endpoint"].as_str().unwrap_or_default())
             .map(|preset| preset.id);
         let editor = Editor::new(
@@ -2396,8 +2567,8 @@ impl SettingsShell {
             window,
             cx,
         );
-        let focus = if editor.subscription.is_some() {
-            editor.focus.close.clone()
+        let focus = if editor.draft.subscription_kind.is_some() {
+            editor.name.read(cx).focus.clone()
         } else {
             editor.focus.key.clone()
         };
@@ -2416,9 +2587,9 @@ impl SettingsShell {
         if self.page == SettingsPage::ClaudeCode {
             // Leaving the provider page discards page-local editor/picker state
             // and the loaded provider projection; returning reads it again.
+            self.providers.discard_fetch();
             self.editor = None;
             self.card_controls.clear();
-            self.provider_context_rows.clear();
             self.keyboard_focus = false;
             self.providers.reset_for_page();
             self.assignments.reset();
@@ -2547,12 +2718,6 @@ impl SettingsShell {
     #[allow(dead_code)]
     pub(crate) fn probe_settings_nav_focus(&self, page: SettingsPage, window: &mut Window) {
         window.focus(&self.nav_focus[page.index()]);
-    }
-
-    #[cfg(debug_assertions)]
-    #[allow(dead_code)]
-    pub(crate) fn probe_provider_context(&self, id: &str) -> &Entity<ProviderContextEditorRow> {
-        &self.provider_context_rows[id]
     }
 
     #[cfg(debug_assertions)]
@@ -2830,24 +2995,31 @@ fn secret_field(
     input: Entity<SecretInput>,
     height: f32,
     horizontal: f32,
+    revealed: bool,
+    reveal_focus: &FocusHandle,
+    keyboard_focus: bool,
     window: &Window,
     colors: &EditorColors,
-    cx: &mut App,
+    cx: &mut Context<SettingsShell>,
+    activate: impl Fn(&mut SettingsShell, &mut Window, &mut Context<SettingsShell>) + 'static,
 ) -> Div {
     let text_color = colors.input_text.map(rgba);
     let placeholder_color = colors.input_placeholder.map(rgba);
     input.update(cx, |input, _| {
         input.text_color = text_color;
         input.placeholder_color = placeholder_color;
+        input.revealed = revealed;
     });
     let focus = input.read(cx).focus.clone();
     let focused = focus.is_focused(window);
     let field = div()
+        .relative()
         .flex()
         .items_center()
         .w_full()
         .h(px(height))
-        .px(px(horizontal))
+        .pl(px(horizontal))
+        .pr(px(horizontal + 31.))
         .rounded(px(9.))
         .border_1()
         .border_color(rgba(if focused {
@@ -2861,11 +3033,28 @@ fn secret_field(
     } else {
         field
     };
+    let reveal = div()
+        .id("provider-key-reveal")
+        .size(px(34.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(7.))
+        .text_size(px(20.))
+        .text_color(rgba(colors.muted))
+        .hover(move |style| style.bg(rgba(colors.card_hover_bg)))
+        .child(if revealed { "◉" } else { "◎" });
     field
         .on_mouse_down(MouseButton::Left, move |_, window, _| {
             window.focus(&focus);
         })
         .child(input)
+        .child(
+            wire_dialog_button(reveal, reveal_focus, 7., keyboard_focus, activate, cx)
+                .absolute()
+                .right(px(5.))
+                .top(px(5.)),
+        )
 }
 
 fn preset_matches(preset: &ProviderPreset, query: &str) -> bool {
@@ -4058,53 +4247,6 @@ impl SettingsShell {
         list
     }
 
-    fn provider_context_row(
-        &mut self,
-        provider: &Value,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<Entity<ProviderContextEditorRow>> {
-        let id = provider["id"].as_str().filter(|id| !id.is_empty())?;
-        let saved = provider["contextWindow"].as_u64();
-        let locale = self.locale;
-        let dark = self.is_dark();
-        if let Some(row) = self.provider_context_rows.get(id)
-            && row.read(cx).saved() == saved
-        {
-            row.update(cx, |row, cx| row.set_locale(locale, cx));
-            return Some(row.clone());
-        }
-
-        let shell = cx.weak_entity();
-        let provider_id = id.to_owned();
-        let row = cx.new(|cx| {
-            ProviderContextEditorRow::new(
-                saved,
-                dark,
-                locale,
-                move |tokens, _, cx| {
-                    shell
-                        .update(cx, |shell, cx| {
-                            shell.providers.save_context_window(&provider_id, tokens)?;
-                            cx.notify();
-                            Ok(())
-                        })
-                        .unwrap_or_else(|_| {
-                            Err(locale
-                                .text("供应商设置已关闭。", "Provider settings are closed.")
-                                .into())
-                        })
-                },
-                window,
-                cx,
-            )
-            .with_runtime_confirmation()
-        });
-        self.provider_context_rows
-            .insert(id.to_owned(), row.clone());
-        Some(row)
-    }
-
     fn provider_actions(
         &self,
         provider: &Value,
@@ -4663,11 +4805,7 @@ impl SettingsShell {
                 .deletable_provider(editor.draft.id.as_deref())
                 .is_some()
         {
-            editor.confirm = Some(ConfirmKind::Delete);
-            editor.effort_open = None;
-            editor.body_scroll.scroll_to_bottom();
-            window.focus(&editor.focus.keep_editing);
-            cx.notify();
+            editor.ask_confirmation(ConfirmKind::Delete, window, cx);
         }
     }
 
@@ -4704,13 +4842,13 @@ impl SettingsShell {
         let Some(editor) = &mut self.editor else {
             return;
         };
-        let kind = editor.confirm.take();
-        let focus = match kind {
-            Some(ConfirmKind::Back) => editor.focus.back.clone(),
-            Some(ConfirmKind::Delete) => editor.focus.delete.clone(),
-            _ => editor.focus.key.clone(),
-        };
-        window.focus(&focus);
+        editor.confirm = None;
+        if let Some((focus, offset)) = editor.confirm_return.take() {
+            editor.body_scroll.set_offset(offset);
+            if let Some(focus) = focus {
+                window.focus(&focus);
+            }
+        }
         cx.notify();
     }
 
@@ -4721,10 +4859,6 @@ impl SettingsShell {
         let Some(editor) = &self.editor else {
             return;
         };
-        if editor.subscription.is_some() {
-            window.focus(&editor.focus.close);
-            return;
-        }
         let mut order: Vec<FocusHandle> = Vec::new();
         match editor.step {
             EditorStep::Pick => {
@@ -4750,24 +4884,50 @@ impl SettingsShell {
                 if editor.draft.id.is_none() {
                     order.push(editor.focus.change.clone());
                 }
-                order.push(editor.focus.key.clone());
-                if !self.editor_busy() && preset_by_endpoint(&editor.values(cx).endpoint).is_some()
-                {
-                    order.push(editor.focus.key_link.clone());
+                let work = editor.working_draft(cx);
+                let subscription = work.subscription_kind.is_some();
+                if !subscription {
+                    if provider_preset_for_endpoint(work.is_codex(), &work.original_endpoint)
+                        .is_some()
+                        || (!work.id.is_some()
+                            && matches!(editor.selection, Some(PickChoice::Preset(_))))
+                    {
+                        order.push(editor.focus.key_link.clone());
+                    }
+                    order.push(editor.focus.key.clone());
+                    order.push(editor.focus.reveal.clone());
+                    order.push(editor.focus.endpoint.clone());
+                    if !self.providers.fetching()
+                        && self.commands.connection().1 == ConnectionPhase::Ready
+                    {
+                        order.push(editor.focus.fetch.clone());
+                    }
+                    order.push(editor.focus.model.clone());
+                    if editor.model_chooser {
+                        order.push(editor.focus.model_search.clone());
+                    } else if editor.draft.fetched_metadata.is_some()
+                        && editor.fetch_error.is_none()
+                        && !self.providers.fetching()
+                    {
+                        order.push(editor.focus.chooser.clone());
+                    }
+                    if work.is_codex() {
+                        order.push(editor.focus.efforts[0].clone());
+                    }
                 }
-                order.push(editor.focus.endpoint.clone());
-                order.push(editor.focus.model.clone());
                 order.push(editor.focus.name.clone());
-                if let Some(context) = editor
-                    .draft
-                    .id
-                    .as_ref()
-                    .and_then(|id| self.provider_context_rows.get(id))
-                {
-                    order.extend(context.read(cx).focus_order(cx));
+                if !work.is_codex() && (!subscription || !work.available_models().is_empty()) {
+                    for index in 0..3 {
+                        if editor.manual_mappings[index] {
+                            order.push(editor.focus.mappings[index].clone());
+                            order.push(editor.focus.manual_links[index].clone());
+                        } else {
+                            order.push(editor.focus.mapping_choices[index].clone());
+                        }
+                        order.push(editor.focus.efforts[index].clone());
+                    }
+                    order.extend(editor.focus.context_modes.iter().cloned());
                 }
-                order.extend(editor.focus.mappings.iter().cloned());
-                order.extend(editor.focus.efforts.iter().cloned());
                 if editor.confirm.is_some() {
                     order.push(editor.focus.keep_editing.clone());
                     order.push(editor.focus.confirm_action.clone());
@@ -4779,8 +4939,10 @@ impl SettingsShell {
                 {
                     order.push(editor.focus.delete.clone());
                 }
-                order.push(editor.focus.save.clone());
-                order.push(editor.focus.save_switch.clone());
+                if provider_editor_can_save(&work) {
+                    order.push(editor.focus.save.clone());
+                    order.push(editor.focus.save_switch.clone());
+                }
             }
         }
         if order.is_empty() {
@@ -4816,6 +4978,11 @@ impl SettingsShell {
         let busy = self.editor_busy();
         let editing = editor.draft.id.is_some();
         let pick = editor.step == EditorStep::Pick;
+        let app = if editor.draft.is_codex() {
+            "Codex"
+        } else {
+            "Claude Code"
+        };
         let title = if pick {
             self.locale.text("添加供应商", "Add provider").to_owned()
         } else if editing {
@@ -4823,13 +4990,17 @@ impl SettingsShell {
         } else {
             match editor.selection {
                 Some(PickChoice::Preset(id)) => format!(
-                    "配置 {}",
+                    "{} {}",
+                    self.locale.text("配置", "Configure"),
                     preset_by_id(id).map_or(
                         self.locale.text("自定义服务", "custom service"),
                         |preset| preset.name
                     )
                 ),
-                _ => "配置 自定义服务".to_owned(),
+                _ => self
+                    .locale
+                    .text("配置 自定义服务", "Configure custom service")
+                    .to_owned(),
             }
         };
 
@@ -4896,34 +5067,42 @@ impl SettingsShell {
         if !pick && !editing {
             header = header.child(back);
         }
+        let subtitle = format!("{} {app}", self.locale.text("用于", "For"));
         header = header
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
-                    .child(
+                    .child(mark_provider(
                         div()
                             .text_size(px(21.))
                             .line_height(px(28.35))
                             .font_weight(FontWeight(650.))
                             .text_color(rgba(colors.label))
-                            .child(title),
-                    )
-                    .child(
+                            .child(title.clone()),
+                        "title",
+                        title,
+                        true,
+                    ))
+                    .child(mark_provider(
                         div()
                             .mt(px(5.))
                             .text_size(px(12.))
                             .line_height(px(16.8))
                             .text_color(rgba(colors.subtitle))
-                            .child("用于 Claude Code"),
-                    ),
+                            .child(subtitle.clone()),
+                        "subtitle",
+                        subtitle,
+                        true,
+                    )),
             )
             .child(close);
 
+        let work = editor.working_draft(cx);
         let body = if pick {
             self.render_pick_body(editor, panel_width, window, cx)
         } else {
-            self.render_form_body(editor, panel_width, window, cx)
+            self.render_form_body(editor, &work, window, cx)
         };
         let body = div()
             .id("provider-setup-body")
@@ -4935,7 +5114,7 @@ impl SettingsShell {
             .track_scroll(&editor.body_scroll)
             .child(body);
 
-        let save_enabled = !busy && editor.subscription.is_none();
+        let save_enabled = !busy && provider_editor_can_save(&work);
         let footer = if pick {
             let cancel = dialog_button(
                 "provider-setup-cancel",
@@ -4987,7 +5166,7 @@ impl SettingsShell {
                         .font_weight(FontWeight(600.))
                         .text_color(rgba(colors.error_text))
                         .child(self.locale.text("删除", "Delete"));
-                    if busy {
+                    let button = if busy {
                         button
                             .opacity(0.55)
                             .cursor(CursorStyle::OperationNotAllowed)
@@ -5000,7 +5179,8 @@ impl SettingsShell {
                             |this, window, cx| this.editor_request_delete(window, cx),
                             cx,
                         )
-                    }
+                    };
+                    mark_provider(button, "delete", self.locale.text("删除", "Delete"), !busy)
                 });
             let save = dialog_button(
                 "provider-setup-save",
@@ -5044,8 +5224,18 @@ impl SettingsShell {
                 .bg(rgba(colors.dialog))
                 .children(delete)
                 .child(div().flex_1())
-                .child(save)
-                .child(save_switch)
+                .child(mark_provider(
+                    div().child(save),
+                    "save",
+                    self.locale.text("保存", "Save"),
+                    save_enabled,
+                ))
+                .child(mark_provider(
+                    div().child(save_switch),
+                    "save-switch",
+                    self.locale.text("保存并切换", "Save and switch"),
+                    save_enabled,
+                ))
         } else {
             let save_only = dialog_button(
                 "provider-setup-save-only",
@@ -5111,7 +5301,7 @@ impl SettingsShell {
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
                     if let Some(editor) = &mut this.editor
-                        && editor.effort_open.take().is_some()
+                        && editor.select_open.take().is_some()
                     {
                         cx.notify();
                     }
@@ -5172,9 +5362,9 @@ impl SettingsShell {
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
                     if let Some(editor) = &mut this.editor
-                        && let Some(index) = editor.effort_open.take()
+                        && let Some((select, _)) = editor.select_open.take()
                     {
-                        let focus = editor.focus.efforts[index].clone();
+                        let focus = editor.select_focus(select).clone();
                         window.focus(&focus);
                         cx.notify();
                         cx.stop_propagation();
@@ -5449,432 +5639,170 @@ impl SettingsShell {
     fn render_form_body(
         &self,
         editor: &Editor,
-        _panel_width: f32,
+        work: &ProviderDraft,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
         let palette = *self.theme.effective().palette();
         let colors = EditorColors::new(&palette, self.is_dark());
         let busy = self.editor_busy();
-        if let Some(provider) = &editor.subscription {
-            let account = &provider["subscription"]["account"];
-            return div()
-                .flex()
-                .flex_col()
-                .gap(px(12.))
-                .child(provider["name"].as_str().unwrap_or_default().to_owned())
-                .child(account["email"].as_str().unwrap_or_default().to_owned())
-                .child(account["plan"].as_str().unwrap_or_default().to_owned())
-                .child(provider_window_badge(provider, self.locale))
-                .child(self.locale.text(
-                    "当前版本暂不支持修改订阅配置。",
-                    "Subscription editing is currently unavailable.",
-                ));
-        }
-        let values = editor.values(cx);
-        let editing = editor.draft.id.is_some();
-        let preset = preset_by_endpoint(&values.endpoint);
-        let display_name = preset.map_or(
-            self.locale.text("自定义服务", "custom service"),
-            |preset| preset.name,
-        );
+        let editing = work.id.is_some();
+        let subscription = work.subscription_kind.is_some();
+        let models = work.available_models();
         let mut body = div().flex().flex_col().w_full();
-
-        let mut strip = div()
-            .flex()
-            .items_center()
-            .gap(px(12.))
-            .p(px(13.))
-            .rounded(px(10.))
-            .bg(rgba(colors.panel_muted))
-            .mb(px(22.))
-            .child(
-                div()
-                    .size(px(38.))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(9.))
-                    .bg(rgb(match preset.map(|preset| preset.id) {
-                        Some("deepseek") => 0x4a85ee,
-                        Some("glm") => 0xeeeaff,
-                        Some("kimi") => 0x26303a,
-                        Some("minimax") => 0xed386e,
-                        _ => PRESET_ICON_BG,
-                    }))
-                    .text_size(px(24.))
-                    .font_weight(FontWeight(650.))
-                    .text_color(rgb(match preset.map(|preset| preset.id) {
-                        Some("glm") => 0x6756de,
-                        Some("deepseek") | Some("kimi") | Some("minimax") => 0xffffff,
-                        _ => PRESET_ICON_FG,
-                    }))
-                    .child(
-                        preset
-                            .and_then(|preset| preset.name.chars().next())
-                            .or_else(|| values.name.trim().chars().next())
-                            .unwrap_or('＋')
-                            .to_string(),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .font_weight(FontWeight(650.))
-                            .text_color(rgba(colors.label))
-                            .child(display_name.to_owned()),
-                    )
-                    .child(
-                        div()
-                            .mt(px(5.))
-                            .text_size(px(11.))
-                            .line_height(px(15.4))
-                            .text_color(rgba(colors.hint_text))
-                            .child("Anthropic Messages"),
-                    ),
-            );
-        if !editing && !busy {
-            strip = strip.child(link_button(
-                "provider-setup-change",
-                self.locale.text("更换", "Change"),
-                &editor.focus.change,
-                self.keyboard_focus,
-                FocusRingStyle::Dialog,
+        if !subscription {
+            body = body.child(self.render_api_fields(editor, work, &models, window, &colors, cx));
+        }
+        let name = self.locale.text("供应商名称", "Provider name");
+        body = body.child(mark_provider(
+            field_label(name, &colors).child(rename_field(
+                editor.name.clone(),
+                44.,
+                13.,
+                window,
                 &colors,
                 cx,
-                |this, window, cx| this.editor_go_back(window, cx),
-            ));
-        }
-        body = body.child(strip);
+            )),
+            "provider-name",
+            name,
+            !busy,
+        ));
 
-        // API Key. The saved snapshot key is never read; the input starts empty
-        // and an empty value on save keeps the existing key.
-        body = body.child(
-            field_label("API Key", &colors)
-                .child(secret_field(
-                    editor.key.clone(),
-                    44.,
-                    13.,
-                    window,
-                    &colors,
-                    cx,
-                ))
-                .child(help_text(
-                    self.locale.text(
-                        "密钥保存在本机，仅向你配置的服务发送。",
-                        "Stored locally and sent only to your configured service.",
-                    ),
-                    &colors,
-                ))
-                .children(preset.filter(|_| !busy).map(|preset| {
-                    link_button(
-                        "provider-key-link",
-                        self.locale.text("获取 API Key ↗", "Get API key ↗"),
-                        &editor.focus.key_link,
-                        self.keyboard_focus,
-                        FocusRingStyle::Dialog,
+        if subscription && models.is_empty() {
+            body = body.child(provider_inline_error(
+                self.locale
+                    .text("没有读到可用的模型", "No available models were found"),
+                &colors,
+            ));
+        } else if !work.is_codex() {
+            let mut roles = div().flex().flex_col().gap(px(10.)).mt(px(4.));
+            for index in 0..3 {
+                let current = work.model_mapping[index].trim();
+                let known = models.iter().any(|row| row["id"] == current);
+                let model = if editor.manual_mappings[index] && !subscription {
+                    let label = self.locale.text("从列表选择", "Choose from list");
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.))
+                        .child(rename_field(
+                            editor.mappings[index].clone(),
+                            38.,
+                            10.,
+                            window,
+                            &colors,
+                            cx,
+                        ))
+                        .child(mark_provider(
+                            div().child(link_button(
+                                SharedString::from(format!("provider-mapping-list-{index}")),
+                                label,
+                                &editor.focus.manual_links[index],
+                                self.keyboard_focus,
+                                FocusRingStyle::Dialog,
+                                &colors,
+                                cx,
+                                move |this, window, cx| {
+                                    this.set_manual_mapping(index, false, window, cx)
+                                },
+                            )),
+                            format!("mapping-list-{index}"),
+                            label,
+                            !busy,
+                        ))
+                } else {
+                    self.provider_select_trigger(
+                        editor,
+                        work,
+                        ProviderSelect::Mapping(index),
                         &colors,
                         cx,
-                        move |_, _, cx| {
-                            cx.emit(SettingsShellEvent::OpenProviderKeyPage(preset.key_url))
-                        },
-                    )
-                })),
-        );
-
-        body = body.child(
-            field_label(self.locale.text("API 地址", "API URL"), &colors)
-                .child(rename_field(editor.endpoint.clone(), 44., 13., window, &colors, cx))
-                .child(help_text(
-                    self.locale.text("填写基础地址，不含 /messages 或 /responses；需支持上方协议。", "Use a base URL without /messages or /responses, supporting the protocol above."),
-                    &colors,
-                )),
-        );
-        if values.endpoint.starts_with("http:") {
-            body = body.child(
-                div()
-                    .mb(px(20.))
-                    .p(px(12.))
-                    .rounded(px(8.))
-                    .border_1()
-                    .border_color(rgba(colors.error_line))
-                    .bg(rgba(colors.error_bg))
-                    .text_size(px(12.))
-                    .line_height(px(19.2))
-                    .text_color(rgba(colors.error_text))
-                    .child(self.locale.text(
-                        "当前为 HTTP，密钥将以明文传输。远程服务建议使用 HTTPS。",
-                        "HTTP sends the key unencrypted. Use HTTPS for remote services.",
-                    )),
-            );
-        }
-
-        let metadata = editor.metadata_for(&values.model, cx);
-        let selected_model_field =
-            field_label(self.locale.text("默认模型", "Default model"), &colors).child(
-                rename_field(editor.model.clone(), 44., 13., window, &colors, cx),
-            );
-        let model_block = selected_model_field.child(model_source(
-            metadata.as_ref(),
-            &values.model,
-            preset,
-            editing,
-            &colors,
-        ));
-        body = body.child(model_block);
-
-        body = body.child(
-            field_label(self.locale.text("供应商名称", "Provider name"), &colors).child(
-                rename_field(editor.name.clone(), 44., 13., window, &colors, cx),
-            ),
-        );
-
-        if let Some(context) = editor
-            .draft
-            .id
-            .as_ref()
-            .and_then(|id| self.provider_context_rows.get(id))
-        {
-            body = body.child(div().mb(px(14.)).child(context.clone()));
-        }
-
-        let mut mapping = div().flex().flex_col().gap(px(10.)).mt(px(4.));
-        for index in 0..3 {
-            let model = values.mappings[index].clone();
-            let row_metadata = editor.metadata_for(&model, cx);
-            let supported = editor.effort_supported(index, cx);
-            let current = &editor.efforts[index];
-            let current_unsupported = !supported;
-            let effort_label = if current_unsupported {
-                format!("{}（不支持）", effort_name(current))
-            } else {
-                effort_name(current).to_owned()
-            };
-            let row_focus = editor.focus.efforts[index].clone();
-            let bounds_cell = editor.effort_bounds.clone();
-            let mut effort_button = div()
-                .id(SharedString::from(format!("provider-effort-{index}")))
-                .relative()
-                .w(px(132.))
-                .flex_none()
-                .h(px(38.))
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap(px(6.))
-                .px(px(10.))
-                .rounded(px(9.))
-                .border_1()
-                .border_color(rgba(if current_unsupported {
-                    colors.error_border
-                } else if editor.effort_open == Some(index) {
-                    colors.focus
-                } else {
-                    colors.line_strong
-                }))
-                .bg(rgba(colors.panel))
-                .text_size(px(12.))
-                .text_color(rgba(if current_unsupported {
-                    colors.error_text
-                } else {
-                    colors.label
-                }))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .child(effort_label),
-                )
-                .child(icon("chevron-down", 12., colors.muted >> 8));
-            let cell = bounds_cell.clone();
-            effort_button = effort_button.child(
-                canvas(
-                    |_, _, _| (),
-                    move |bounds, _, _, _| {
-                        cell.borrow_mut()[index] = Some(bounds);
-                    },
-                )
-                .absolute()
-                .inset_0()
-                .size_full(),
-            );
-            if busy {
-                effort_button = effort_button.opacity(0.55);
-            } else {
-                effort_button =
-                    effort_button
-                        .track_focus(&row_focus)
-                        .on_mouse_down(MouseButton::Left, {
-                            let focus = row_focus.clone();
-                            move |_, window, cx| {
-                                window.focus(&focus);
-                                cx.stop_propagation();
-                            }
-                        });
-                effort_button = effort_button
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if let Some(editor) = &mut this.editor {
-                            editor.effort_open = if editor.effort_open == Some(index) {
-                                None
-                            } else {
-                                Some(index)
-                            };
-                        }
-                        cx.stop_propagation();
-                        cx.notify();
-                    }))
-                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _window, cx| {
-                        let key = event.keystroke.key.as_str();
-                        let open = this
-                            .editor
-                            .as_ref()
-                            .is_some_and(|editor| editor.effort_open == Some(index));
-                        if open {
-                            let choices = this
-                                .editor
-                                .as_ref()
-                                .map(|editor| editor.efforts_for(index, cx))
-                                .unwrap_or_default();
-                            let Some(editor) = &mut this.editor else {
-                                return;
-                            };
-                            match key {
-                                "tab" => {
-                                    editor.effort_open = None;
-                                    cx.notify();
-                                    return;
-                                }
-                                "escape" => editor.effort_open = None,
-                                "arrowdown" | "arrowright" => {
-                                    if let Some(position) = choices
-                                        .iter()
-                                        .position(|choice| choice == &editor.efforts[index])
-                                    {
-                                        editor.efforts[index] =
-                                            choices[(position + 1) % choices.len()].clone();
-                                    }
-                                }
-                                "arrowup" | "arrowleft" => {
-                                    if let Some(position) = choices
-                                        .iter()
-                                        .position(|choice| choice == &editor.efforts[index])
-                                    {
-                                        editor.efforts[index] = choices
-                                            [(position + choices.len() - 1) % choices.len()]
-                                        .clone();
-                                    }
-                                }
-                                "enter" | "space" => editor.effort_open = None,
-                                _ => return,
-                            }
-                        } else if matches!(key, "enter" | "space" | "arrowdown") {
-                            let Some(editor) = &mut this.editor else {
-                                return;
-                            };
-                            editor.effort_open = Some(index);
-                        } else {
-                            return;
-                        }
-                        cx.stop_propagation();
-                        cx.notify();
-                    }))
-                    .child(dialog_focus_ring(
-                        row_focus.clone(),
-                        9.,
-                        self.keyboard_focus,
-                    ));
-            }
-            let row = div()
-                .flex()
-                .items_center()
-                .gap(px(10.))
-                .child(
-                    div()
-                        .w(px(58.))
-                        .flex_none()
-                        .text_size(px(12.))
-                        .font_weight(FontWeight(600.))
-                        .text_color(rgba(colors.role_text))
-                        .child(ROLE_LABELS[index]),
-                )
-                .child(div().flex_1().min_w_0().child(rename_field(
-                    editor.mappings[index].clone(),
-                    36.,
-                    10.,
-                    window,
-                    &colors,
-                    cx,
-                )))
-                .child(effort_button);
-            let mut column = div().flex().flex_col().gap(px(5.)).child(row);
-            if !supported {
-                let message = if row_metadata.is_some() {
-                    self.locale.text(
-                        "该模型不支持当前推理强度。",
-                        "This model does not support the selected reasoning effort.",
-                    )
-                } else {
-                    self.locale.text(
-                        "该模型不支持当前推理强度。",
-                        "This model does not support the selected reasoning effort.",
                     )
                 };
-                column = column.child(
-                    div()
-                        .pl(px(68.))
-                        .text_size(px(10.))
-                        .line_height(px(15.))
-                        .text_color(rgba(colors.error_text))
-                        .child(message),
-                );
+                let row = div()
+                    .flex()
+                    .items_start()
+                    .gap(px(10.))
+                    .child(
+                        div()
+                            .w(px(58.))
+                            .flex_none()
+                            .pt(px(11.))
+                            .text_size(px(12.))
+                            .font_weight(FontWeight(600.))
+                            .text_color(rgba(colors.role_text))
+                            .child(ROLE_LABELS[index]),
+                    )
+                    .child(div().flex_1().min_w_0().child(model))
+                    .child(self.provider_select_trigger(
+                        editor,
+                        work,
+                        ProviderSelect::Effort(index),
+                        &colors,
+                        cx,
+                    ));
+                let mut column = div().flex().flex_col().gap(px(5.)).child(row);
+                if subscription && !known && !current.is_empty() {
+                    column = column.child(self.provider_effort_error(
+                        self.locale.text(
+                            "模型已不可用；原选择已保留，请重新选择。",
+                            "Model is unavailable. Your selection was kept; choose another model.",
+                        ),
+                        index,
+                        &colors,
+                    ));
+                } else if !work.effort_supported(index, &work.effort_mapping[index]) {
+                    column = column.child(self.provider_effort_error(
+                        self.locale.text(
+                            "该模型不支持当前推理强度。",
+                            "This model does not support the selected reasoning effort.",
+                        ),
+                        index,
+                        &colors,
+                    ));
+                }
+                roles = roles.child(column);
             }
-            mapping = mapping.child(column);
-        }
-        let any_metadata = (0..3).any(|index| {
-            editor
-                .metadata_for(&values.mappings[index], cx)
-                .and_then(|row| row.get("supportedEfforts").cloned())
-                .is_some()
-        });
-        if any_metadata {
-            mapping = mapping.child(
-                div()
-                    .text_size(px(11.))
-                    .line_height(px(18.15))
-                    .text_color(rgba(colors.muted))
-                    .child(self.locale.text("已获取模型的推理强度来自接口返回范围；其余模型仍为候选，待服务确认。", "Fetched models use their returned effort ranges; other models remain candidates pending service confirmation.")),
-            );
-        } else {
-            mapping = mapping.child(
-                div()
-                    .text_size(px(11.))
-                    .line_height(px(18.15))
-                    .text_color(rgba(colors.muted))
-                    .child(self.locale.text("推理强度选项为候选，实际可用性以供应商支持为准。", "Reasoning effort options are candidates; actual availability depends on provider support.")),
-            );
-        }
-        body = body.child(mapping.mb(px(20.)));
-
-        // 上下文窗口写入尚未在运行时提供，本关不渲染窗口选择器。
-        body = body.child(
-            div()
-                .text_size(px(11.))
-                .line_height(px(18.15))
-                .text_color(rgba(colors.muted))
-                .child(if editing {
-                    "ⓘ 保存修改不会重新连接运行中的会话。"
+            let known_efforts = work
+                .model_mapping
+                .iter()
+                .filter(|id| {
+                    !work.ignore_model_efforts
+                        && models
+                            .iter()
+                            .any(|row| row["id"] == id.trim() && row["supportedEfforts"].is_array())
+                })
+                .count();
+            if known_efforts < 3 {
+                let hint = if known_efforts > 0 && !subscription {
+                    self.locale.text(
+                        "已获取模型的推理强度来自接口返回范围；其余模型仍为候选，待服务确认。",
+                        "Fetched models use their returned effort ranges; other models remain candidates pending service confirmation.",
+                    )
                 } else {
-                    "ⓘ 仅保存不会切换；添加并使用会更新默认供应商。"
-                }),
-        );
+                    self.effort_fallback()
+                };
+                roles = roles.child(help_text(hint, &colors));
+            }
+            body = body.child(roles);
+            body = body.child(self.render_context_picker(editor, work, &models, &colors, cx));
+        }
+        if !subscription {
+            body = body.child(help_text(
+                if editing {
+                    self.locale.text(
+                        "ⓘ 保存修改不会重新连接运行中的会话。",
+                        "ⓘ Saving does not reconnect running sessions.",
+                    )
+                } else {
+                    self.locale.text(
+                        "ⓘ 仅保存不会切换；添加并使用会更新默认供应商。",
+                        "ⓘ Save only keeps the configuration; Add and use changes the default.",
+                    )
+                },
+                &colors,
+            ));
+        }
 
         if let Some(error) = editor.error.as_deref() {
             let mut error_box = div()
@@ -5939,12 +5867,15 @@ impl SettingsShell {
                 .border_color(rgba(colors.confirm_line))
                 .bg(rgba(colors.confirm_bg))
                 .text_size(px(12.))
-                .child(
+                .child(mark_provider(
                     div()
                         .font_weight(FontWeight(650.))
                         .text_color(rgba(colors.label))
-                        .child(title),
-                )
+                        .child(title.clone()),
+                    "confirmation",
+                    title,
+                    true,
+                ))
                 .child(
                     div()
                         .mt(px(6.))
@@ -5984,19 +5915,1170 @@ impl SettingsShell {
         body
     }
 
-    fn render_effort_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_api_fields(
+        &self,
+        editor: &Editor,
+        work: &ProviderDraft,
+        models: &[&Value],
+        window: &mut Window,
+        colors: &EditorColors,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let busy = self.editor_busy();
+        let editing = work.id.is_some();
+        let preset = if editing {
+            provider_preset_for_endpoint(work.is_codex(), &work.original_endpoint)
+        } else {
+            match editor.selection {
+                Some(PickChoice::Preset(id)) => preset_by_id(id),
+                _ => None,
+            }
+        };
+        let display_name = preset
+            .map_or(self.locale.text("自定义服务", "Custom service"), |p| {
+                p.name
+            });
+        let protocol = if work.is_codex() {
+            "OpenAI Responses"
+        } else {
+            "Anthropic Messages"
+        };
+        let mut strip = div()
+            .flex()
+            .items_center()
+            .gap(px(11.))
+            .p(px(12.))
+            .mb(px(20.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(rgba(colors.line))
+            .bg(rgba(colors.panel_muted))
+            .child(provider_preset_badge(preset, &work.name))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .font_weight(FontWeight(650.))
+                            .child(display_name),
+                    )
+                    .child(mark_provider(
+                        div()
+                            .mt(px(5.))
+                            .text_size(px(11.))
+                            .line_height(px(15.4))
+                            .text_color(rgba(colors.hint_text))
+                            .child(protocol),
+                        "protocol",
+                        protocol,
+                        true,
+                    )),
+            );
+        if !editing && !busy {
+            strip = strip.child(link_button(
+                "provider-setup-change",
+                self.locale.text("更换", "Change"),
+                &editor.focus.change,
+                self.keyboard_focus,
+                FocusRingStyle::Dialog,
+                colors,
+                cx,
+                |this, window, cx| this.editor_go_back(window, cx),
+            ));
+        }
+
+        let key_heading = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(mark_provider(
+                div().child("API Key"),
+                "key-label",
+                "API Key",
+                true,
+            ))
+            .children(preset.map(|preset| {
+                let text = self.locale.text("获取密钥 ↗", "Get API key ↗");
+                mark_provider(
+                    div().child(link_button(
+                        "provider-key-link",
+                        text,
+                        &editor.focus.key_link,
+                        self.keyboard_focus,
+                        FocusRingStyle::Dialog,
+                        colors,
+                        cx,
+                        move |_, _, cx| {
+                            cx.emit(SettingsShellEvent::OpenProviderKeyPage(preset.key_url))
+                        },
+                    )),
+                    "key-link",
+                    text,
+                    !busy,
+                )
+            }));
+        let key_field = field_container(colors)
+            .child(key_heading)
+            .child(secret_field(
+                editor.key.clone(),
+                44.,
+                13.,
+                editor.revealed_key,
+                &editor.focus.reveal,
+                self.keyboard_focus,
+                window,
+                colors,
+                cx,
+                |this, _, cx| {
+                    if let Some(editor) = &mut this.editor {
+                        editor.revealed_key = !editor.revealed_key;
+                    }
+                    cx.notify();
+                },
+            ))
+            .child(help_text(
+                self.locale.text(
+                    "密钥保存在本机，仅向你配置的服务发送。",
+                    "Stored locally and sent only to your configured service.",
+                ),
+                colors,
+            ));
+        let endpoint_field = field_label(self.locale.text("API 地址", "API URL"), colors)
+            .child(rename_field(editor.endpoint.clone(), 44., 13., window, colors, cx))
+            .child(help_text(self.locale.text(
+                "填写基础地址，不含 /messages 或 /responses；需支持上方协议。",
+                "Use a base URL without /messages or /responses, supporting the protocol above.",
+            ), colors));
+
+        let fetching = self.providers.fetching();
+        let fetch_text = if fetching {
+            self.locale.text("正在获取…", "Fetching…")
+        } else {
+            self.locale.text("获取模型", "Get models")
+        };
+        let can_fetch =
+            !busy && !fetching && self.commands.connection().1 == ConnectionPhase::Ready;
+        let fetch_button = if can_fetch {
+            link_button(
+                "provider-model-fetch",
+                fetch_text,
+                &editor.focus.fetch,
+                self.keyboard_focus,
+                FocusRingStyle::Dialog,
+                colors,
+                cx,
+                |this, _, cx| this.request_provider_models(cx),
+            )
+        } else {
+            div()
+                .text_size(px(12.))
+                .text_color(rgba(colors.muted))
+                .child(fetch_text)
+                .into_any_element()
+        };
+        let model_label = self.locale.text("默认模型", "Default model");
+        let model_id = work.model.trim();
+        let metadata = models.iter().find(|row| row["id"] == model_id).copied();
+        let mut model_field = field_container(colors)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(mark_provider(
+                        div().child(model_label),
+                        "model-label",
+                        model_label,
+                        true,
+                    ))
+                    .child(mark_provider(
+                        div().child(fetch_button),
+                        "fetch",
+                        fetch_text,
+                        can_fetch,
+                    )),
+            )
+            .child(rename_field(
+                editor.model.clone(),
+                44.,
+                13.,
+                window,
+                colors,
+                cx,
+            ));
+        if let Some(row) = metadata {
+            model_field = model_field.child(self.model_details(row, "model-detail", true, colors));
+        }
+        let confirmed = editor.fetch_error.is_none() && work.fetched_metadata.is_some();
+        let source = self.model_source(
+            fetching,
+            editor.fetch_error.is_some(),
+            confirmed,
+            editing,
+            models.len(),
+            model_id,
+            metadata,
+            preset,
+        );
+        model_field = model_field.child(mark_provider(
+            help_text(source.clone(), colors),
+            "model-source",
+            source.clone(),
+            true,
+        ));
+        if confirmed && let Some(row) = metadata {
+            let no_name = row["displayName"].as_str().is_none();
+            let no_window = row["contextWindow"].is_null() && row["maxContextWindow"].is_null();
+            let gap = match (no_name, no_window) {
+                (true, true) => self.locale.text(
+                    "本次响应未提供显示名称与窗口。",
+                    "This response did not provide a display name or window.",
+                ),
+                (true, false) => self.locale.text(
+                    "本次响应只返回模型 ID，未提供显示名称。",
+                    "This response returned only the model ID; no display name was provided.",
+                ),
+                (false, true) => self.locale.text(
+                    "本次响应未提供窗口。",
+                    "This response did not provide a window.",
+                ),
+                (false, false) => "",
+            };
+            if !gap.is_empty() {
+                model_field = model_field.child(help_text(gap, colors));
+            }
+        }
+        if let Some(error) = &editor.fetch_error {
+            model_field = model_field.child(help_text(self.model_fetch_message(error), colors));
+        } else if confirmed && !fetching {
+            let message = if self.locale == InterfaceLocale::Chinese {
+                format!("已获取 {} 个模型；尚未验证实际对话能力。", models.len())
+            } else {
+                format!(
+                    "{} models fetched; actual inference has not been tested.",
+                    models.len()
+                )
+            };
+            model_field = model_field.child(help_text(message, colors));
+        }
+        if editor.model_chooser {
+            model_field =
+                model_field.child(self.render_model_chooser(editor, work, window, colors, cx));
+        } else if confirmed && !fetching {
+            model_field = model_field.child(link_button(
+                "provider-model-choose",
+                self.locale
+                    .text("从已获取列表选择", "Choose from fetched models"),
+                &editor.focus.chooser,
+                self.keyboard_focus,
+                FocusRingStyle::Dialog,
+                colors,
+                cx,
+                |this, window, cx| {
+                    if let Some(editor) = &mut this.editor {
+                        editor.model_chooser = true;
+                        window.focus(&editor.focus.model_search);
+                    }
+                    cx.notify();
+                },
+            ));
+        }
+        if work.is_codex() {
+            let title = self.locale.text("推理强度", "Reasoning effort");
+            let explanation = if !work.ignore_model_efforts
+                && metadata.is_some_and(|row| row["supportedEfforts"].is_array())
+            {
+                self.locale.text(
+                    "推理强度选项来自接口返回的模型信息。",
+                    "Reasoning effort options come from the fetched model information.",
+                )
+            } else {
+                self.effort_fallback()
+            };
+            let mut section = div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .mt(px(7.))
+                .child(div().child(title))
+                .child(self.provider_select_trigger(
+                    editor,
+                    work,
+                    ProviderSelect::Effort(0),
+                    colors,
+                    cx,
+                ))
+                .child(help_text(explanation, colors));
+            if !work.effort_supported(0, &work.reasoning_effort) {
+                section = section.child(self.provider_effort_error(
+                    self.locale.text(
+                        "当前模型不支持所选推理强度。",
+                        "This model does not support the selected reasoning effort.",
+                    ),
+                    0,
+                    colors,
+                ));
+            }
+            model_field = model_field.child(mark_provider(section, "codex-effort", title, !busy));
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .child(strip)
+            .child(key_field)
+            .child(endpoint_field)
+            .children(work.endpoint.starts_with("http:").then(|| {
+                provider_inline_error(
+                    self.locale.text(
+                        "当前为 HTTP，密钥将以明文传输。远程服务建议使用 HTTPS。",
+                        "HTTP sends the key unencrypted. Use HTTPS for remote services.",
+                    ),
+                    colors,
+                )
+                .mb(px(20.))
+            }))
+            .child(model_field)
+    }
+
+    fn model_source(
+        &self,
+        fetching: bool,
+        failed: bool,
+        confirmed: bool,
+        editing: bool,
+        count: usize,
+        model: &str,
+        metadata: Option<&Value>,
+        preset: Option<&ProviderPreset>,
+    ) -> String {
+        let locale = self.locale;
+        let text = if fetching {
+            locale.text(
+                "正在向当前地址获取模型信息…",
+                "Fetching model information from this endpoint…",
+            )
+        } else if failed {
+            if count > 0 {
+                locale.text("本次刷新失败；以下为上次记录的模型信息，名称与窗口可能已变化。", "Refresh failed. The last recorded model information is shown; names and windows may have changed.")
+            } else {
+                locale.text(
+                    "本次刷新失败；当前没有可用的模型名称或窗口信息。",
+                    "Refresh failed. No model names or windows are available.",
+                )
+            }
+        } else if confirmed {
+            if model.is_empty() {
+                return if locale == InterfaceLocale::Chinese {
+                    format!("已获取 {count} 个模型；请选择模型，或手动填写模型 ID。")
+                } else {
+                    format!("{count} models fetched. Choose a model or enter an ID manually.")
+                };
+            } else if metadata.is_some() {
+                locale.text(
+                    "已在本次获取的模型列表中确认该 ID。",
+                    "This ID was confirmed in the models fetched in this request.",
+                )
+            } else {
+                locale.text("手动填写的模型 ID 不在本次获取列表中；名称与窗口未知。", "The manually entered model ID is not in this response; its name and window are unknown.")
+            }
+        } else if count > 0 {
+            if metadata.is_some() || model.is_empty() {
+                locale.text(
+                    "显示已保存的模型信息，可获取模型刷新。",
+                    "Showing saved model information. Fetch models to refresh it.",
+                )
+            } else {
+                locale.text("手动填写的模型 ID 不在已保存的模型信息中；名称与窗口未知。", "The manually entered ID is not in the saved model information; its name and window are unknown.")
+            }
+        } else if editing {
+            locale.text(
+                "当前仅有模型 ID；尚未获取名称或窗口信息。",
+                "Only a model ID is available; its name and window have not been fetched.",
+            )
+        } else if preset.is_some_and(|preset| preset.model == model) {
+            locale.text("预设模型尚未向服务验证名称、窗口或对话能力。", "The preset model has not been verified against the service for its name, window, or inference.")
+        } else {
+            locale.text(
+                "手动填写模型 ID；名称与窗口未知。",
+                "Entered manually; the name and window are unknown.",
+            )
+        };
+        text.into()
+    }
+
+    fn model_fetch_message(&self, error: &str) -> &'static str {
+        let l = self.locale;
+        match error {
+            "auth" => l.text(
+                "密钥未通过验证，请检查密钥和对应的服务地址。",
+                "The key was rejected. Check the key and service URL.",
+            ),
+            "unsupported" => l.text(
+                "该地址暂不支持模型列表，请手动填写模型名称。",
+                "This endpoint does not offer a compatible model list. Enter the model manually.",
+            ),
+            "timeout" => l.text(
+                "获取超时，已保留填写内容。可以重试或手动填写。",
+                "Request timed out. Your draft is kept; retry or enter a model manually.",
+            ),
+            "invalid" => l.text(
+                "请先填写有效的 API 基础地址。",
+                "Enter a valid API base URL first.",
+            ),
+            "key-required" => l.text(
+                "请填写此地址对应的 API Key；修改地址后需重新填写密钥。",
+                "Enter the key for this endpoint. A changed endpoint requires re-entering the key.",
+            ),
+            "empty" => l.text(
+                "服务没有返回模型，可以手动填写模型名称。",
+                "No models returned. Enter a model manually.",
+            ),
+            "too-large" => l.text(
+                "模型列表过大，请手动填写模型名称。",
+                "Model list is too large. Enter a model manually.",
+            ),
+            _ => l.text(
+                "连接未完成，请检查网络或服务地址后重试。",
+                "Connection failed. Check the network and service URL, then retry.",
+            ),
+        }
+    }
+
+    fn model_details(&self, row: &Value, marker: &str, card: bool, colors: &EditorColors) -> Div {
+        let id = row["id"].as_str().unwrap_or_default();
+        let name = row["displayName"].as_str().unwrap_or(id);
+        let id_text = if row["displayName"].is_string() {
+            id
+        } else {
+            self.locale.text("仅返回模型 ID", "Model ID only")
+        };
+        let tokens = window_text(row, self.locale);
+        let mut view = div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .min_w_0()
+            .flex_1()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .min_w_0()
+                    .flex_1()
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(12.))
+                            .font_weight(FontWeight(650.))
+                            .child(name.to_owned()),
+                    )
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(10.))
+                            .font_weight(FontWeight(400.))
+                            .text_color(rgba(colors.muted))
+                            .child(id_text.to_owned()),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(11.))
+                    .text_color(rgba(colors.link))
+                    .child(tokens.clone()),
+            );
+        if card {
+            view = view
+                .p(px(9.))
+                .px(px(11.))
+                .rounded(px(9.))
+                .border_1()
+                .border_color(rgba(colors.info_line))
+                .bg(rgba(colors.info_bg));
+        }
+        mark_provider(view, marker, format!("{name} {id_text} {tokens}"), true)
+    }
+
+    fn render_model_chooser(
+        &self,
+        editor: &Editor,
+        work: &ProviderDraft,
+        window: &mut Window,
+        colors: &EditorColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let rows = editor.visible_fetched_models(cx);
+        let mut list = div()
+            .id("provider-model-options")
+            .max_h(px(190.))
+            .overflow_y_scroll()
+            .track_scroll(&editor.model_scroll);
+        if rows.is_empty() {
+            list = list.child(help_text(
+                self.locale.text("没有匹配模型", "No matching model"),
+                colors,
+            ));
+        }
+        for (index, row) in rows.iter().enumerate() {
+            let id = row["id"].as_str().unwrap_or_default().to_owned();
+            let selected = id == work.model.trim();
+            let check = if selected { "✓" } else { "" };
+            let marker = format!("option-{id}");
+            let label = format!(
+                "{} {} {} {check}",
+                row["displayName"].as_str().unwrap_or(&id),
+                id,
+                window_text(row, self.locale)
+            );
+            let option = div()
+                .id(SharedString::from(format!("provider-model-option-{id}")))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .px(px(8.))
+                .py(px(5.))
+                .rounded(px(6.))
+                .bg(rgba(if index == editor.model_cursor || selected {
+                    colors.menu_selected_bg
+                } else {
+                    colors.panel
+                }))
+                .hover(move |s| s.bg(rgba(colors.menu_selected_bg)))
+                .cursor_pointer()
+                .child(self.model_details(row, "model-option-details", false, colors))
+                .child(
+                    div()
+                        .w(px(12.))
+                        .flex_none()
+                        .text_color(rgba(colors.link))
+                        .child(check),
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    if let Some(editor) = &mut this.editor {
+                        editor.choose_model(id.clone(), window, cx);
+                    }
+                    cx.stop_propagation();
+                }));
+            list = list.child(mark_provider(option, marker, label, true));
+        }
+        div()
+            .id("provider-model-chooser")
+            .flex()
+            .flex_col()
+            .gap(px(5.))
+            .p(px(6.))
+            .rounded(px(9.))
+            .border_1()
+            .border_color(rgba(colors.line))
+            .bg(rgba(colors.panel))
+            .child(rename_field(
+                editor.model_query.clone(),
+                34.,
+                8.,
+                window,
+                colors,
+                cx,
+            ))
+            .child(list)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                let Some(editor) = &mut this.editor else {
+                    return;
+                };
+                let count = editor.visible_fetched_models(cx).len();
+                if count == 0 {
+                    return;
+                }
+                match event.keystroke.key.as_str() {
+                    "arrowdown" => editor.model_cursor = (editor.model_cursor + 1) % count,
+                    "arrowup" => editor.model_cursor = (editor.model_cursor + count - 1) % count,
+                    _ => return,
+                }
+                editor.model_scroll.scroll_to_item(editor.model_cursor);
+                cx.stop_propagation();
+                cx.notify();
+            }))
+            .into_any_element()
+    }
+
+    fn effort_fallback(&self) -> &'static str {
+        self.locale.text(
+            "推理强度选项为候选，实际可用性以供应商支持为准。",
+            "Reasoning effort options are candidates; actual availability depends on provider support.",
+        )
+    }
+
+    fn provider_effort_error(
+        &self,
+        text: &'static str,
+        index: usize,
+        colors: &EditorColors,
+    ) -> Div {
+        mark_provider(
+            div()
+                .pl(px(68.))
+                .text_size(px(11.))
+                .font_weight(FontWeight(600.))
+                .text_color(rgba(colors.error_text))
+                .child(text),
+            format!("effort-invalid-{index}"),
+            text,
+            true,
+        )
+    }
+
+    fn render_context_picker(
+        &self,
+        editor: &Editor,
+        work: &ProviderDraft,
+        models: &[&Value],
+        colors: &EditorColors,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let catalog: Vec<_> = models.iter().map(|row| (*row).clone()).collect();
+        let selected_ids: Vec<_> = work
+            .model_mapping
+            .iter()
+            .chain((work.subscription_kind.is_none()).then_some(&work.model))
+            .filter(|id| !id.trim().is_empty() && id.trim() != "__cli_default__")
+            .cloned()
+            .collect();
+        let busy = self.editor_busy();
+        let mode = work.context_mode();
+        let mut options = div().flex().gap(px(8.));
+        for (index, choice) in CONTEXT_MODES.into_iter().enumerate() {
+            let selected = choice == mode;
+            let label = context_mode_title(choice, self.locale);
+            let tokens = context_mode_tokens(choice, &catalog, &selected_ids, self.locale);
+            let option = div()
+                .id(SharedString::from(format!("provider-context-{choice}")))
+                .flex()
+                .items_start()
+                .gap(px(6.))
+                .flex_1()
+                .min_w_0()
+                .p(px(8.))
+                .rounded(px(8.))
+                .border_1()
+                .border_color(rgba(if selected {
+                    colors.focus
+                } else {
+                    colors.line_strong
+                }))
+                .bg(rgba(if selected {
+                    colors.menu_selected_bg
+                } else {
+                    colors.panel
+                }))
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(px(13.))
+                        .text_color(rgba(if selected { colors.link } else { colors.muted }))
+                        .child(if selected { "◉" } else { "○" }),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .min_w_0()
+                        .gap(px(3.))
+                        .child(
+                            div()
+                                .font_weight(FontWeight(650.))
+                                .text_size(px(12.))
+                                .child(label),
+                        )
+                        .child(
+                            div()
+                                .font_weight(FontWeight(650.))
+                                .text_size(px(11.))
+                                .text_color(rgba(colors.link))
+                                .child(tokens),
+                        )
+                        .child(help_text(
+                            context_mode_subtitle(choice, self.locale),
+                            colors,
+                        )),
+                );
+            let option = if busy {
+                option.opacity(0.55)
+            } else {
+                wire_dialog_button(
+                    option.cursor_pointer(),
+                    &editor.focus.context_modes[index],
+                    8.,
+                    self.keyboard_focus,
+                    move |this, _, cx| {
+                        if let Some(editor) = &mut this.editor {
+                            editor.draft.context_window_mode = Some(choice.into());
+                            editor.context_touched = true;
+                            editor.error = None;
+                        }
+                        cx.notify();
+                    },
+                    cx,
+                )
+            };
+            options = options.child(mark_provider(
+                option,
+                format!("context-{choice}"),
+                label,
+                !busy,
+            ));
+        }
+        let title = self.locale.text("上下文窗口长度", "Context window");
+        let mut picker = div()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .mt(px(12.))
+            .mb(px(14.))
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .font_weight(FontWeight(600.))
+                    .child(title),
+            )
+            .child(options);
+        if selected_ids
+            .iter()
+            .map(|id| id.trim())
+            .collect::<HashSet<_>>()
+            .len()
+            > 1
+        {
+            picker = picker.child(help_text(context_multi_model_hint(self.locale), colors));
+        }
+        if mode != "512k" && resolve_context_tokens(mode, &catalog, &selected_ids).is_none() {
+            let hint = context_unknown_hint(self.locale);
+            picker = picker.child(mark_provider(
+                help_text(hint, colors),
+                "context-unknown",
+                hint,
+                true,
+            ));
+        }
+        #[cfg(debug_assertions)]
+        PROVIDER_EDITOR_PROBE.with_borrow_mut(|probe| {
+            if let Some(probe) = probe {
+                probe.context_mode = Some(mode.to_owned());
+            }
+        });
+        mark_provider(picker, "context", title, !busy)
+    }
+
+    fn request_provider_models(&mut self, cx: &mut Context<Self>) {
+        if self.editor_busy() || self.providers.fetching() {
+            return;
+        }
+        let Some(editor) = &mut self.editor else {
+            return;
+        };
+        let draft = editor.working_draft(cx);
+        editor.model_chooser = false;
+        editor.select_open = None;
+        editor.fetch_error = None;
+        match self.providers.fetch_models(&draft) {
+            Ok(()) => {
+                editor.fetch_snapshot =
+                    Some((draft.api_key.trim().into(), draft.endpoint.trim().into()))
+            }
+            Err(_) => editor.fetch_error = Some("network".into()),
+        }
+        cx.notify();
+    }
+
+    fn set_manual_mapping(
+        &mut self,
+        index: usize,
+        manual: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(editor) = &mut self.editor {
+            editor.manual_mappings[index] = manual;
+            editor.select_open = None;
+            window.focus(if manual {
+                &editor.focus.mappings[index]
+            } else {
+                &editor.focus.mapping_choices[index]
+            });
+            cx.notify();
+        }
+    }
+
+    fn mapping_label(&self, work: &ProviderDraft, index: usize) -> (String, bool) {
+        let id = work.model_mapping[index].trim();
+        let (label, enabled) = if id.is_empty() && work.subscription_kind.is_none() {
+            (
+                self.locale.text("沿用 CLI 默认", "Use CLI default").into(),
+                true,
+            )
+        } else if !work.ignore_model_efforts
+            && let Some(row) = work
+                .available_models()
+                .into_iter()
+                .find(|row| row["id"] == id)
+        {
+            (row["displayName"].as_str().unwrap_or(id).into(), true)
+        } else if work.subscription_kind.is_some() {
+            (
+                if id.is_empty() {
+                    "—".into()
+                } else {
+                    format!("{id} · {}", self.locale.text("不可用", "Unavailable"))
+                },
+                false,
+            )
+        } else if work.ignore_model_efforts || work.available_models().is_empty() {
+            (
+                format!(
+                    "{id} {}",
+                    self.locale.text("（尚未获取列表）", "(list not fetched)")
+                ),
+                true,
+            )
+        } else {
+            (
+                format!(
+                    "{id} {}",
+                    self.locale.text("（未在列表中）", "(not in list)")
+                ),
+                true,
+            )
+        };
+        (label, enabled)
+    }
+
+    fn provider_select_options(
+        &self,
+        work: &ProviderDraft,
+        select: ProviderSelect,
+    ) -> Vec<SelectOption> {
+        match select {
+            ProviderSelect::Effort(index) => {
+                let current = if work.is_codex() {
+                    &work.reasoning_effort
+                } else {
+                    &work.effort_mapping[index]
+                };
+                work.effort_choices(index)
+                    .into_iter()
+                    .map(|effort| {
+                        let enabled = work.effort_supported(index, &effort);
+                        let label = editor_effort_name(&effort, self.locale);
+                        SelectOption {
+                            label: if enabled {
+                                label.into()
+                            } else {
+                                format!(
+                                    "{label} {}",
+                                    self.locale.text("（不支持）", "(unsupported)")
+                                )
+                            },
+                            selected: current == &effort,
+                            choice: ProviderChoice::Effort(effort),
+                            detail: None,
+                            enabled,
+                        }
+                    })
+                    .collect()
+            }
+            ProviderSelect::Mapping(index) => {
+                let id = work.model_mapping[index].trim();
+                let subscription = work.subscription_kind.is_some();
+                let models = if work.ignore_model_efforts && !subscription {
+                    Vec::new()
+                } else {
+                    work.available_models()
+                };
+                let known = models.iter().any(|row| row["id"] == id);
+                let mut options = Vec::with_capacity(models.len() + 3);
+                if !subscription {
+                    options.push(SelectOption {
+                        choice: ProviderChoice::Model(String::new()),
+                        label: self.locale.text("沿用 CLI 默认", "Use CLI default").into(),
+                        detail: None,
+                        selected: id.is_empty(),
+                        enabled: true,
+                    });
+                }
+                options.extend(models.into_iter().map(|row| {
+                    let model_id = row["id"].as_str().unwrap_or_default();
+                    let window = window_text(row, self.locale);
+                    SelectOption {
+                        choice: ProviderChoice::Model(model_id.into()),
+                        label: row["displayName"].as_str().unwrap_or(model_id).into(),
+                        detail: Some(format!("{model_id} · {window}")),
+                        selected: model_id == id,
+                        enabled: true,
+                    }
+                }));
+                if !known && (!id.is_empty() || subscription) {
+                    let (label, enabled) = self.mapping_label(work, index);
+                    options.push(SelectOption {
+                        choice: ProviderChoice::Model(id.into()),
+                        label,
+                        detail: None,
+                        selected: true,
+                        enabled,
+                    });
+                }
+                if !subscription {
+                    options.push(SelectOption {
+                        choice: ProviderChoice::Manual,
+                        label: self
+                            .locale
+                            .text("手动填写模型 ID…", "Enter model ID manually…")
+                            .into(),
+                        detail: None,
+                        selected: false,
+                        enabled: true,
+                    });
+                }
+                options
+            }
+        }
+    }
+
+    fn provider_select_trigger(
+        &self,
+        editor: &Editor,
+        work: &ProviderDraft,
+        select: ProviderSelect,
+        colors: &EditorColors,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let opened = editor.select_open.is_some_and(|(kind, _)| kind == select);
+        let focus = editor.select_focus(select).clone();
+        let slot = select.slot();
+        let cell = editor.select_bounds.clone();
+        let busy = self.editor_busy();
+        let (marker, label, valid, width) = match select {
+            ProviderSelect::Mapping(index) => {
+                let (label, valid) = self.mapping_label(work, index);
+                (format!("mapping-{index}"), label, valid, None)
+            }
+            ProviderSelect::Effort(index) => {
+                let current = if work.is_codex() {
+                    &work.reasoning_effort
+                } else {
+                    &work.effort_mapping[index]
+                };
+                let valid = work.effort_supported(index, current);
+                let label = editor_effort_name(current, self.locale);
+                let label = if valid {
+                    label.into()
+                } else {
+                    format!(
+                        "{label} {}",
+                        self.locale.text("（不支持）", "(unsupported)")
+                    )
+                };
+                (
+                    format!("effort-{index}"),
+                    label,
+                    valid,
+                    (!work.is_codex()).then_some(132.),
+                )
+            }
+        };
+        let mut trigger = div()
+            .id(SharedString::from(format!("provider-{marker}")))
+            .relative()
+            .h(px(38.))
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(6.))
+            .px(px(10.))
+            .rounded(px(9.))
+            .border_1()
+            .border_color(rgba(if !valid {
+                colors.error_border
+            } else if opened {
+                colors.focus
+            } else {
+                colors.line_strong
+            }))
+            .bg(rgba(colors.panel))
+            .text_size(px(12.))
+            .text_color(rgba(if valid {
+                colors.label
+            } else {
+                colors.error_text
+            }))
+            .child(div().flex_1().min_w_0().truncate().child(label.clone()))
+            .child(icon("chevron-down", 12., colors.muted >> 8))
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |bounds, _, _, _| {
+                        cell.borrow_mut()[slot] = Some(bounds);
+                    },
+                )
+                .absolute()
+                .inset_0()
+                .size_full(),
+            );
+        trigger = if let Some(width) = width {
+            trigger.w(px(width)).flex_none()
+        } else {
+            trigger.w_full()
+        };
+        if busy {
+            trigger = trigger.opacity(0.55);
+        } else {
+            trigger = trigger
+                .track_focus(&focus)
+                .cursor_pointer()
+                .on_mouse_down(MouseButton::Left, {
+                    let focus = focus.clone();
+                    move |_, window, cx| {
+                        window.focus(&focus);
+                        cx.stop_propagation();
+                    }
+                })
+                .on_click(cx.listener(move |this, event, _, cx| {
+                    if !matches!(event, ClickEvent::Keyboard(_)) {
+                        this.toggle_provider_select(select, cx);
+                        cx.stop_propagation();
+                    }
+                }))
+                .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                    let key = event.keystroke.key.as_str();
+                    if !matches!(key, "enter" | "space" | "arrowdown" | "arrowup") {
+                        return;
+                    }
+                    this.provider_select_key(select, key, window, cx);
+                    cx.stop_propagation();
+                }))
+                .child(dialog_focus_ring(focus, 9., self.keyboard_focus));
+        }
+        mark_provider(
+            div()
+                .w_full()
+                .when_some(width, |element, width| element.w(px(width)).flex_none())
+                .child(trigger),
+            marker,
+            label,
+            !busy,
+        )
+    }
+
+    fn toggle_provider_select(&mut self, select: ProviderSelect, cx: &mut Context<Self>) {
+        let Some(editor) = &self.editor else {
+            return;
+        };
+        let work = editor.working_draft(cx);
+        let options = self.provider_select_options(&work, select);
+        let editor = self.editor.as_mut().unwrap();
+        if editor.select_open.is_some_and(|(kind, _)| kind == select) {
+            editor.select_open = None;
+        } else if !options.is_empty() {
+            let index = options
+                .iter()
+                .position(|option| option.selected)
+                .unwrap_or_default();
+            editor.select_open = Some((select, index));
+            editor.select_scroll.set_offset(Point::default());
+            editor.select_scroll.scroll_to_item(index);
+        }
+        cx.notify();
+    }
+
+    fn provider_select_key(
+        &mut self,
+        select: ProviderSelect,
+        key: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = &self.editor else {
+            return;
+        };
+        let Some((kind, index)) = editor.select_open.filter(|(kind, _)| *kind == select) else {
+            self.toggle_provider_select(select, cx);
+            return;
+        };
+        let options = self.provider_select_options(&editor.working_draft(cx), kind);
+        if options.is_empty() {
+            return;
+        }
+        if matches!(key, "enter" | "space") {
+            if let Some(option) = options
+                .into_iter()
+                .nth(index)
+                .filter(|option| option.enabled)
+            {
+                self.choose_provider_option(kind, &option.choice, window, cx);
+            }
+        } else {
+            let next = if key == "arrowup" {
+                (index + options.len() - 1) % options.len()
+            } else {
+                (index + 1) % options.len()
+            };
+            let editor = self.editor.as_mut().unwrap();
+            editor.select_open = Some((kind, next));
+            editor.select_scroll.scroll_to_item(next);
+            cx.notify();
+        }
+    }
+
+    fn choose_provider_option(
+        &mut self,
+        select: ProviderSelect,
+        choice: &ProviderChoice,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = &mut self.editor else {
+            return;
+        };
+        match (select, choice) {
+            (ProviderSelect::Mapping(index), ProviderChoice::Manual) => {
+                self.set_manual_mapping(index, true, window, cx);
+                return;
+            }
+            (ProviderSelect::Mapping(index), ProviderChoice::Model(id)) => {
+                editor.mappings[index].update(cx, |input, cx| {
+                    input.text.clone_from(id);
+                    cx.notify();
+                });
+            }
+            (ProviderSelect::Effort(index), ProviderChoice::Effort(effort)) => {
+                if editor.draft.is_codex() {
+                    editor.draft.reasoning_effort.clone_from(effort);
+                } else {
+                    editor.efforts[index].clone_from(effort);
+                }
+            }
+            _ => return,
+        }
+        editor.select_open = None;
+        editor.error = None;
+        window.focus(editor.select_focus(select));
+        cx.notify();
+    }
+
+    fn render_provider_select(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let palette = *self.theme.effective().palette();
         let colors = EditorColors::new(&palette, self.is_dark());
         let editor = self.editor.as_ref()?;
-        let index = editor.effort_open?;
-        let bounds = (*editor.effort_bounds.borrow())[index]?;
-        let choices = editor.efforts_for(index, cx);
-        let current = editor.efforts[index].clone();
+        let (select, cursor) = editor.select_open?;
+        let bounds = (*editor.select_bounds.borrow())[select.slot()]?;
+        let options = self.provider_select_options(&editor.working_draft(cx), select);
         let mut menu = div()
-            .id("provider-effort-menu")
-            .w(px(132.))
-            .flex()
-            .flex_col()
+            .id("provider-select-menu")
+            .w(bounds.size.width.max(px(132.)))
+            .max_h(px(250.))
+            .overflow_y_scroll()
+            .track_scroll(&editor.select_scroll)
             .p(px(4.))
             .rounded(px(8.))
             .border_1()
@@ -6005,43 +7087,69 @@ impl SettingsShell {
             .shadow(vec![shadow(0x1a304b, 0.16, 8., 24.)])
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_scroll_wheel(|_, _, cx| cx.stop_propagation());
-        for choice in choices {
-            let selected = choice == current;
-            let focus = editor.focus.efforts[index].clone();
+        for (index, option) in options.into_iter().enumerate() {
+            let marker = match &option.choice {
+                ProviderChoice::Model(id) => format!("mapping-option-{id}"),
+                ProviderChoice::Manual => "mapping-option-manual".into(),
+                ProviderChoice::Effort(id) => format!("effort-option-{id}"),
+            };
+            let check = if option.selected { "✓" } else { "" };
+            let label = format!(
+                "{} {} {check}",
+                option.label,
+                option.detail.as_deref().unwrap_or_default()
+            );
+            let enabled = option.enabled;
             let mut item = div()
-                .id(SharedString::from(format!(
-                    "provider-effort-option-{choice}"
-                )))
-                .h(px(30.))
+                .id(SharedString::from(format!("provider-{marker}-{index}")))
+                .min_h(px(30.))
                 .flex()
                 .items_center()
+                .justify_between()
+                .gap(px(6.))
                 .px(px(9.))
+                .py(px(5.))
                 .rounded(px(5.))
                 .text_size(px(12.))
-                .text_color(rgba(if selected { colors.link } else { colors.label }))
-                .bg(rgba(if selected {
+                .text_color(rgba(if !enabled {
+                    colors.muted
+                } else if option.selected {
+                    colors.link
+                } else {
+                    colors.label
+                }))
+                .bg(rgba(if cursor == index || option.selected {
                     colors.menu_selected_bg
                 } else {
                     colors.panel
                 }))
-                .hover(move |style| style.bg(rgba(colors.menu_selected_bg)))
-                .child(effort_name(&choice).to_owned());
-            let value = choice.clone();
-            item = item.on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                window.focus(&focus);
-                cx.stop_propagation();
-            });
-            item = item.on_click(cx.listener(move |this, _, window, cx| {
-                if let Some(editor) = &mut this.editor {
-                    editor.efforts[index] = value.clone();
-                    editor.effort_open = None;
-                    let focus = editor.focus.efforts[index].clone();
-                    window.focus(&focus);
-                }
-                cx.stop_propagation();
-                cx.notify();
-            }));
-            menu = menu.child(item);
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .min_w_0()
+                        .flex_1()
+                        .child(div().truncate().child(option.label))
+                        .children(option.detail.map(|detail| {
+                            div()
+                                .truncate()
+                                .text_size(px(10.))
+                                .text_color(rgba(colors.muted))
+                                .child(detail)
+                        })),
+                )
+                .child(div().flex_none().child(check));
+            if enabled {
+                let choice = option.choice;
+                item = item
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(rgba(colors.menu_selected_bg)))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.choose_provider_option(select, &choice, window, cx);
+                        cx.stop_propagation();
+                    }));
+            }
+            menu = menu.child(mark_provider(item, marker, label, enabled));
         }
         Some(
             deferred(
@@ -6056,7 +7164,123 @@ impl SettingsShell {
     }
 }
 
+fn provider_editor_can_save(draft: &ProviderDraft) -> bool {
+    let efforts_valid = if draft.is_codex() {
+        draft.effort_supported(0, &draft.reasoning_effort)
+    } else {
+        draft
+            .effort_mapping
+            .iter()
+            .enumerate()
+            .all(|(index, effort)| draft.effort_supported(index, effort))
+    };
+    efforts_valid && draft.subscription_models_valid()
+}
+
+#[cfg(debug_assertions)]
+#[derive(Default)]
+pub(crate) struct ProviderEditorProbe {
+    pub bounds: HashMap<String, Bounds<Pixels>>,
+    pub labels: HashMap<String, String>,
+    pub enabled: HashMap<String, bool>,
+    pub context_mode: Option<String>,
+}
+
+#[cfg(debug_assertions)]
+thread_local! {
+    static PROVIDER_EDITOR_PROBE: RefCell<Option<ProviderEditorProbe>> = const { RefCell::new(None) };
+}
+
+#[cfg(debug_assertions)]
+#[allow(dead_code)]
+pub(crate) fn probe_provider_editor(draw: impl FnOnce()) -> ProviderEditorProbe {
+    PROVIDER_EDITOR_PROBE.set(Some(ProviderEditorProbe::default()));
+    draw();
+    PROVIDER_EDITOR_PROBE.take().unwrap()
+}
+
+fn mark_provider<E: ParentElement + Styled>(
+    element: E,
+    marker: impl Into<String>,
+    label: impl Into<String>,
+    enabled: bool,
+) -> E {
+    #[cfg(debug_assertions)]
+    if PROVIDER_EDITOR_PROBE.with_borrow(|probe| probe.is_some()) {
+        let marker = marker.into();
+        let label = label.into();
+        return element.relative().child(
+            canvas(
+                |_, _, _| (),
+                move |bounds, _, _, _| {
+                    PROVIDER_EDITOR_PROBE.with_borrow_mut(|probe| {
+                        if let Some(probe) = probe {
+                            probe.bounds.insert(marker.clone(), bounds);
+                            probe.labels.insert(marker.clone(), label.clone());
+                            probe.enabled.insert(marker.clone(), enabled);
+                        }
+                    });
+                },
+            )
+            .absolute()
+            .inset_0()
+            .size_full(),
+        );
+    }
+    let _ = (marker, label, enabled);
+    element
+}
+
+#[cfg(debug_assertions)]
+impl SettingsShell {
+    #[allow(dead_code)]
+    pub(crate) fn probe_open_provider_value(
+        &mut self,
+        provider: Value,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_edit_editor(provider, self.new_provider_focus.clone(), window, cx);
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn probe_provider_editor_focus(&self, control: &str, window: &mut Window) {
+        if control == "new" {
+            window.focus(&self.new_provider_focus);
+            return;
+        }
+        let focus = &self.editor.as_ref().expect("provider editor open").focus;
+        let target = match control {
+            "close" => &focus.close,
+            "back" => &focus.back,
+            "custom" => &focus.custom,
+            "next" => &focus.next,
+            "fetch" => &focus.fetch,
+            "search" => &focus.model_search,
+            "reveal" => &focus.reveal,
+            "name" => &focus.name,
+            "mapping-0" => &focus.mapping_choices[0],
+            "manual-0" => &focus.mappings[0],
+            "mapping-list-0" => &focus.manual_links[0],
+            "effort-0" => &focus.efforts[0],
+            "context-512k" => &focus.context_modes[1],
+            "context-maximum" => &focus.context_modes[2],
+            "delete" => &focus.delete,
+            "save" => &focus.save,
+            "save-switch" => &focus.save_switch,
+            "keep-editing" => &focus.keep_editing,
+            "discard" => &focus.confirm_action,
+            _ => panic!("Unknown provider editor control: {control}"),
+        };
+        window.focus(target);
+    }
+}
+
 fn field_label(label: impl Into<SharedString>, colors: &EditorColors) -> Div {
+    field_container(colors).child(div().child(label.into()))
+}
+
+fn field_container(colors: &EditorColors) -> Div {
     div()
         .flex()
         .flex_col()
@@ -6065,7 +7289,19 @@ fn field_label(label: impl Into<SharedString>, colors: &EditorColors) -> Div {
         .text_size(px(13.))
         .font_weight(FontWeight(600.))
         .text_color(rgba(colors.label))
-        .child(div().child(label.into()))
+}
+
+fn provider_inline_error(text: &'static str, colors: &EditorColors) -> Div {
+    div()
+        .p(px(12.))
+        .rounded(px(8.))
+        .border_1()
+        .border_color(rgba(colors.error_line))
+        .bg(rgba(colors.error_bg))
+        .text_size(px(12.))
+        .line_height(px(19.2))
+        .text_color(rgba(colors.error_text))
+        .child(text)
 }
 
 fn help_text(text: impl Into<SharedString>, colors: &EditorColors) -> Div {
@@ -6076,87 +7312,6 @@ fn help_text(text: impl Into<SharedString>, colors: &EditorColors) -> Div {
         .text_color(rgba(colors.muted))
         .whitespace_normal()
         .child(text.into())
-}
-
-fn model_source(
-    metadata: Option<&Value>,
-    model: &str,
-    preset: Option<&ProviderPreset>,
-    editing: bool,
-    colors: &EditorColors,
-) -> Div {
-    let mut block = div().flex().flex_col().gap(px(6.));
-    if let Some(row) = metadata {
-        let display = row["displayName"].as_str().unwrap_or(model);
-        let id_line = if row["displayName"].is_string() {
-            model.to_owned()
-        } else {
-            "仅返回模型 ID".to_owned()
-        };
-        block = block.child(
-            div()
-                .flex()
-                .flex_wrap()
-                .items_baseline()
-                .gap(px(8.))
-                .p(px(9.))
-                .px(px(11.))
-                .rounded(px(9.))
-                .border_1()
-                .border_color(rgba(colors.info_line))
-                .bg(rgba(colors.info_bg))
-                .child(
-                    div()
-                        .text_size(px(12.))
-                        .font_weight(FontWeight(650.))
-                        .text_color(rgba(colors.label))
-                        .child(display.to_owned()),
-                )
-                .child(
-                    div()
-                        .text_size(px(10.))
-                        .font_weight(FontWeight(400.))
-                        .text_color(rgba(colors.muted))
-                        .child(id_line),
-                )
-                .child(
-                    div()
-                        .text_size(px(11.))
-                        .text_color(rgba(colors.link))
-                        .child(window_text(row)),
-                )
-                .children(supported_efforts_text(row).map(|efforts| {
-                    div()
-                        .text_size(px(10.))
-                        .font_weight(FontWeight(400.))
-                        .text_color(rgba(colors.muted))
-                        .child(format!("可选强度：{efforts}"))
-                })),
-        );
-        block = block.child(
-            div()
-                .text_size(px(11.))
-                .line_height(px(17.6))
-                .text_color(rgba(colors.role_text))
-                .child("显示已保存的模型信息。"),
-        );
-    } else {
-        let source = if editing {
-            "当前仅有模型 ID；尚未获取名称或窗口信息。"
-        } else if preset.is_some_and(|preset| preset.model == model.trim()) {
-            "预设模型尚未向服务验证名称、窗口或对话能力。"
-        } else {
-            "手动填写模型 ID；名称与窗口未知。"
-        };
-        block = block.child(
-            div()
-                .text_size(px(11.))
-                .line_height(px(17.6))
-                .text_color(rgba(colors.role_text))
-                .child(source),
-        );
-    }
-    block
 }
 
 fn dialog_button(
@@ -6326,7 +7481,7 @@ impl Render for SettingsShell {
             |surface, delta| surface.opacity(delta).top(px(3. * (1. - delta))),
         );
         let dialog = self.render_editor(window, cx);
-        let menu = self.render_effort_menu(cx);
+        let menu = self.render_provider_select(cx);
         div()
             .id("settings-shell")
             .relative()
