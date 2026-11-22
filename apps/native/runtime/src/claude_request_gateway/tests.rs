@@ -2310,6 +2310,8 @@ fn deepseek_gateway_reads_resumed_usage_from_hud_before_any_upstream_response() 
         Arc::new(plan),
         Duration::from_secs(15),
         Some(Arc::new(move || observed.lock().ok().map(|usage| *usage))),
+        None,
+        Arc::default(),
         Some(address),
     )?;
     let (requests, workers) = record(server, 2, "200 OK", "", b"ok");

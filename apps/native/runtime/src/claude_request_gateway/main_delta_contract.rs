@@ -1,15 +1,3 @@
-// Exercise the private gateway over HTTP without exposing a test-only routing API
-// or resolving the DeepSeek host. The gateway's socket remap is compiled only here
-// and in the library's unit tests.
-#[path = "../src/claude_request_gateway.rs"]
-mod claude_request_gateway;
-
-mod host {
-    pub(crate) fn native_role_catalog() -> Vec<serde_json::Value> {
-        panic!("loopback fixtures never select a lazy upstream catalog");
-    }
-}
-
 use std::{
     io::{self, BufRead, BufReader, Read, Write},
     net::{SocketAddr, TcpListener},
@@ -18,14 +6,14 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Result, ensure};
-use claude_request_gateway::{
+use super::{
     Gateway,
     tests::{
         TIMEOUT, exchange, head, length, listener, open_request, projection, read_chunk, record,
         upstream, write_chunk,
     },
 };
+use anyhow::{Result, ensure};
 use serde_json::{Value, json};
 
 fn main_delta_gateway(ordinary: SocketAddr, deepseek: SocketAddr) -> Result<Gateway> {

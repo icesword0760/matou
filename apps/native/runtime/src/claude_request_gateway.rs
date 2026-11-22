@@ -4,11 +4,13 @@ use std::{
     convert::Infallible,
     error::Error as _,
     fmt::Write as _,
+    future::{Future, poll_fn},
+    io,
     net::Ipv4Addr,
     pin::Pin,
     sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
         mpsc,
     },
     task::{Context as TaskContext, Poll},
@@ -35,7 +37,7 @@ use matou_native_core::{
     claude_role_budget::CLAUDE_ROLES,
     provider_launch::{
         ClaudeGatewayCompaction, ClaudeGatewayConnection, ClaudeGatewayProjection,
-        ClaudeGatewayRole, EFFORTS,
+        ClaudeGatewayRole, EFFORTS, PreparedSubscriptionTarget,
     },
 };
 use serde_json::{Map, Value, json};
@@ -45,6 +47,15 @@ use tokio::{
     task::AbortHandle,
 };
 use tower_service::Service;
+
+use crate::{
+    egress_probe::Family, model_router::RouterConnection, subscription_launch::RouterRequest,
+    subscription_service::SessionSubscriptions,
+};
+
+#[cfg(test)]
+#[path = "claude_request_gateway/main_delta_contract.rs"]
+mod main_delta_contract;
 
 #[path = "claude_request_gateway/deepseek_token_usage.rs"]
 mod deepseek_token_usage;
@@ -90,11 +101,15 @@ impl Gateway {
     pub(crate) fn start_with_context(
         projection: Arc<ClaudeGatewayProjection>,
         read_context_usage: Option<ReadContextUsage>,
+        subscriptions: Option<SessionSubscriptions>,
+        blocked_families: Arc<AtomicU8>,
     ) -> Result<Self> {
         Self::start_gateway(
             projection,
             gemini_sse_keepalive::INTERVAL,
             read_context_usage,
+            subscriptions,
+            blocked_families,
             #[cfg(test)]
             None,
         )
@@ -106,13 +121,22 @@ impl Gateway {
         keep_alive_interval: Duration,
         loopback: Option<std::net::SocketAddr>,
     ) -> Result<Self> {
-        Self::start_gateway(projection, keep_alive_interval, None, loopback)
+        Self::start_gateway(
+            projection,
+            keep_alive_interval,
+            None,
+            None,
+            Arc::default(),
+            loopback,
+        )
     }
 
     fn start_gateway(
         projection: Arc<ClaudeGatewayProjection>,
         keep_alive_interval: Duration,
         read_context_usage: Option<ReadContextUsage>,
+        subscriptions: Option<SessionSubscriptions>,
+        blocked_families: Arc<AtomicU8>,
         #[cfg(test)] loopback: Option<std::net::SocketAddr>,
     ) -> Result<Self> {
         let mut random = [0u8; 32];
@@ -130,6 +154,8 @@ impl Gateway {
             stopped: Arc::clone(&stopped),
             token_usage: Arc::default(),
             read_context_usage,
+            subscriptions,
+            blocked_families,
             keep_alive_interval,
             #[cfg(test)]
             loopback,
@@ -198,6 +224,8 @@ struct State {
     prefix: String,
     projection: Arc<ClaudeGatewayProjection>,
     lazy_compaction: OnceCell<ClaudeGatewayRole>,
+    subscriptions: Option<SessionSubscriptions>,
+    blocked_families: Arc<AtomicU8>,
     stopped: Arc<AtomicBool>,
     token_usage: Arc<Mutex<deepseek_token_usage::Tracker>>,
     read_context_usage: Option<ReadContextUsage>,
@@ -210,6 +238,7 @@ struct State {
 struct MessageResponse {
     track_usage: bool,
     gemini_stream: bool,
+    lazy_compaction: bool,
 }
 
 async fn serve(listener: TcpListener, state: Arc<State>) {
@@ -258,7 +287,7 @@ impl State {
         let is_message = parts.method == Method::POST && path == "/v1/messages";
         let is_count = parts.method == Method::POST && path == "/v1/messages/count_tokens";
         let limited = Limited::new(incoming, MAX_REQUEST_BYTES);
-        let (body, length, connection, destination, rewritten, message_response) =
+        let (body, buffered, length, connection, destination, rewritten, message_response) =
             if is_message || is_count {
                 let bytes = limited
                     .collect()
@@ -269,11 +298,10 @@ impl State {
                     .rewrite_json(bytes, path, query, &parts.headers)
                     .await?;
                 let length = bytes.len() as u64;
-                let body = Full::new(bytes)
-                    .map_err(|never| match never {})
-                    .boxed_unsync();
+                let body = full_body(bytes.clone());
                 (
                     body,
+                    Some(bytes),
                     Some(length),
                     connection,
                     destination,
@@ -299,6 +327,7 @@ impl State {
                     .ok_or(Fault::bad_gateway(CONNECTION_ERROR))?;
                 (
                     body,
+                    None,
                     size,
                     connection,
                     destination,
@@ -306,13 +335,28 @@ impl State {
                     MessageResponse::default(),
                 )
             };
-        let mut key = HeaderValue::from_str(&connection.api_key)
-            .map_err(|_| Fault::bad_gateway("Claude model target credential is unavailable."))?;
-        key.set_sensitive(true);
-        request_headers(
-            &mut parts.headers,
-            [(header::HeaderName::from_static("x-api-key"), key)],
-        );
+        if connection.subscription.is_some() {
+            if !matches!(
+                path,
+                "/v1/messages" | "/v1/messages/count_tokens" | "/v1/models"
+            ) {
+                return Err(Fault::new(StatusCode::NOT_FOUND, PATH_ERROR));
+            }
+            request_headers(&mut parts.headers, []);
+            parts.headers.insert(
+                header::ACCEPT_ENCODING,
+                HeaderValue::from_static("identity"),
+            );
+        } else {
+            let mut key = HeaderValue::from_str(&connection.api_key).map_err(|_| {
+                Fault::bad_gateway("Claude model target credential is unavailable.")
+            })?;
+            key.set_sensitive(true);
+            request_headers(
+                &mut parts.headers,
+                [(header::HeaderName::from_static("x-api-key"), key)],
+            );
+        }
         if rewritten {
             for name in ["content-md5", "content-digest", "digest"] {
                 parts.headers.remove(name);
@@ -367,8 +411,18 @@ impl State {
                 .expect("local fixture destination"),
             None => destination,
         };
-        let (mut response, mut body) =
-            send_once(destination, Request::from_parts(parts, body)).await?;
+        let (mut response, mut body) = if let Some(target) = &connection.subscription {
+            self.send_subscription(
+                target,
+                parts,
+                body,
+                buffered,
+                message_response.lazy_compaction,
+            )
+            .await?
+        } else {
+            send_once(destination, Request::from_parts(parts, body)).await?
+        };
         if (message_response.track_usage || message_response.gemini_stream)
             && response.status.is_success()
             && let Some(media) = observable_media(&response.headers)
@@ -388,6 +442,112 @@ impl State {
         }
         filter_hop_by_hop(&mut response.headers);
         Ok(Response::from_parts(response, body.boxed_unsync()))
+    }
+
+    async fn send_subscription(
+        &self,
+        target: &PreparedSubscriptionTarget,
+        parts: hyper::http::request::Parts,
+        body: GatewayBody,
+        buffered: Option<Bytes>,
+        lazy: bool,
+    ) -> Result<(hyper::http::response::Parts, UpstreamBody), Fault> {
+        let subscriptions = self.subscriptions.as_ref().ok_or(Fault::bad_gateway(
+            "Subscription launch service is unavailable",
+        ))?;
+        self.check_subscription_egress(target)?;
+        let binding = match subscriptions.targets.get(target) {
+            Some(binding) => Arc::clone(binding),
+            None if lazy => {
+                let service = Arc::clone(&subscriptions.service);
+                let target = target.clone();
+                tokio::task::spawn_blocking(move || service.prepare_model_target(&target))
+                    .await
+                    .map_err(|_| Fault::bad_gateway(CONNECTION_ERROR))?
+                    .map_err(|_| {
+                        Fault::bad_gateway("Subscription compaction target is unavailable")
+                    })?
+            }
+            None => return Err(Fault::bad_gateway("Subscription target was not prepared")),
+        };
+
+        let route = |failed_generation| {
+            let service = Arc::clone(&subscriptions.service);
+            let binding = Arc::clone(&binding);
+            async move {
+                tokio::task::spawn_blocking(move || service.connection(&binding, failed_generation))
+                    .await
+                    .map_err(|_| Fault::bad_gateway(CONNECTION_ERROR))?
+                    .map_err(|_| {
+                        Fault::bad_gateway(
+                            "Subscription route is unavailable. Check the account and try again.",
+                        )
+                    })
+            }
+        };
+        let mut revoked = Box::pin(binding.cancelled());
+        let connection = with_revocation(revoked.as_mut(), route(None)).await?;
+        self.check_subscription_egress(target)?;
+        let first = with_revocation(
+            revoked.as_mut(),
+            send_router(&connection, parts.clone(), body),
+        )
+        .await;
+
+        let (response, mut body) = match first {
+            Err(error)
+                if error.2.is_some_and(|kind| {
+                    RouterRequest {
+                        local_router_target: true,
+                        body_buffered: buffered.is_some(),
+                        recovery_available: true,
+                        cancelled: binding.is_revoked(),
+                        ..RouterRequest::default()
+                    }
+                    .should_reconnect(kind)
+                }) =>
+            {
+                let recovered =
+                    with_revocation(revoked.as_mut(), route(Some(connection.generation))).await?;
+                self.check_subscription_egress(target)?;
+                with_revocation(
+                    revoked.as_mut(),
+                    send_router(
+                        &recovered,
+                        parts,
+                        full_body(buffered.expect("replayable request")),
+                    ),
+                )
+                .await?
+            }
+            result => result?,
+        };
+        if matches!(
+            response.status,
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+        ) {
+            let service = Arc::clone(&subscriptions.service);
+            let failed = Arc::clone(&binding);
+            tokio::task::spawn_blocking(move || service.mark_needs_sign_in(&failed))
+                .await
+                .map_err(|_| Fault::bad_gateway(CONNECTION_ERROR))?;
+        }
+        drop(revoked);
+        body.cancelled = Some(Box::pin(async move { binding.cancelled().await }));
+        Ok((response, body))
+    }
+
+    fn check_subscription_egress(&self, target: &PreparedSubscriptionTarget) -> Result<(), Fault> {
+        if target.provider == "codex"
+            && self.blocked_families.load(Ordering::Acquire)
+                & (1 << Family::ChatgptSubscription as u8)
+                != 0
+        {
+            return Err(Fault::bad_gateway(
+                "出口异常，已暂停。请在网络检查中恢复出口或明确豁免后重试。 Network egress protection is active.",
+            ));
+        }
+        Ok(())
     }
 
     async fn rewrite_json(
@@ -454,7 +614,14 @@ impl State {
             .or(self.projection.source.as_ref())
             .ok_or(Fault::bad_gateway(SOURCE_ERROR))?;
         let literal_effort = model.and_then(|model| self.projection.literal_effort(model));
-        let literal_model = model.and_then(|model| self.projection.literal_model_override(model));
+        let fallback_alias = connection
+            .subscription
+            .as_ref()
+            .filter(|target| target.model.is_none() && model == Some("matou-opus-fallback"))
+            .map(|target| format!("{}/matou-opus-fallback", target.prefix()));
+        let literal_model = fallback_alias
+            .as_deref()
+            .or_else(|| model.and_then(|model| self.projection.literal_model_override(model)));
         let keep_alive = target.is_some_and(|target| target.stream_keep_alive)
             || target.is_none()
                 && model.is_some_and(|model| self.projection.literal_stream_keep_alive(model));
@@ -553,6 +720,7 @@ impl State {
         }
         let message_response = MessageResponse {
             track_usage: is_message && !marked,
+            lazy_compaction: matches!(compaction, Some(ClaudeGatewayCompaction::OnFirstRequest(_))),
             gemini_stream: is_message
                 && message.as_ref().is_some_and(|message| {
                     message.get("stream").and_then(Value::as_bool) == Some(true)
@@ -809,6 +977,58 @@ fn observable_media(headers: &HeaderMap) -> Option<ObservableMedia> {
     json.then_some(ObservableMedia::Json)
 }
 
+fn full_body(bytes: Bytes) -> GatewayBody {
+    Full::new(bytes)
+        .map_err(|never| match never {})
+        .boxed_unsync()
+}
+
+async fn with_revocation<T>(
+    mut cancelled: Pin<&mut impl Future<Output = ()>>,
+    send: impl Future<Output = Result<T, Fault>>,
+) -> Result<T, Fault> {
+    let mut send = std::pin::pin!(send);
+    poll_fn(|cx| {
+        if cancelled.as_mut().poll(cx).is_ready() {
+            Poll::Ready(Err(Fault::bad_gateway(
+                "Subscription account changed. Restart this Claude session.",
+            )))
+        } else {
+            send.as_mut().poll(cx)
+        }
+    })
+    .await
+}
+
+async fn send_router(
+    connection: &RouterConnection,
+    mut parts: hyper::http::request::Parts,
+    body: GatewayBody,
+) -> Result<(hyper::http::response::Parts, UpstreamBody), Fault> {
+    let authority = format!("127.0.0.1:{}", connection.port);
+    let destination = Uri::builder()
+        .scheme("http")
+        .authority(authority.as_str())
+        .path_and_query(
+            parts
+                .uri
+                .path_and_query()
+                .cloned()
+                .ok_or(Fault::bad_gateway(PATH_ERROR))?,
+        )
+        .build()
+        .map_err(|_| Fault::bad_gateway(PATH_ERROR))?;
+    let mut bearer = HeaderValue::from_str(&format!("Bearer {}", connection.client_key))
+        .map_err(|_| Fault::bad_gateway(CONNECTION_ERROR))?;
+    bearer.set_sensitive(true);
+    parts.headers.insert(header::AUTHORIZATION, bearer);
+    parts.headers.insert(
+        header::HOST,
+        HeaderValue::from_str(&authority).map_err(|_| Fault::bad_gateway(CONNECTION_ERROR))?,
+    );
+    send_once(destination, Request::from_parts(parts, body)).await
+}
+
 async fn send_once(
     destination: Uri,
     request: Request<GatewayBody>,
@@ -834,13 +1054,19 @@ async fn send_once(
             .as_ref()
             .ok_or_else(failure)?
             .clone();
-        connect(connector.call(destination).await.map_err(|_| failure())?).await?
+        connect(
+            connector
+                .call(destination)
+                .await
+                .map_err(|error| Fault::transport(error.as_ref()))?,
+        )
+        .await?
     } else {
         connect(
             http_connector()
                 .call(destination)
                 .await
-                .map_err(|_| failure())?,
+                .map_err(|error| Fault::transport(&error))?,
         )
         .await?
     };
@@ -849,8 +1075,10 @@ async fn send_once(
             && let Some(cause) = error.source()
         {
             Fault::request_body(cause)
+        } else if error.is_incomplete_message() || error.is_closed() {
+            Fault::connection(io::ErrorKind::ConnectionReset)
         } else {
-            failure()
+            Fault::transport(&error)
         }
     })?;
     let (parts, incoming) = response.into_parts();
@@ -864,6 +1092,7 @@ async fn send_once(
         _connection: task,
         usage: None,
         keep_alive: None,
+        cancelled: None,
     };
     Ok((parts, body))
 }
@@ -873,6 +1102,7 @@ struct UpstreamBody {
     _connection: AbortOnDrop,
     usage: Option<deepseek_token_usage::Observer>,
     keep_alive: Option<gemini_sse_keepalive::KeepAlive>,
+    cancelled: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
 }
 
 impl UpstreamBody {
@@ -892,6 +1122,18 @@ impl Body for UpstreamBody {
         mut self: Pin<&mut Self>,
         cx: &mut TaskContext<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, BodyError>>> {
+        if self
+            .cancelled
+            .as_mut()
+            .is_some_and(|signal| signal.as_mut().poll(cx).is_ready())
+        {
+            self.finish();
+            return Poll::Ready(Some(Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "Subscription account changed",
+            )
+            .into())));
+        }
         loop {
             match Pin::new(&mut self.incoming).poll_frame(cx) {
                 Poll::Ready(Some(Ok(frame))) => {
@@ -956,22 +1198,41 @@ async fn connect<T: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static>
 ) -> Result<(client::SendRequest<GatewayBody>, AbortOnDrop), Fault> {
     let (sender, connection) = client::handshake(socket)
         .await
-        .map_err(|_| Fault::bad_gateway(CONNECTION_ERROR))?;
+        .map_err(|error| Fault::transport(&error))?;
     let task = tokio::spawn(async move {
         let _ = connection.await;
     });
     Ok((sender, AbortOnDrop(task.abort_handle())))
 }
 
-struct Fault(StatusCode, Cow<'static, str>);
+struct Fault(StatusCode, Cow<'static, str>, Option<io::ErrorKind>);
 
 impl Fault {
     fn new(status: StatusCode, message: &'static str) -> Self {
-        Self(status, Cow::Borrowed(message))
+        Self(status, Cow::Borrowed(message), None)
     }
 
     fn bad_gateway(message: impl Into<Cow<'static, str>>) -> Self {
-        Self(StatusCode::BAD_GATEWAY, message.into())
+        Self(StatusCode::BAD_GATEWAY, message.into(), None)
+    }
+
+    fn connection(kind: io::ErrorKind) -> Self {
+        Self(
+            StatusCode::BAD_GATEWAY,
+            Cow::Borrowed(CONNECTION_ERROR),
+            Some(kind),
+        )
+    }
+
+    fn transport(error: &(dyn std::error::Error + 'static)) -> Self {
+        let mut cause = Some(error);
+        while let Some(error) = cause {
+            if let Some(io_error) = error.downcast_ref::<io::Error>() {
+                return Self::connection(io_error.kind());
+            }
+            cause = error.source();
+        }
+        Self::bad_gateway(CONNECTION_ERROR)
     }
 
     fn too_large() -> Self {
