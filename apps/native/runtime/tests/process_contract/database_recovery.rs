@@ -447,8 +447,12 @@ fn recovery_rejects_all_concurrent_requests_before_any_files_change() -> Result<
     let fence = Connection::open(child.data.join(format!("{DB}.recovery-action.sqlite")))?;
     fence.execute_batch("BEGIN EXCLUSIVE")?;
     let before = file_tree(&child.data)?;
-    let first = retry(&mut child, &details.recovery_id)?;
+    let mut batch = Vec::new();
+    let mut request_ids = Vec::new();
     for action in [
+        DatabaseRecoveryAction::RetryOpen {
+            expected_recovery_id: details.recovery_id.clone(),
+        },
         DatabaseRecoveryAction::RestoreBackup {
             backup_id: "unused".into(),
             expected_recovery_id: details.recovery_id.clone(),
@@ -458,17 +462,34 @@ fn recovery_rejects_all_concurrent_requests_before_any_files_change() -> Result<
         },
         DatabaseRecoveryAction::ExportRecoveryBundle,
     ] {
-        let duplicate = send_recovery(&mut child, action)?;
-        let error = result(&mut child, &duplicate)?
+        let request_id = database_recovery_request_id();
+        write_message(
+            &mut batch,
+            &ClientMessage::Command(Command::DatabaseRecovery {
+                request_id: request_id.clone(),
+                action,
+            }),
+        )?;
+        request_ids.push(request_id);
+    }
+    // Put the competing requests on the pipe while RetryOpen is fenced,
+    // before any reply wait or filesystem assertion can delay submission.
+    let input = child.input.as_mut().context("child stdin")?;
+    input.write_all(&batch)?;
+    input.flush()?;
+    let (first, duplicates) = request_ids.split_first().expect("retry request");
+    for duplicate in duplicates {
+        let reply = result(&mut child, duplicate)?;
+        let error = reply
             .error
-            .context("concurrent request rejected")?;
+            .with_context(|| format!("concurrent request {duplicate} was accepted"))?;
         ensure!(error.code == "RECOVERY_BUSY", "{error:?}");
         ensure!(file_tree(&child.data)? == before);
     }
     fence.execute_batch("ROLLBACK")?;
     drop(fence);
     ensure!(
-        result(&mut child, &first)?
+        result(&mut child, first)?
             .error
             .context("original is absent")?
             .code
