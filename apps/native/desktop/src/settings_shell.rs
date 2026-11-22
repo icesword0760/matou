@@ -2513,6 +2513,9 @@ impl SettingsShell {
             return option.label.clone();
         }
         if !selected.is_empty() && selected != "__manual__" {
+            if select == CompactionSelect::Effort {
+                return compaction_effort_label(&selected, self.locale).into();
+            }
             if select == CompactionSelect::Model
                 && let Some(draft) = &self.compaction.draft
                 && let Some(provider) = selected_provider(draft, self.providers.providers())
