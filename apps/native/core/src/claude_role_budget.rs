@@ -1,4 +1,4 @@
-//! Context limits for the three Claude tiers and their optional compaction target.
+//! Context limits for the Claude tiers and their optional compaction target.
 
 use anyhow::{Result, ensure};
 use serde_json::{Map, Value};
@@ -6,7 +6,8 @@ use serde_json::{Map, Value};
 const MINIMUM_CONTEXT: u64 = 100_000;
 const FIXED_CONTEXT: u64 = 512_000;
 pub const MAXIMUM_CONTEXT: u64 = 1_000_000;
-pub const CLAUDE_ROLES: [&str; 3] = ["opus", "sonnet", "haiku"];
+pub const CLAUDE_ROLES: [&str; 4] = ["opus", "fable", "sonnet", "haiku"];
+pub const CLAUDE_ROLE_LABELS: [&str; CLAUDE_ROLES.len()] = ["Opus", "Fable", "Sonnet", "Haiku"];
 
 #[derive(Clone, Copy)]
 pub struct ClaudeBudgetTarget<'a> {
@@ -30,7 +31,7 @@ pub struct ClaudeRoleBudget {
 
 /// `roles` follows `CLAUDE_ROLES` order, including for the first threshold error.
 pub fn claude_role_budget(
-    roles: [ClaudeBudgetTarget<'_>; 3],
+    roles: [ClaudeBudgetTarget<'_>; CLAUDE_ROLES.len()],
     compaction: ClaudeBudgetCompaction<'_>,
     context_windows: &Map<String, Value>,
 ) -> Result<ClaudeRoleBudget> {

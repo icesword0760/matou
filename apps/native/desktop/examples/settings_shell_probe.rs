@@ -316,8 +316,8 @@ mod probe {
         let mut draft = ProviderDraft::from_provider(&a);
         assert!(draft.api_key.is_empty());
         draft.name = "确认保留草稿".into();
-        draft.model_mapping = ["probe-opus".into(), String::new(), String::new()];
-        draft.effort_mapping = ["medium".into(), String::new(), String::new()];
+        draft.model_mapping[0] = "probe-opus".into();
+        draft.effort_mapping[0] = "medium".into();
         settings.save(&draft, false).unwrap();
         assert!(settings.saving());
         let Command::SaveProvider {
@@ -828,7 +828,7 @@ mod probe {
         assert!(view.bounds["key-link"].left() > view.bounds["key-label"].left());
         text(&view, "model-detail", "Saved name");
         text(&view, "model-detail", "200,000 tokens");
-        assert!(view.bounds["context"].top() > view.bounds["mapping-2"].bottom());
+        assert!(view.bounds["context"].top() > view.bounds["mapping-3"].bottom());
         text(&view, "context-unknown", "沿用 CLI 默认设置");
 
         let view = activate(cx, "fetch");
@@ -873,18 +873,21 @@ mod probe {
         text(&view, "model-detail", "512,000 tokens");
         text(&view, "model-source", "本次获取");
 
-        let view = activate(cx, "mapping-0");
+        text(&view, "mapping-1", "沿用 Opus");
+        let view = activate(cx, "mapping-1");
         text(&view, "mapping-option-manual", "手动填写模型 ID");
         let view = click(cx, &view, "mapping-option-manual");
-        text(&view, "mapping-list-0", "从列表选择");
-        focus(cx, "manual-0");
+        text(&view, "mapping-list-1", "从列表选择");
+        focus(cx, "manual-1");
         press(window, "cmd-a", cx);
         for key in ["u", "n", "k"] {
             press(window, key, cx);
         }
-        let view = activate(cx, "mapping-list-0");
-        text(&view, "mapping-0", "unk");
-        text(&view, "mapping-0", "未在列表中");
+        let view = activate(cx, "mapping-list-1");
+        text(&view, "mapping-1", "unk");
+        text(&view, "mapping-1", "未在列表中");
+        let view = activate(cx, "effort-1");
+        click(cx, &view, "effort-option-high");
         activate(cx, "context-512k");
         let view = activate(cx, "close");
         text(&view, "confirmation", "有尚未保存的修改");
@@ -892,7 +895,9 @@ mod probe {
         activate(cx, "save");
         let (request, input) = save_command();
         assert_eq!(input["model"], "other-model");
-        assert_eq!(input["modelMapping"]["opus"], "unk");
+        assert_eq!(input["modelMapping"]["fable"], "unk");
+        assert_eq!(input["effortMapping"]["fable"], "high");
+        assert_eq!(input["modelMapping"]["opus"], "saved-model");
         assert_eq!(input["contextWindowMode"], "512k");
         assert_eq!(input["modelMetadata"].as_array().unwrap().len(), 2);
         let mut saved_api = api;
@@ -908,7 +913,7 @@ mod probe {
         text(&view, "title", "编辑供应商");
         text(&view, "subtitle", "用于 Claude Code");
         text(&view, "provider-name", "供应商名称");
-        for role in 0..3 {
+        for role in 0..4 {
             assert!(view.bounds.contains_key(format!("mapping-{role}").as_str()));
             assert!(view.bounds.contains_key(format!("effort-{role}").as_str()));
         }
@@ -936,6 +941,12 @@ mod probe {
         click(cx, &view, "mapping-option-chat-b");
         let view = activate(cx, "effort-0");
         click(cx, &view, "effort-option-high");
+        let view = activate(cx, "mapping-1");
+        text(&view, "mapping-option-", "沿用 Opus");
+        text(&view, "mapping-option-manual", "手动填写模型 ID");
+        click(cx, &view, "mapping-option-chat-b");
+        let view = activate(cx, "effort-1");
+        click(cx, &view, "effort-option-low");
         focus(cx, "name");
         press(window, "end", cx);
         press(window, "x", cx);
@@ -950,6 +961,8 @@ mod probe {
         assert_eq!(input["kind"], "subscription");
         assert_eq!(input["modelMapping"]["opus"], "chat-b");
         assert_eq!(input["effortMapping"]["opus"], "high");
+        assert_eq!(input["modelMapping"]["fable"], "chat-b");
+        assert_eq!(input["effortMapping"]["fable"], "low");
         assert_eq!(input["contextWindowMode"], "maximum");
         assert!(input.get("subscription").is_none() && input.get("apiKey").is_none());
         let mut saved_subscription = subscription;
@@ -981,7 +994,7 @@ mod probe {
         activate(cx, "new");
         activate(cx, "custom");
         let view = activate(cx, "next");
-        assert!(view.bounds["context"].top() > view.bounds["mapping-2"].bottom());
+        assert!(view.bounds["context"].top() > view.bounds["mapping-3"].bottom());
         assert_eq!(view.context_mode.as_deref(), Some("default"));
         activate(cx, "context-maximum");
         let view = activate(cx, "back");
@@ -1475,6 +1488,8 @@ mod probe {
         let (panel, flags) = data(cx);
         assert!(!flags.0);
         assert_eq!(panel.rows[0].target, "最终：隔离默认 · base-opus");
+        assert_eq!(panel.rows[1].tier, "Fable");
+        assert_eq!(panel.rows[1].target, "最终：隔离默认 · base-opus");
         assert!(
             panel.rows[0]
                 .provider
@@ -1482,15 +1497,15 @@ mod probe {
                 .iter()
                 .all(|item| item.value != "subscription")
         );
-        assert_eq!(panel.rows[2].provider.label, "subscription · 不可用");
+        assert_eq!(panel.rows[3].provider.label, "subscription · 不可用");
         assert_eq!(
-            panel.rows[2].problem.as_deref(),
+            panel.rows[3].problem.as_deref(),
             Some("账号已失效，请重新登录或选择其他供应商。")
         );
         assert!(!panel.can_save);
 
+        action(cx, AssignmentAction::Provider(3, "".into()));
         action(cx, AssignmentAction::Provider(2, "".into()));
-        action(cx, AssignmentAction::Provider(1, "".into()));
         draw(window, cx);
         window
             .update(cx, |view, window, cx| {
@@ -1509,12 +1524,25 @@ mod probe {
         assert!(!data(cx).0.can_save);
         action(cx, AssignmentAction::Model(0, "target-opus".into()));
         action(cx, AssignmentAction::Effort(0, "high".into()));
+        assert_eq!(data(cx).0.rows[1].target, "最终：隔离备用 · 备用 Opus · 高");
+        action(cx, AssignmentAction::Provider(1, "target".into()));
+        action(cx, AssignmentAction::Model(1, "target-opus".into()));
+        action(cx, AssignmentAction::Effort(1, "low".into()));
+        assert!(!data(cx).0.can_save);
+        assert!(data(cx).0.rows[1].problem.is_some());
+        action(cx, AssignmentAction::Model(1, "target-sonnet".into()));
+        action(cx, AssignmentAction::Effort(1, "low".into()));
         let (panel, flags) = data(cx);
+        assert_eq!(
+            panel.rows[1].target,
+            "当前目标：隔离备用 · 备用 Sonnet · 低"
+        );
         assert_eq!(flags, (true, false, false, false));
         assert_eq!(panel.rows[0].target, "当前目标：隔离备用 · 备用 Opus · 高");
         assert!(panel.can_save);
         let expected = json!({
-            "opus": {"providerId": "target", "model": "target-opus", "effort": "high"}
+            "opus": {"providerId": "target", "model": "target-opus", "effort": "high"},
+            "fable": {"providerId": "target", "model": "target-sonnet", "effort": "low"}
         });
         let save = |cx: &mut AsyncApp, expected| {
             action(cx, AssignmentAction::Save);
@@ -1558,11 +1586,11 @@ mod probe {
         action(cx, AssignmentAction::Restore);
         let (panel, _) = data(cx);
         assert!(
-            panel.rows[..3]
+            panel.rows[..4]
                 .iter()
                 .all(|row| row.target.starts_with("最终："))
         );
-        assert_eq!(panel.rows[3].target, "未指定：搜索请求使用当前档位供应商");
+        assert_eq!(panel.rows[4].target, "未指定：搜索请求使用当前档位供应商");
         let restored = save(cx, json!({}));
         reply(cx, restored, Some(json!({})));
         assert_eq!(data(cx).1, (false, false, true, false));
@@ -1704,10 +1732,10 @@ mod probe {
         reply(cx, successful, rows.clone());
         let current = panel(cx);
         assert!(current.can_save);
-        assert_eq!(current.rows[1].target, "最终：隔离官方 · Sonnet alias");
-        assert_eq!(current.rows[2].target, "最终：隔离官方 · Haiku concrete");
+        assert_eq!(current.rows[2].target, "最终：隔离官方 · Sonnet alias");
+        assert_eq!(current.rows[3].target, "最终：隔离官方 · Haiku concrete");
 
-        for (index, name) in ["Opus alias", "Sonnet alias", "Haiku concrete"]
+        for (index, name) in ["Opus alias", "Opus alias", "Sonnet alias", "Haiku concrete"]
             .into_iter()
             .enumerate()
         {
@@ -1738,10 +1766,10 @@ mod probe {
             assert_eq!(options[6].label, "fable");
             action(cx, AssignmentAction::Provider(index, "".into()));
         }
-        action(cx, AssignmentAction::Provider(1, "custom".into()));
+        action(cx, AssignmentAction::Provider(2, "custom".into()));
         let current = panel(cx);
         assert_eq!(
-            current.rows[1]
+            current.rows[2]
                 .model
                 .items
                 .iter()
@@ -1749,7 +1777,7 @@ mod probe {
                 .collect::<Vec<_>>(),
             ["", "custom-only"]
         );
-        action(cx, AssignmentAction::Provider(1, "".into()));
+        action(cx, AssignmentAction::Provider(2, "".into()));
         action(
             cx,
             AssignmentAction::Provider(0, "anthropic-official".into()),

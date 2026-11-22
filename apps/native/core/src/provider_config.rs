@@ -14,13 +14,12 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
-use crate::provider_launch::EFFORTS;
+use crate::{claude_role_budget::CLAUDE_ROLES as ROLES, provider_launch::EFFORTS};
 use models::{normalize_metadata, subscription_model};
 
 const CONFIG_FILE: &str = "provider-config.json";
 const TEMP_FILE: &str = "provider-config.json.tmp";
 const CLIS: [&str; 2] = ["claude-code", "codex"];
-const ROLES: [&str; 3] = ["opus", "sonnet", "haiku"];
 const RISK_POLICY: &str = "antigravityRiskAcceptedAt";
 const DEFAULT_MODEL_INPUT: &str = "__cli_default__";
 const DEFAULT_MODEL_VIEW: &str = "CLI 默认";
@@ -373,6 +372,9 @@ impl ProviderConfigStore {
             .context("Invalid subscription model directory")?;
         for role in ROLES {
             let id = mapping[role].as_str().unwrap_or_default();
+            if role == "fable" && id.is_empty() {
+                continue;
+            }
             let normalized = id.to_ascii_lowercase();
             let model = models
                 .iter()
@@ -535,6 +537,9 @@ impl ProviderConfigStore {
             let mapping =
                 require_object(&input["modelMapping"], "Selected model is not available")?;
             for role in ROLES {
+                if role == "fable" && mapping.get(role).is_none_or(|id| id == "") {
+                    continue;
+                }
                 ensure!(
                     mapping.get(role).is_some_and(
                         |id| id.is_string() && models.iter().any(|model| model["id"] == *id)
@@ -774,7 +779,10 @@ fn normalize_mapping(value: &Value) -> Result<Value> {
             .get(role)
             .map_or(Some(""), Value::as_str)
             .context("Invalid model mapping")?;
-        mapping.insert(role.into(), json!(trim(model)));
+        let model = trim(model);
+        if role != "fable" || !model.is_empty() {
+            mapping.insert(role.into(), json!(model));
+        }
     }
     Ok(Value::Object(mapping))
 }
@@ -898,8 +906,9 @@ fn subscription_max_effort(subscription: &Value, model: &Value) -> bool {
             .any(|word| {
                 matches!(word, "gpt" | "codex") || matches!(word.as_bytes(), [b'o', b'1'..=b'9'])
             })
-        && ["claude", "opus", "sonnet", "haiku"]
-            .iter()
+        && ROLES
+            .into_iter()
+            .chain(["claude"])
             .any(|part| label.contains(part))
 }
 

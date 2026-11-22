@@ -1,14 +1,13 @@
 //! Provider settings use the runtime's redacted Graph replies.
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use matou_native_core::provider_launch::EFFORTS;
+use matou_native_core::{claude_role_budget::CLAUDE_ROLES as ROLES, provider_launch::EFFORTS};
 use matou_native_runtime::protocol::{ProviderSettingsReply, ProviderSettingsResult};
 use serde_json::{Value, json};
 
 use crate::runtime_bridge::{Command, ConnectionPhase, RuntimeCommands};
 
 const CLI: &str = "claude-code";
-const ROLES: [&str; 3] = ["opus", "sonnet", "haiku"];
 const CONNECTING: &str = "供应商配置服务正在连接，请稍后重试";
 const LOAD_FAILED: &str = "供应商配置载入失败";
 const SAVE_FAILED: &str = "供应商配置保存失败";
@@ -30,8 +29,8 @@ pub(crate) struct ProviderDraft {
     pub(crate) endpoint: String,
     pub(crate) api_key: String,
     pub(crate) model: String,
-    pub(crate) model_mapping: [String; 3],
-    pub(crate) effort_mapping: [String; 3],
+    pub(crate) model_mapping: [String; ROLES.len()],
+    pub(crate) effort_mapping: [String; ROLES.len()],
     pub(crate) built_in: bool,
     pub(crate) has_api_key: bool,
     pub(crate) original_endpoint: String,
@@ -120,9 +119,10 @@ impl ProviderDraft {
     pub(crate) fn subscription_models_valid(&self) -> bool {
         self.subscription_kind.is_none() || {
             let models = self.available_models();
-            self.model_mapping
-                .iter()
-                .all(|id| models.iter().any(|model| model["id"] == id.trim()))
+            self.model_mapping.iter().zip(ROLES).all(|(id, role)| {
+                let id = id.trim();
+                (role == "fable" && id.is_empty()) || models.iter().any(|model| model["id"] == id)
+            })
         }
     }
 
@@ -221,8 +221,9 @@ impl ProviderDraft {
             Some("codex") => false,
             Some(_) => {
                 !gpt_family(&label)
-                    && ["claude", "opus", "sonnet", "haiku"]
-                        .iter()
+                    && ROLES
+                        .into_iter()
+                        .chain(["claude"])
                         .any(|part| label.contains(part))
             }
             None => !self.is_codex() && !gpt_family(&model.to_ascii_lowercase()),
@@ -247,7 +248,8 @@ impl ProviderDraft {
     }
 
     pub(crate) fn effort_supported(&self, index: usize, effort: &str) -> bool {
-        effort.is_empty()
+        (!self.is_codex() && ROLES[index] == "fable" && self.model_mapping[index].trim().is_empty())
+            || effort.is_empty()
             || self
                 .base_efforts(index)
                 .iter()
@@ -270,7 +272,11 @@ impl ProviderDraft {
         let mut model_mapping = serde_json::Map::new();
         let mut effort_mapping = serde_json::Map::new();
         for (index, role) in ROLES.into_iter().enumerate() {
-            model_mapping.insert(role.into(), json!(self.model_mapping[index].trim()));
+            let mapping = self.model_mapping[index].trim();
+            if role == "fable" && mapping.is_empty() {
+                continue;
+            }
+            model_mapping.insert(role.into(), json!(mapping));
             let effort = self.effort_mapping[index].as_str();
             effort_mapping.insert(
                 role.into(),
@@ -904,6 +910,30 @@ mod tests {
         draft.model_mapping[0] = "gpt-5-probe".into();
         assert!(!draft.effort_supported(0, "max"));
         assert!(draft.effort_supported(0, "follow"));
+    }
+
+    #[test]
+    fn fable_draft_saves_valid_effort_and_clears_the_optional_mapping() {
+        let mut draft = ProviderDraft::from_provider(&json!({
+            "id": "subscription", "kind": "subscription", "name": "Account",
+            "modelMapping": {"opus": "work", "sonnet": "work", "haiku": "work"},
+            "subscription": {"provider": "codex", "modelMetadata": [
+                {"id": "work"}, {"id": "fable-special", "supportedEfforts": ["high"]}
+            ]}
+        }));
+        assert!(draft.validation_error().is_none());
+        draft.model_mapping[1] = "unknown".into();
+        assert!(draft.validation_error().is_some());
+        draft.model_mapping[1] = "fable-special".into();
+        draft.effort_mapping[1] = "low".into();
+        assert!(draft.validation_error().is_some());
+        draft.effort_mapping[1] = "high".into();
+        assert!(draft.validation_error().is_none());
+        assert_eq!(draft.input()["modelMapping"]["fable"], "fable-special");
+        assert_eq!(draft.input()["effortMapping"]["fable"], "high");
+        draft.model_mapping[1].clear();
+        assert!(draft.input()["modelMapping"].get("fable").is_none());
+        assert!(draft.input()["effortMapping"].get("fable").is_none());
     }
 
     #[test]

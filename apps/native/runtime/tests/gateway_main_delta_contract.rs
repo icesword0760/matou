@@ -30,7 +30,7 @@ use serde_json::{Value, json};
 
 fn main_delta_gateway(ordinary: SocketAddr, deepseek: SocketAddr) -> Result<Gateway> {
     let mut plan = projection(ordinary, deepseek)?;
-    let sonnet = plan.roles[1].as_mut().unwrap();
+    let sonnet = plan.roles[2].as_mut().unwrap();
     sonnet.model = "deepseek-flash".into();
     sonnet.max_output_tokens = None;
     sonnet.connection.endpoint = url::Url::parse("https://api.deepseek.com/anthropic")?;

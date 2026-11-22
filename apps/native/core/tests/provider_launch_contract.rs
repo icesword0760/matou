@@ -195,8 +195,8 @@ fn web_search_preferences_resolve_exactly_for_new_launches_in_two_workspaces() -
         assert_eq!(&plan.launch.cwd, cwd);
         let snapshot = plan.gateway.context("search-only snapshot")?;
         assert_eq!(
-            snapshot.roles.map(|role| role.unwrap().model),
-            ["work-opus", "work-sonnet", "work-haiku"]
+            [0, 1, 2, 3].map(|index| snapshot.role_target(index).unwrap().model.as_str()),
+            ["work-opus", "work-opus", "work-sonnet", "work-haiku"]
         );
         let search = snapshot.web_search.context("search target")?;
         assert_eq!(search.model, "claude-search-fixture");
@@ -409,6 +409,88 @@ fn new_role_assignment_projects_exact_provider_model_and_effort() -> Result<()> 
             assert!(!launch.env.contains_key(OsStr::new(name)));
         }
     }
+    Ok(())
+}
+
+#[test]
+fn managed_launch_replaces_stale_model_environment_for_api_and_official() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("provider-config.json");
+    let inherited = [
+        ("ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME", "stale-gemini"),
+        ("ANTHROPIC_DEFAULT_FABLE_MODEL", "matou-role/opus"),
+        ("ANTHROPIC_DEFAULT_FABLE_MODEL_NAME", "stale-fable"),
+        (
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION",
+            "old-description",
+        ),
+        ("ANTHROPIC_MODEL", "old-model"),
+        ("ANTHROPIC_SMALL_FAST_MODEL", "old-fast"),
+        ("CLAUDE_CODE_GATEWAY_HINT_HEADERS", "old-headers"),
+        ("CLAUDE_CODE_SUBAGENT_MODEL_FORCE", "old-subagent"),
+    ];
+    let mut environment = inherited.to_vec();
+    environment.extend([
+        ("HTTPS_PROXY", "http://localhost:1234"),
+        ("CLAUDE_CONFIG_DIR", "isolated"),
+    ]);
+    let official = prepare(temp.path(), Value::Null, &environment)?;
+    for (key, _) in inherited {
+        assert!(!official.env.contains_key(OsStr::new(key)), "{key}");
+    }
+    assert_env(&official, "HTTPS_PROXY", "http://localhost:1234");
+    assert_env(&official, "CLAUDE_CONFIG_DIR", "isolated");
+
+    let mut provider = json!({
+        "id": "deepseek", "endpoint": "https://api.deepseek.com/anthropic",
+        "model": "deepseek-v4-pro",
+        "modelMapping": {"opus": "deepseek-v4-pro", "haiku": "deepseek-flash"}
+    });
+    for mapping in [None, Some("deepseek-fable")] {
+        if let Some(mapping) = mapping {
+            provider["modelMapping"]["fable"] = json!(mapping);
+        }
+        fs::write(&path, config(json!([provider]), "deepseek").to_string())?;
+        let api = prepare(temp.path(), Value::Null, &environment)?;
+        for (role, model) in [
+            ("HAIKU", "deepseek-flash"),
+            ("FABLE", mapping.unwrap_or("deepseek-v4-pro")),
+        ] {
+            let key = format!("ANTHROPIC_DEFAULT_{role}_MODEL");
+            assert_env(&api, &key, model);
+            assert_env(&api, &format!("{key}_NAME"), model);
+        }
+        for (key, _) in &inherited[3..] {
+            assert!(!api.env.contains_key(OsStr::new(key)), "{key}");
+        }
+        assert_env(&api, "HTTPS_PROXY", "http://localhost:1234");
+    }
+    Ok(())
+}
+
+#[test]
+fn fable_startup_selects_the_independent_assignment_before_opus() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut providers = role_providers();
+    providers["providers"]["claude-code"][0]["model"] = json!("claude-fable-5-2");
+    fs::write(
+        temp.path().join("provider-config.json"),
+        providers.to_string(),
+    )?;
+    let assignments = json!({
+        "opus": {"providerId": "source", "model": "source-main"},
+        "fable": {"providerId": "target", "model": "target-sonnet", "effort": "xhigh"},
+    });
+    let plan = prepare_new(temp.path(), &assignments)?;
+    assert_eq!(plan.assigned_role, Some("fable"));
+    assert_eq!(plan.provider_config_id, "target");
+    assert_eq!(plan.model, "target-sonnet");
+    assert_eq!(plan.effort.as_deref(), Some("xhigh"));
+    assert_env(
+        &plan.launch,
+        "ANTHROPIC_DEFAULT_FABLE_MODEL",
+        "target-sonnet",
+    );
     Ok(())
 }
 
@@ -673,11 +755,8 @@ fn sonnet_only_assignment_cleans_environment_when_starting_opus() -> Result<()> 
         "ANTHROPIC_DEFAULT_SONNET_MODEL",
         "source-sonnet",
     );
-    let stale_models = [
-        "ANTHROPIC_MODEL",
-        "CLAUDE_CODE_SUBAGENT_MODEL",
-        "ANTHROPIC_DEFAULT_FABLE_MODEL",
-    ];
+    let stale_models = ["ANTHROPIC_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL"];
+    assert_env(&plan.launch, "ANTHROPIC_DEFAULT_FABLE_MODEL", "source-main");
     for name in stale_models {
         assert!(!plan.launch.env.contains_key(OsStr::new(name)), "{name}");
     }

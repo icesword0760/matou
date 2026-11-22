@@ -39,6 +39,7 @@ fn frozen_role_budget_fixtures() -> Result<()> {
             .as_str()
             .map_or(&providers[0], provider);
         let roles = CLAUDE_ROLES.map(|role| {
+            let role = if role == "fable" { "opus" } else { role };
             let assignment = &preferences["claudeRoleAssignments"][role];
             match assignment["providerId"].as_str() {
                 Some(id) => target(provider(id), assignment["model"].as_str().unwrap()),
@@ -70,7 +71,13 @@ fn frozen_role_budget_fixtures() -> Result<()> {
                 "{id}"
             );
             assert_eq!(
-                json!(budget.unknown_context_roles),
+                json!(
+                    budget
+                        .unknown_context_roles
+                        .into_iter()
+                        .filter(|role| *role != "fable")
+                        .collect::<Vec<_>>()
+                ),
                 expected["value"]["unknownContextRoles"],
                 "{id}"
             );
@@ -96,7 +103,11 @@ fn maximum_falls_back_to_standard_and_checks_tiers_before_compaction() -> Result
     };
     let modes = json!({"api": "maximum"});
     let modes = modes.as_object().unwrap();
-    let budget = claude_role_budget([target; 3], ClaudeBudgetCompaction::Follow, modes)?;
+    let budget = claude_role_budget(
+        [target; CLAUDE_ROLES.len()],
+        ClaudeBudgetCompaction::Follow,
+        modes,
+    )?;
     assert_eq!(budget.context_window, Some(123_456));
 
     let small = ClaudeBudgetTarget {
@@ -104,14 +115,14 @@ fn maximum_falls_back_to_standard_and_checks_tiers_before_compaction() -> Result
         ..target
     };
     let error = claude_role_budget(
-        [target, small, small],
+        [target, small, small, small],
         ClaudeBudgetCompaction::Custom(small),
         modes,
     )
     .unwrap_err();
     assert_eq!(
         error.to_string(),
-        "sonnet · Fixture API: context window is under 100K"
+        "fable · Fixture API: context window is under 100K"
     );
     Ok(())
 }

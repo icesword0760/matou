@@ -404,14 +404,19 @@ impl State {
             .and_then(|object| object.get("model"))
             .and_then(Value::as_str);
         let role = model.and_then(|model| self.projection.request_role(model));
-        if role.is_none() && model.is_some_and(|model| model.starts_with("matou-role/")) {
+        if role.is_none()
+            && model.is_some_and(|model| {
+                model.starts_with("matou-role/")
+                    && self.projection.literal_model_override(model).is_none()
+            })
+        {
             return Err(Fault::bad_gateway("Unknown Claude model role."));
         }
         let marked = compaction_marked(headers);
         if is_message && marked && model.is_some() {
             self.token_usage.lock().unwrap().note_compaction();
         }
-        let role_target = role.and_then(|index| self.projection.roles[index].as_ref());
+        let role_target = role.and_then(|index| self.projection.role_target(index));
         let compaction = self
             .projection
             .compaction
