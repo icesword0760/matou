@@ -411,6 +411,39 @@ pub struct ClaudeLaunch {
 }
 
 impl ClaudeLaunch {
+    pub fn for_fork_rebuild(&self, parent: &str, child: &str) -> Result<Self> {
+        validate_fork_rebuild_ids(parent, child)?;
+        let original = &self.launch;
+        let argv = claude_argv(
+            &self.model,
+            self.effort.as_deref(),
+            Some(ClaudeTarget::RebuildFork { parent, child }),
+            Some(&self.permission_mode),
+        );
+        Ok(Self {
+            launch: ShellLaunch {
+                profile: original.profile,
+                executable: original.executable.clone(),
+                argv,
+                cwd: original.cwd.clone(),
+                data_root: original.data_root.clone(),
+                inherited_env: original.inherited_env.clone(),
+                env: original.env.clone(),
+                cols: original.cols,
+                rows: original.rows,
+            },
+            provider_config_id: self.provider_config_id.clone(),
+            model: self.model.clone(),
+            permission_mode: self.permission_mode.clone(),
+            assigned_role: self.assigned_role,
+            effort: self.effort.clone(),
+            clear_assignment_environment: self.clear_assignment_environment,
+            gateway: self.gateway.clone(),
+            subscription_settings: self.subscription_settings.clone(),
+            subscription_role: self.subscription_role,
+        })
+    }
+
     pub fn project_time_zone(&mut self, setting: &str, system: &str) {
         self.project_time_zone_with_exit(setting, system, None);
     }
@@ -440,8 +473,9 @@ impl ClaudeLaunch {
     }
 }
 
-/// Private launch material. The runtime owns it for at most one CLI run.
+/// Private launch material for a CLI run.
 /// Never serialize or format it as part of a launch diagnostic.
+#[derive(Clone)]
 pub struct ClaudeGatewayProjection {
     pub source: Option<ClaudeGatewayConnection>,
     pub roles: [Option<ClaudeGatewayRole>; ROLES.len()],
@@ -460,6 +494,7 @@ pub struct ClaudeGatewayProjection {
     startup_role: Option<&'static str>,
 }
 
+#[derive(Clone)]
 pub enum ClaudeGatewayCompaction {
     Snapshot {
         target: ClaudeGatewayRole,
@@ -537,6 +572,7 @@ pub struct PreparedSubscriptionTarget {
     pub model: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct ClaudeGatewayConnection {
     pub endpoint: url::Url,
     pub api_key: String,
@@ -592,6 +628,7 @@ impl ClaudeLaunch {
     }
 }
 
+#[derive(Clone)]
 pub struct ClaudeGatewayRole {
     pub connection: ClaudeGatewayConnection,
     pub model: String,
@@ -1016,6 +1053,27 @@ pub fn prepare_claude_launch(
     )
 }
 
+pub fn prepare_claude_fork_rebuild(
+    data_root: &Path,
+    cwd: &Path,
+    binding: &Value,
+    (parent, child): (&str, &str),
+    environment: BTreeMap<OsString, OsString>,
+    cols: u16,
+    rows: u16,
+) -> Result<ClaudeLaunch> {
+    prepare_claude(
+        data_root,
+        cwd,
+        binding,
+        Some(ClaudeTarget::RebuildFork { parent, child }),
+        environment,
+        cols,
+        rows,
+        false,
+    )
+}
+
 pub fn prepare_new_claude_launch(
     data_root: &Path,
     cwd: &Path,
@@ -1121,6 +1179,27 @@ pub enum ClaudeTarget<'a> {
     },
     Resume(&'a str),
     Fork(&'a str),
+    RebuildFork {
+        parent: &'a str,
+        child: &'a str,
+    },
+}
+
+fn validate_fork_rebuild_ids(parent: &str, child: &str) -> Result<()> {
+    let parent = parent.trim();
+    let child = child.trim();
+    ensure!(
+        !parent.is_empty() && !child.is_empty(),
+        "Fork rebuild requires both a parent and a child conversation ID"
+    );
+    ensure!(
+        !parent.eq_ignore_ascii_case(child)
+            && uuid::Uuid::parse_str(parent)
+                .ok()
+                .is_none_or(|parent| { uuid::Uuid::parse_str(child) != Ok(parent) }),
+        "Fork rebuild requires distinct parent and child conversation IDs"
+    );
+    Ok(())
 }
 
 pub fn prepare_managed_claude_launch(
@@ -1160,6 +1239,9 @@ fn prepare_claude(
     rows: u16,
     subscriptions: bool,
 ) -> Result<ClaudeLaunch> {
+    if let Some(ClaudeTarget::RebuildFork { parent, child }) = target {
+        validate_fork_rebuild_ids(parent, child)?;
+    }
     validate_cwd(cwd)?;
     let config = read_provider_config(data_root)?;
     let (provider_binding, assignments) = match target {
@@ -1176,7 +1258,11 @@ fn prepare_claude(
     }
     let bound_role = if matches!(
         target,
-        Some(ClaudeTarget::Resume(_) | ClaudeTarget::PermissionRestart { .. })
+        Some(
+            ClaudeTarget::Resume(_)
+                | ClaudeTarget::RebuildFork { .. }
+                | ClaudeTarget::PermissionRestart { .. }
+        )
     ) {
         ROLES
             .into_iter()
@@ -2285,11 +2371,21 @@ fn claude_argv(
     if let Some(effort) = effort {
         argv.extend(["--effort".into(), effort.into()]);
     }
-    if let Some(ClaudeTarget::Resume(id) | ClaudeTarget::Fork(id)) = target {
-        argv.extend(["--resume".into(), id.into()]);
-        if matches!(target, Some(ClaudeTarget::Fork(_))) {
-            argv.push("--fork-session".into());
+    match target {
+        Some(ClaudeTarget::Resume(id)) => argv.extend(["--resume".into(), id.into()]),
+        Some(ClaudeTarget::Fork(id)) => {
+            argv.extend(["--resume".into(), id.into(), "--fork-session".into()]);
         }
+        Some(ClaudeTarget::RebuildFork { parent, child }) => {
+            argv.extend([
+                "--resume".into(),
+                parent.into(),
+                "--fork-session".into(),
+                "--session-id".into(),
+                child.into(),
+            ]);
+        }
+        _ => {}
     }
     match permission {
         Some("bypassPermissions") => argv.push("--dangerously-skip-permissions".into()),
