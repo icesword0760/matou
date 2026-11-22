@@ -290,6 +290,68 @@ mod probe {
         })
     }
 
+    #[::core::prelude::v1::test]
+    fn inactive_official_provider_requests_catalog_before_role_assignments_load() {
+        use crate::settings_shell::claude_role_assignments::ClaudeAssignments;
+
+        let (commands, sink) = runtime_bridge::probe_channel();
+        let mut assignments = ClaudeAssignments::new(commands.clone());
+        let mut providers = ProviderSettings::new(commands);
+        providers.load();
+        let request = request_id(&sink);
+        providers.receive(result(
+            request,
+            snapshot(
+                vec![
+                    json!({
+                        "id": "anthropic-official", "builtIn": true,
+                        "endpoint": "https://api.anthropic.com",
+                    }),
+                    row("deepseek", "DeepSeek"),
+                ],
+                "deepseek",
+            ),
+        ));
+        assert_eq!(providers.active_id(), Some("deepseek"));
+        let request = assignments
+            .load_catalog(&providers, false)
+            .expect("an inactive official provider still needs its catalog");
+        assert!(
+            matches!(business(&sink).unwrap(), Command::GetClaudeModelCatalog { request_id } if request_id == request)
+        );
+        assert_eq!(assignments.load_catalog(&providers, false), None);
+    }
+
+    #[::core::prelude::v1::test]
+    fn model_catalog_is_not_requested_without_an_eligible_official_provider() {
+        use crate::settings_shell::claude_role_assignments::ClaudeAssignments;
+
+        let (commands, sink) = runtime_bridge::probe_channel();
+        let mut assignments = ClaudeAssignments::new(commands.clone());
+        let mut providers = ProviderSettings::new(commands);
+        providers.load();
+        let request = request_id(&sink);
+        providers.receive(result(
+            request,
+            snapshot(
+                vec![
+                    row("deepseek", "DeepSeek"),
+                    json!({
+                        "id": "redirected", "builtIn": true,
+                        "endpoint": "https://proxy.example.invalid",
+                    }),
+                    json!({
+                        "id": "explicit", "builtIn": true,
+                        "endpoint": "https://api.anthropic.com", "modelMetadata": [],
+                    }),
+                ],
+                "deepseek",
+            ),
+        ));
+        assert_eq!(assignments.load_catalog(&providers, false), None);
+        assert!(business(&sink).is_err());
+    }
+
     fn verify_commands() {
         let (commands, sink) = runtime_bridge::probe_channel();
         let mut settings = ProviderSettings::new(commands);
@@ -1748,6 +1810,18 @@ mod probe {
             let request = request_id(&sink);
             assignment_request_id(&sink);
             reply(cx, request, ProviderSettingsResult::Snapshot(snapshot));
+            let Command::GetClaudeModelCatalog { request_id } = business(&sink).unwrap() else {
+                panic!("the built-in provider should request its model catalog");
+            };
+            window
+                .update(cx, |view, window, cx| {
+                    view.model_catalog_reply(
+                        json!({"requestId": request_id, "models": []}),
+                        window,
+                        cx,
+                    );
+                })
+                .unwrap();
             draw(window, cx);
         };
         open_settings(cx, store.snapshot().unwrap());
@@ -2097,7 +2171,7 @@ mod probe {
             "id": "anthropic-official", "name": "隔离官方", "cli": "claude-code",
             "builtIn": true, "endpoint": "https://api.anthropic.com/", "hasApiKey": false,
         });
-        let mut custom = row("custom", "隔离自定义");
+        let mut custom = row("deepseek", "DeepSeek");
         custom["modelMetadata"] = json!([{"id": "custom-only", "displayName": "自定义模型"}]);
         let providers = |cx: &mut AsyncApp, request, active| {
             window
@@ -2168,6 +2242,24 @@ mod probe {
             };
             request_id
         };
+        let badge = |cx: &mut AsyncApp| {
+            probe_provider_editor(|| draw(window, cx)).labels["provider-window-badge-anthropic-official"]
+                .clone()
+        };
+        let context_labels = |cx: &mut AsyncApp, provider: Value| {
+            update_shell(window, cx, |shell, window, cx| {
+                shell.probe_open_provider_value(provider, window, cx);
+            });
+            let frame = probe_provider_editor(|| draw(window, cx));
+            update_shell(window, cx, |shell, window, _| {
+                shell.probe_provider_editor_focus("close", window);
+            });
+            press(window, "enter", cx);
+            (
+                frame.labels["context-default-tokens"].clone(),
+                frame.labels["context-maximum-tokens"].clone(),
+            )
+        };
 
         toggle(cx);
         let provider_read = request_id(&sink);
@@ -2187,7 +2279,8 @@ mod probe {
 
         let rows = json!({"models": [
             {"id": "claude-opus-fixture", "displayName": "Opus concrete", "contextWindow": 200000},
-            {"id": "default", "resolvedModel": "claude-opus-fixture", "displayName": "Default (recommended)"},
+            {"id": "default", "resolvedModel": "claude-opus-fixture", "displayName": "Default (recommended)",
+                "contextWindow": 1000000, "maxContextWindow": 1000000},
             {"id": "opus", "resolvedModel": "claude-opus-fixture", "displayName": "Opus alias",
                 "contextWindow": 200000, "maxContextWindow": 1000000, "supportedEfforts": ["high"]},
             {"id": "sonnet", "resolvedModel": "claude-sonnet-fixture", "displayName": "Sonnet alias"},
@@ -2206,6 +2299,11 @@ mod probe {
                 first
             };
             reply(cx, active, result);
+            assert_eq!(badge(cx), "默认窗口");
+            assert_eq!(
+                context_labels(cx, official.clone()),
+                ("由 CLI 决定".into(), "未提供（沿用默认）".into())
+            );
             let current = panel(cx);
             assert_eq!(
                 current.rows[0].problem.as_deref(),
@@ -2219,6 +2317,19 @@ mod probe {
         action(cx, AssignmentAction::RetryCatalog(0));
         let successful = catalog_request();
         reply(cx, successful, rows.clone());
+        assert_eq!(
+            (badge(cx), context_labels(cx, official.clone())),
+            (
+                "默认 1M 窗口".into(),
+                ("1,000,000 tokens".into(), "1,000,000 tokens".into())
+            )
+        );
+        let mut custom_endpoint = official.clone();
+        custom_endpoint["endpoint"] = json!("https://proxy.example.invalid");
+        assert_eq!(
+            context_labels(cx, custom_endpoint),
+            ("由 CLI 决定".into(), "未提供（沿用默认）".into())
+        );
         let current = panel(cx);
         assert!(current.can_save);
         assert_eq!(current.rows[2].target, "最终：隔离官方 · Sonnet alias");
@@ -2255,7 +2366,7 @@ mod probe {
             assert_eq!(options[6].label, "fable");
             action(cx, AssignmentAction::Provider(index, "".into()));
         }
-        action(cx, AssignmentAction::Provider(2, "custom".into()));
+        action(cx, AssignmentAction::Provider(2, "deepseek".into()));
         let current = panel(cx);
         assert_eq!(
             current.rows[2]
@@ -2299,20 +2410,21 @@ mod probe {
         toggle(cx);
         let provider_read = request_id(&sink);
         let assignment_read = assignment_request_id(&sink);
-        providers(cx, provider_read, "custom");
+        providers(cx, provider_read, "deepseek");
+        let inactive = catalog_request();
+        assignments(cx, assignment_read, saved);
         assert!(
             business(&sink).is_err(),
-            "unused official provider should not request its catalog"
+            "the assignment reply repeated the catalog request"
         );
-        assignments(cx, assignment_read, saved);
-        let explicit = catalog_request();
-        reply(cx, explicit, rows);
+        reply(cx, inactive, rows);
+        assert_eq!(badge(cx), "默认 1M 窗口");
         assert_eq!(panel(cx).rows[0].model.label, "Opus alias");
         window
             .update(cx, |_, window, _| window.remove_window())
             .unwrap();
         println!(
-            "Hidden GPUI: official catalog defaults, alias and concrete choices, explicit/non-default lookup, empty and error retries, custom isolation and alias save"
+            "Hidden GPUI: inactive official catalog lookup, 1M badge and picker, empty fallback, endpoint isolation, alias and concrete choices, retries and alias save"
         );
     }
 
