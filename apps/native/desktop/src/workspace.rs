@@ -2739,11 +2739,17 @@ impl Workspace {
         if self.theme.preference() == preference {
             return;
         }
-        let result = self
-            .data_root
-            .as_deref()
-            .ok_or_else(|| std::io::Error::other("Theme data root is unavailable"))
-            .and_then(|root| write_theme_preference(root, preference));
+        let result = if self.is_read_only() {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Workspace is read-only",
+            ))
+        } else {
+            self.data_root
+                .as_deref()
+                .ok_or_else(|| std::io::Error::other("Theme data root is unavailable"))
+                .and_then(|root| write_theme_preference(root, preference))
+        };
         if let Err(error) = result {
             eprintln!("Save theme preference: {error}");
             if let Some((settings, _)) = &self.settings {
@@ -4964,6 +4970,10 @@ impl Workspace {
         }
     }
 
+    pub fn is_read_only(&self) -> bool {
+        self.read_only.is_some()
+    }
+
     pub fn flush_geometry(&mut self, cx: &mut Context<Self>) {
         self.geometry_timer += 1;
         if let Some(update) = self.pending_geometry.take() {
@@ -4976,7 +4986,7 @@ impl Workspace {
     }
 
     fn write_geometry(&mut self, update: GeometryUpdate, attempt: u8, cx: &mut Context<Self>) {
-        if self.read_only.is_some() {
+        if self.is_read_only() {
             return;
         }
         if self.active_scene_id() == Some(update.scene_id.as_str())
@@ -13761,7 +13771,7 @@ impl Workspace {
                 .child(self.button(
                     text_item(
                         "workspace-menu-finder",
-                        self.locale.text("在 Finder 中显示", "Show in Finder"),
+                        workspace_file_manager_label(self.locale, cfg!(target_os = "macos")),
                     ),
                     &controls[next_focus + 1],
                     move |this, _, cx| {
@@ -17639,6 +17649,41 @@ fn loader_event_label(
             |name| format!("{} · {name}", locale.text("工具", "Tool")).into(),
         ),
         _ => locale.text("系统", "System").into(),
+    }
+}
+
+fn workspace_file_manager_label(locale: InterfaceLocale, is_macos: bool) -> &'static str {
+    if is_macos {
+        locale.text("在 Finder 中显示", "Show in Finder")
+    } else {
+        locale.text("在文件管理器中显示", "Reveal in File Manager")
+    }
+}
+
+#[cfg(test)]
+mod workspace_menu_tests {
+    use super::{InterfaceLocale, workspace_file_manager_label};
+
+    #[test]
+    fn file_manager_label_matches_platform_and_locale() {
+        use InterfaceLocale::{Chinese, English};
+
+        assert_eq!(
+            workspace_file_manager_label(Chinese, true),
+            "在 Finder 中显示"
+        );
+        assert_eq!(
+            workspace_file_manager_label(English, true),
+            "Show in Finder"
+        );
+        assert_eq!(
+            workspace_file_manager_label(Chinese, false),
+            "在文件管理器中显示"
+        );
+        assert_eq!(
+            workspace_file_manager_label(English, false),
+            "Reveal in File Manager"
+        );
     }
 }
 
