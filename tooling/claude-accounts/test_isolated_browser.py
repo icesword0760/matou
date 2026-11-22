@@ -3,7 +3,6 @@ import os
 import io
 import json
 import shutil
-from contextlib import nullcontext
 from pathlib import Path
 import subprocess
 import sys
@@ -15,16 +14,52 @@ from unittest.mock import patch
 import isolated_browser as browser
 
 URL = 'https://claude.ai/oauth/authorize?state=FIXTURE&code_challenge=FIXTURE'
+COMPACT_URL = 'https://claude.ai/oauth/authorize?z-HEHOr2P7pBfhdSDfUPBteRqDDPQWyJ9aC7jG-BhXJMI'
 
 class PrivateBrowserTests(unittest.TestCase):
     def test_only_complete_official_authorization_urls_are_accepted(self):
-        self.assertEqual(browser.authorization_url(('Login: '+URL+'\n').encode()), URL)
-        current = URL.replace('claude.ai/oauth', 'claude.com/cai/oauth')
-        self.assertEqual(browser.authorization_url((current+'\n').encode()), current)
-        for invalid in [URL, URL.replace('claude.ai', 'claude.ai.example.org')+'\n',
-                        URL.replace('https:', 'http:')+'\n', URL.replace('/oauth/authorize', '/redirect')+'\n',
-                        URL.replace('claude.ai', 'attacker@claude.ai')+'\n', URL.replace('state=', 'missing=')+'\n']:
-            self.assertIsNone(browser.authorization_url(invalid.encode()))
+        for url in (URL, COMPACT_URL):
+            for authority in ('claude.ai/oauth', 'claude.com/cai/oauth',
+                              'console.anthropic.com/oauth', 'platform.claude.com:443/oauth'):
+                official = url.replace('claude.ai/oauth', authority)
+                for ending in ('\n', '\r\n', '\x1b[0m'):
+                    self.assertEqual(browser.authorization_url(('Login: ' + official + ending).encode()), official)
+            self.assertIsNone(browser.authorization_url(url.encode()))
+        for invalid in (
+            COMPACT_URL.replace('claude.ai', 'claude.ai.example.org'),
+            COMPACT_URL.replace('claude.ai', 'claude.ai@evil.example'),
+            COMPACT_URL.replace('claude.ai', '@claude.ai'),
+            COMPACT_URL.replace('claude.ai', 'attacker:password@claude.ai'),
+            COMPACT_URL.replace('claude.ai', 'claude.ai:444'),
+            COMPACT_URL.replace('https:', 'http:'),
+            COMPACT_URL.replace('/oauth/authorize', '/redirect'),
+            COMPACT_URL + '#fragment', COMPACT_URL + '#', COMPACT_URL + '=value', COMPACT_URL + '&x',
+            URL.replace('state=', 'missing='), URL.replace('state=FIXTURE', 'state='),
+            *(COMPACT_URL.split('?')[0] + '?' + query for query in ('', 'a' * 15, 'a' * 513, '%41' * 16)),
+        ):
+            self.assertIsNone(browser.authorization_url((invalid + '\n').encode()))
+
+    def test_split_compact_token_waits_for_line_delimiter(self):
+        with tempfile.TemporaryDirectory() as temp:
+            profile = Path(temp)
+            prefix, suffix = COMPACT_URL[:-12], COMPACT_URL[-12:]
+            cli = self.fake_cli(profile, f'''
+import sys, time
+sys.stdout.write({prefix!r})
+sys.stdout.flush()
+time.sleep(0.15)
+sys.stdout.write({(suffix + chr(13) + chr(10))!r})
+sys.stdout.flush()
+time.sleep(0.2)
+''')
+            child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(5)'], start_new_session=True)
+            try:
+                with patch.object(browser, 'find_browser', return_value=('/fixture/chrome', [])), \
+                        patch.object(browser, 'start_browser', return_value=child) as launch:
+                    browser.login(cli, profile, timeout=3)
+                launch.assert_called_once_with('/fixture/chrome', profile, COMPACT_URL, [])
+            finally:
+                browser.stop_process(child)
 
     def test_launch_uses_unique_profile_and_keeps_url_out_of_process_arguments(self):
         with tempfile.TemporaryDirectory() as temp, patch.object(browser.subprocess, 'Popen') as start:
@@ -176,19 +211,21 @@ class PrivateBrowserTests(unittest.TestCase):
                 profile = Path(temp)
                 cli = self.fake_cli(profile, 'import time\nprint('+repr(URL)+',flush=True)\ntime.sleep(30)\n')
                 child = subprocess.Popen([sys.executable, '-c', 'import time;time.sleep(30)'], start_new_session=True)
-                original_sleep = time.sleep
-                interrupted = False
-                def interrupt_once(seconds):
-                    nonlocal interrupted
-                    if not interrupted:
-                        interrupted = True
-                        raise KeyboardInterrupt()
-                    original_sleep(seconds)
+                read_fd, write_fd = os.pipe()
                 try:
-                    with patch.object(browser, 'find_browser', return_value=('/fixture/chrome', [])), patch.object(browser, 'start_browser', return_value=child), (patch.object(browser.time, 'sleep', side_effect=interrupt_once) if cancelled else nullcontext()):
-                        with self.assertRaises(KeyboardInterrupt if cancelled else subprocess.TimeoutExpired):
-                            browser.login(cli, profile, timeout=.3)
-                    self.assertIsNone(child.poll())
+                    with os.fdopen(read_fd) as reader, os.fdopen(write_fd, 'w') as writer:
+                        def launch(*_):
+                            if cancelled:
+                                print(json.dumps({'action': 'cancel-login', 'nonce': 'current'}), file=writer, flush=True)
+                            return child
+
+                        with patch.object(browser, 'find_browser', return_value=('/fixture/chrome', [])), \
+                                patch.object(browser, 'start_browser', side_effect=launch) as start:
+                            with self.assertRaises(KeyboardInterrupt if cancelled else subprocess.TimeoutExpired):
+                                browser.login(cli, profile, timeout=3 if cancelled else 1,
+                                              code_input=reader if cancelled else None, nonce='current')
+                        start.assert_called_once()
+                        self.assertIsNone(child.poll())
                 finally:
                     browser.stop_process(child)
 

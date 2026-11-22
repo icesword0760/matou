@@ -12,6 +12,13 @@ use std::{
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+#[cfg(unix)]
+use std::{
+    ffi::{OsStr, OsString},
+    io::{Seek, SeekFrom},
+    os::unix::{ffi::OsStringExt, process::CommandExt},
+    sync::OnceLock,
+};
 
 #[derive(Serialize, Deserialize)]
 #[serde(
@@ -132,26 +139,34 @@ struct Engine {
     executable: PathBuf,
     script: Option<PathBuf>,
     resolve_login_path: bool,
+    #[cfg(unix)]
+    login_path: OnceLock<Option<OsString>>,
 }
 
 impl Engine {
+    fn new(executable: PathBuf, script: Option<PathBuf>, resolve_login_path: bool) -> Self {
+        Self {
+            executable,
+            script,
+            resolve_login_path,
+            #[cfg(unix)]
+            login_path: OnceLock::new(),
+        }
+    }
+
     fn resolve(allow_default: bool, fixture: Option<PathBuf>) -> Option<Self> {
         if let Some(executable) = fixture {
-            return Some(Self {
-                executable,
-                script: None,
-                resolve_login_path: false,
-            });
+            return Some(Self::new(executable, None, false));
         }
         if !allow_default {
             return None;
         }
         if let Some(path) = std::env::var_os("MATOU_CLAUDE_ACCOUNTS_ENGINE") {
-            return Some(Self {
-                executable: path.into(),
-                script: std::env::var_os("MATOU_CLAUDE_ACCOUNTS_BRIDGE").map(PathBuf::from),
-                resolve_login_path: false,
-            });
+            return Some(Self::new(
+                path.into(),
+                std::env::var_os("MATOU_CLAUDE_ACCOUNTS_BRIDGE").map(PathBuf::from),
+                false,
+            ));
         }
         if std::env::var_os("MATOU_DAG_WINDOW_PROBE").is_some()
             || std::env::var_os("MATOU_WINDOW_REGISTRY_PROBE").is_some()
@@ -165,34 +180,29 @@ impl Engine {
             let executable = bin
                 .join("resources/claude-accounts/matou-claude-accounts/matou-claude-accounts.exe");
             if executable.is_file() {
-                return Some(Self {
-                    executable,
-                    script: None,
-                    resolve_login_path: true,
-                });
+                return Some(Self::new(executable, None, true));
             }
         }
         #[cfg(target_os = "macos")]
         if bin.file_name().is_some_and(|name| name == "MacOS") {
-            return Some(Self {
-                executable: bin
-                    .parent()?
+            return Some(Self::new(
+                bin.parent()?
                     .join("Resources/claude-accounts/matou-claude-accounts/matou-claude-accounts"),
-                script: None,
-                resolve_login_path: true,
-            });
+                None,
+                true,
+            ));
         }
         let tooling =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../tooling/claude-accounts");
-        Some(Self {
-            executable: tooling.join(if cfg!(windows) {
+        Some(Self::new(
+            tooling.join(if cfg!(windows) {
                 ".venv/Scripts/python.exe"
             } else {
                 ".venv/bin/python"
             }),
-            script: Some(tooling.join("bridge.py")),
-            resolve_login_path: true,
-        })
+            Some(tooling.join("bridge.py")),
+            true,
+        ))
     }
 
     fn spawn(&self, root: &Path, input: Value, interactive: bool) -> Result<EngineProcess, Fault> {
@@ -200,19 +210,45 @@ impl Engine {
             return Err("engine-missing");
         }
         let mut command = Command::new(&self.executable);
-        if interactive && self.resolve_login_path {
-            let mut environment = std::env::vars_os().collect::<BTreeMap<_, _>>();
-            environment.remove(std::ffi::OsStr::new("MATOU_CLAUDE_COMMAND"));
-            if let Ok(cwd) = std::env::current_dir() {
-                let _ = matou_native_core::provider_launch::resolve_claude_executable(
-                    &cwd,
-                    &mut environment,
-                );
-                if let Some(path) = environment.get(std::ffi::OsStr::new("PATH")) {
+        // Login is the bridge's only action that starts Claude Code. Roster
+        // reads and local credential transactions need no shell startup.
+        if self.resolve_login_path && interactive {
+            let cwd = ["HOME", "USERPROFILE"]
+                .into_iter()
+                .filter_map(std::env::var_os)
+                .map(PathBuf::from)
+                .find(|path| path.is_absolute() && path.is_dir())
+                .or_else(|| std::env::current_dir().ok());
+            if let Some(cwd) = cwd {
+                command.current_dir(&cwd);
+                #[cfg(unix)]
+                if let Some(path) = self.login_path.get_or_init(|| {
+                    if std::env::var_os("MATOU_DISABLE_LOGIN_PATH_PROBE").as_deref()
+                        == Some(OsStr::new("1"))
+                    {
+                        return None;
+                    }
+                    let shell = std::env::var_os("SHELL")
+                        .filter(|shell| !shell.is_empty())
+                        .unwrap_or_else(|| "/bin/zsh".into());
+                    login_shell_path(&shell, &cwd)
+                }) {
                     command.env("PATH", path);
                 }
             }
         }
+        // Inherit the current safe-browser settings on every spawn. Only PATH
+        // comes from the login shell, never its credentials or other variables.
+        let safe_browser = [
+            "MATOU_SAFE_BROWSER_BIN",
+            "MATOU_SAFE_BROWSER_TZ",
+            "MATOU_SAFE_BROWSER_SEED",
+        ];
+        command.envs(
+            safe_browser
+                .into_iter()
+                .filter_map(|key| std::env::var_os(key).map(|value| (key, value))),
+        );
         let mut child = command
             .args(self.script.iter())
             .arg(root)
@@ -241,12 +277,63 @@ impl Engine {
             child,
             output: Some(output),
         };
-        process.write(&input).map_err(|_| "engine-error")?;
+        let written = process.write(&input);
         if !interactive {
+            written.map_err(|_| "engine-error")?;
             process.child.stdin.take();
         }
+        // A fast interactive exit can close stdin before the first write.
+        // Keep its stdout so the worker can report the bridge's error code.
         Ok(process)
     }
+}
+
+#[cfg(unix)]
+fn login_shell_path(shell: &OsStr, cwd: &Path) -> Option<OsString> {
+    const MARKER: &[u8] = b"__MATOU_LOGIN_PATH__=";
+    const LIMIT: u64 = 64 * 1024;
+    let mut output = tempfile::tempfile().ok()?;
+    let mut child = Command::new(shell)
+        .args(["-ilc", "printf '__MATOU_LOGIN_PATH__=%s\\n' \"$PATH\""])
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(output.try_clone().ok()?)
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .ok()?;
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(10) {
+        if !output
+            .metadata()
+            .is_ok_and(|metadata| metadata.len() <= LIMIT)
+        {
+            break;
+        }
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => {
+                output.seek(SeekFrom::Start(0)).ok()?;
+                let mut bytes = Vec::new();
+                output.take(LIMIT + 1).read_to_end(&mut bytes).ok()?;
+                if bytes.len() as u64 > LIMIT {
+                    return None;
+                }
+                return bytes
+                    .split(|&byte| byte == b'\n')
+                    .rev()
+                    .find_map(|line| line.strip_prefix(MARKER))
+                    .filter(|path| !path.is_empty())
+                    .map(|path| OsString::from_vec(path.to_vec()));
+            }
+            Ok(Some(_)) => return None,
+            Err(_) => break,
+            Ok(None) => thread::sleep(Duration::from_millis(10)),
+        }
+    }
+    // The shell owns a separate process group until reaped.
+    unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL) };
+    let _ = child.wait();
+    None
 }
 
 struct EngineProcess {
@@ -259,6 +346,24 @@ impl EngineProcess {
         let stdin = self.child.stdin.as_mut().ok_or("login-ended")?;
         serde_json::to_writer(&mut *stdin, input).map_err(|_| "login-ended")?;
         stdin.write_all(b"\n").map_err(|_| "login-ended")
+    }
+
+    fn stop_login(&mut self, nonce: &str) {
+        // Let the bridge terminate its own CLI before the process is reaped.
+        // This also works on Windows, where killing the bridge skips Python's finally.
+        if self
+            .write(&json!({"action":"cancel-login", "nonce":nonce}))
+            .is_ok()
+        {
+            self.child.stdin.take();
+            let deadline = Instant::now() + Duration::from_secs(4);
+            while Instant::now() < deadline {
+                if !matches!(self.child.try_wait(), Ok(None)) {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
     }
 
     fn poll(&mut self) -> Option<Result<Value, Fault>> {
@@ -455,9 +560,10 @@ impl Manager {
     }
 
     fn cancel(&mut self) -> Option<u64> {
-        let request = self.login.take().map(|login| {
+        let request = self.login.take().map(|mut login| {
             let nonce = login.nonce.clone();
             let request_id = login.request_id;
+            login.process.stop_login(&nonce);
             drop(login);
             let _ = self.run(json!({"action":"cancel-login", "nonce":nonce}));
             request_id
@@ -468,9 +574,10 @@ impl Manager {
         request
     }
 
-    fn poll_login(&mut self) -> Option<(u64, ClaudeAccountsState)> {
+    fn poll_login(&mut self) -> Option<(u64, ClaudeAccountsState, Option<String>)> {
         let login = self.login.as_mut()?;
         let result = if login.began.elapsed() >= Duration::from_secs(360) {
+            login.process.stop_login(&login.nonce);
             Err("login-timeout")
         } else {
             login.process.poll()?
@@ -496,10 +603,8 @@ impl Manager {
             Ok(())
         });
         drop(login);
-        if result.is_err() {
-            let _ = self.run(json!({"action":"cancel-login", "nonce":nonce}));
-        }
-        Some((request_id, self.state(result.err(), false)))
+        let error = result.err();
+        Some((request_id, self.state(error, false), error.map(|_| nonce)))
     }
 
     fn state(&self, error: Option<Fault>, switched: bool) -> ClaudeAccountsState {
@@ -745,8 +850,11 @@ impl AccountWorker {
             .spawn(move || {
                 let mut manager = Manager::new(root, engine);
                 loop {
-                    if let Some(reply) = manager.poll_login() {
-                        let _ = outgoing.send(reply);
+                    if let Some((id, state, cleanup)) = manager.poll_login() {
+                        let _ = outgoing.send((id, state));
+                        if let Some(nonce) = cleanup {
+                            let _ = manager.run(json!({"action":"cancel-login", "nonce":nonce}));
+                        }
                     }
                     let request = if manager.login.is_some() {
                         incoming.recv_timeout(Duration::from_millis(40))
@@ -792,5 +900,100 @@ impl Drop for AccountWorker {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn executable(path: &Path, script: &str) {
+        fs::write(path, script).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[test]
+    fn login_shell_path_recovers_node_for_an_env_shebang() {
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("nvm/bin");
+        fs::create_dir_all(&bin).unwrap();
+        let shell = root.path().join("login-shell");
+        executable(
+            &shell,
+            "#!/bin/sh\n[ \"$1\" = -ilc ] || exit 1\nPATH=\"$PWD/nvm/bin:$PATH\"\nprintf 'startup banner\\n'\neval \"$2\"\n",
+        );
+        executable(
+            &bin.join("node"),
+            "#!/bin/sh\nprintf 'ready from node\\n'\n",
+        );
+        let claude = root.path().join("claude");
+        executable(&claude, "#!/usr/bin/env node\n");
+        let path = login_shell_path(shell.as_os_str(), root.path()).unwrap();
+        assert_eq!(std::env::split_paths(&path).next(), Some(bin));
+        let result = Command::new(claude).env("PATH", path).output().unwrap();
+        assert!(result.status.success());
+        assert_eq!(result.stdout, b"ready from node\n");
+    }
+
+    fn receive(worker: &AccountWorker, request: u64) -> ClaudeAccountsState {
+        let (id, state) = worker.replies.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert_eq!(id, request);
+        state
+    }
+
+    #[test]
+    fn login_publishes_attempt_and_reports_immediate_engine_errors() {
+        let root = tempfile::tempdir().unwrap();
+        for error in ["cli-missing", "browser-missing", "login-failed"] {
+            let engine = root.path().join(error);
+            executable(
+                &engine,
+                &format!(
+                    "#!/bin/sh\nread -r request\ncase \"$request\" in\n  *cancel-login*) printf '%s\\n' '{{\"ok\":true,\"value\":{{}}}}' ;;\n  *) printf '%s\\n' '{{\"ok\":false,\"error\":\"{error}\"}}' ;;\nesac\n"
+                ),
+            );
+            let worker = AccountWorker::start(root.path(), false, Some(engine)).unwrap();
+            assert!(worker.send(1, ClaudeAccountCommand::Login { replace_id: None }));
+            let waiting = receive(&worker, 1);
+            assert!(waiting.login_attempt_id.is_some());
+            assert!(waiting.error.is_none());
+            let failed = receive(&worker, 1);
+            assert!(failed.login_attempt_id.is_none());
+            assert_eq!(failed.error.as_deref(), Some(error));
+        }
+    }
+
+    #[test]
+    fn cancel_signals_waiting_bridge_and_clears_attempt() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("claude-accounts")).unwrap();
+        let engine = root.path().join("engine");
+        executable(
+            &engine,
+            r#"#!/bin/sh
+read -r request
+case "$request" in
+  *cancel-login*) ;;
+  *)
+    read -r cancel
+    nonce=${cancel#*\"nonce\":\"}
+    nonce=${nonce%%\"*}
+    case "$cancel" in *cancel-login*) printf %s "$nonce" > "$1/stopped" ;; esac
+    ;;
+esac
+printf '%s\n' '{"ok":true,"value":{}}'
+"#,
+        );
+        let worker = AccountWorker::start(root.path(), false, Some(engine)).unwrap();
+        assert!(worker.send(1, ClaudeAccountCommand::Login { replace_id: None }));
+        let waiting = receive(&worker, 1);
+        assert!(worker.send(2, ClaudeAccountCommand::CancelLogin));
+        assert!(receive(&worker, 1).login_attempt_id.is_none());
+        assert!(receive(&worker, 2).login_attempt_id.is_none());
+        assert_eq!(
+            fs::read_to_string(root.path().join("claude-accounts/stopped")).unwrap(),
+            waiting.login_attempt_id.unwrap()
+        );
     }
 }
