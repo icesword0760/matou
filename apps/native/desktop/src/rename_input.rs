@@ -84,6 +84,7 @@ pub struct RenameInput {
     /// the frozen default colors for every other caller.
     pub text_color: Option<Rgba>,
     pub placeholder_color: Option<Rgba>,
+    dialog_dark: Option<bool>,
     session_loader_search_style: bool,
     selection: Range<usize>,
     reversed: bool,
@@ -109,6 +110,7 @@ impl RenameInput {
             search_style: false,
             text_color: None,
             placeholder_color: None,
+            dialog_dark: None,
             session_loader_search_style: false,
             selection: end..end,
             reversed: false,
@@ -123,6 +125,20 @@ impl RenameInput {
             selecting: false,
             document: None,
         }
+    }
+
+    pub fn set_dialog_theme(&mut self, dark: bool) {
+        self.dialog_dark = Some(dark);
+        self.text_color = Some(if dark {
+            rgb(0xe8e8e8)
+        } else {
+            rgba(0x000000d9)
+        });
+        self.placeholder_color = Some(if dark {
+            rgba(0xffffff66)
+        } else {
+            rgba(0x00000066)
+        });
     }
 
     pub fn instructions(text: String, focus: FocusHandle, cx: &mut Context<Self>) -> Self {
@@ -911,7 +927,11 @@ impl Render for RenameInput {
         let entity = cx.entity();
         let document = self.document.is_some();
         let focused = self.focus.is_focused(window);
-        div()
+        let field = match self.dialog_dark {
+            Some(dark) => crate::tab_dialog_style::rename_input_wrap(focused, dark),
+            None => div(),
+        };
+        field
             .id(if document {
                 "instructions-native-input"
             } else {
@@ -927,7 +947,7 @@ impl Render for RenameInput {
             .w_full()
             .relative()
             .rounded(px(8.))
-            .when(!document, |el| {
+            .when(!document && self.dialog_dark.is_none(), |el| {
                 el.bg(rgba(if self.search_style {
                     0x00000000
                 } else {
@@ -1013,16 +1033,10 @@ impl Render for RenameInput {
                 }),
             )
             .when(!document && !self.search_style, |el| {
-                el.child(
-                    div()
-                        .absolute()
-                        .right(px(14.))
-                        .top(px(6.))
-                        .text_size(px(13.))
-                        .line_height(px(20.))
-                        .text_color(rgba(0xffffff57))
-                        .child(format!("{}/20", self.text.encode_utf16().count())),
-                )
+                el.child(crate::tab_dialog_style::rename_counter(
+                    self.text.encode_utf16().count(),
+                    self.dialog_dark.unwrap_or(true),
+                ))
             })
     }
 }
