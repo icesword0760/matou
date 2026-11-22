@@ -179,8 +179,8 @@ pub fn dialog_overlay(id: impl Into<ElementId>) -> Stateful<Div> {
         .bg(color_alpha(0x000000, 0.58))
 }
 
-/// `.light-theme .rename-dialog, .light-theme [role="alertdialog"]`.
-pub fn dialog_panel(viewport_width: f32) -> Div {
+/// `.rename-dialog, [role="alertdialog"]` and its `.light-theme` override.
+pub fn dialog_panel(viewport_width: f32, dark: bool) -> Div {
     let width = 420.0_f32.min((viewport_width - 40.0).max(0.0));
     div()
         .flex()
@@ -188,8 +188,8 @@ pub fn dialog_panel(viewport_width: f32) -> Div {
         .w(px(width))
         .overflow_hidden()
         .rounded(px(12.))
-        .text_color(rgb(0x2f3547))
-        .bg(rgb(0xffffff))
+        .text_color(if dark { rgb(0xf4f4f4) } else { rgb(0x2f3547) })
+        .bg(if dark { rgb(0x292929) } else { rgb(0xffffff) })
 }
 
 /// `.rename-dialog header, [role="alertdialog"] header`.
@@ -203,18 +203,37 @@ pub fn dialog_header() -> Div {
         .pb(px(16.))
 }
 
-/// `.light-theme .rename-dialog h2, .light-theme [role="alertdialog"] h2`.
-pub fn dialog_title(text: impl Into<SharedString>) -> Div {
+/// `.rename-dialog h2, [role="alertdialog"] h2` and its light override.
+pub fn dialog_title(text: impl Into<SharedString>, dark: bool) -> Div {
     div()
-        .text_color(color_alpha(0x000000, 0.85))
+        .text_color(if dark {
+            rgb(0xf4f4f4)
+        } else {
+            color_alpha(0x000000, 0.85)
+        })
         .text_size(px(16.))
         .font_weight(FontWeight::SEMIBOLD)
         .whitespace_nowrap()
         .child(ui_text(text).normal_line_height())
 }
 
-/// `.dialog-close` (no light-theme override in frozen CSS; retains low-opacity white).
-pub fn dialog_close(id: impl Into<ElementId>) -> Stateful<Div> {
+/// `.dialog-close`: the frozen CSS keeps a low-opacity white glyph even on the
+/// light panel; the light surface uses the same alpha over black so the close
+/// affordance stays legible.
+pub fn dialog_close(id: impl Into<ElementId>, dark: bool) -> Stateful<Div> {
+    let (foreground, hover_text, hover_background) = if dark {
+        (
+            color_alpha(0xffffff, 0.34),
+            color_alpha(0xffffff, 0.6),
+            color_alpha(0xffffff, 0.06),
+        )
+    } else {
+        (
+            color_alpha(0x000000, 0.34),
+            color_alpha(0x000000, 0.6),
+            color_alpha(0x000000, 0.06),
+        )
+    };
     div()
         .id(id)
         .flex()
@@ -223,49 +242,55 @@ pub fn dialog_close(id: impl Into<ElementId>) -> Stateful<Div> {
         .justify_center()
         .size(px(28.))
         .rounded(px(6.))
-        .text_color(color_alpha(0xffffff, 0.34))
+        .text_color(foreground)
         .bg(rgba(0x00000000))
         .text_size(px(20.))
         .line_height(relative(1.))
         .cursor_pointer()
-        .hover(|style| {
-            style
-                .text_color(color_alpha(0xffffff, 0.6))
-                .bg(color_alpha(0xffffff, 0.06))
-        })
+        .hover(move |style| style.text_color(hover_text).bg(hover_background))
         .child("×")
 }
 
-/// `.rename-dialog-body` / `.light-theme [role="alertdialog"] > p`.
-pub fn dialog_body() -> Div {
+/// `.rename-dialog-body` / `[role="alertdialog"] > p` in both themes.
+pub fn dialog_body(dark: bool) -> Div {
     div()
         .flex()
         .flex_col()
         .pt(px(8.))
         .px(px(24.))
         .pb(px(24.))
-        .text_color(color_alpha(0x000000, 0.65))
+        .text_color(if dark {
+            color_alpha(0xffffff, 0.7)
+        } else {
+            color_alpha(0x000000, 0.65)
+        })
         .text_size(px(14.))
         .line_height(relative(1.6))
 }
 
-/// `.light-theme .rename-input-wrap` + `input` container styling.
-pub fn rename_input_wrap(focused: bool) -> Div {
+/// `.rename-input-wrap` + `input` container styling in both themes.
+pub fn rename_input_wrap(focused: bool, dark: bool) -> Div {
     let base = div()
         .relative()
-        .flex()
-        .items_center()
         .w_full()
         .min_h(px(32.))
         .pl(px(14.))
         .pr(px(50.))
         .rounded(px(8.))
-        .text_color(color_alpha(0x000000, 0.85))
-        .bg(color_alpha(0x000000, 0.04))
+        .text_color(if dark {
+            rgb(0xe8e8e8)
+        } else {
+            color_alpha(0x000000, 0.85)
+        })
+        .bg(if dark {
+            rgb(0x464646)
+        } else {
+            color_alpha(0x000000, 0.04)
+        })
         .text_size(px(14.));
     if focused {
         base.shadow(vec![BoxShadow {
-            color: color_alpha(0xffffff, 0.15).into(),
+            color: color_alpha(if dark { 0xffffff } else { 0x000000 }, 0.15).into(),
             offset: point(px(0.), px(0.)),
             blur_radius: px(0.),
             spread_radius: px(1.),
@@ -275,21 +300,25 @@ pub fn rename_input_wrap(focused: bool) -> Div {
     }
 }
 
-/// `.rename-input-wrap > span` (retains low-opacity white in frozen CSS).
-pub fn rename_counter(count: usize) -> Div {
+/// `.rename-input-wrap > span`. The frozen CSS only declares the white alpha
+/// used on the dark panel; the light panel uses the same alpha over black so
+/// the character counter remains readable on white.
+pub fn rename_counter(count: usize, dark: bool) -> Div {
     div()
         .absolute()
         .right(px(14.))
-        .text_color(color_alpha(0xffffff, 0.34))
+        .top(px(6.))
+        .text_color(color_alpha(if dark { 0xffffff } else { 0x000000 }, 0.34))
         .text_size(px(13.))
+        .line_height(px(20.))
         .child(format!("{count}/20"))
 }
 
 /// `.rename-dialog-body [role="alert"]`.
-pub fn dialog_error(text: impl Into<SharedString>) -> Div {
+pub fn dialog_error(text: impl Into<SharedString>, dark: bool) -> Div {
     div()
         .mt(px(8.))
-        .text_color(rgb(0xff7b72))
+        .text_color(if dark { rgb(0xff7b72) } else { rgb(0xd94238) })
         .text_size(px(12.))
         .child(ui_text(text))
 }
@@ -313,6 +342,7 @@ pub fn dialog_button(
     label: impl Into<SharedString>,
     primary: bool,
     disabled: bool,
+    dark: bool,
 ) -> Stateful<Div> {
     let base = div()
         .id(id)
@@ -333,6 +363,21 @@ pub fn dialog_button(
         } else {
             button.hover(|style| style.bg(rgb(0x2f72c1)))
         }
+    } else if dark {
+        let button = base
+            .border_1()
+            .border_color(rgb(0x383838))
+            .text_color(rgb(0xf2f2f2))
+            .bg(rgba(0x00000000));
+        if disabled {
+            button
+        } else {
+            button.hover(|style| {
+                style
+                    .border_color(color_alpha(0xffffff, 0.14))
+                    .bg(color_alpha(0xffffff, 0.04))
+            })
+        }
     } else {
         let button = base
             .border_1()
@@ -342,7 +387,7 @@ pub fn dialog_button(
         if disabled {
             button
         } else {
-            button.hover(|style| style.bg(color_alpha(0xffffff, 0.04)))
+            button.hover(|style| style.bg(color_alpha(0x000000, 0.04)))
         }
     };
     if disabled {

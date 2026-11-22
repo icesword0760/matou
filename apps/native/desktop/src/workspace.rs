@@ -1949,6 +1949,7 @@ impl Workspace {
     }
 
     fn archive_summary(&self, session_id: &str) -> Option<Div> {
+        let dark = self.wiring_dark();
         let search = self
             .search
             .as_ref()
@@ -1991,10 +1992,23 @@ impl Workspace {
                 .px(px(10.))
                 .py(px(7.))
                 .border_1()
-                .border_color(rgba(0x30384826))
+                .border_color(if dark {
+                    rgba(0xffffff24)
+                } else {
+                    rgba(0x30384826)
+                })
                 .rounded(px(7.))
-                .bg(rgba(0xfffffff5))
-                .text_color(rgb(0x303848))
+                .bg(if dark {
+                    rgba(0x13161df0)
+                } else {
+                    rgba(0xfffffff5)
+                })
+                .text_color(if dark { rgb(0xd7dbe5) } else { rgb(0x303848) })
+                .shadow(vec![if dark {
+                    shadow(0x000000, 0.28, 8., 14.)
+                } else {
+                    shadow(0x2c374e, 0.16, 8., 14.)
+                }])
                 .flex()
                 .items_center()
                 .gap(px(8.))
@@ -2761,14 +2775,33 @@ impl Workspace {
             terminal.update(cx, |terminal, cx| terminal.set_theme(theme, cx));
             self.send_terminal_theme(session_id, theme);
         }
-        if let Some(TabDialog::SessionLoader(state)) = &self.dialog {
-            let dark = self.theme.effective() == AppTheme::Dark;
-            for input in [&state.input, &state.content_input] {
-                input.update(cx, |input, cx| {
-                    set_loader_input_colors(input, dark);
+        let dark = self.wiring_dark();
+        match &self.dialog {
+            Some(TabDialog::SessionLoader(state)) => {
+                for input in [&state.input, &state.content_input] {
+                    input.update(cx, |input, cx| {
+                        set_loader_input_colors(input, dark);
+                        cx.notify();
+                    });
+                }
+            }
+            Some(TabDialog::Branch(state)) => {
+                state.input.update(cx, |input, cx| {
+                    set_branch_input_colors(input, dark);
                     cx.notify();
                 });
             }
+            Some(
+                TabDialog::Rename { input, .. }
+                | TabDialog::RenameTask { input, .. }
+                | TabDialog::RenameSession { input, .. },
+            ) => {
+                input.update(cx, |input, cx| {
+                    input.set_dialog_theme(dark);
+                    cx.notify();
+                });
+            }
+            _ => {}
         }
         #[cfg(target_os = "macos")]
         for water in self.recovery_water.values() {
@@ -6781,9 +6814,11 @@ impl Workspace {
         let Some(task) = self.tasks.iter().find(|task| task.id == task_id) else {
             return;
         };
+        let dark = self.wiring_dark();
         let input = cx.new(|cx| {
             let mut input = RenameInput::new(task.title.clone(), cx);
             input.placeholder = "请输入事项名称".into();
+            input.set_dialog_theme(dark);
             input
         });
         self.dialog_controls = (0..3).map(|_| cx.focus_handle().tab_stop(true)).collect();
@@ -6996,7 +7031,12 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<RenameInput> {
-        let input = cx.new(|cx| RenameInput::new(text, cx));
+        let dark = self.wiring_dark();
+        let input = cx.new(|cx| {
+            let mut input = RenameInput::new(text, cx);
+            input.set_dialog_theme(dark);
+            input
+        });
         self.dialog_controls = (0..3).map(|_| cx.focus_handle().tab_stop(true)).collect();
         self.dialog_subscription =
             Some(
@@ -7577,8 +7617,9 @@ impl Workspace {
             .detached_permission_confirmations
             .get(&window.window_handle())?;
         let (title, body, confirm) = state.copy();
+        let dark = self.wiring_dark();
         let close = self.button(
-            tabs_ui::dialog_close("detached-permission-close"),
+            tabs_ui::dialog_close("detached-permission-close", dark),
             &self.control_focus["detached-permission-close"],
             Self::close_detached_permission,
             cx,
@@ -7589,13 +7630,14 @@ impl Workspace {
                 self.locale.text("取消", "Cancel"),
                 false,
                 false,
+                dark,
             ),
             &self.control_focus["detached-permission-cancel"],
             Self::close_detached_permission,
             cx,
         );
         let send = self.button(
-            tabs_ui::dialog_button("detached-permission-confirm", confirm, true, false),
+            tabs_ui::dialog_button("detached-permission-confirm", confirm, true, false, dark),
             &self.control_focus["detached-permission-confirm"],
             |this, window, cx| {
                 if let Some(state) = this
@@ -7624,14 +7666,14 @@ impl Workspace {
                     cx.listener(|this, _, window, cx| this.close_detached_permission(window, cx)),
                 )
                 .child(
-                    tabs_ui::dialog_panel(f32::from(window.viewport_size().width))
+                    tabs_ui::dialog_panel(f32::from(window.viewport_size().width), dark)
                         .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
                         .child(
                             tabs_ui::dialog_header()
-                                .child(tabs_ui::dialog_title(title))
+                                .child(tabs_ui::dialog_title(title, dark))
                                 .child(close),
                         )
-                        .child(tabs_ui::dialog_body().child(ui_text(body).pre_line()))
+                        .child(tabs_ui::dialog_body(dark).child(ui_text(body).pre_line()))
                         .child(tabs_ui::dialog_footer().child(cancel).child(send)),
                 ),
         )
@@ -8082,13 +8124,18 @@ impl Workspace {
         } else {
             node
         };
+        let input_dark = self.wiring_dark();
         let state = BranchDialog {
             scene_id: scene_id.into(),
             session_id: id.into(),
             source_title: source["title"].as_str().unwrap_or_default().into(),
             placement,
             worktree_mode,
-            input: cx.new(|cx| RenameInput::session_loader_search("例如：修复登录流程", cx)),
+            input: cx.new(|cx| {
+                let mut input = RenameInput::session_loader_search("例如：修复登录流程", cx);
+                set_branch_input_colors(&mut input, input_dark);
+                input
+            }),
             submission_key: fork_submission_key(),
             submitting: false,
             error: None,
@@ -11004,6 +11051,7 @@ impl Workspace {
         choice: RemovalChoiceText,
         scope: RemoveScope,
         selected: RemoveScope,
+        dark: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let (id, index, other) = match scope {
@@ -11021,12 +11069,24 @@ impl Workspace {
             .p(px(12.))
             .border_1()
             .border_color(if selected {
-                rgb(0x458bd7)
+                if dark {
+                    rgba(0x5b9de9cc)
+                } else {
+                    rgb(0x458bd7)
+                }
+            } else if dark {
+                rgba(0xffffff1a)
             } else {
                 rgba(0x0000001f)
             })
             .bg(if selected {
-                rgb(0xeef6ff)
+                if dark {
+                    rgba(0x5b9de91a)
+                } else {
+                    rgb(0xeef6ff)
+                }
+            } else if dark {
+                rgba(0xffffff06)
             } else {
                 rgba(0x00000005)
             })
@@ -11071,19 +11131,19 @@ impl Workspace {
                     .child(
                         div()
                             .font_weight(FontWeight::BOLD)
-                            .text_color(rgb(0x2f3547))
+                            .text_color(if dark { rgb(0xf0f1f3) } else { rgb(0x2f3547) })
                             .child(choice.title),
                     )
                     .child(
                         div()
                             .text_size(px(12.))
-                            .text_color(rgb(0x596273))
+                            .text_color(if dark { rgb(0xb8c0ca) } else { rgb(0x596273) })
                             .child(ui_text(choice.impact)),
                     )
                     .child(
                         div()
                             .text_size(px(11.))
-                            .text_color(rgb(0x77808e))
+                            .text_color(if dark { rgb(0x8e98a5) } else { rgb(0x77808e) })
                             .child(ui_text(choice.description)),
                     ),
             )
@@ -11309,35 +11369,62 @@ impl Workspace {
             .child(actions)
     }
 
+    /// The reference header uses `box-shadow: 0 5px 9px -7px`. GPUI clips
+    /// `paint_shadows` to the card's content mask, which dropped the whole
+    /// shadow. Paint it explicitly as a 10px band of tight vertical gradient
+    /// quads instead; each quad re-uses the CSS blur's alpha decay.
     fn session_card_header_shadow(dark: bool) -> Canvas<()> {
-        let (color, opacity) = if dark {
-            (0x000000, 0.38)
-        } else {
-            (0x2f3f52, 0.25)
-        };
-        let shadow = BoxShadow {
-            spread_radius: px(-7.),
-            // GPUI takes the Gaussian standard deviation. CSS blur is twice that.
-            ..shadow(color, opacity, 5., 4.5)
-        };
-        // Paint the outer shadow after the terminal, clipped to the area below the header.
+        let color = Hsla::from(rgb(if dark { 0x000000 } else { 0x2f3f52 }));
+        let bands = card_header_shadow_bands(dark);
         canvas(
             |_, _, _| (),
             move |bounds, _, window, _| {
-                let header = Bounds::new(
-                    bounds.origin - point(px(0.), px(42.)),
-                    size(bounds.size.width, px(42.)),
-                );
-                window.with_content_mask(Some(ContentMask { bounds }), |window| {
-                    window.paint_shadows(header, Corners::default(), std::slice::from_ref(&shadow));
-                });
+                let inset = px(CARD_HEADER_SHADOW_INSET);
+                let fade = px(4.);
+                let width = bounds.size.width - inset * 2.;
+                if width <= px(0.) {
+                    return;
+                }
+                let left = bounds.left() + inset;
+                let right = bounds.right() - inset;
+                let clear = color.opacity(0.);
+                for band in bands {
+                    let y = bounds.top() + px(band.top);
+                    let gradient = linear_gradient(
+                        180.,
+                        linear_color_stop(color.opacity(band.from_alpha), 0.),
+                        linear_color_stop(color.opacity(band.to_alpha), 1.),
+                    );
+                    window.paint_quad(fill(
+                        Bounds::new(point(left, y), size(width, px(band.height))),
+                        gradient,
+                    ));
+                    // Continue the same falloff toward the card edges using
+                    // horizontal gradients in one-point rows.
+                    for row in 0..band.height as u32 {
+                        let fraction = (row as f32 + 0.5) / band.height;
+                        let alpha = band.from_alpha + (band.to_alpha - band.from_alpha) * fraction;
+                        let tint = color.opacity(alpha);
+                        let y = y + px(row as f32);
+                        for (x, angle) in [(left - fade, 90.), (right, 270.)] {
+                            window.paint_quad(fill(
+                                Bounds::new(point(x, y), size(fade, px(1.))),
+                                linear_gradient(
+                                    angle,
+                                    linear_color_stop(clear, 0.),
+                                    linear_color_stop(tint, 1.),
+                                ),
+                            ));
+                        }
+                    }
+                }
             },
         )
         .absolute()
         .left_0()
         .right_0()
-        .top(px(42.))
-        .h(px(12.))
+        .top(px(CARD_HEADER_SHADOW_TOP))
+        .h(px(CARD_HEADER_SHADOW_HEIGHT))
     }
 
     fn session_card_actions() -> Div {
@@ -11745,6 +11832,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Div {
         let controls = &self.start_failure_controls[id];
+        let dark = self.wiring_dark();
         let narrow = width - 20. <= 520.;
         let reason = SharedString::from(card.reason.to_owned());
         let reason_tooltip = reason.clone();
@@ -11755,10 +11843,18 @@ impl Workspace {
                 .px(px(8.))
                 .py(px(3.))
                 .border_1()
-                .border_color(Hsla::from(rgb(0xe45d55)).alpha(0.45))
+                .border_color(if dark {
+                    Hsla::from(rgb(0xe45d55)).alpha(0.45)
+                } else {
+                    rgb(0xd69b97).into()
+                })
                 .rounded(px(5.))
-                .text_color(rgb(0xf2b7b3))
-                .bg(rgba(0xe45d5514))
+                .text_color(if dark { rgb(0xf2b7b3) } else { rgb(0x8e2d28) })
+                .bg(if dark {
+                    rgba(0xe45d5514)
+                } else {
+                    rgb(0xffffff)
+                })
                 .whitespace_nowrap()
                 .cursor_pointer()
                 .child(label)
@@ -11801,9 +11897,13 @@ impl Workspace {
             .py(px(8.))
             .border_t_1()
             .border_b_1()
-            .border_color(rgb(0xedc2bf))
-            .bg(rgb(0xfff3f2))
-            .text_color(rgb(0x9b2f2a))
+            .border_color(if dark {
+                Hsla::from(rgb(0xe45d55)).alpha(0.3)
+            } else {
+                rgb(0xedc2bf).into()
+            })
+            .bg(if dark { rgb(0x2b1919) } else { rgb(0xfff3f2) })
+            .text_color(if dark { rgb(0xf0b1ad) } else { rgb(0x9b2f2a) })
             .text_size(px(11.))
             .line_height(relative(1.2))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -11827,7 +11927,7 @@ impl Workspace {
                             .id(SharedString::from(format!("start-failure-reason-{id}")))
                             .flex_1()
                             .min_w_0()
-                            .text_color(rgb(0xa95853))
+                            .text_color(if dark { rgb(0xd98e89) } else { rgb(0xa95853) })
                             .when(narrow, |label| label.whitespace_normal().line_clamp(2))
                             .when(!narrow, |label| label.truncate())
                             .tooltip(move |_, cx| {
@@ -13097,6 +13197,7 @@ impl Workspace {
             _ => None,
         };
         let blocked = self.fork_repair_blocked_reason(id, node);
+        let dark = self.wiring_dark();
         let action = |remove: bool, cx: &mut Context<Self>| {
             let (role, label) = if remove {
                 ("remove", "移除节点…")
@@ -13109,6 +13210,7 @@ impl Workspace {
                 label,
                 blocked,
                 retry_pending,
+                dark,
             );
             let button = measure_card_action(button, action_bounds);
             if blocked.is_some() || retry_pending {
@@ -13134,6 +13236,7 @@ impl Workspace {
             error,
             action(false, cx).into_any_element(),
             action(true, cx).into_any_element(),
+            dark,
         ))
     }
 
@@ -13143,6 +13246,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let dark = self.wiring_dark();
         let (title, description, hint) = state.copy();
         let input = state.input.read(cx);
         let focused = input.focus.is_focused(window);
@@ -13156,7 +13260,13 @@ impl Workspace {
             .pr(px(52.))
             .rounded(px(9.))
             .border_1()
-            .border_color(rgb(if focused { 0x5b9de9 } else { 0x414752 }))
+            .border_color(if focused {
+                rgb(0x5b9de9)
+            } else if dark {
+                rgb(0x414752)
+            } else {
+                rgb(0xccd2dc)
+            })
             .when(focused, |input| {
                 input.shadow(vec![BoxShadow {
                     color: rgba(0x5b9de929).into(),
@@ -13165,22 +13275,29 @@ impl Workspace {
                     spread_radius: px(3.),
                 }])
             })
-            .bg(rgb(0x15171a))
+            .bg(if dark { rgb(0x15171a) } else { rgb(0xf8f9fb) })
             .when_else(
                 state.submitting,
                 |field| {
                     field.child(
                         div()
                             .truncate()
-                            .text_color(rgb(0xf2f3f5))
+                            .text_color(if dark { rgb(0xf2f3f5) } else { rgb(0x252b36) })
                             .child(input.text.clone()),
                     )
                 },
                 |field| field.child(state.input.clone()),
             );
-        let close = fork_dialog_close();
-        let cancel = fork_dialog_button("fork-dialog-cancel", "取消", false, state.submitting);
-        let confirm = fork_dialog_button("fork-dialog-confirm", "创建分支", true, state.submitting);
+        let close = fork_dialog_close(dark);
+        let cancel =
+            fork_dialog_button("fork-dialog-cancel", "取消", false, state.submitting, dark);
+        let confirm = fork_dialog_button(
+            "fork-dialog-confirm",
+            "创建分支",
+            true,
+            state.submitting,
+            dark,
+        );
         let (close, cancel, confirm) = if state.submitting {
             (close.opacity(0.55).cursor_default(), cancel, confirm)
         } else {
@@ -13205,6 +13322,7 @@ impl Workspace {
                 cancel.into_any_element(),
                 confirm.into_any_element(),
             ),
+            dark,
         );
         tabs_ui::dialog_overlay("fork-dialog-backdrop")
             .bg(rgba(0x00000070))
@@ -13221,6 +13339,7 @@ impl Workspace {
     }
 
     fn tab_overlay(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let dark = self.wiring_dark();
         if let Some(TabDialog::Branch(state)) = &self.dialog {
             return Some(self.render_branch_dialog(state, window, cx));
         }
@@ -13234,13 +13353,13 @@ impl Workspace {
                     let value = trim_name(&input.read(cx).text);
                     let error = if *empty_submitted && value.is_empty() { Some("工作台名称不能为空".into()) }
                         else { self.task_rename_error(task_id, value).or_else(|| failure.as_ref().filter(|(title, _)| title == value).map(|(_, message)| message.clone())) };
-                    let mut body = tabs_ui::dialog_body().child(input.clone());
-                    if let Some(error) = &error { body = body.child(tabs_ui::dialog_error(error.clone())); }
+                    let mut body = tabs_ui::dialog_body(dark).child(input.clone());
+                    if let Some(error) = &error { body = body.child(tabs_ui::dialog_error(error.clone(), dark)); }
                     ("重命名".into(), body, "确定".into(), true, error.is_some() && !value.is_empty())
                 }
                 TabDialog::RemoveWorkspace { name, .. } => (
                     "移出工作空间".into(),
-                    tabs_ui::dialog_body().child(ui_text(format!(
+                    tabs_ui::dialog_body(dark).child(ui_text(format!(
                         "移出 \"{name}\" 会关闭该空间下的事项和终端会话，本地文件保持原样。 是否继续？"
                     )).pre_line()),
                     "移出".into(),
@@ -13249,7 +13368,7 @@ impl Workspace {
                 ),
                 TabDialog::DeleteTask { title, .. } => (
                     self.locale.text("提示", "Notice").into(),
-                    tabs_ui::dialog_body().child(ui_text(match self.locale {
+                    tabs_ui::dialog_body(dark).child(ui_text(match self.locale {
                         InterfaceLocale::Chinese => format!("删除 \"{title}\" 会丢失该事项下所有终端会话，但不会删除本地目录。 是否继续？"),
                         InterfaceLocale::English => format!("Deleting \"{title}\" discards every terminal session in this task, but does not delete the local directory. Continue?"),
                     }).pre_line()),
@@ -13262,7 +13381,7 @@ impl Workspace {
                     let (title, body, confirm) = state.copy();
                     (
                         title.into(),
-                        tabs_ui::dialog_body().child(ui_text(body).pre_line()),
+                        tabs_ui::dialog_body(dark).child(ui_text(body).pre_line()),
                         confirm.into(),
                         true,
                         false,
@@ -13271,9 +13390,9 @@ impl Workspace {
                 TabDialog::Rename { scene_id, input } => {
                     let value = trim_name(&input.read(cx).text);
                     let error = self.rename_error(scene_id, value);
-                    let mut body = tabs_ui::dialog_body().child(input.clone());
+                    let mut body = tabs_ui::dialog_body(dark).child(input.clone());
                     if let Some(error) = &error {
-                        body = body.child(tabs_ui::dialog_error(error.clone()));
+                        body = body.child(tabs_ui::dialog_error(error.clone(), dark));
                     }
                     (
                         "重命名标签页".into(),
@@ -13285,11 +13404,12 @@ impl Workspace {
                 }
                 TabDialog::RenameSession { input, failure, .. } => {
                     let value = trim_name(&input.read(cx).text);
-                    let mut body = tabs_ui::dialog_body().child(input.clone());
+                    let mut body = tabs_ui::dialog_body(dark).child(input.clone());
                     if failure.as_deref() == Some(value) {
-                        body = body.child(tabs_ui::dialog_error(self.locale.text(
-                            "重命名失败，请稍后重试", "Could not rename the session. Try again."
-                        )));
+                        body = body.child(tabs_ui::dialog_error(
+                            self.locale.text("重命名失败，请稍后重试", "Could not rename the session. Try again."),
+                            dark,
+                        ));
                     }
                     (
                         self.locale.text("重命名会话", "Rename session").into(),
@@ -13358,7 +13478,7 @@ impl Workspace {
                     };
                     (
                         if *is_last { self.locale.text("提示", "Notice") } else { self.locale.text("关闭画布", "Close canvas") }.into(),
-                        tabs_ui::dialog_body().child(ui_text(text).pre_line()),
+                        tabs_ui::dialog_body(dark).child(ui_text(text).pre_line()),
                         if *is_last {
                             self.locale.text(LAST_TAB_CONFIRM, "Got it")
                         } else {
@@ -13370,14 +13490,14 @@ impl Workspace {
                 }
                 TabDialog::CloseSession { body, .. } => (
                     STOP_SESSION.into(),
-                    tabs_ui::dialog_body().child(ui_text(body.clone()).pre_line()),
+                    tabs_ui::dialog_body(dark).child(ui_text(body.clone()).pre_line()),
                     STOP_SESSION.into(),
                     true,
                     false,
                 ),
                 TabDialog::LastSession { .. } => (
                     self.locale.text("提示", "Notice").into(),
-                    tabs_ui::dialog_body().child(ui_text(last_tab_body(self.locale)).pre_line()),
+                    tabs_ui::dialog_body(dark).child(ui_text(last_tab_body(self.locale)).pre_line()),
                     self.locale.text(LAST_TAB_CONFIRM, "Got it").into(),
                     false,
                     false,
@@ -13386,7 +13506,11 @@ impl Workspace {
                     let text = self.removal_dialog_text(session_id, *scope)?;
                     let body = div()
                         .px(px(24.))
-                        .text_color(rgba(0x000000a6))
+                        .text_color(if dark {
+                            rgba(0xffffffb3)
+                        } else {
+                            rgba(0x000000a6)
+                        })
                         .text_size(px(13.))
                         .line_height(relative(1.5))
                         .flex()
@@ -13402,8 +13526,8 @@ impl Workspace {
                                 .flex()
                                 .flex_col()
                                 .gap(px(8.))
-                                .child(self.remove_scope_choice(node, RemoveScope::NodeOnly, *scope, cx))
-                                .child(self.remove_scope_choice(branch, RemoveScope::NodeAndDescendants, *scope, cx))
+                                .child(self.remove_scope_choice(node, RemoveScope::NodeOnly, *scope, dark, cx))
+                                .child(self.remove_scope_choice(branch, RemoveScope::NodeAndDescendants, *scope, dark, cx))
                         }))
                         .children(text.warning.map(|warning| div().mb(px(12.)).text_color(rgb(0xe7aa65)).child(ui_text(warning))));
                     (text.title.into(), body, text.confirm.into(), true, false)
@@ -13418,13 +13542,14 @@ impl Workspace {
                     "取消"
                 };
                 footer = footer.child(self.button(
-                    tabs_ui::dialog_button("dialog-cancel", cancel, false, false),
+                    tabs_ui::dialog_button("dialog-cancel", cancel, false, false, dark),
                     &self.dialog_controls[n - 2],
                     |this, window, cx| this.close_dialog(window, cx),
                     cx,
                 ));
             }
-            let confirm_button = tabs_ui::dialog_button("dialog-confirm", confirm, true, disabled);
+            let confirm_button =
+                tabs_ui::dialog_button("dialog-confirm", confirm, true, disabled, dark);
             footer = footer.child(if disabled {
                 confirm_button
             } else {
@@ -13446,17 +13571,17 @@ impl Workspace {
                     )
                     .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
                     .child(
-                        tabs_ui::dialog_panel(f32::from(window.viewport_size().width))
+                        tabs_ui::dialog_panel(f32::from(window.viewport_size().width), dark)
                             .id("tab-dialog-panel")
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .child(
                                 tabs_ui::dialog_header()
-                                    .child(tabs_ui::dialog_title(title).when(
+                                    .child(tabs_ui::dialog_title(title, dark).when(
                                         matches!(dialog, TabDialog::RemoveSession { .. }),
                                         |title| title.min_w_0().whitespace_normal(),
                                     ))
                                     .child(self.button(
-                                        tabs_ui::dialog_close("dialog-close"),
+                                        tabs_ui::dialog_close("dialog-close", dark),
                                         &self.dialog_controls[0],
                                         |this, window, cx| this.close_dialog(window, cx),
                                         cx,
@@ -15538,7 +15663,9 @@ impl Render for Workspace {
                                 .map(|view| div().absolute().inset_0().child(view.clone())),
                         )
                         .children(self.archive_summary(id))
-                        .children(fork_progress.map(|progress| fork_progress_body(progress, now)))
+                        .children(
+                            fork_progress.map(|progress| fork_progress_body(progress, now, dark)),
+                        )
                         .children(self.deferred_card(id).map(|card| {
                             self.render_deferred_recovery_card(id, card, width, window, cx)
                         }))
@@ -17599,6 +17726,37 @@ mod carousel_tests {
     }
 }
 
+const CARD_HEADER_SHADOW_TOP: f32 = 42.;
+const CARD_HEADER_SHADOW_HEIGHT: f32 = 10.;
+/// The CSS spread is `-7px`; the reference fades the shadow back in over the
+/// first few pixels inside each card edge.
+const CARD_HEADER_SHADOW_INSET: f32 = 7.;
+
+/// One tightly stacked slice of the vertical shadow decay. `top`/`height` are
+/// logical pixels below the 42px card header; the two alphas are the gradient
+/// endpoints. Kept as plain data so probes can assert the calibrated curve.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CardHeaderShadowBand {
+    top: f32,
+    height: f32,
+    from_alpha: f32,
+    to_alpha: f32,
+}
+
+fn card_header_shadow_bands(dark: bool) -> [CardHeaderShadowBand; 5] {
+    let stops = [0., 2., 4., 6., 8., CARD_HEADER_SHADOW_HEIGHT];
+    // Match the reference's sampled light-card pixels. The dark CSS shadow
+    // has the same shape with opacity 0.38 instead of 0.25.
+    let strength = if dark { 0.38 / 0.25 } else { 1. };
+    let alphas = [0.125, 0.102, 0.058, 0.029, 0.014, 0.];
+    std::array::from_fn(|index| CardHeaderShadowBand {
+        top: stops[index],
+        height: stops[index + 1] - stops[index],
+        from_alpha: alphas[index] * strength,
+        to_alpha: alphas[index + 1] * strength,
+    })
+}
+
 fn shadow(color: u32, alpha: f32, y: f32, blur: f32) -> BoxShadow {
     let mut color: Hsla = rgb(color).into();
     color.a = alpha;
@@ -17923,19 +18081,25 @@ fn fork_header_button(
     }
 }
 
+fn set_branch_input_colors(input: &mut RenameInput, dark: bool) {
+    input.text_color = Some(if dark { rgb(0xf2f3f5) } else { rgb(0x252b36) });
+    input.placeholder_color = Some(if dark { rgb(0x858e9b) } else { rgb(0x8c95a3) });
+}
+
 /// `.branch-dialog__field small`: `n/64`, bottom-right of the input wrapper.
-fn fork_dialog_name_counter(count: usize) -> Div {
+fn fork_dialog_name_counter(count: usize, dark: bool) -> Div {
     div()
         .absolute()
         .right(px(10.))
         .bottom(px(12.))
-        .text_color(rgb(0x747b86))
+        .text_color(if dark { rgb(0x747b86) } else { rgb(0x8c95a3) })
         .text_size(px(12.))
         .child(format!("{count}/{FORK_NAME_LIMIT}"))
 }
 
-/// `.branch-worktree-card input` (frozen accent `#5b9de9`).
-fn fork_worktree_radio(selected: bool) -> Div {
+/// `.branch-worktree-card input` (dark accent `#5b9de9`, light `#458bd7`).
+fn fork_worktree_radio(selected: bool, dark: bool) -> Div {
+    let accent = if dark { 0x5b9de9 } else { 0x458bd7 };
     div()
         .flex_none()
         .mt(px(2.))
@@ -17946,12 +18110,12 @@ fn fork_worktree_radio(selected: bool) -> Div {
         .rounded_full()
         .border_1()
         .border_color(if selected {
-            rgb(0x5b9de9)
+            rgb(accent)
         } else {
-            rgb(0x5a616c)
+            rgb(if dark { 0x5a616c } else { 0xb4bcc8 })
         })
         .when(selected, |radio| {
-            radio.child(div().size(px(6.)).rounded_full().bg(rgb(0x5b9de9)))
+            radio.child(div().size(px(6.)).rounded_full().bg(rgb(accent)))
         })
 }
 
@@ -17962,24 +18126,35 @@ fn fork_worktree_card(
     title: &'static str,
     hint: &str,
     note: Option<&'static str>,
+    dark: bool,
 ) -> Div {
+    let border = if selected {
+        if dark { 0x5b9de9 } else { 0x458bd7 }
+    } else if dark {
+        0x343942
+    } else {
+        0xd8dde5
+    };
+    let background = if selected {
+        if dark {
+            rgba(0x5b9de917)
+        } else {
+            rgb(0xeef6ff)
+        }
+    } else if dark {
+        rgb(0x181a1e)
+    } else {
+        rgb(0xf7f8fa)
+    };
     let card = div()
         .flex()
         .gap(px(10.))
         .p(px(12.))
         .border_1()
-        .border_color(if selected {
-            rgb(0x5b9de9)
-        } else {
-            rgb(0x343942)
-        })
+        .border_color(rgb(border))
         .rounded(px(10.))
-        .bg(if selected {
-            rgba(0x5b9de917)
-        } else {
-            rgb(0x181a1e)
-        })
-        .child(fork_worktree_radio(selected))
+        .bg(background)
+        .child(fork_worktree_radio(selected, dark))
         .child(
             div()
                 .flex()
@@ -17988,13 +18163,13 @@ fn fork_worktree_card(
                 .child(div().text_size(px(13.)).child(title))
                 .child(
                     div()
-                        .text_color(rgb(0x8f96a1))
+                        .text_color(if dark { rgb(0x8f96a1) } else { rgb(0x737b89) })
                         .text_size(px(11.))
                         .child(ui_text(hint.to_owned())),
                 )
                 .children(note.map(|note| {
                     div()
-                        .text_color(rgb(0xe6a44a))
+                        .text_color(if dark { rgb(0xe6a44a) } else { rgb(0xc77c1e) })
                         .text_size(px(11.))
                         .child(note)
                 })),
@@ -18020,9 +18195,14 @@ fn fork_dialog_panel(
     submitting: bool,
     error: Option<&str>,
     so: (AnyElement, AnyElement, AnyElement, AnyElement),
+    dark: bool,
 ) -> Div {
     let (close, input, cancel, confirm) = so;
     let panel_width = 520.0_f32.min((f32::from(viewport_width) - 48.0).max(0.0));
+    // `.branch-dialog__header p`: #9298a3 dark, #737b89 light.
+    let muted = if dark { 0x9298a3 } else { 0x737b89 };
+    // `.branch-dialog__field` / `legend`: #c9cdd4 dark, #4c5564 light.
+    let label = if dark { 0xc9cdd4 } else { 0x4c5564 };
     let header = div()
         .flex()
         .items_start()
@@ -18043,7 +18223,7 @@ fn fork_dialog_panel(
                 .child(
                     div()
                         .mt(px(6.))
-                        .text_color(rgb(0x9298a3))
+                        .text_color(rgb(muted))
                         .text_size(px(12.))
                         .line_height(relative(1.45))
                         .child(ui_text(description.to_owned())),
@@ -18056,7 +18236,7 @@ fn fork_dialog_panel(
         .flex_col()
         .gap(px(7.))
         .mt(px(20.))
-        .text_color(rgb(0xc9cdd4))
+        .text_color(rgb(label))
         .text_size(px(12.))
         .child(div().child(FORK_DIALOG_NAME))
         .child(
@@ -18064,7 +18244,7 @@ fn fork_dialog_panel(
                 .relative()
                 .w_full()
                 .child(input)
-                .child(fork_dialog_name_counter(count)),
+                .child(fork_dialog_name_counter(count, dark)),
         );
     let worktrees = div()
         .flex()
@@ -18074,7 +18254,7 @@ fn fork_dialog_panel(
         .child(
             div()
                 .mb(px(8.))
-                .text_color(rgb(0xc9cdd4))
+                .text_color(rgb(label))
                 .text_size(px(12.))
                 .child(FORK_WORKTREE_SECTION),
         )
@@ -18084,6 +18264,7 @@ fn fork_dialog_panel(
             FORK_USE_CURRENT_WORKTREE,
             current_hint,
             None,
+            dark,
         ))
         .child(fork_worktree_card(
             new_worktree,
@@ -18091,6 +18272,7 @@ fn fork_dialog_panel(
             FORK_USE_NEW_WORKTREE,
             FORK_NEW_WORKTREE_HINT,
             (!new_worktree).then_some(FORK_NEEDS_GIT_REPOSITORY),
+            dark,
         ));
     let mut panel = div()
         .flex()
@@ -18098,11 +18280,15 @@ fn fork_dialog_panel(
         .w(px(panel_width))
         .p(px(20.))
         .border_1()
-        .border_color(rgb(0x343942))
+        .border_color(if dark { rgb(0x343942) } else { rgb(0xd7dbe2) })
         .rounded(px(16.))
-        .text_color(rgb(0xe8eaed))
-        .bg(rgb(0x1d1f23))
-        .shadow(vec![shadow(0x000000, 0.46, 24., 80.)])
+        .text_color(if dark { rgb(0xe8eaed) } else { rgb(0x252b36) })
+        .bg(if dark { rgb(0x1d1f23) } else { rgb(0xffffff) })
+        .shadow(vec![if dark {
+            shadow(0x000000, 0.46, 24., 40.)
+        } else {
+            shadow(0x232b38, 0.2, 24., 35.)
+        }])
         .child(header)
         .child(field)
         .child(worktrees);
@@ -18110,7 +18296,7 @@ fn fork_dialog_panel(
         panel = panel.child(
             div()
                 .mt(px(12.))
-                .text_color(rgb(0xff8276))
+                .text_color(if dark { rgb(0xff8276) } else { rgb(0xd94238) })
                 .text_size(px(12.))
                 .child(ui_text(error.to_owned())),
         );
@@ -18119,7 +18305,7 @@ fn fork_dialog_panel(
         panel = panel.child(
             div()
                 .mt(px(12.))
-                .text_color(rgb(0x8ebcf4))
+                .text_color(if dark { rgb(0x8ebcf4) } else { rgb(0x2b6cb8) })
                 .text_size(px(12.))
                 .child(FORK_DIALOG_CREATING),
         );
@@ -18136,7 +18322,7 @@ fn fork_dialog_panel(
 }
 
 /// `.branch-dialog__header button`: the frozen 22px `×` close affordance.
-fn fork_dialog_close() -> Stateful<Div> {
+fn fork_dialog_close(dark: bool) -> Stateful<Div> {
     div()
         .id("fork-dialog-close")
         .flex_none()
@@ -18145,10 +18331,11 @@ fn fork_dialog_close() -> Stateful<Div> {
         .justify_center()
         .px(px(6.))
         .py(px(1.))
-        .text_color(rgb(0xa5abb4))
+        .text_color(if dark { rgb(0xa5abb4) } else { rgb(0x737b89) })
         .text_size(px(22.))
         .line_height(relative(1.))
         .cursor_pointer()
+        .hover(move |style| style.text_color(if dark { rgb(0xa5abb4) } else { rgb(0x252b36) }))
         .child("×")
 }
 
@@ -18158,11 +18345,18 @@ fn fork_dialog_button(
     label: &'static str,
     primary: bool,
     disabled: bool,
+    dark: bool,
 ) -> Stateful<Div> {
     let (border, text, background) = if primary {
-        (rgb(0x4b8edc), rgb(0xffffff), rgb(0x347bc8))
-    } else {
+        (
+            rgb(if dark { 0x4b8edc } else { 0x347bc8 }),
+            rgb(0xffffff),
+            rgb(0x347bc8),
+        )
+    } else if dark {
         (rgb(0x3b414a), rgb(0xd9dce1), rgb(0x26292e))
+    } else {
+        (rgb(0xccd2dc), rgb(0x394250), rgb(0xf4f5f7))
     };
     let button = div()
         .id(id)
@@ -18196,6 +18390,7 @@ fn fork_failure_body(
     retry_error: Option<&str>,
     retry: AnyElement,
     remove: AnyElement,
+    dark: bool,
 ) -> Div {
     div()
         .flex_1()
@@ -18207,8 +18402,8 @@ fn fork_failure_body(
         .justify_center()
         .gap(px(14.))
         .p(px(28.))
-        .bg(rgb(0x181a1e))
-        .text_color(rgb(0xd9dce2))
+        .bg(if dark { rgb(0x181a1e) } else { rgb(0xf7f8fa) })
+        .text_color(if dark { rgb(0xd9dce2) } else { rgb(0x333b48) })
         .text_center()
         .child(
             div()
@@ -18229,7 +18424,7 @@ fn fork_failure_body(
                             div()
                                 .max_w(px(520.))
                                 .mt(px(8.))
-                                .text_color(rgb(0xf08a80))
+                                .text_color(if dark { rgb(0xf08a80) } else { rgb(0xd94238) })
                                 .text_size(px(12.))
                                 .line_height(relative(1.5))
                                 .child(ui_text(error.to_owned()))
@@ -18253,6 +18448,7 @@ fn fork_failure_button(
     label: &'static str,
     blocked_reason: Option<&'static str>,
     pending: bool,
+    dark: bool,
 ) -> Stateful<Div> {
     let button = div()
         .id(id)
@@ -18263,10 +18459,10 @@ fn fork_failure_button(
         .h(px(30.))
         .px(px(13.))
         .border_1()
-        .border_color(rgb(0x434955))
+        .border_color(if dark { rgb(0x434955) } else { rgb(0xcbd1da) })
         .rounded(px(7.))
-        .text_color(rgb(0xd9dce2))
-        .bg(rgb(0x282b31))
+        .text_color(if dark { rgb(0xd9dce2) } else { rgb(0x333b48) })
+        .bg(if dark { rgb(0x282b31) } else { rgb(0xffffff) })
         .text_size(px(16.))
         .whitespace_nowrap()
         .child(ui_text(label).normal_line_height());
@@ -18283,7 +18479,7 @@ fn fork_failure_button(
 }
 
 /// `.fork-progress-overlay` and its interactive variant for provider prompts.
-fn fork_progress_body(progress: ForkProgressCopy, now: f64) -> Stateful<Div> {
+fn fork_progress_body(progress: ForkProgressCopy, now: f64, dark: bool) -> Stateful<Div> {
     let fill = progress.fraction.unwrap_or(0.);
     let animate = !reduced_motion();
     let spinner_size = if progress.interactive { 12. } else { 20. };
@@ -18333,24 +18529,12 @@ fn fork_progress_body(progress: ForkProgressCopy, now: f64) -> Stateful<Div> {
             .left(px(-2.))
             .size(px(spinner_size)),
         );
-    let content = div()
-        .flex()
-        .items_center()
-        .gap(px(9.))
-        .border_1()
-        .border_color(rgba(0x78abef57))
-        .rounded(px(12.))
-        .text_color(rgb(0xe7eef9))
-        .bg(rgba(0x1d222bf5))
-        .shadow(vec![shadow(0x000000, 0.34, 16., 44.)])
-        .text_center()
-        .child(spinner)
-        .child(
-            div()
-                .text_size(px(if progress.interactive { 11. } else { 16. }))
-                .font_weight(FontWeight::BOLD)
-                .child(progress.label),
-        );
+    let content = fork_progress_panel(dark).child(spinner).child(
+        div()
+            .text_size(px(if progress.interactive { 11. } else { 16. }))
+            .font_weight(FontWeight::BOLD)
+            .child(progress.label),
+    );
     if progress.interactive {
         return div()
             .id("fork-progress")
@@ -18361,7 +18545,7 @@ fn fork_progress_body(progress: ForkProgressCopy, now: f64) -> Stateful<Div> {
     }
     let detail = |label: SharedString| {
         div()
-            .text_color(rgb(0xaebdd1))
+            .text_color(if dark { rgb(0xaebdd1) } else { rgb(0x60748d) })
             .text_size(px(11.))
             .line_height(relative(1.5))
             .child(ui_text(label))
@@ -18398,9 +18582,148 @@ fn fork_progress_body(progress: ForkProgressCopy, now: f64) -> Stateful<Div> {
         .items_center()
         .justify_center()
         .p(px(24.))
-        .bg(rgba(0x111214c7))
+        .bg(if dark {
+            rgba(0x111214c7)
+        } else {
+            rgba(0xf6f9fdd1)
+        })
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(content)
+}
+
+fn fork_progress_panel(dark: bool) -> Div {
+    let (border, foreground, background, shadow_color) = if dark {
+        (
+            rgba(0x78abef57),
+            rgb(0xe7eef9),
+            rgba(0x1d222bf5),
+            shadow(0x000000, 0.34, 16., 22.),
+        )
+    } else {
+        (
+            rgb(0xc7d9f2),
+            rgb(0x23364f),
+            rgba(0xfffffff7),
+            shadow(0x204470, 0.13, 16., 22.),
+        )
+    };
+    div()
+        .flex()
+        .items_center()
+        .gap(px(9.))
+        .border_1()
+        .border_color(border)
+        .rounded(px(12.))
+        .text_color(foreground)
+        .bg(background)
+        .shadow(vec![shadow_color])
+        .text_center()
+}
+
+#[cfg(test)]
+mod fork_surface_tests {
+    use super::{
+        CARD_HEADER_SHADOW_INSET, CARD_HEADER_SHADOW_TOP, ForkProgressCopy,
+        card_header_shadow_bands, fork_dialog_name_counter, fork_dialog_panel, fork_progress_body,
+        fork_progress_panel, fork_worktree_card,
+    };
+    use gpui::{IntoElement, Styled, div, px, rgb, rgba};
+
+    #[test]
+    fn branch_dialog_surfaces_follow_the_workspace_theme() {
+        for (dark, surface, border, text, selection, counter, blur) in [
+            (
+                false, 0xffffff, 0xd7dbe2, 0x252b36, 0xeef6ffff, 0x8c95a3, 35.,
+            ),
+            (
+                true, 0x1d1f23, 0x343942, 0xe8eaed, 0x5b9de917, 0x747b86, 40.,
+            ),
+        ] {
+            let slot = || div().into_any_element();
+            let mut panel = fork_dialog_panel(
+                px(900.),
+                "",
+                "",
+                "",
+                false,
+                0,
+                false,
+                None,
+                (slot(), slot(), slot(), slot()),
+                dark,
+            );
+            let style = panel.style();
+            assert_eq!(style.background, Some(rgb(surface).into()));
+            assert_eq!(style.border_color, Some(rgb(border).into()));
+            assert_eq!(style.text.as_ref().unwrap().color, Some(rgb(text).into()));
+            assert_eq!(style.box_shadow.as_ref().unwrap()[0].blur_radius, px(blur));
+
+            let mut card = fork_worktree_card(true, false, "", "", None, dark);
+            assert_eq!(card.style().background, Some(rgba(selection).into()));
+            assert_eq!(
+                fork_dialog_name_counter(2, dark)
+                    .style()
+                    .text
+                    .as_ref()
+                    .unwrap()
+                    .color,
+                Some(rgb(counter).into())
+            );
+        }
+    }
+
+    #[test]
+    fn branch_progress_panel_and_scrim_follow_the_workspace_theme() {
+        for (dark, scrim, surface, border, text) in [
+            (false, 0xf6f9fdd1, 0xfffffff7, 0xc7d9f2ff, 0x23364f),
+            (true, 0x111214c7, 0x1d222bf5, 0x78abef57, 0xe7eef9),
+        ] {
+            let progress = |interactive| ForkProgressCopy {
+                label: "Creating branch".into(),
+                description: "Preparing the worktree",
+                counter: Some("1/2".into()),
+                fraction: Some(0.5),
+                interactive,
+            };
+            assert_eq!(
+                fork_progress_body(progress(false), 0., dark)
+                    .style()
+                    .background,
+                Some(rgba(scrim).into())
+            );
+            assert!(
+                fork_progress_body(progress(true), 0., dark)
+                    .style()
+                    .background
+                    .is_none()
+            );
+            let mut panel = fork_progress_panel(dark);
+            let style = panel.style();
+            assert_eq!(style.background, Some(rgba(surface).into()));
+            assert_eq!(style.border_color, Some(rgba(border).into()));
+            assert_eq!(style.text.as_ref().unwrap().color, Some(rgb(text).into()));
+            assert_eq!(style.box_shadow.as_ref().unwrap()[0].blur_radius, px(22.));
+        }
+    }
+
+    #[test]
+    fn card_header_shadow_covers_ten_points_with_continuous_falloff() {
+        assert_eq!(CARD_HEADER_SHADOW_TOP, 42.);
+        assert_eq!(CARD_HEADER_SHADOW_INSET, 7.);
+        for (dark, alphas) in [
+            (false, [0.125, 0.102, 0.058, 0.029, 0.014, 0.]),
+            (true, [0.19, 0.15504, 0.08816, 0.04408, 0.02128, 0.]),
+        ] {
+            let bands = card_header_shadow_bands(dark);
+            let stops = [0., 2., 4., 6., 8., 10.];
+            for (index, band) in bands.into_iter().enumerate() {
+                assert_eq!(band.top, stops[index]);
+                assert_eq!(band.top + band.height, stops[index + 1]);
+                assert!((band.from_alpha - alphas[index]).abs() < 0.00001);
+                assert!((band.to_alpha - alphas[index + 1]).abs() < 0.00001);
+            }
+        }
+    }
 }
 
 /// `.fork-readiness-toast` (frozen light-surface variant): fixed below the card
