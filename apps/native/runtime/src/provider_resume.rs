@@ -1,12 +1,111 @@
 use std::{
+    fs,
+    io::ErrorKind,
+    path::Path,
     sync::LazyLock,
     time::{Duration, Instant},
 };
 
+use anyhow::Result;
 use matou_native_core::{pty::LaunchProfile, sessions::ClaudeBinding};
 use regex::Regex;
+use rusqlite::{Connection, OptionalExtension, params};
 
 pub(crate) const IDENTITY_MISMATCH: &str = "The context returned by the AI session does not match the session being restored; try restoring again";
+pub(crate) const SESSION_NOT_FOUND: &str = "provider session not found";
+pub(crate) const FORK_REBUILD_FAILED: &str = "provider fork rebuild failed: ";
+const REBUILD_PARENT_NOT_FOUND: &str = "fork rebuild parent session not found";
+const REBUILD_CHILD_IN_USE: &str = "fork rebuild child session ID already in use";
+
+pub(crate) fn empty_fork_parent(
+    db: &Connection,
+    session_id: &str,
+    binding: &ClaudeBinding,
+    reason: &str,
+) -> Result<Option<String>> {
+    let child = &binding.provider_session_id;
+    if reason != SESSION_NOT_FOUND
+        || !transcript_id(child)
+        || !binding.metadata.is_object()
+        || binding.metadata["observedUserPrompt"] == true
+    {
+        return Ok(None);
+    }
+    let parent: Option<String> = db
+        .query_row(
+            "SELECT fork.source_provider_session_id
+         FROM session_fork_intents fork
+         JOIN sessions child ON child.id = fork.session_id
+         JOIN provider_bindings binding ON binding.session_id = child.id
+         WHERE child.id = ? AND child.kind = 'claude-code' AND child.archived_at IS NULL
+           AND fork.source_provider = 'claude-code' AND fork.state = 'succeeded'
+           AND binding.id = ? AND binding.provider = child.kind AND binding.provider_session_id = ?
+           AND binding.validated_at IS NOT NULL AND binding.user_exited_at IS NULL
+           AND ((binding.resume_state = 'available' AND binding.invalidated_at IS NULL)
+             OR (binding.resume_state = 'failed' AND binding.restore_state = 'failed'
+                 AND binding.restore_error = ?))",
+            params![session_id, binding.id, child, reason],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(parent.filter(|parent| {
+        transcript_id(parent)
+            && !parent.eq_ignore_ascii_case(child)
+            && uuid::Uuid::parse_str(parent)
+                .ok()
+                .is_none_or(|parent| uuid::Uuid::parse_str(child) != Ok(parent))
+    }))
+}
+
+fn transcript_id(id: &str) -> bool {
+    id.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+}
+
+fn missing_parent(parent: &str) -> String {
+    format!("No conversation found with session ID: {parent}")
+}
+
+pub(crate) fn fork_rebuild_blocker(
+    projects: Option<&Path>,
+    parent: &str,
+    child: &str,
+) -> Option<String> {
+    let unverified_parent =
+        || format!("Could not verify the Claude parent conversation file for session ID: {parent}");
+    let Some(projects) = projects else {
+        return Some(unverified_parent());
+    };
+    let directories = match fs::read_dir(projects) {
+        Ok(directories) => directories,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Some(missing_parent(parent)),
+        Err(_) => return Some(unverified_parent()),
+    };
+    let parent_file = format!("{parent}.jsonl");
+    let child_file = format!("{child}.jsonl");
+    let mut found_parent = false;
+    for directory in directories {
+        let Ok(directory) = directory else {
+            return Some(unverified_parent());
+        };
+        let directory = directory.path();
+        // An unreadable child entry still blocks rebuilding.
+        match fs::symlink_metadata(directory.join(&child_file)) {
+            Err(error)
+                if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {}
+            _ => return Some(SESSION_NOT_FOUND.into()),
+        }
+        match fs::metadata(directory.join(&parent_file)) {
+            Ok(metadata) => found_parent |= metadata.is_file(),
+            Err(error)
+                if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {}
+            Err(_) => return Some(unverified_parent()),
+        }
+    }
+    (!found_parent).then(|| missing_parent(parent))
+}
 
 static ANSI: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\x1b\[[0-?]*[ -/]*[@-~]").unwrap());
 static MISSING: LazyLock<Regex> = LazyLock::new(|| {
@@ -37,6 +136,7 @@ pub(crate) struct ResumeMonitor {
     pub binding_id: Option<String>,
     pub expected_id: Option<String>,
     pub permission_respawn: bool,
+    pub rebuild_parent: Option<String>,
     recent: String,
     has_visible_output: bool,
     watching_failure_output: bool,
@@ -92,6 +192,7 @@ impl ResumeMonitor {
             binding_id: None,
             expected_id: None,
             permission_respawn: false,
+            rebuild_parent: None,
             recent: String::new(),
             has_visible_output: false,
             watching_failure_output: false,
@@ -141,7 +242,8 @@ impl ResumeMonitor {
             if let Some(error) = self.failure_in(&output) {
                 return (Some(error), None);
             }
-            self.watching_failure_output = output.encode_utf16().count() <= 2_000;
+            self.watching_failure_output =
+                self.rebuild_parent.is_some() || output.encode_utf16().count() <= 2_000;
         }
         let has = |markers: &[&str]| markers.iter().all(|marker| output.contains(marker));
         if self.bypass_consent == Some(BypassConsent::Watching)
@@ -237,6 +339,17 @@ impl ResumeMonitor {
         let id = self.expected_id.as_ref()?.to_ascii_lowercase();
         // Terminal wrapping and cursor moves can split both the error text and the ID.
         let compact: String = output.split_whitespace().collect();
+        if let Some(parent) = &self.rebuild_parent {
+            if compact.contains(&format!(
+                "noconversationfoundwithsessionid:{}",
+                parent.to_ascii_lowercase(),
+            )) {
+                return Some(REBUILD_PARENT_NOT_FOUND);
+            }
+            if compact.contains(&format!("sessionid{id}isalreadyinuse")) {
+                return Some(REBUILD_CHILD_IN_USE);
+            }
+        }
         if id.len() == 36
             && uuid::Uuid::parse_str(&id).is_ok()
             && compact.contains(&format!(
@@ -251,7 +364,21 @@ impl ResumeMonitor {
         let end = compact.ceil_char_boundary((at + id.len() + 320).min(compact.len()));
         MISSING
             .is_match(&compact[start..end])
-            .then_some("provider session not found")
+            .then_some(SESSION_NOT_FOUND)
+    }
+
+    pub(crate) fn failure_message(&self, reason: &str) -> String {
+        match reason {
+            REBUILD_PARENT_NOT_FOUND => {
+                missing_parent(self.rebuild_parent.as_deref().expect("rebuild parent"))
+            }
+            REBUILD_CHILD_IN_USE => format!(
+                "Error: Session ID {} is already in use.",
+                self.expected_id.as_deref().expect("rebuild child"),
+            ),
+            _ if self.rebuild_parent.is_some() => format!("{FORK_REBUILD_FAILED}{reason}"),
+            _ => reason.to_owned(),
+        }
     }
 
     pub(crate) fn due_input(&mut self) -> Option<&'static [u8]> {
@@ -287,9 +414,84 @@ mod tests {
     use super::*;
 
     const SESSION_ID: &str = "7ec4132a-f6f8-4b49-9f6d-4b07be37f5c2";
+    const PARENT_ID: &str = "f1f4132a-f6f8-4b49-9f6d-4b07be37f5c2";
     const CLAUDE_TRUST_HEADER: &str = "Accessing workspace: /tmp/project\r\n\
         Quick safety check: Is this a project you created or one you trust?\r\n\
         Claude Code'll be able to read, edit, and execute files here.\r\n";
+
+    #[test]
+    fn empty_fork_rebuild_requires_a_confirmed_empty_claude_child_and_missing_session() -> Result<()>
+    {
+        let mut db = Connection::open_in_memory()?;
+        matou_native_core::storage::migrate(&mut db, 1)?;
+        db.execute_batch(
+            "INSERT INTO workspaces (id, name, root_directory, created_at, updated_at) VALUES ('w', 'W', '/tmp', 1, 1);
+             INSERT INTO execution_contexts (id, workspace_id, kind, cwd, created_at) VALUES ('e', 'w', 'plain-directory', '/tmp', 1);
+             INSERT INTO tasks (id, workspace_id, execution_context_id, title, status, created_at, updated_at)
+                 VALUES ('t', 'w', 'e', 'T', 'planned', 1, 1);
+             INSERT INTO sessions (id, task_id, execution_context_id, kind, status, created_at, updated_at, last_activity_at)
+                 VALUES ('parent', 't', 'e', 'claude-code', 'created', 1, 1, 1),
+                        ('child', 't', 'e', 'claude-code', 'created', 1, 1, 1);"
+        )?;
+        db.execute(
+            "INSERT INTO provider_bindings (id, session_id, provider, provider_session_id, resume_state,
+                       metadata_json, created_at, updated_at, validated_at)
+             VALUES ('binding', 'child', 'claude-code', ?, 'available', '{}', 1, 1, 1)",
+            [SESSION_ID],
+        )?;
+        let eligible = |reason| {
+            let binding = matou_native_core::sessions::claude_binding(&db, "child")?.unwrap();
+            empty_fork_parent(&db, "child", &binding, reason)
+        };
+        assert_eq!(eligible(SESSION_NOT_FOUND)?, None);
+        db.execute(
+            "INSERT INTO session_fork_intents (session_id, source_session_id, source_provider,
+                       source_provider_session_id, state, created_at)
+             VALUES ('child', 'parent', 'claude-code', ?, 'succeeded', 1)",
+            [PARENT_ID],
+        )?;
+        assert_eq!(eligible(SESSION_NOT_FOUND)?.as_deref(), Some(PARENT_ID));
+        assert_eq!(eligible("provider resume exited with code 1")?, None);
+        for (state, parent) in [
+            ("failed", PARENT_ID),
+            ("starting", PARENT_ID),
+            ("succeeded", SESSION_ID),
+            ("succeeded", " "),
+        ] {
+            db.execute(
+                "UPDATE session_fork_intents SET state=?, source_provider_session_id=?",
+                params![state, parent],
+            )?;
+            assert_eq!(eligible(SESSION_NOT_FOUND)?, None, "{state} {parent}");
+        }
+        db.execute(
+            "UPDATE session_fork_intents SET source_provider_session_id=?",
+            [PARENT_ID],
+        )?;
+        db.execute("UPDATE provider_bindings SET metadata_json = '{\"observedUserPrompt\":true,\"lastHookEvent\":\"SessionStart\"}'", [])?;
+        assert_eq!(eligible(SESSION_NOT_FOUND)?, None);
+        db.execute("UPDATE provider_bindings SET metadata_json = '{}', resume_state = 'failed', restore_state = 'failed', restore_error = ?", [SESSION_NOT_FOUND])?;
+        assert_eq!(eligible(SESSION_NOT_FOUND)?.as_deref(), Some(PARENT_ID));
+        db.execute(
+            "UPDATE provider_bindings SET restore_error = 'other failure'",
+            [],
+        )?;
+        assert_eq!(eligible(SESSION_NOT_FOUND)?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn fork_rebuild_reports_the_parent_error_and_child_collision_separately() {
+        for message in [
+            format!("No conversation found with session ID: {PARENT_ID}"),
+            format!("Error: Session ID {SESSION_ID} is already in use."),
+        ] {
+            let mut monitor = ResumeMonitor::for_id(SESSION_ID.into());
+            monitor.rebuild_parent = Some(PARENT_ID.into());
+            let (reason, _) = monitor.ingest(&message);
+            assert_eq!(monitor.failure_message(reason.unwrap()), message);
+        }
+    }
 
     #[test]
     fn claude_trust_respects_both_highlighted_rows_and_redraws() {

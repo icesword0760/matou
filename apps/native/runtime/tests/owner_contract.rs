@@ -121,6 +121,9 @@ fn collect(
                 .filter_map(|event| match event {
                     OwnerEvent::Terminal(event) => Some(event),
                     OwnerEvent::Domain(_) | OwnerEvent::ProviderIdentity(_) => None,
+                    OwnerEvent::RebuildClaudeFork { .. } => {
+                        panic!("unexpected Claude fork rebuild")
+                    }
                     OwnerEvent::Diagnostic { message, .. } => panic!("owner diagnostic: {message}"),
                 }),
         );

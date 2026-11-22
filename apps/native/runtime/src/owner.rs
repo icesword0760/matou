@@ -62,7 +62,9 @@ use crate::{
         HOOK_QUEUE_CAPACITY, HookMessage, HookSetup, IDENTITY_TIMEOUT, Observation,
         ProviderHookServer, Registration, Scope,
     },
-    provider_resume::{IDENTITY_MISMATCH, ResumeMonitor},
+    provider_resume::{
+        self, FORK_REBUILD_FAILED, IDENTITY_MISMATCH, ResumeMonitor, SESSION_NOT_FOUND,
+    },
     shell_input::ShellInput,
     subscription_service::{PreparedClaudeLaunch, SessionSubscriptions, SubscriptionService},
     worker::{SessionWorker, WorkerCommand, WorkerEvent},
@@ -166,6 +168,7 @@ struct RunHook {
     last_observation: Option<Observation>,
     last_submission: Option<Instant>,
     resume: Option<ResumeMonitor>,
+    claude_fork_rebuild: Option<ClaudeForkRebuild>,
     reported_missing: bool,
     pending_startup_observations: Vec<(Scope, Observation)>,
     hud: AgentHudProjection,
@@ -246,10 +249,28 @@ pub enum OwnerEvent {
     /// The event range is committed before consumers refresh their graph views.
     Domain(DomainCommit),
     ProviderIdentity(Value),
+    RebuildClaudeFork {
+        session_id: String,
+        rebuild: Box<ClaudeForkRebuild>,
+    },
     Diagnostic {
         session_id: String,
         message: String,
     },
+}
+
+pub struct ClaudeForkRebuild {
+    pub(crate) parent: String,
+    pub(crate) child: String,
+    pub(crate) plan: PreparedClaudeLaunch,
+}
+
+impl std::fmt::Debug for ClaudeForkRebuild {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ClaudeForkRebuild")
+            .finish_non_exhaustive()
+    }
 }
 
 /// Serialized database-side owner, used on the runtime thread, never the UI thread.
@@ -1755,7 +1776,10 @@ impl ShellOwner {
     ) -> Result<bool> {
         let (result, mismatch) = match change {
             ClaudeRestore::Begin(_) => ("restoring", false),
-            ClaudeRestore::Fail { error, .. } => ("restore-failed", error == IDENTITY_MISMATCH),
+            ClaudeRestore::Fail { error, .. } => (
+                "restore-failed",
+                error.strip_prefix(FORK_REBUILD_FAILED).unwrap_or(error) == IDENTITY_MISMATCH,
+            ),
             ClaudeRestore::Retry => ("retrying", false),
             ClaudeRestore::Fresh | ClaudeRestore::PermissionFresh => ("starting-fresh", false),
             ClaudeRestore::Ready { .. } => unreachable!(),
@@ -2423,6 +2447,107 @@ impl ShellOwner {
         )
     }
 
+    pub(crate) fn failed_claude_fork_parent(&self, session_id: &str) -> Result<Option<String>> {
+        let Some(binding) = self
+            .claude_binding(session_id)?
+            .filter(|binding| binding.restore_state == "failed")
+        else {
+            return Ok(None);
+        };
+        provider_resume::empty_fork_parent(
+            &self.connection,
+            session_id,
+            &binding,
+            SESSION_NOT_FOUND,
+        )
+    }
+
+    pub(crate) fn launch_claude_restore(
+        &mut self,
+        session_id: String,
+        terminal: matou_native_terminal::TerminalOptions,
+        plan: PreparedClaudeLaunch,
+        binding: &ClaudeBinding,
+        rebuild: Option<(String, String)>,
+    ) -> Result<()> {
+        let mut monitor = ResumeMonitor::new(binding);
+        let fallback = if let Some((parent, child)) = rebuild {
+            ensure!(
+                child == binding.provider_session_id,
+                "Fork rebuild binding changed"
+            );
+            ensure!(
+                provider_resume::empty_fork_parent(
+                    &self.connection,
+                    &session_id,
+                    binding,
+                    SESSION_NOT_FOUND
+                )?
+                .as_deref()
+                    == Some(parent.as_str()),
+                "Fork rebuild no longer owns an empty child binding"
+            );
+            if let Some(error) = provider_resume::fork_rebuild_blocker(
+                claude_projects(&plan.launch.launch).as_deref(),
+                &parent,
+                &child,
+            ) {
+                self.change_claude_restore(
+                    &session_id,
+                    ClaudeRestore::Fail {
+                        binding_id: &binding.id,
+                        error: &error,
+                    },
+                )?;
+                anyhow::bail!("{error}");
+            }
+            monitor.rebuild_parent = Some(parent);
+            None
+        } else {
+            provider_resume::empty_fork_parent(
+                &self.connection,
+                &session_id,
+                binding,
+                SESSION_NOT_FOUND,
+            )?
+            .map(|parent| {
+                let child = binding.provider_session_id.clone();
+                let launch = plan.launch.for_fork_rebuild(&parent, &child)?;
+                let subscriptions =
+                    plan.subscriptions
+                        .as_ref()
+                        .map(|subscriptions| SessionSubscriptions {
+                            service: subscriptions.service.clone(),
+                            targets: subscriptions.targets.clone(),
+                        });
+                Ok::<_, anyhow::Error>(ClaudeForkRebuild {
+                    parent,
+                    child,
+                    plan: PreparedClaudeLaunch {
+                        launch,
+                        subscriptions,
+                    },
+                })
+            })
+            .transpose()?
+        };
+        self.launch_claude_with_monitor(
+            session_id.clone(),
+            terminal,
+            plan,
+            Some(monitor),
+            binding.metadata.get("spawnRevision"),
+        )?;
+        self.shells
+            .get_mut(&session_id)
+            .unwrap()
+            .hook
+            .as_mut()
+            .unwrap()
+            .claude_fork_rebuild = fallback;
+        Ok(())
+    }
+
     pub(crate) fn launch_promoted_claude(
         &mut self,
         session_id: &str,
@@ -2901,15 +3026,7 @@ impl ShellOwner {
                 IDENTITY_TIMEOUT
             };
             let claude_projects = (profile == LaunchProfile::ClaudeCode)
-                .then(|| {
-                    get_var(&options.launch.env, "CLAUDE_CONFIG_DIR")
-                        .map(|path| options.launch.cwd.join(path).join("projects"))
-                        .or_else(|| {
-                            get_var(&options.launch.env, "HOME")
-                                .map(|home| Path::new(home).join(".claude/projects"))
-                        })
-                        .or_else(crate::provider_catalog::projects_root)
-                })
+                .then(|| claude_projects(&options.launch))
                 .flatten();
             let mut hud = AgentHudProjection::new(
                 &session_id,
@@ -3168,6 +3285,7 @@ impl ShellOwner {
                 last_observation: None,
                 last_submission: None,
                 resume,
+                claude_fork_rebuild: None,
                 reported_missing: false,
                 pending_startup_observations: Vec::new(),
                 hud,
@@ -3698,7 +3816,7 @@ impl ShellOwner {
                             Some(FRESH_PERMISSION_IDENTITY_TIMEOUT.into());
                         continue;
                     }
-                    if resume.permission_respawn
+                    if (resume.permission_respawn || resume.rebuild_parent.is_some())
                         && let Some(binding_id) = &resume.binding_id
                     {
                         expired_permission_restores.push((
@@ -4659,6 +4777,7 @@ impl ShellOwner {
                 resume.stop_trust();
             }
             hook.last_observation = Some(observation);
+            hook.claude_fork_rebuild = None;
             if confirms {
                 hook.claude_transcript = None;
                 hook.claude_transcript_poll = None;
@@ -5236,10 +5355,89 @@ impl ShellOwner {
         error: &str,
         events: &mut Vec<OwnerEvent>,
     ) {
+        let mut error = self
+            .shells
+            .get(session_id)
+            .filter(|shell| shell.run_id == run_id)
+            .and_then(|shell| shell.hook.as_ref())
+            .and_then(|hook| hook.resume.as_ref())
+            .map_or_else(|| error.to_owned(), |resume| resume.failure_message(error));
+        if error == SESSION_NOT_FOUND {
+            let rebuild = (|| {
+                let Some(hook) = self
+                    .shells
+                    .get(session_id)
+                    .filter(|shell| shell.run_id == run_id && !shell.retiring)
+                    .and_then(|shell| shell.hook.as_ref())
+                    .filter(|hook| hook.last_observation.is_none())
+                else {
+                    return Ok(None);
+                };
+                let Some(rebuild) = &hook.claude_fork_rebuild else {
+                    return Ok(None);
+                };
+                let Some(binding) = self
+                    .claude_binding(session_id)?
+                    .filter(|binding| binding.id == binding_id && binding.resumable)
+                else {
+                    return Ok(None);
+                };
+                let parent = provider_resume::empty_fork_parent(
+                    &self.connection,
+                    session_id,
+                    &binding,
+                    &error,
+                )?;
+                if parent.as_deref() != Some(rebuild.parent.as_str())
+                    || rebuild.child != binding.provider_session_id
+                {
+                    return Ok(None);
+                }
+                if let Some(blocker) = provider_resume::fork_rebuild_blocker(
+                    hook.claude_projects.as_deref(),
+                    &rebuild.parent,
+                    &rebuild.child,
+                ) {
+                    error = blocker;
+                    return Ok(None);
+                }
+                self.commit_claude_restore(
+                    session_id,
+                    ClaudeRestore::Begin(binding_id),
+                    Some(run_id),
+                    events,
+                )?;
+                Ok::<_, anyhow::Error>(
+                    self.shells
+                        .get_mut(session_id)
+                        .and_then(|shell| shell.hook.as_mut())
+                        .and_then(|hook| hook.claude_fork_rebuild.take()),
+                )
+            })();
+            match rebuild {
+                Ok(Some(rebuild)) => {
+                    self.retire_sessions(&[session_id.to_owned()]);
+                    events.push(OwnerEvent::RebuildClaudeFork {
+                        session_id: session_id.to_owned(),
+                        rebuild: Box::new(rebuild),
+                    });
+                    return;
+                }
+                Ok(None) => {}
+                Err(error) => diagnostic(
+                    events,
+                    session_id,
+                    format!("Prepare Claude fork rebuild: {error:#}"),
+                ),
+            }
+        }
         self.retire_sessions(&[session_id.to_owned()]);
         if let Err(error) = self.commit_claude_restore(
             session_id,
-            ClaudeRestore::Fail { binding_id, error },
+            ClaudeRestore::Fail {
+                binding_id,
+                error: &error,
+            },
             Some(run_id),
             events,
         ) {
@@ -5758,13 +5956,16 @@ impl ShellOwner {
             return Ok(());
         }
         if let Some(resume) = pending_restore.filter(|_| !retiring) {
-            if let Some(binding_id) = resume.binding_id {
+            if let Some(binding_id) = &resume.binding_id {
                 if !disposed && !self.closing {
                     self.park_provider_run(
                         id,
                         &run,
-                        &binding_id,
-                        &format!("provider resume exited with code {}", status.exit_code),
+                        binding_id,
+                        &resume.failure_message(&format!(
+                            "provider resume exited with code {}",
+                            status.exit_code
+                        )),
                         events,
                     );
                 }
@@ -6061,6 +6262,20 @@ fn tracks_egress(profile: LaunchProfile) -> bool {
         profile,
         LaunchProfile::ClaudeCode | LaunchProfile::Codex | LaunchProfile::Antigravity
     )
+}
+
+fn claude_projects(launch: &ShellLaunch) -> Option<PathBuf> {
+    get_var(&launch.env, "CLAUDE_CONFIG_DIR")
+        .filter(|path| !path.is_empty())
+        .map(|path| launch.cwd.join(path).join("projects"))
+        .or_else(|| {
+            let home = get_var(&launch.env, "HOME").filter(|path| !path.is_empty());
+            #[cfg(windows)]
+            let home = home
+                .or_else(|| get_var(&launch.env, "USERPROFILE").filter(|path| !path.is_empty()));
+            home.map(|home| launch.cwd.join(home).join(".claude/projects"))
+        })
+        .or_else(crate::provider_catalog::projects_root)
 }
 
 fn launch_egress_families(
