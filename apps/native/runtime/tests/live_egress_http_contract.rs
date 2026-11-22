@@ -288,6 +288,27 @@ fn first_sample_updates_status_and_manual_recheck_gets_new_results() -> Result<(
     let first = runtime.status("egressStatusChanged", 0, QUICK_WAIT)?;
     assert_eq!(first["state"], "ok");
     assert_exit(&first, "203.0.113.7", "US");
+    let local: Vec<_> = first["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|check| check["family"].is_null())
+        .map(|check| {
+            (
+                check["id"].as_str().unwrap(),
+                check["result"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        local,
+        [
+            ("agent-proxy-path", "pass"),
+            ("browser-path", "pass"),
+            ("time-zone", "pass"),
+            ("ipv6", "pass")
+        ]
+    );
     assert_eq!(runtime.status("egressStatusResult", 1, QUICK_WAIT)?, first);
     assert!(first["checkedAt"].is_number());
 
@@ -314,6 +335,43 @@ fn first_sample_updates_status_and_manual_recheck_gets_new_results() -> Result<(
     assert_eq!(new["families"][0]["violation"], "rule");
     runtime.send(Command::GetEgressStatus { request_id: 4 })?;
     assert_eq!(runtime.status("egressStatusResult", 4, QUICK_WAIT)?, new);
+    runtime.shutdown()
+}
+
+#[test]
+fn saving_time_zone_schedules_a_new_loopback_sample() -> Result<()> {
+    let server = listener()?;
+    let base = format!("http://{}", server.local_addr()?);
+    let root = tempfile::tempdir()?;
+    let mut runtime = Runtime::start(root.path(), &base, &[("TZ", "Asia/Shanghai")])?;
+    let body = "ip=203.0.113.7\nloc=US\n";
+    let time_zone_check = |status: &Value| {
+        status["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["id"] == "time-zone")
+            .unwrap()["result"]
+            .clone()
+    };
+    respond(accept_batch(&server, "/cdn-cgi/trace")?, "200 OK", body)?;
+    let auto = runtime.status("egressStatusChanged", 0, QUICK_WAIT)?;
+    assert_eq!(time_zone_check(&auto), "pass");
+
+    for (request_id, setting, expected) in [(1, "system", "warn"), (2, "UTC", "pass")] {
+        runtime.send(Command::SetTimeZoneSettings {
+            request_id,
+            time_zone: json!(setting),
+        })?;
+        let saved = runtime.wait(QUICK_WAIT, |event| match event {
+            Event::TimeZoneSettings(reply) if reply.request_id == request_id => Some(reply.result),
+            _ => None,
+        })?;
+        assert_eq!(saved.unwrap().time_zone, setting);
+        respond(accept_batch(&server, "/cdn-cgi/trace")?, "200 OK", body)?;
+        let updated = runtime.status("egressStatusChanged", 0, QUICK_WAIT)?;
+        assert_eq!(time_zone_check(&updated), expected);
+    }
     runtime.shutdown()
 }
 

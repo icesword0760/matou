@@ -743,7 +743,11 @@ exec /bin/cat
     let patch = marker(&patch_path, |value| value.contains("runId:"))?;
     let (url, run) = dsh_registration(&patch)?;
     post(&url, &dsh_ready(&run, &options.workspace, "dsh-fresh"))?;
-    identity(&host, &id, "dsh-fresh")?;
+    let fresh = identity(&host, &id, "dsh-fresh")?;
+    assert_eq!(
+        node(&fresh, &id).context("DSH card")?["historyProviderSessionId"],
+        "dsh-fresh"
+    );
     let loaded = result(
         &host,
         Command::LoadDshSession {
@@ -764,7 +768,11 @@ exec /bin/cat
     })?;
     let (url, run) = dsh_registration(&patch)?;
     post(&url, &dsh_ready(&run, &options.workspace, "dsh-saved"))?;
-    identity(&host, &id, "dsh-saved")?;
+    let resumed = identity(&host, &id, "dsh-saved")?;
+    assert_eq!(
+        node(&resumed, &id).context("restored DSH card")?["historyProviderSessionId"],
+        "dsh-saved"
+    );
     let hud = result(
         &host,
         Command::GetAgentHud {
@@ -1379,7 +1387,7 @@ exec /bin/cat
         Path::new(path.trim()).is_file()
     })?;
     let settings: Value = serde_json::from_slice(&fs::read(settings.trim())?)?;
-    let url = settings["hooks"]["SessionStart"][0]["hooks"][0]["url"]
+    let url = settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["url"]
         .as_str()
         .context("Claude fixture hook URL")?;
     post(
