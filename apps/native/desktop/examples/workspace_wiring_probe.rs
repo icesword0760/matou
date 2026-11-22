@@ -2778,11 +2778,15 @@ mod workspace {
             .unwrap();
         assert!(!draw(window.into(), cx).contains_key("remove-session-shell-a"));
         window
-            .update(cx, |view, _, cx| {
+            .update(cx, |view, window, cx| {
                 view.graph = graph();
+                view.graph["nodes"][0]["currentMode"] = json!("claude-code");
+                view.refresh_terminals(window, cx);
                 cx.notify();
             })
             .unwrap();
+        wait_for_hud_element(window.into(), cx, "quota").await;
+        assert_eq!(hud_text(window.into(), cx, "quota").as_deref(), Some("—"));
         let live = json!({
             "model":"Long full model name","contextWindowSize":200000,"permissionMode":"ask","resumable":true,
             "usageWindows":[{"id":"current","label":"Current model","usedPercent":91,"resetText":"12:00"}],
@@ -3372,7 +3376,7 @@ mod workspace {
             .update(cx, |_, window, _| window.remove_window())
             .unwrap();
         println!(
-            "HUD: live projection, Antigravity quota/permission, Git/environment popovers, edit/save and detached footer"
+            "HUD: Claude empty quota, live projection, Antigravity quota/permission, Git/environment popovers, edit/save and detached footer"
         );
     }
 

@@ -1050,7 +1050,12 @@ pub(super) async fn verify(cx: &mut AsyncApp, root: PathBuf) {
         })
         .await;
     let settings: Value = serde_json::from_slice(&settings).unwrap();
-    let url = settings["hooks"]["SessionStart"][0]["hooks"][0]["url"]
+    // SessionStart uses a command hook that posts to the same receiver as the HTTP hooks.
+    assert_eq!(
+        settings["hooks"]["SessionStart"][0]["hooks"][0]["type"],
+        "command"
+    );
+    let url = settings["hooks"]["PreToolUse"][0]["hooks"][0]["url"]
         .as_str()
         .unwrap();
     post(
