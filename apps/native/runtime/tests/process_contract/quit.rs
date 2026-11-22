@@ -2,7 +2,9 @@ use super::*;
 use std::{
     collections::HashSet,
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
+    os::unix::fs::MetadataExt,
     ptr,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 fn wait_for_fixture(path: &Path, event: &str) -> Result<serde_json::Value> {
@@ -31,7 +33,9 @@ fn start_fixture(root: &Path, mode: &str) -> Result<(RuntimeChild, u32, Option<u
     let root_arg = root.display().to_string().replace('\'', "'\"'\"'");
     let run = format!("/usr/bin/python3 -I -B '{script}' {mode} '{root_arg}'",);
     let shell = match mode {
-        "baseline" => format!("PROMPT='{PROMPT} '\n"),
+        // A chevron prompt is classified as a request for input if it arrives
+        // in a separate PTY chunk from the preceding completion marker.
+        "baseline" => "PROMPT='QUIT_BASELINE_READY$ '\n".into(),
         "nested" => format!("printf '%s' \"$$\" > '{root_arg}/shell-pid'\n{run}\n"),
         _ => format!("exec {run}\n"),
     };
@@ -42,6 +46,28 @@ fn start_fixture(root: &Path, mode: &str) -> Result<(RuntimeChild, u32, Option<u
     child.ready()?;
     if mode == "baseline" {
         let pid = child.shell_pid()?;
+        let db = Connection::open_with_flags(
+            child.data.join("matou.sqlite"),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        let deadline = Instant::now() + TIMEOUT;
+        // The PID arrives before the Shell's command-completion marker can
+        // settle its work status. This scenario starts shutdown from idle.
+        loop {
+            let idle: bool = db.query_row(
+                "SELECT work_status='idle' FROM sessions WHERE id=?",
+                [&child.session],
+                |row| row.get(0),
+            )?;
+            if idle {
+                break;
+            }
+            ensure!(
+                Instant::now() < deadline,
+                "baseline Shell did not return to idle after reporting its PID"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
         return Ok((child, pid, None));
     }
 
@@ -133,10 +159,12 @@ fn clean_quit_waits_for_direct_shell_and_foreground_group_before_publishing() ->
     let foreign_log = foreign_root.path().join("child.jsonl");
     let foreign_exits = watch_exits(&[foreign_shell])?;
 
+    // The upper bounds include both runtime scheduling and the SQLite backup.
+    // Parallel runs have published handled/ignored pairs in 2857/3267 ms.
     for (mode, grace_min, grace_max, expected_signal) in [
         ("baseline", 0, 1000, 0),
-        ("handled", 900, 2750, 0),
-        ("ignored", 1400, 2750, 9),
+        ("handled", 900, 3250, 0),
+        ("ignored", 1400, 3500, 9),
         ("nested", 1400, 2750, 0),
     ] {
         let root = tempfile::tempdir()?;
@@ -148,6 +176,7 @@ fn clean_quit_waits_for_direct_shell_and_foreground_group_before_publishing() ->
             .collect();
         let queue = watch_exits(&pids)?;
         let before = Instant::now();
+        let requested_at = SystemTime::now();
         child.send(Command::Shutdown)?;
         let mut exits = HashSet::new();
         let path = loop {
@@ -181,7 +210,15 @@ fn clean_quit_waits_for_direct_shell_and_foreground_group_before_publishing() ->
             );
             thread::sleep(Duration::from_millis(1));
         };
-        let elapsed = before.elapsed().as_millis();
+        // On macOS the final manifest rename stamps ctime. Measure when the
+        // pair was published even if this test was descheduled while polling.
+        let manifest = fs::metadata(path.with_extension("json"))?;
+        let published_at = UNIX_EPOCH
+            + Duration::new(
+                u64::try_from(manifest.ctime())?,
+                u32::try_from(manifest.ctime_nsec())?,
+            );
+        let elapsed = published_at.duration_since(requested_at)?.as_millis();
         ensure!(
             (grace_min..grace_max).contains(&elapsed),
             "{mode}: backup published after {elapsed} ms"

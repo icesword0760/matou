@@ -311,13 +311,14 @@ fn seed_journal(root: &Path, session: u64, frames: impl IntoIterator<Item = Fram
     journal.close()
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct Snapshot {
     rows: BTreeMap<String, Vec<Vec<SqlValue>>>,
     files: BTreeMap<PathBuf, Vec<u8>>,
 }
 
 fn snapshot(connection: &Connection, root: &Path) -> Result<Snapshot> {
+    let connection = connection.unchecked_transaction()?;
     let mut names =
         connection.prepare("SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name")?;
     let tables = names
@@ -341,6 +342,86 @@ fn snapshot(connection: &Connection, root: &Path) -> Result<Snapshot> {
     let mut files = BTreeMap::new();
     snapshot_files(root, root, &mut files)?;
     Ok(Snapshot { rows, files })
+}
+
+#[cfg(unix)]
+fn assert_managed_snapshot_unchanged(before: &Snapshot, after: Snapshot) -> Result<()> {
+    use matou_native_core::workspace_paths::WorkspacePathState;
+
+    let receipts = &before.rows["command_deduplication"];
+    let mut rechecks = BTreeMap::new();
+    for receipt in &after.rows["command_deduplication"] {
+        let [
+            SqlValue::Text(id),
+            SqlValue::Text(kind),
+            SqlValue::Text(hash),
+            SqlValue::Text(response),
+            SqlValue::Null,
+            SqlValue::Null,
+            SqlValue::Integer(_),
+        ] = receipt.as_slice()
+        else {
+            continue;
+        };
+        if kind == "workspace.validate-path"
+            && id.starts_with("workspace-path-")
+            && !receipts.contains(receipt)
+        {
+            let state: WorkspacePathState = serde_json::from_str(response)?;
+            assert_eq!(
+                *hash,
+                format!(
+                    "{}:{}:{}:{}",
+                    state.workspace_id, state.validation_generation, state.status, state.reason
+                )
+            );
+            assert!(
+                rechecks
+                    .insert(state.validation_generation, (state, receipt.clone()))
+                    .is_none()
+            );
+        }
+    }
+
+    // A live host periodically validates the active workspace. Account for
+    // those event-free checks and still compare every database and file entry.
+    let mut expected = before.clone();
+    let [workspace] = expected
+        .rows
+        .get_mut("workspace_path_state")
+        .unwrap()
+        .as_mut_slice()
+    else {
+        bail!("expected one managed workspace");
+    };
+    let [
+        SqlValue::Text(id),
+        SqlValue::Text(status),
+        SqlValue::Text(reason),
+        SqlValue::Integer(checked_at),
+        SqlValue::Integer(generation),
+    ] = workspace.as_mut_slice()
+    else {
+        bail!("unexpected managed workspace path state");
+    };
+    let mut expected_receipts = receipts.clone();
+    for (state, receipt) in rechecks.into_values() {
+        assert_eq!(
+            (&state.workspace_id, &state.status, &state.reason),
+            (&*id, &*status, &*reason)
+        );
+        assert_eq!(state.validation_generation, *generation + 1);
+        assert!(state.checked_at >= *checked_at);
+        *generation = state.validation_generation;
+        *checked_at = state.checked_at;
+        expected_receipts.push(receipt);
+    }
+    expected_receipts.sort_by_cached_key(|row| format!("{row:?}"));
+    expected
+        .rows
+        .insert("command_deduplication".into(), expected_receipts);
+    assert_eq!(after, expected);
+    Ok(())
 }
 
 fn snapshot_files(
@@ -1358,7 +1439,7 @@ exit 0
         reply["result"]["caller"],
         json!({"sessionId":session_id, "runId":run_id})
     );
-    assert_eq!(snapshot(&observe, &data)?, before);
+    assert_managed_snapshot_unchanged(&before, snapshot(&observe, &data)?)?;
 
     for (method, params) in [
         (READ, screen_params(json!({"kind":"self"}))),
@@ -1386,18 +1467,24 @@ exit 0
         };
         check_reply(&reply, "managed-read", expected);
     }
-    assert_eq!(snapshot(&observe, &data)?, before);
+    assert_managed_snapshot_unchanged(&before, snapshot(&observe, &data)?)?;
 
     fs::write(home.join("exit"), b"")?;
     let until = Instant::now() + Duration::from_secs(8);
     loop {
-        ensure!(Instant::now() < until, "managed run did not exit");
-        let exited: bool = observe.query_row(
-            "SELECT status='exited' FROM session_runs WHERE id=?",
+        ensure!(
+            Instant::now() < until,
+            "managed run exit and work status did not settle"
+        );
+        // This fixture exits from .zshrc before reaching a prompt. Its work
+        // status is committed separately from the run exit.
+        let settled: bool = observe.query_row(
+            "SELECT r.status='exited' AND s.work_status='error'
+             FROM session_runs r JOIN sessions s ON s.id=r.session_id WHERE r.id=?",
             [run_id],
             |row| row.get(0),
         )?;
-        if exited {
+        if settled {
             break;
         }
         while host.events.try_recv().is_ok() {}
@@ -1407,7 +1494,7 @@ exit 0
     let after_exit = snapshot(&observe, &data)?;
     let revoked = identify(&mut socket)?;
     check_reply(&revoked, "managed", Some("CAPABILITY_DENIED"));
-    assert_eq!(snapshot(&observe, &data)?, after_exit);
+    assert_managed_snapshot_unchanged(&after_exit, snapshot(&observe, &data)?)?;
     host.shutdown()?;
     assert!(!Path::new(endpoint).exists());
     println!(

@@ -378,7 +378,9 @@ fn codex_launch_rolls_back_missing_and_immediately_exiting_commands() -> Result<
         ),
     ] {
         let root = tempfile::tempdir()?;
-        let (mut child, codex_home) = fixture(root.path(), executable, exit)?;
+        // The PTY reports a physical cwd. Start with that same spelling even
+        // when TMPDIR is a symlink, before the runtime's first cwd observation.
+        let (mut child, codex_home) = fixture(&root.path().canonicalize()?, executable, exit)?;
         let db = Connection::open(child.data.join("matou.sqlite"))?;
         db.busy_timeout(TIMEOUT)?;
         let session = child.session.clone();

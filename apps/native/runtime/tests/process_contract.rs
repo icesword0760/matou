@@ -4584,11 +4584,14 @@ done
     assert_eq!(previous.metadata["custom"], serde_json::json!([1, 2]));
     child.send(set("auto"))?;
     let failure = permission_mode_result(&mut child, "auto")?;
+    let error = failure["error"].as_str().unwrap();
+    // The same exit can reach either the startup check or the resume monitor.
     assert!(
-        failure["error"]
-            .as_str()
-            .unwrap()
-            .contains("process exited with code 23"),
+        error
+            .rsplit(": ")
+            .next()
+            .is_some_and(|cause| cause == "process exited with code 23")
+            || error == "provider resume exited with code 23",
         "{failure}"
     );
     let restored = claude_binding(&db, &session)?.context("rolled back binding")?;

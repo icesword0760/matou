@@ -1,7 +1,7 @@
 use std::{
     fs,
     io::{Read, Write},
-    net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream},
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream},
     os::unix::fs::PermissionsExt,
 };
 
@@ -405,20 +405,46 @@ fn antigravity_risk_ipv6_cancel_and_unambiguous_baseline() -> Result<()> {
 
 #[test]
 fn login_timeout_busy_port_and_untrusted_redirect() -> Result<()> {
-    let fixture = Fixture::new("", Duration::from_millis(100))?;
-    let service = &fixture.service;
+    let mut fixture = Fixture::new("", Duration::from_millis(100))?;
     let kind = SubscriptionProvider::ChatGpt;
-    service.begin_settings(1)?;
-    let busy = TcpListener::bind((Ipv4Addr::LOCALHOST, fixture.ports[0]))?;
+    let use_codex_port = |fixture: &mut Fixture, port| -> Result<()> {
+        fixture.ports[0] = port;
+        fs::write(
+            fixture.root.path().join("model-router/fixture-oauth-ports"),
+            json!({"codex": port, "antigravity": fixture.ports[1]}).to_string(),
+        )?;
+        fixture.service.login_options.ports = Some(fixture.ports);
+        Ok(())
+    };
+    fixture.service.begin_settings(1)?;
+    let (port, busy) = callback::bind(0)?;
+    use_codex_port(&mut fixture, port)?;
     assert!(
-        service
+        fixture
+            .service
             .start_login(1, kind, false)
             .unwrap_err()
             .to_string()
             .contains("port is in use")
     );
     drop(busy);
-    let view = service.start_login(1, kind, false)?;
+    let mut view = fixture.service.start_login(1, kind, false);
+    // Other local fixtures can claim an ephemeral port during the handoff.
+    // Retry only an OS bind conflict, with a freshly reserved port.
+    for _ in 0..2 {
+        if !view
+            .as_ref()
+            .is_err_and(|error| error.to_string().contains("port is in use"))
+        {
+            break;
+        }
+        let (port, reservation) = callback::bind(0)?;
+        use_codex_port(&mut fixture, port)?;
+        drop(reservation);
+        view = fixture.service.start_login(1, kind, false);
+    }
+    let view = view?;
+    let service = &fixture.service;
     thread::sleep(Duration::from_millis(125));
     service.expire_logins();
     assert_eq!(

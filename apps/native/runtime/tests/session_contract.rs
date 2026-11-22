@@ -127,13 +127,16 @@ fn collect_worker(
 #[test]
 fn worker_copy_interrupt_clears_the_line_and_preserves_the_decoder_tail() -> Result<()> {
     let root = tempfile::tempdir()?;
-    let (events, _incoming) = mpsc::channel();
+    let (events, incoming) = mpsc::channel();
     let mut worker = SessionWorker::spawn(
         shell_options(root.path(), "copy-utf8", 4096)?,
         events,
         "copy-utf8-run".into(),
     )?;
     let timeout = Duration::from_secs(5);
+    collect_worker(&incoming, &mut Vec::new(), timeout, |events| {
+        output_has(events, "MATOU_READY>")
+    })?;
     let (reply, written) = mpsc::channel();
     worker.send(WorkerCommand::WriteShellInput {
         bytes: b"old-line\xef".to_vec(),
