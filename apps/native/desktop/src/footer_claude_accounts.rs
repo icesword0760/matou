@@ -43,6 +43,97 @@ pub(super) struct AccountUi {
     selected: Option<String>,
     remember: bool,
     notice: bool,
+    scroll: gpui::ScrollHandle,
+}
+
+impl AccountUi {
+    fn can_request(&self, reply: Reply) -> bool {
+        match (self.request.map(|(_, pending)| pending), reply) {
+            (Some(Reply::List), Reply::Login) => true,
+            (Some(Reply::Login | Reply::Code), Reply::Cancel) => true,
+            (Some(_), _) => false,
+            (None, Reply::Code | Reply::Cancel) => true,
+            (None, _) => self.login.is_none(),
+        }
+    }
+
+    fn button_disabled(&self, id: &str) -> bool {
+        match id {
+            "footer-accounts-close" | "claude-account-refresh" => false,
+            "claude-account-add" | "claude-start-login" => !self.can_request(Reply::Login),
+            "claude-cancel-login" => !self.can_request(Reply::Cancel),
+            "claude-submit-code" => {
+                self.state.login_attempt_id.is_none() || !self.can_request(Reply::Code)
+            }
+            _ => self.request.is_some(),
+        }
+    }
+
+    fn show_error(&mut self, reply: Reply) {
+        if reply == Reply::Login
+            && self.page == Page::Login
+            && self.state.login_attempt_id.is_none()
+        {
+            self.page = if self.selected.is_some() {
+                Page::Reauth
+            } else {
+                Page::Add
+            };
+            self.input = None;
+        }
+        self.scroll.set_offset(Point::default());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AccountUi, Page, Reply, account_error};
+    use matou_native_core::sessions::InterfaceLocale;
+    use matou_native_runtime::claude_accounts::ClaudeAccountsState;
+
+    #[test]
+    fn roster_read_does_not_disable_login() {
+        let ui = AccountUi {
+            request: Some((1, Reply::List)),
+            page: Page::Add,
+            ..Default::default()
+        };
+        assert!(!ui.button_disabled("claude-account-add"));
+        assert!(!ui.button_disabled("claude-start-login"));
+        assert!(ui.button_disabled("footer-manage-accounts"));
+    }
+
+    #[test]
+    fn pending_login_and_code_allow_cancel() {
+        let mut ui = AccountUi {
+            request: Some((1, Reply::Login)),
+            page: Page::Login,
+            ..Default::default()
+        };
+        assert!(!ui.button_disabled("claude-cancel-login"));
+        assert!(ui.button_disabled("claude-submit-code"));
+        ui.request = Some((2, Reply::Code));
+        assert!(!ui.button_disabled("claude-cancel-login"));
+    }
+
+    #[test]
+    fn login_failure_keeps_error_and_returns_to_the_correct_form() {
+        for (selected, expected) in [(None, Page::Add), (Some("work".into()), Page::Reauth)] {
+            let mut ui = AccountUi {
+                page: Page::Login,
+                selected,
+                state: ClaudeAccountsState {
+                    error: Some("browser-missing".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            ui.show_error(Reply::Login);
+            assert!(ui.page == expected);
+            assert_eq!(ui.state.error.as_deref(), Some("browser-missing"));
+            assert!(account_error(InterfaceLocale::Chinese, "browser-missing").contains("Chrome"));
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -114,14 +205,6 @@ impl Workspace {
     }
 
     fn request_claude_account(&mut self, action: Action, cx: &mut Context<Self>) {
-        let ui = &self.wiring.accounts;
-        if ui.request.is_some()
-            || (ui.login.is_some()
-                && !matches!(action, Action::SubmitLoginCode { .. } | Action::CancelLogin))
-        {
-            return;
-        }
-        let request_id = self.next_wiring_request();
         let reply = match action {
             Action::List => Reply::List,
             Action::RefreshUsage => Reply::Refresh,
@@ -133,6 +216,10 @@ impl Workspace {
             Action::SaveDraft { .. } | Action::SaveDetected { .. } => Reply::Save,
             Action::CancelLogin => Reply::Cancel,
         };
+        if !self.wiring.accounts.can_request(reply) {
+            return;
+        }
+        let request_id = self.next_wiring_request();
         let command = if reply == Reply::List {
             Command::GetClaudeAccounts { request_id }
         } else {
@@ -145,7 +232,22 @@ impl Workspace {
         let ui = &mut self.wiring.accounts;
         ui.requested = true;
         ui.state.error = (!sent).then(|| "runtime".into());
-        ui.request = sent.then_some((request_id, reply));
+        if sent {
+            ui.request = Some((request_id, reply));
+            if reply == Reply::Login {
+                let selected = ui.selected.clone();
+                self.account_page(Page::Login, selected, "", cx);
+                return;
+            } else if reply == Reply::Cancel {
+                ui.login = None;
+                ui.state.login_attempt_id = None;
+                ui.state.draft = None;
+                self.account_page(Page::List, None, "", cx);
+                return;
+            }
+        } else {
+            ui.show_error(reply);
+        }
         cx.notify();
     }
 
@@ -160,6 +262,9 @@ impl Workspace {
             ui.request.take().map(|(_, reply)| reply)
         } else if ui.login == Some(request_id) {
             ui.login = None;
+            if ui.request.is_some_and(|(_, reply)| reply == Reply::Code) {
+                ui.request = None;
+            }
             Some(Reply::Login)
         } else {
             None
@@ -168,6 +273,10 @@ impl Workspace {
         let Ok(state) = serde_json::from_value::<ClaudeAccountsState>(reply["result"].clone())
         else {
             ui.state.error = Some("runtime".into());
+            if request == Reply::Login {
+                ui.state.login_attempt_id = None;
+            }
+            ui.show_error(request);
             cx.notify();
             return;
         };
@@ -179,7 +288,9 @@ impl Workspace {
                 Reply::Switch | Reply::Cancel => Some(Page::List),
                 Reply::Rename | Reply::Remove => Some(Page::Manage),
                 Reply::Login if state.draft.is_some() => Some(Page::Draft),
-                Reply::Login if state.login_attempt_id.is_some() => Some(Page::Login),
+                Reply::Login if state.login_attempt_id.is_some() && ui.page != Page::Login => {
+                    Some(Page::Login)
+                }
                 Reply::Save if ui.page == Page::Draft => {
                     if let Some(id) = ui.state.reauth_id.as_ref() {
                         ui.selected = Some(id.clone());
@@ -198,6 +309,7 @@ impl Workspace {
                     None
                 };
                 ui.page = page;
+                ui.scroll.set_offset(Point::default());
                 ui.input = match page {
                     Page::Draft => Some(account_input(
                         text.unwrap_or_default(),
@@ -215,18 +327,11 @@ impl Workspace {
                 };
             }
             ui.notice |= state.switched;
-        } else if request == Reply::Login
-            && ui.page == Page::Login
-            && state.login_attempt_id.is_none()
-        {
-            ui.page = if ui.selected.is_some() {
-                Page::Reauth
-            } else {
-                Page::Add
-            };
-            ui.input = None;
         }
         ui.state = state;
+        if ui.state.error.is_some() {
+            ui.show_error(request);
+        }
         cx.notify();
     }
 
@@ -242,8 +347,15 @@ impl Workspace {
             if let Some(draft) = self.wiring.accounts.state.draft.as_ref() {
                 let name = draft.name.clone();
                 self.account_page(Page::Draft, None, &name, cx);
-            } else if self.wiring.accounts.state.login_attempt_id.is_some() {
-                self.account_page(Page::Login, None, "", cx);
+            } else if self.wiring.accounts.state.login_attempt_id.is_some()
+                || self
+                    .wiring
+                    .accounts
+                    .request
+                    .is_some_and(|(_, reply)| reply == Reply::Login)
+            {
+                let selected = self.wiring.accounts.selected.clone();
+                self.account_page(Page::Login, selected, "", cx);
             } else {
                 self.account_page(Page::List, None, "", cx);
                 self.load_claude_accounts(cx);
@@ -275,6 +387,7 @@ impl Workspace {
         ui.selected = selected;
         ui.remember = ui.state.remember_scope;
         ui.state.error = None;
+        ui.scroll.set_offset(Point::default());
         cx.notify();
     }
 
@@ -493,14 +606,19 @@ impl Workspace {
             .flex_col()
             .min_h_0()
             .overflow_y_scroll()
+            .track_scroll(&ui.scroll)
             .px(px(12.))
             .pb(px(8.));
         if let Some(error) = ui.state.error.as_deref() {
-            body = body.child(ca_notice(
-                colors,
-                locale.text("操作尚未完成", "Action not completed"),
-                account_error(locale, error),
-            ));
+            body = body.child(
+                ca_notice(
+                    colors,
+                    locale.text("操作尚未完成", "Action not completed"),
+                    account_error(locale, error),
+                )
+                .relative()
+                .children(wiring_probe_bounds("claude-account-error".into())),
+            );
         }
         if ui.page == Page::List {
             body = body.child(self.account_list(colors, dark, window, cx));
@@ -616,11 +734,7 @@ impl Workspace {
             .use_keyed_state(id.clone(), cx, |_, cx| cx.focus_handle().tab_stop(true))
             .read(cx)
             .clone();
-        let disabled = self.wiring.accounts.request.is_some()
-            && !matches!(
-                id.as_ref(),
-                "footer-accounts-close" | "claude-account-refresh"
-            );
+        let disabled = self.wiring.accounts.button_disabled(id.as_ref());
         let button = div()
             .id(id.clone())
             .relative()
