@@ -10,7 +10,19 @@ use matou_native_runtime::{
 };
 
 fn main() -> Result<()> {
-    let options = LaunchOptions::from_args(std::env::args_os().skip(1))?;
+    let mut args = std::env::args_os().skip(1).peekable();
+    if args
+        .peek()
+        .is_some_and(|arg| arg == matou_native_runtime::model_router::WATCHDOG_MODE)
+    {
+        args.next();
+        let directory = args.next().context("Expected model router directory")?;
+        if args.next().is_some() {
+            bail!("Unexpected model router watchdog arguments");
+        }
+        return matou_native_runtime::model_router::run_watchdog(std::path::Path::new(&directory));
+    }
+    let options = LaunchOptions::from_args(args)?;
     // Move this same persistent parser to the reader thread after Hello. Creating
     // another parser would lose any commands already buffered alongside Hello.
     let mut messages = read_messages::<ClientMessage>(io::stdin());

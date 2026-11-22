@@ -13,7 +13,7 @@ use matou_native_core::{
     provider_launch::{EFFORTS, is_claude_model_environment, role_model_env_key},
 };
 use regex::Regex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use url::Url;
 
@@ -26,14 +26,14 @@ pub enum SubscriptionProvider {
 }
 
 impl SubscriptionProvider {
-    fn prefix(self) -> &'static str {
+    pub(crate) fn prefix(self) -> &'static str {
         match self {
             Self::ChatGpt => "matou-chatgpt",
             Self::Antigravity => "matou-antigravity",
         }
     }
 
-    fn router_provider(self) -> &'static str {
+    pub(crate) fn router_provider(self) -> &'static str {
         match self {
             Self::ChatGpt => "codex",
             Self::Antigravity => "antigravity",
@@ -76,7 +76,7 @@ impl ModelRole {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CatalogModel {
     pub id: String,
@@ -146,7 +146,7 @@ pub struct LaunchPlan {
     pub unknown: Vec<&'static str>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelAlias {
     pub name: String,
     pub alias: String,
@@ -332,6 +332,14 @@ fn client_model_id(
     {
         return format!("matou-{}", role.name());
     }
+    if role == ModelRole::Fable {
+        let id = strip_context_marker(&id);
+        let id = id.strip_prefix("anthropic/").unwrap_or(id);
+        return match id {
+            "claude-fable-5" | "claude-fable-5-2" | "claude-fable-5-5" => id.into(),
+            _ => "matou-fable".into(),
+        };
+    }
     if role == ModelRole::Haiku {
         return "claude-haiku-5-5".into();
     }
@@ -364,6 +372,7 @@ fn inherited_env_to_clear(names: &[&str]) -> BTreeSet<String> {
         "CLAUDE_CODE_FORCE_SUBAGENT_MODEL",
         "CLAUDE_CODE_SUBAGENT_MODEL_FORCE",
         "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+        "CLAUDE_CODE_DISABLE_1M_CONTEXT",
         "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
         "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
         "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE",
@@ -862,6 +871,49 @@ mod tests {
                 plan.aliases
                     .iter()
                     .any(|item| item.alias == "matou-fable" && item.name == fable.id)
+            );
+        }
+    }
+
+    #[test]
+    fn antigravity_fable_keeps_only_the_three_native_ids() {
+        let opus = model("anthropic/claude-opus-5-5[1M]", 1_000_000);
+        for (id, expected) in [
+            ("anthropic/claude-fable-5[1M]", "claude-fable-5"),
+            ("claude-fable-5-2", "claude-fable-5-2"),
+            ("CLAUDE-FABLE-5-5[1m]", "claude-fable-5-5"),
+            ("claude-fable-5-7", "matou-fable"),
+            ("anthropic/claude-opus-5[1M]", "matou-fable"),
+            ("gemini-pro", "matou-fable"),
+            ("", "matou-fable"),
+        ] {
+            let fable = model(id, 1_000_000);
+            let mut input = input(&opus);
+            input.provider = SubscriptionProvider::Antigravity;
+            input.models.fable = (!id.is_empty()).then_some(&fable);
+            let projection = build_launch(input).unwrap();
+            assert_eq!(
+                projection.env["ANTHROPIC_DEFAULT_FABLE_MODEL"],
+                format!("matou-antigravity/{expected}")
+            );
+            assert!(
+                projection
+                    .aliases
+                    .iter()
+                    .any(|alias| alias.alias == FABLE_FALLBACK_ALIAS
+                        && alias.name == "anthropic/claude-opus-5-5")
+            );
+            assert!(
+                projection
+                    .aliases
+                    .iter()
+                    .any(|alias| alias.alias == expected
+                        && alias.name
+                            == if id.is_empty() {
+                                strip_context_marker(&opus.id)
+                            } else {
+                                strip_context_marker(id)
+                            })
             );
         }
     }

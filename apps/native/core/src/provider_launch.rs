@@ -406,31 +406,37 @@ pub struct ClaudeLaunch {
     pub effort: Option<String>,
     pub clear_assignment_environment: bool,
     pub gateway: Option<ClaudeGatewayProjection>,
+    pub subscription_settings: Option<Value>,
+    pub subscription_role: Option<&'static str>,
 }
 
 impl ClaudeLaunch {
     pub fn project_time_zone(&mut self, setting: &str, system: &str) {
+        self.project_time_zone_with_exit(setting, system, None);
+    }
+
+    pub fn project_time_zone_with_exit(
+        &mut self,
+        setting: &str,
+        system: &str,
+        codex_exit: Option<&str>,
+    ) {
         let official = official_time_zone_endpoint(
             get_var(&self.launch.env, "ANTHROPIC_BASE_URL"),
             "api.anthropic.com",
         ) || self.gateway.as_ref().is_some_and(|gateway| {
-            gateway
-                .roles
-                .iter()
-                .flatten()
-                .chain(gateway.web_search.iter())
-                .chain(
-                    gateway
-                        .compaction
-                        .iter()
-                        .filter_map(|compaction| match compaction {
-                            ClaudeGatewayCompaction::Snapshot { target, .. } => Some(target),
-                            ClaudeGatewayCompaction::OnFirstRequest(_) => None,
-                        }),
-                )
-                .any(|target| target.connection.endpoint.host_str() == Some("api.anthropic.com"))
+            gateway.subscription_providers().next().is_some()
+                || gateway.connections().skip(usize::from(gateway.source.is_some()))
+                    .any(|target| target.endpoint.host_str() == Some("api.anthropic.com"))
         });
-        project_cli_time_zone(&mut self.launch, setting, system, official);
+        let exit = codex_exit.filter(|_| {
+            self.gateway.as_ref().is_some_and(|gateway| {
+                gateway.subscription_providers().any(|provider| provider == "codex")
+            })
+        });
+        if let Some(zone) = cli_time_zone("claude-code", setting, system, exit, official) {
+            set_var(&mut self.launch.env, "TZ".into(), zone.into());
+        }
     }
 }
 
@@ -466,6 +472,7 @@ pub enum ClaudeGatewayCompaction {
 pub struct ClaudeLazyCompaction {
     data_root: PathBuf,
     loopback_only: bool,
+    subscription_provider: Option<&'static str>,
 }
 
 impl ClaudeLazyCompaction {
@@ -494,17 +501,22 @@ impl ClaudeLazyCompaction {
         if preferences.compaction["effort"] == "follow" {
             target.effort = None;
         }
-        target.model =
-            if target.connection.endpoint.origin().ascii_serialization() == OFFICIAL_ENDPOINT {
-                catalog()
-                    .iter()
-                    .find(|model| model["id"].as_str() == Some(&target.catalog_model))
-                    .and_then(|model| model["resolvedModel"].as_str())
-                    .unwrap_or(&target.catalog_model)
-                    .to_owned()
-            } else {
-                target.catalog_model.clone()
-            };
+        target.model = if let Some(subscription) = &target.connection.subscription {
+            format!(
+                "{}/{}",
+                subscription.prefix(),
+                without_context_suffix(&target.catalog_model)
+            )
+        } else if target.connection.endpoint.origin().ascii_serialization() == OFFICIAL_ENDPOINT {
+            catalog()
+                .iter()
+                .find(|model| model["id"].as_str() == Some(&target.catalog_model))
+                .and_then(|model| model["resolvedModel"].as_str())
+                .unwrap_or(&target.catalog_model)
+                .to_owned()
+        } else {
+            target.catalog_model.clone()
+        };
         target.context_window = effective_context_window(
             target.context_window,
             target.max_context_window,
@@ -516,9 +528,68 @@ impl ClaudeLazyCompaction {
     }
 }
 
+/// A route the runtime must bind before opening a connection.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct PreparedSubscriptionTarget {
+    pub provider_id: String,
+    pub provider: &'static str,
+    /// The saved raw model for an exact route, or none for the four role aliases.
+    pub model: Option<String>,
+}
+
 pub struct ClaudeGatewayConnection {
     pub endpoint: url::Url,
     pub api_key: String,
+    pub subscription: Option<PreparedSubscriptionTarget>,
+}
+
+/// Four-tier projection from the managed runtime. It contains only CLI-safe values.
+pub struct PreparedSubscriptionLaunch {
+    pub models: [String; ROLES.len()],
+    pub environment: BTreeMap<String, String>,
+    pub clear_environment: std::collections::BTreeSet<String>,
+    pub settings: Value,
+    pub main_model: String,
+}
+
+impl ClaudeLaunch {
+    pub fn apply_subscription_launch(&mut self, projection: PreparedSubscriptionLaunch) {
+        let gateway = self.gateway.as_mut().expect("managed subscription gateway");
+        for (index, model) in projection.models.into_iter().enumerate() {
+            if let Some(window) = gateway.source_models[index]
+                .as_deref()
+                .and_then(|raw| {
+                    gateway
+                        .source_context_windows
+                        .get(without_context_suffix(raw))
+                })
+                .copied()
+            {
+                gateway
+                    .source_context_windows
+                    .insert(without_context_suffix(&model).to_owned(), window);
+            }
+            gateway.source_models[index] = Some(model);
+        }
+        for key in projection.clear_environment {
+            remove_var(&mut self.launch.env, OsStr::new(&key));
+        }
+        for (key, value) in projection.environment {
+            set_var(&mut self.launch.env, key.into(), value.into());
+        }
+        gateway.context_window = projection.settings["autoCompactWindow"].as_u64();
+        self.model = projection.main_model;
+        if let [flag, model, ..] = self.launch.argv.as_mut_slice()
+            && flag == "--model"
+        {
+            *model = self.model.clone();
+        } else {
+            self.launch
+                .argv
+                .splice(..0, ["--model".into(), self.model.clone()]);
+        }
+        self.subscription_settings = Some(projection.settings);
+    }
 }
 
 pub struct ClaudeGatewayRole {
@@ -570,6 +641,21 @@ impl ClaudeGatewayProjection {
             )
     }
 
+    pub fn subscription_providers(&self) -> impl Iterator<Item = &'static str> {
+        let lazy = match &self.compaction {
+            Some(ClaudeGatewayCompaction::OnFirstRequest(route)) => route.subscription_provider,
+            _ => None,
+        };
+        self.connections()
+            .filter_map(|connection| {
+                connection
+                    .subscription
+                    .as_ref()
+                    .map(|subscription| subscription.provider)
+            })
+            .chain(lazy)
+    }
+
     pub fn request_role(&self, model: &str) -> Option<usize> {
         if !self.has_role_assignments {
             return None;
@@ -609,14 +695,29 @@ impl ClaudeGatewayProjection {
         if self.has_role_assignments {
             return None;
         }
-        self.source_models[literal_role_index(model)?].as_deref()
+        let index = if self
+            .source
+            .as_ref()
+            .is_some_and(|source| source.subscription.is_some())
+        {
+            let plain = without_context_suffix(model);
+            if plain.starts_with("matou-chatgpt/") || plain.starts_with("matou-antigravity/") {
+                return None;
+            }
+            let role = startup_role_alias(plain)?;
+            ROLES.iter().position(|candidate| *candidate == role)?
+        } else {
+            literal_role_index(model)?
+        };
+        self.source_models[index].as_deref()
     }
 
     fn direct_gateway_required(&self) -> bool {
         self.stream_keep_alive
             || self.source.as_ref().is_some_and(|source| {
-                source.endpoint.host_str() == Some("api.deepseek.com")
-                    && source.endpoint.path().trim_end_matches('/') == "/anthropic"
+                source.subscription.is_some()
+                    || (source.endpoint.host_str() == Some("api.deepseek.com")
+                        && source.endpoint.path().trim_end_matches('/') == "/anthropic")
             })
     }
 
@@ -702,6 +803,12 @@ impl ClaudeGatewayProjection {
         for (index, role) in ROLES.into_iter().enumerate() {
             let (prefix, name) = if self.has_role_assignments {
                 ("matou-role", self.display_model(index))
+            } else if self
+                .source
+                .as_ref()
+                .is_some_and(|source| source.subscription.is_some())
+            {
+                continue;
             } else if let Some(model) = self.source_models[index]
                 .as_deref()
                 .filter(|model| !model.is_empty())
@@ -813,7 +920,7 @@ impl ClaudeLaunch {
         let role = self
             .assigned_role
             .or_else(|| model_role(&source, &self.model));
-        self.gateway = if independent {
+        self.gateway = if independent || managed_role_snapshot(&config, &source, preferences) {
             let (projection, context_window) = independent_gateway_projection(
                 &config,
                 &source,
@@ -905,6 +1012,7 @@ pub fn prepare_claude_launch(
         environment,
         cols,
         rows,
+        false,
     )
 }
 
@@ -928,6 +1036,7 @@ pub fn prepare_new_claude_launch(
         environment,
         cols,
         rows,
+        false,
     )
 }
 
@@ -951,6 +1060,7 @@ pub fn prepare_new_claude_launch_with_budget(
         environment,
         cols,
         rows,
+        false,
     )
 }
 
@@ -971,6 +1081,7 @@ pub fn prepare_claude_permission_restart(
         environment,
         cols,
         rows,
+        false,
     )
 }
 
@@ -995,11 +1106,12 @@ pub fn prepare_claude_fork(
         environment,
         cols,
         rows,
+        false,
     )
 }
 
 #[derive(Clone, Copy)]
-enum ClaudeTarget<'a> {
+pub enum ClaudeTarget<'a> {
     New {
         assignments: Option<&'a ClaudeRoleAssignments>,
         budget_preferences: Option<(&'a ClaudeRoleLaunchPreferences, &'a dyn Fn() -> Vec<Value>)>,
@@ -1011,6 +1123,33 @@ enum ClaudeTarget<'a> {
     Fork(&'a str),
 }
 
+pub fn prepare_managed_claude_launch(
+    data_root: &Path,
+    cwd: &Path,
+    binding: &Value,
+    target: Option<ClaudeTarget<'_>>,
+    environment: BTreeMap<OsString, OsString>,
+    cols: u16,
+    rows: u16,
+) -> Result<ClaudeLaunch> {
+    if let Some(ClaudeTarget::Fork(source_id)) = target {
+        ensure!(
+            !source_id.trim().is_empty(),
+            "Fork source conversation is missing"
+        );
+    }
+    prepare_claude(
+        data_root,
+        cwd,
+        binding,
+        target,
+        environment,
+        cols,
+        rows,
+        true,
+    )
+}
+
 fn prepare_claude(
     data_root: &Path,
     cwd: &Path,
@@ -1019,6 +1158,7 @@ fn prepare_claude(
     mut environment: BTreeMap<OsString, OsString>,
     cols: u16,
     rows: u16,
+    subscriptions: bool,
 ) -> Result<ClaudeLaunch> {
     validate_cwd(cwd)?;
     let config = read_provider_config(data_root)?;
@@ -1031,6 +1171,9 @@ fn prepare_claude(
         Some(ClaudeTarget::PermissionRestart { remembered: true })
     );
     let mut provider = read_provider(data_root, &config, provider_binding)?;
+    if subscriptions && provider.is_subscription() {
+        ensure!(gateway_connection(&provider).is_some(), "Subscription provider is unavailable");
+    }
     let bound_role = if matches!(
         target,
         Some(ClaudeTarget::Resume(_) | ClaudeTarget::PermissionRestart { .. })
@@ -1045,9 +1188,8 @@ fn prepare_claude(
         // Preserve assignment credential projection for keyless official targets.
         provider.api_key = provider.api_key.filter(|key| !key.trim().is_empty());
     }
-    // Subscription source preparation is deferred. A valid subscription source
-    // still hits the service error before an API assignment can be applied.
-    if provider.kind.as_deref() == Some("subscription")
+    if !subscriptions
+        && provider.is_subscription()
         && let Some(subscription) = &provider.subscription
     {
         let opus = provider.model_mapping.get("opus").map(String::as_str);
@@ -1071,7 +1213,9 @@ fn prepare_claude(
         Some(ClaudeTarget::New {
             budget_preferences: Some((preferences, catalog)),
             ..
-        }) if has_independent_target(preferences) => {
+        }) if has_independent_target(preferences)
+            || managed_role_snapshot(&config, &provider, preferences) =>
+        {
             let (projection, context_window) = independent_gateway_projection(
                 &config,
                 &provider,
@@ -1102,15 +1246,21 @@ fn prepare_claude(
     };
     let selected_model = match provider_binding["model"].as_str() {
         Some(bound)
-            if bound.starts_with("matou-chatgpt/") || bound.starts_with("matou-antigravity/") =>
+            if !provider.is_subscription()
+                && (bound.starts_with("matou-chatgpt/") || bound.starts_with("matou-antigravity/")) =>
         {
             &provider.model
         }
         Some(bound) => bound,
+        None if provider.is_subscription() => "opus",
         None => &provider.model,
     };
     // Translate a model selected through the request gateway for direct launches.
-    let selected_role = literal_role_index(selected_model).map(|index| ROLES[index]);
+    let selected_role = if provider.is_subscription() {
+        model_role(&provider, selected_model)
+    } else {
+        literal_role_index(selected_model).map(|index| ROLES[index])
+    };
     let model = match selected_role {
         Some(role) => effective_role_model(&provider, role).unwrap_or_else(|| {
             if selected_model.starts_with("matou-api/") {
@@ -1139,6 +1289,19 @@ fn prepare_claude(
             (&provider, model, effort, bound_role)
         }
     };
+    ensure!(
+        subscriptions
+            || gateway.as_ref().is_none_or(|plan| {
+                plan.connections()
+                    .all(|connection| connection.subscription.is_none())
+            }) && !provider.is_subscription(),
+        "Subscription launch service is unavailable"
+    );
+    let subscription_role = provider.is_subscription().then(|| {
+        selected_role
+            .or_else(|| model_role(provider, model))
+            .unwrap_or("opus")
+    });
     let clear_assignment_environment = gateway
         .as_ref()
         .is_some_and(|projection| projection.web_search.is_some())
@@ -1201,6 +1364,8 @@ fn prepare_claude(
         effort: effort.map(str::to_owned),
         clear_assignment_environment,
         gateway,
+        subscription_settings: None,
+        subscription_role,
     })
 }
 
@@ -1355,16 +1520,23 @@ fn gateway_target(
     role: Option<&str>,
     effort: Option<&str>,
 ) -> Option<ClaudeGatewayRole> {
-    let connection = gateway_connection(provider)?;
+    let mut connection = gateway_connection(provider)?;
+    if let Some(subscription) = &mut connection.subscription {
+        subscription.model = Some(model.trim().to_owned());
+    }
     let catalog_model = model.trim();
     if catalog_model.is_empty() {
         return None;
     }
-    let model = metadata
-        .and_then(|item| item["resolvedModel"].as_str())
-        .filter(|model| !model.is_empty())
-        .unwrap_or(catalog_model)
-        .to_owned();
+    let model = if let Some(subscription) = &connection.subscription {
+        format!("{}/{catalog_model}", subscription.prefix())
+    } else {
+        metadata
+            .and_then(|item| item["resolvedModel"].as_str())
+            .filter(|model| !model.is_empty())
+            .unwrap_or(catalog_model)
+            .to_owned()
+    };
     let effort = effort
         .or_else(|| role.and_then(|role| provider.effort_mapping.get(role).map(String::as_str)))
         .or(provider.reasoning_effort.as_deref())
@@ -1410,6 +1582,19 @@ fn has_independent_target(preferences: &ClaudeRoleLaunchPreferences) -> bool {
     preferences.web_search.is_some() || preferences.compaction["mode"] == "custom"
 }
 
+fn managed_role_snapshot(
+    config: &Value,
+    source: &Provider,
+    preferences: &ClaudeRoleLaunchPreferences,
+) -> bool {
+    has_role_snapshot(preferences)
+        && (source.is_subscription()
+            || preferences.assignments.values().any(|target| {
+                provider_entry(config, &target.provider_id)
+                    .is_some_and(|row| row["kind"] == "subscription")
+            }))
+}
+
 fn independent_gateway_projection(
     config: &Value,
     source: &Provider,
@@ -1429,6 +1614,10 @@ fn independent_gateway_projection(
             ClaudeLazyCompaction {
                 data_root: data_root.to_owned(),
                 loopback_only: gateway_loopback_only(environment),
+                subscription_provider: preferences.compaction["providerId"]
+                    .as_str()
+                    .and_then(|id| provider_entry(config, id))
+                    .and_then(subscription_kind),
             },
         ));
         return Ok((projection, None));
@@ -1464,6 +1653,10 @@ fn independent_gateway_projection(
         });
     }
     projection.roles = snapshot_api_roles(config, source, &preferences.assignments, &catalog)?;
+    if source.is_subscription() {
+        // Every used subscription role has its own exact target in a snapshot.
+        projection.source = None;
+    }
     projection.has_role_assignments = true;
     projection.startup_role = startup_role;
     if gateway_loopback_only(environment) {
@@ -1499,7 +1692,12 @@ fn independent_gateway_projection(
         unknown_compaction_context,
         ..
     } = claude_role_budget(
-        std::array::from_fn(|index| projection.role_target(index).unwrap().budget_target()),
+        std::array::from_fn(|index| {
+            projection
+                .role_target(index)
+                .expect("complete Claude role snapshot")
+                .budget_target()
+        }),
         compaction,
         &context_windows(config, preferences),
     )?;
@@ -1579,16 +1777,16 @@ fn exact_api_provider<'a>(
     let entry = provider_entry(config, &assignment.provider_id)
         .filter(|entry| entry["cli"].as_str().is_none_or(|cli| cli == "claude-code"))
         .context("供应商已不存在")?;
-    ensure!(
-        entry["kind"] != "subscription" && entry["subscription"].is_null(),
-        "供应商已不存在"
-    );
-    ensure!(
-        entry["apiKey"]
-            .as_str()
-            .is_some_and(|key| !key.is_empty() && key.bytes().all(|byte| byte.is_ascii_graphic())),
-        "API Key 未配置"
-    );
+    if entry["kind"] == "subscription" {
+        ensure!(subscription_kind(entry).is_some(), "供应商已不存在");
+    } else {
+        ensure!(
+            entry["apiKey"].as_str().is_some_and(
+                |key| !key.is_empty() && key.bytes().all(|byte| byte.is_ascii_graphic())
+            ),
+            "API Key 未配置"
+        );
+    }
     let provider: Provider =
         serde_json::from_value(entry.clone()).map_err(|_| anyhow::anyhow!("供应商已不存在"))?;
     let metadata = exact_model_metadata(entry, &assignment.model, native_catalog)?;
@@ -1600,7 +1798,11 @@ fn exact_model_metadata<'a>(
     model: &str,
     native_catalog: &impl Fn() -> &'a [Value],
 ) -> Result<Option<&'a Value>> {
-    let models = if uses_native_catalog(entry) {
+    let models = if entry["kind"] == "subscription" {
+        entry["subscription"]["modelMetadata"]
+            .as_array()
+            .context("模型目录暂不可用")?
+    } else if uses_native_catalog(entry) {
         native_catalog()
     } else if let Some(catalog) = entry.get("modelMetadata") {
         catalog.as_array().context("模型目录暂不可用")?
@@ -1675,7 +1877,49 @@ fn snapshot_api_roles<'a>(
     Ok(targets)
 }
 
+impl Provider {
+    fn is_subscription(&self) -> bool {
+        self.kind.as_deref() == Some("subscription")
+    }
+}
+
+impl PreparedSubscriptionTarget {
+    pub fn prefix(&self) -> &'static str {
+        match self.provider {
+            "codex" => "matou-chatgpt",
+            _ => "matou-antigravity",
+        }
+    }
+}
+
+fn subscription_kind(entry: &Value) -> Option<&'static str> {
+    if entry["kind"] != "subscription" {
+        return None;
+    }
+    subscription_provider(&entry["subscription"])
+}
+
+fn subscription_provider(subscription: &Value) -> Option<&'static str> {
+    match subscription["provider"].as_str()? {
+        "codex" => Some("codex"),
+        "antigravity" => Some("antigravity"),
+        _ => None,
+    }
+}
+
 fn gateway_connection(provider: &Provider) -> Option<ClaudeGatewayConnection> {
+    if provider.is_subscription() {
+        let provider_kind = subscription_provider(provider.subscription.as_ref()?)?;
+        return Some(ClaudeGatewayConnection {
+            endpoint: url::Url::parse("http://127.0.0.1").expect("loopback endpoint"),
+            api_key: String::new(),
+            subscription: Some(PreparedSubscriptionTarget {
+                provider_id: provider.id.clone(),
+                provider: provider_kind,
+                model: None,
+            }),
+        });
+    }
     let api_key = provider
         .api_key
         .as_deref()
@@ -1694,6 +1938,7 @@ fn gateway_connection(provider: &Provider) -> Option<ClaudeGatewayConnection> {
     Some(ClaudeGatewayConnection {
         endpoint,
         api_key: api_key.into(),
+        subscription: None,
     })
 }
 
@@ -1801,12 +2046,15 @@ fn assignment_provider(config: &Value, assignment: &ClaudeRoleAssignment) -> Res
         .context("Assignment provider is unavailable")?;
     let mut provider: Provider = serde_json::from_value(entry.clone())
         .map_err(|_| anyhow::anyhow!("Invalid assignment provider entry"))?;
-    // Subscription targets are deliberately rejected until native can start
-    // the subscription service, including when saving an assignment.
-    ensure!(
-        provider.kind.as_deref() != Some("subscription"),
-        "Subscription launch service is unavailable"
-    );
+    if provider.is_subscription() {
+        ensure!(subscription_kind(entry).is_some(), "Assignment provider is unavailable");
+        validate_assignment_model(
+            &entry["subscription"]["modelMetadata"],
+            &provider,
+            assignment,
+        )?;
+        return Ok(provider);
+    }
     provider.api_key = provider.api_key.filter(|key| !key.trim().is_empty());
     let catalog = entry.get("modelMetadata");
     let endpoint = provider
@@ -1869,6 +2117,9 @@ fn validate_assignment_effort(
 }
 
 fn startup_role(source: &Provider) -> Option<&'static str> {
+    if source.is_subscription() {
+        return Some("opus");
+    }
     model_role(source, &source.model)
 }
 
@@ -2084,6 +2335,17 @@ fn fallback_role(
 ) -> &'static str {
     if assignments.contains_key(role) {
         role
+    } else if role == "fable"
+        && source.is_subscription()
+        && mapped_role_model(source, role).is_some_and(|model| {
+            source
+                .subscription
+                .as_ref()
+                .and_then(|sub| sub["modelMetadata"].as_array())
+                .is_none_or(|models| !models.iter().any(|item| item["id"] == model))
+        })
+    {
+        "opus"
     } else {
         provider_mapping_role(source, role)
     }

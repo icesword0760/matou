@@ -45,7 +45,9 @@ use crate::{
     retention_policy::{self, IndexedCheckpoint, IndexedSession, RetentionQuota, SessionRetention},
     search::{SearchRequest, SearchResult},
     shell_input::{InteractiveLaunch, ShellInput},
-    subscription_launch, update_download, update_http,
+    subscription_launch,
+    subscription_service::{PreparedClaudeLaunch, SubscriptionService},
+    update_download, update_http,
     worker::{SelectionCopy, ShellSubmission, WorkerCommand},
     workspace_paths::WorkspacePathChecks,
 };
@@ -70,12 +72,12 @@ use matou_native_core::{
     link_routing::{self, LinkSource},
     provider_config::{ProviderConfigLocale, ProviderConfigStore},
     provider_launch::{
-        CLAUDE_PERMISSION_MODES, ClaudeLaunch, automatic_time_zone, available_time_zones,
-        official_time_zone_endpoint, prepare_claude_fork, prepare_claude_launch,
-        prepare_claude_permission_restart, prepare_new_claude_launch_with_budget,
-        project_cli_time_zone, system_time_zone, valid_claude_time_zone,
-        validate_claude_compaction, validate_claude_role_assignments, validate_claude_web_search,
-        validate_cwd,
+        CLAUDE_PERMISSION_MODES, ClaudeLaunch, ClaudeTarget, automatic_time_zone,
+        available_time_zones, official_time_zone_endpoint, prepare_claude_fork,
+        prepare_claude_launch, prepare_claude_permission_restart, prepare_managed_claude_launch,
+        prepare_new_claude_launch_with_budget, project_cli_time_zone, system_time_zone,
+        valid_claude_time_zone, validate_claude_compaction, validate_claude_role_assignments,
+        validate_claude_web_search, validate_cwd,
     },
     pty::{LaunchProfile, ShellLaunch},
     sessions::{
@@ -1421,6 +1423,15 @@ struct RuntimeWiring {
     next_egress_attempt: u64,
     live_egress: Option<LiveEgress>,
     claude_accounts: Option<crate::claude_accounts::AccountWorker>,
+    subscriptions: Option<Arc<SubscriptionService>>,
+}
+
+impl Drop for RuntimeWiring {
+    fn drop(&mut self) {
+        if let Some(service) = &self.subscriptions {
+            service.shutdown();
+        }
+    }
 }
 
 struct LiveUpdate {
@@ -1515,8 +1526,11 @@ struct LiveEgress {
 }
 
 impl LiveEgress {
-    fn start(data_root: PathBuf) -> Result<Option<Self>> {
-        let Some(sampler) = LiveEgressSampler::start(data_root)? else {
+    fn start(
+        data_root: PathBuf,
+        subscriptions: Option<Arc<SubscriptionService>>,
+    ) -> Result<Option<Self>> {
+        let Some(sampler) = LiveEgressSampler::start(data_root, subscriptions)? else {
             return Ok(None);
         };
         let mut live = Self {
@@ -1844,6 +1858,7 @@ impl RuntimeWiring {
             next_egress_attempt: 0,
             live_egress: None,
             claude_accounts: None,
+            subscriptions: None,
         })
     }
 
@@ -2502,7 +2517,7 @@ impl RuntimeHost {
 
 impl Drop for RuntimeHost {
     fn drop(&mut self) {
-        request_shutdown(&self.commands, &self.shutdown_requested, false);
+        let _ = self.shutdown_and_join(false);
     }
 }
 
@@ -2868,11 +2883,11 @@ struct ProviderSettingsWorker {
 }
 
 impl ProviderSettingsWorker {
-    fn new(data_root: PathBuf) -> Result<Self> {
-        let locale = match current_interface_locale(read_locale_preference(&data_root)) {
-            InterfaceLocale::English => ProviderConfigLocale::En,
-            InterfaceLocale::Chinese => ProviderConfigLocale::ZhCn,
-        };
+    fn new(
+        data_root: PathBuf,
+        store: Arc<ProviderConfigStore>,
+        subscriptions: Option<Arc<SubscriptionService>>,
+    ) -> Result<Self> {
         let (requests, incoming) = mpsc::channel();
         let (outgoing, replies) = mpsc::channel();
         let thread = thread::Builder::new()
@@ -2880,8 +2895,6 @@ impl ProviderSettingsWorker {
             .spawn(move || {
                 // The host's owner lease excludes another native runtime for this root.
                 // Legacy or external processes writing the file outside that lease can race.
-                // Store construction does no I/O, so a bad file cannot block runtime startup.
-                let store = ProviderConfigStore::new(&data_root, locale);
                 let project_windows = |mut snapshot: Value| {
                     if let Ok(db) = startup::open_read_only(&data_root.join("matou.sqlite")) {
                         ProviderConfigStore::project_context_windows(&db, &mut snapshot);
@@ -2911,12 +2924,31 @@ impl ProviderSettingsWorker {
                             Ok(Models(provider_model_discovery::fetch(&store, &input))),
                         ),
                         ProviderSettingsRequest::Delete(id, cli, provider_id) => {
-                            (id, store.delete(&cli, &provider_id).map(&project_windows))
+                            let result = if let Some(service) = &subscriptions {
+                                service.delete(&cli, &provider_id)
+                            } else {
+                                store.delete(&cli, &provider_id)
+                            };
+                            (id, result.map(&project_windows))
                         }
-                        ProviderSettingsRequest::SetActive(id, cli, provider_id) => (
-                            id,
-                            store.set_active(&cli, &provider_id).map(&project_windows),
-                        ),
+                        ProviderSettingsRequest::SetActive(id, cli, provider_id) => {
+                            let result = match &subscriptions {
+                                Some(service) if cli == "claude-code" => {
+                                    service.activate(&provider_id)
+                                }
+                                None if cli == "claude-code" => {
+                                    store.subscription(&provider_id).and_then(|row| {
+                                        ensure!(
+                                            row.is_none(),
+                                            "Subscription launch service is unavailable"
+                                        );
+                                        store.set_active(&cli, &provider_id)
+                                    })
+                                }
+                                _ => store.set_active(&cli, &provider_id),
+                            };
+                            (id, result.map(&project_windows))
+                        }
                         ProviderSettingsRequest::ConfirmRisk(id) => (
                             id,
                             store.confirm_antigravity_risk().map(|()| Accepted(true)),
@@ -3724,7 +3756,7 @@ fn run_writable(
     recovery_request: &mut Option<String>,
     generation: &str,
     wiring: &mut RuntimeWiring,
-    live_egress: bool,
+    live_services: bool,
 ) -> Result<()> {
     for path in [&options.workspace, &options.shell_home] {
         if let Err(error) = std::fs::create_dir_all(path) {
@@ -3737,7 +3769,7 @@ fn run_writable(
     }
     wiring.claude_accounts = crate::claude_accounts::AccountWorker::start(
         &data_root,
-        live_egress,
+        live_services,
         wiring.fixtures.claude_accounts_engine.take(),
     )
     .ok();
@@ -3789,7 +3821,25 @@ fn run_writable(
     owner.fork_worktree_root = wiring.fixtures.fork_worktree_root.take();
     owner.fork_setup = wiring.fixtures.fork_setup.take();
     // Declared after the lease-owning host state so early returns also join the worker first.
-    let mut provider_settings = ProviderSettingsWorker::new(data_root.clone())?;
+    let locale = match current_interface_locale(read_locale_preference(&data_root)) {
+        InterfaceLocale::English => ProviderConfigLocale::En,
+        InterfaceLocale::Chinese => ProviderConfigLocale::ZhCn,
+    };
+    let provider_store = Arc::new(ProviderConfigStore::new(&data_root, locale));
+    let subscriptions = live_services
+        .then(|| {
+            SubscriptionService::new(
+                data_root.clone(),
+                Arc::clone(&provider_store),
+                owner.launch_environment(),
+            )
+            .map(Arc::new)
+        })
+        .transpose()?;
+    wiring.subscriptions = subscriptions.clone();
+    owner.subscriptions = subscriptions.clone();
+    let mut provider_settings =
+        ProviderSettingsWorker::new(data_root.clone(), provider_store, subscriptions.clone())?;
     let mut sessions = HashSet::new();
     let mut active_workspace = hierarchy
         .workspace
@@ -4045,8 +4095,8 @@ fn run_writable(
     } else {
         None
     };
-    if live_egress {
-        match LiveEgress::start(data_root.clone()) {
+    if live_services {
+        match LiveEgress::start(data_root.clone(), subscriptions.clone()) {
             Ok(live) => wiring.live_egress = live,
             Err(error) => send.send_blocking(Event::Diagnostic(format!(
                 "Start egress sampler: {error:#}"
@@ -4390,7 +4440,7 @@ fn run_writable(
                     fork_source,
                 } => {
                     claude_launch_targets
-                        .insert(session_id.clone(), claude_target_metadata(&launch));
+                        .insert(session_id.clone(), claude_target_metadata(&launch.launch));
                     let terminal = terminal_layouts
                         .get(&session_id)
                         .copied()
@@ -7164,10 +7214,19 @@ fn run_writable(
         }
         graph_dirty |= owner.poll_codex_hud();
         if owner.take_egress_membership_change() {
+            let status = owner.egress().status();
+            if status
+                .session_families
+                .values()
+                .any(|families| families.contains(&Family::ChatgptSubscription))
+                && let Some(live) = &mut wiring.live_egress
+            {
+                live.next_check = Instant::now();
+            }
             send.send_blocking(wiring_result(
                 "egressStatusChanged",
                 0,
-                Ok(egress_projection(owner.egress().status())),
+                Ok(egress_projection(status)),
             ))?;
         }
         if (graph_dirty
@@ -7274,6 +7333,9 @@ fn run_writable(
     let role_worker = role_worker
         .join()
         .map_err(|_| anyhow!("Claude role assignment worker panicked"));
+    if let Some(service) = &subscriptions {
+        service.shutdown();
+    }
     let provider_worker = provider_settings.shutdown();
     let mut sessions = owner.shutdown().context("stop native runtime sessions");
     if let Ok(worker) = model_catalog_worker {
@@ -7420,8 +7482,10 @@ impl ShellPromotion {
                         launch,
                         fork_source: None,
                     } => {
-                        claude_launch_targets
-                            .insert(session_id.to_owned(), claude_target_metadata(&launch));
+                        claude_launch_targets.insert(
+                            session_id.to_owned(),
+                            claude_target_metadata(&launch.launch),
+                        );
                         owner.launch_promoted_claude(session_id, terminal, launch)?
                     }
                     PreparedLaunch::Antigravity(launch, permission) => owner.launch_antigravity(
@@ -7680,14 +7744,15 @@ impl PermissionChange {
                                     && binding.resumable
                                     && binding.provider_session_id == previous.provider_session_id
                                     && binding.metadata["permissionMode"] == self.mode
-                                    && plan.permission_mode == self.mode
+                                    && plan.launch.permission_mode == self.mode
                             })
                             .context("AI Session permission respawn lost its binding")?,
                     )
                 } else {
                     None
                 };
-                claude_launch_targets.insert(session_id.to_owned(), claude_target_metadata(&plan));
+                claude_launch_targets
+                    .insert(session_id.to_owned(), claude_target_metadata(&plan.launch));
                 let run_id =
                     owner.launch_claude_permission(session_id, terminal, plan, binding.as_ref())?;
                 self.phase = PermissionPhase::AwaitingIdentity {
@@ -8411,7 +8476,7 @@ fn default_terminal_options() -> TerminalOptions {
 enum PreparedLaunch {
     Shell(String),
     ClaudeCode {
-        launch: ClaudeLaunch,
+        launch: PreparedClaudeLaunch,
         fork_source: Option<String>,
     },
     Codex(CodexLaunch, Option<CodexResume>),
@@ -8676,6 +8741,11 @@ fn prepare_launch(
             );
             let data_root = options.data_root.clone();
             let environment = owner.launch_environment();
+            let subscriptions = owner.subscriptions.clone();
+            let codex_exit = owner
+                .egress()
+                .exit_country(Family::ChatgptSubscription)
+                .map(str::to_owned);
             thread::Builder::new()
                 .name("claude-launch".into())
                 .spawn(move || {
@@ -8683,7 +8753,38 @@ fn prepare_launch(
                     let cwd = Path::new(&session.cwd);
                     let result = (|| {
                         let preferences = role_preferences.recv()?;
-                        let mut launch = if let Some(fork) = &fork {
+                        let mut launch = if subscriptions.is_some() {
+                            let (binding, target) = if let Some(fork) = &fork {
+                                (&fork.metadata, Some(ClaudeTarget::Fork(&fork.source_id)))
+                            } else if fresh_launch {
+                                (
+                                    &metadata,
+                                    Some(ClaudeTarget::New {
+                                        assignments: Some(&preferences.assignments),
+                                        budget_preferences: Some((
+                                            &preferences,
+                                            &native_role_catalog,
+                                        )),
+                                    }),
+                                )
+                            } else if permission_fresh {
+                                (
+                                    &metadata,
+                                    Some(ClaudeTarget::PermissionRestart { remembered }),
+                                )
+                            } else {
+                                (&metadata, resume_id.as_deref().map(ClaudeTarget::Resume))
+                            };
+                            prepare_managed_claude_launch(
+                                &data_root,
+                                cwd,
+                                binding,
+                                target,
+                                environment,
+                                terminal.cols,
+                                terminal.rows,
+                            )
+                        } else if let Some(fork) = &fork {
                             prepare_claude_fork(
                                 &data_root,
                                 cwd,
@@ -8730,7 +8831,15 @@ fn prepare_launch(
                         let zone = startup::open_read_only(&data_root.join("matou.sqlite"))
                             .and_then(|db| read_claude_time_zone(&db))
                             .unwrap_or_else(|_| "auto".into());
-                        launch.project_time_zone(&zone, &system_time_zone());
+                        let mut launch = match &subscriptions {
+                            Some(service) => service.prepare_session(launch, &preferences)?,
+                            None => launch.into(),
+                        };
+                        launch.launch.project_time_zone_with_exit(
+                            &zone,
+                            &system_time_zone(),
+                            codex_exit.as_deref(),
+                        );
                         Ok(PreparedLaunch::ClaudeCode {
                             launch,
                             fork_source: fork.map(|fork| fork.source_id),

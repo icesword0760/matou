@@ -836,24 +836,27 @@ fn active_subscription_source_reports_service_unavailable_even_with_an_api_opus_
 }
 
 #[test]
-fn saving_subscription_targets_is_intentionally_unavailable() -> Result<()> {
+fn saved_subscription_targets_validate_but_an_offline_launch_still_requires_the_service()
+-> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut providers = role_providers();
     providers["providers"]["claude-code"][1] = json!({
         "id": "target", "model": "opus", "endpoint": "", "kind": "subscription",
         "modelMapping": {"opus": "subscription-opus"},
-        "subscription": {"modelMetadata": [{"id": "subscription-opus"}]}
+        "subscription": {"provider": "codex", "modelMetadata": [{"id": "subscription-opus"}]}
     });
     fs::write(
         temp.path().join("provider-config.json"),
         providers.to_string(),
     )?;
-    // Native intentionally rejects saving a target it has no subscription service to launch.
     let assignment = json!({"opus": {"providerId": "target", "model": "subscription-opus"}});
-    let error = validate_claude_role_assignments(temp.path(), &assignment).unwrap_err();
+    validate_claude_role_assignments(temp.path(), &assignment)?;
+    let error = prepare_new(temp.path(), &assignment)
+        .err()
+        .context("offline subscription launch")?;
     assert_eq!(
-        format!("{error:#}"),
-        "opus assignment: Subscription launch service is unavailable"
+        error.to_string(),
+        "Subscription launch service is unavailable"
     );
     Ok(())
 }

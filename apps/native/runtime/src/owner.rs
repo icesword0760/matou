@@ -1,7 +1,11 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock, mpsc},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicU8, Ordering},
+        mpsc,
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -13,7 +17,7 @@ use matou_native_core::{
         canvas, cards, tabs, tasks, workspaces,
     },
     ownership::DatabaseOwner,
-    provider_launch::{ClaudeGatewayProjection, ClaudeLaunch, EFFORTS, attach_claude_settings},
+    provider_launch::{ClaudeGatewayProjection, EFFORTS, attach_claude_settings},
     pty::{LaunchProfile, ShellLaunch, get_var, set_var},
     session_graph,
     sessions::{
@@ -60,6 +64,7 @@ use crate::{
     },
     provider_resume::{IDENTITY_MISMATCH, ResumeMonitor},
     shell_input::ShellInput,
+    subscription_service::{PreparedClaudeLaunch, SessionSubscriptions, SubscriptionService},
     worker::{SessionWorker, WorkerCommand, WorkerEvent},
 };
 
@@ -266,6 +271,8 @@ pub struct ShellOwner {
     control_bin: Option<PathBuf>,
     closing: bool,
     egress: EgressMonitor,
+    blocked_gateway_families: Arc<AtomicU8>,
+    pub(crate) subscriptions: Option<Arc<SubscriptionService>>,
     egress_membership_changed: bool,
     pub(crate) provider_environment:
         Option<std::collections::BTreeMap<std::ffi::OsString, std::ffi::OsString>>,
@@ -306,6 +313,8 @@ impl ShellOwner {
             control_bin: None,
             closing: false,
             egress: EgressMonitor::default(),
+            blocked_gateway_families: Arc::default(),
+            subscriptions: None,
             egress_membership_changed: false,
             provider_environment: None,
             dsh_session_root: None,
@@ -608,7 +617,7 @@ impl ShellOwner {
             },
             false,
             "",
-            Some((metadata, secrets, None, None)),
+            Some((metadata, secrets, None, None, None, None)),
             None,
             Some(SpecialLaunch::CodexFork {
                 key: key.clone(),
@@ -761,6 +770,12 @@ impl ShellOwner {
     }
 
     fn apply_egress_effects(&self, effects: Vec<SessionEffect>) -> Result<()> {
+        let blocked = egress_probe::FAMILIES
+            .into_iter()
+            .filter(|family| self.egress.assert_target_allowed(Some(*family)).is_err())
+            .fold(0, |mask, family| mask | (1 << family as u8));
+        self.blocked_gateway_families
+            .store(blocked, Ordering::Release);
         let mut first_error = None;
         for effect in effects {
             let (id, frozen) = match effect {
@@ -2150,12 +2165,13 @@ impl ShellOwner {
         &mut self,
         session_id: &str,
         terminal: matou_native_terminal::TerminalOptions,
-        plan: ClaudeLaunch,
+        plan: impl Into<PreparedClaudeLaunch>,
         binding: Option<&ClaudeBinding>,
     ) -> Result<String> {
+        let plan = plan.into();
         let resume = ResumeMonitor::for_permission_respawn(
             binding,
-            plan.permission_mode == "bypassPermissions",
+            plan.launch.permission_mode == "bypassPermissions",
         );
         self.launch_claude_with_monitor(
             session_id.to_owned(),
@@ -2392,7 +2408,7 @@ impl ShellOwner {
         &mut self,
         session_id: String,
         terminal: matou_native_terminal::TerminalOptions,
-        plan: ClaudeLaunch,
+        plan: impl Into<PreparedClaudeLaunch>,
         binding: Option<&ClaudeBinding>,
     ) -> Result<()> {
         let resume = binding
@@ -2401,7 +2417,7 @@ impl ShellOwner {
         self.launch_claude_with_monitor(
             session_id,
             terminal,
-            plan,
+            plan.into(),
             resume,
             binding.and_then(|binding| binding.metadata.get("spawnRevision")),
         )
@@ -2411,7 +2427,7 @@ impl ShellOwner {
         &mut self,
         session_id: &str,
         terminal: matou_native_terminal::TerminalOptions,
-        plan: ClaudeLaunch,
+        plan: impl Into<PreparedClaudeLaunch>,
     ) -> Result<String> {
         self.launch_claude(session_id.to_owned(), terminal, plan, None)?;
         let shell = self.shells.get_mut(session_id).unwrap();
@@ -2456,7 +2472,7 @@ impl ShellOwner {
             },
             false,
             "",
-            Some((metadata, secrets, None, None)),
+            Some((metadata, secrets, None, None, None, None)),
             resume,
             None,
         )?;
@@ -2472,7 +2488,7 @@ impl ShellOwner {
         &mut self,
         session_id: String,
         terminal: matou_native_terminal::TerminalOptions,
-        plan: ClaudeLaunch,
+        plan: impl Into<PreparedClaudeLaunch>,
         source_id: String,
     ) -> Result<()> {
         ensure!(
@@ -2481,20 +2497,36 @@ impl ShellOwner {
             "Fork launch no longer owns its pending operation"
         );
         let monitor = ResumeMonitor::for_id(source_id);
-        self.launch_claude_with_monitor(session_id, terminal, plan, Some(monitor), None)
+        self.launch_claude_with_monitor(session_id, terminal, plan.into(), Some(monitor), None)
     }
 
     fn launch_claude_with_monitor(
         &mut self,
         session_id: String,
         terminal: matou_native_terminal::TerminalOptions,
-        plan: ClaudeLaunch,
+        prepared: PreparedClaudeLaunch,
         resume: Option<ResumeMonitor>,
         revision: Option<&Value>,
     ) -> Result<()> {
+        let PreparedClaudeLaunch {
+            launch: plan,
+            subscriptions,
+        } = prepared;
         let mut launch = plan.launch;
         launch.cols = terminal.cols;
         launch.rows = terminal.rows;
+        if let Some(gateway) = &plan.gateway
+            && gateway.subscription_providers().next().is_some()
+        {
+            ensure!(
+                gateway.supports_environment(&launch.env),
+                "Claude model targets are unavailable through the configured proxy"
+            );
+            ensure!(
+                subscriptions.is_some(),
+                "Subscription launch service is unavailable"
+            );
+        }
         let gateway = plan
             .gateway
             .filter(|plan| plan.supports_environment(&launch.env));
@@ -2517,6 +2549,7 @@ impl ShellOwner {
             secrets.extend(
                 gateway
                     .connections()
+                    .filter(|connection| !connection.api_key.is_empty())
                     .map(|connection| connection.api_key.clone()),
             );
         }
@@ -2552,7 +2585,14 @@ impl ShellOwner {
             },
             false,
             "",
-            Some((metadata, secrets, resume, gateway)),
+            Some((
+                metadata,
+                secrets,
+                resume,
+                gateway,
+                subscriptions,
+                plan.subscription_settings,
+            )),
             None,
             None,
         )
@@ -2602,7 +2642,7 @@ impl ShellOwner {
             },
             false,
             "",
-            Some((metadata, Vec::new(), None, None)),
+            Some((metadata, Vec::new(), None, None, None, None)),
             None,
             Some(SpecialLaunch::Dsh {
                 config_dump,
@@ -2669,7 +2709,7 @@ impl ShellOwner {
             },
             false,
             "",
-            Some((metadata, Vec::new(), None, None)),
+            Some((metadata, Vec::new(), None, None, None, None)),
             None,
             Some(SpecialLaunch::Antigravity {
                 mode: plan.mode,
@@ -2728,6 +2768,8 @@ impl ShellOwner {
             Vec<String>,
             Option<ResumeMonitor>,
             Option<ClaudeGatewayProjection>,
+            Option<SessionSubscriptions>,
+            Option<Value>,
         )>,
         codex_resume: Option<CodexResume>,
         special: Option<SpecialLaunch>,
@@ -2805,7 +2847,15 @@ impl ShellOwner {
         let mut permission_starting = false;
         let mut gateway = None;
         let mut agent_status_directory = None;
-        let hook = if let Some((launch_metadata, mut secrets, resume, gateway_plan)) = provider {
+        let hook = if let Some((
+            launch_metadata,
+            mut secrets,
+            resume,
+            gateway_plan,
+            subscriptions,
+            subscription_settings,
+        )) = provider
+        {
             let default_claude_login = profile == LaunchProfile::ClaudeCode
                 && gateway_plan.is_none()
                 && uses_default_claude_login(
@@ -2909,12 +2959,14 @@ impl ShellOwner {
                     Some(Arc::new(move || {
                         read_context.lock().ok().map(|usage| *usage)
                     })),
+                    subscriptions,
+                    Arc::clone(&self.blocked_gateway_families),
                 )?;
                 gateway_context = Some(context);
                 let env = plan.project_environment(&mut options.launch, listener.base_url());
                 secrets.push(listener.base_url().to_owned());
                 gateway = Some(listener);
-                Some((env, plan.model_picker()))
+                Some((env, plan.model_picker(), subscription_settings))
             } else {
                 None
             };
@@ -3028,10 +3080,18 @@ impl ShellOwner {
                 Some(SpecialLaunch::CodexFork { key, authority }) => fork = Some((key, authority)),
                 None => {}
             }
-            if let Some((env, model_picker)) = gateway_settings {
+            if let Some((env, model_picker, subscription_settings)) = gateway_settings {
                 let path = &registration.settings_path;
                 let mut settings: Value = serde_json::from_slice(&std::fs::read(path)?)
                     .map_err(|_| anyhow::anyhow!("Read Claude gateway launch settings"))?;
+                if let Some(subscription) =
+                    subscription_settings.as_ref().and_then(Value::as_object)
+                {
+                    settings
+                        .as_object_mut()
+                        .expect("Claude run settings object")
+                        .extend(subscription.clone());
+                }
                 if let Some(fable_alias) = env["ANTHROPIC_DEFAULT_FABLE_MODEL"].as_str() {
                     settings["modelOverrides"] = json!({
                         "claude-fable-5": fable_alias,
@@ -3039,7 +3099,12 @@ impl ShellOwner {
                         "claude-fable-5-5": fable_alias,
                     });
                 }
-                settings["env"] = env;
+                let settings_env = settings["env"].as_object_mut();
+                if let (Some(settings_env), Some(env)) = (settings_env, env.as_object()) {
+                    settings_env.extend(env.clone());
+                } else {
+                    settings["env"] = env;
+                }
                 if let Some(model_picker) = model_picker {
                     settings["modelPicker"] = model_picker;
                 }
@@ -6003,7 +6068,27 @@ fn launch_egress_families(
     environment: &std::collections::BTreeMap<String, String>,
     gateway: Option<&ClaudeGatewayProjection>,
 ) -> Vec<Family> {
-    let mut families: Vec<_> = egress_probe::launch_plan(profile.kind(), environment, None)
+    let subscription = gateway
+        .and_then(|gateway| {
+            gateway
+                .source
+                .as_ref()
+                .and_then(|source| source.subscription.as_ref())
+                .or_else(|| {
+                    // A role snapshot with no source uses only its explicit connections.
+                    gateway
+                        .source
+                        .is_none()
+                        .then(|| {
+                            gateway
+                                .connections()
+                                .find_map(|target| target.subscription.as_ref())
+                        })
+                        .flatten()
+                })
+        })
+        .map(|target| target.provider);
+    let mut families: Vec<_> = egress_probe::launch_plan(profile.kind(), environment, subscription)
         .family
         .into_iter()
         .collect();
@@ -6013,6 +6098,9 @@ fn launch_egress_families(
         .into_iter()
         .flat_map(ClaudeGatewayProjection::connections)
     {
+        if connection.subscription.is_some() {
+            continue;
+        }
         let family = match connection.endpoint.host_str() {
             Some("api.anthropic.com") => Family::Anthropic,
             Some("api.openai.com") => Family::OpenAi,
@@ -6025,6 +6113,17 @@ fn launch_egress_families(
             _ => continue,
         };
         if !families.contains(&family) {
+            families.push(family);
+        }
+    }
+    for provider in gateway
+        .into_iter()
+        .flat_map(ClaudeGatewayProjection::subscription_providers)
+    {
+        if let Some(family) =
+            egress_probe::launch_plan(profile.kind(), environment, Some(provider)).family
+            && !families.contains(&family)
+        {
             families.push(family);
         }
     }
@@ -6754,7 +6853,7 @@ mod provider_tests {
         let run = owner.launch_promoted_claude(
             session,
             TerminalOptions::new(80, 24, 7, 14),
-            ClaudeLaunch {
+            matou_native_core::provider_launch::ClaudeLaunch {
                 launch: ShellLaunch {
                     profile: LaunchProfile::ClaudeCode,
                     executable,
@@ -6773,6 +6872,8 @@ mod provider_tests {
                 effort: None,
                 clear_assignment_environment: false,
                 gateway: None,
+                subscription_settings: None,
+                subscription_role: None,
             },
         )?;
         assert_eq!(
@@ -6924,7 +7025,7 @@ mod provider_tests {
             "#!/bin/sh\nprintf 'provider output before identity\\n'\nread -r line\n",
         )?;
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))?;
-        let plan = || ClaudeLaunch {
+        let plan = || matou_native_core::provider_launch::ClaudeLaunch {
             launch: ShellLaunch {
                 profile: LaunchProfile::ClaudeCode,
                 executable: executable.clone(),
@@ -6947,6 +7048,8 @@ mod provider_tests {
             effort: None,
             clear_assignment_environment: false,
             gateway: None,
+            subscription_settings: None,
+            subscription_role: None,
         };
         let terminal = TerminalOptions::new(80, 24, 7, 14);
         let blocked_directory = root.path().join("provider-hooks");

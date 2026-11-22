@@ -3,6 +3,7 @@ mod format;
 mod models;
 
 use std::{
+    collections::BTreeMap,
     fs, io,
     path::{Path, PathBuf},
     sync::Mutex,
@@ -79,6 +80,42 @@ impl ProviderConfigLocale {
     }
 }
 
+/// Private account authority used by the runtime, never a settings view.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SubscriptionAccountIdentity {
+    pub credential_name: String,
+    pub auth_index: Option<String>,
+    pub email: Option<String>,
+}
+
+pub struct StoredSubscription {
+    pub name: String,
+    pub provider: String,
+    pub identity: SubscriptionAccountIdentity,
+    pub account: Value,
+    pub model_metadata: Vec<Value>,
+    pub model_mapping: Value,
+    pub context_window: Option<u64>,
+}
+
+fn subscription_identity(row: &Value) -> Option<SubscriptionAccountIdentity> {
+    if row["kind"] != "subscription" {
+        return None;
+    }
+    let subscription = &row["subscription"];
+    let copy = |value: &Value| {
+        value
+            .as_str()
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned)
+    };
+    Some(SubscriptionAccountIdentity {
+        credential_name: copy(&subscription["credentialRef"]["name"])?,
+        auth_index: copy(&subscription["credentialRef"]["authIndex"]),
+        email: copy(&subscription["account"]["email"]),
+    })
+}
+
 /// Keeps transactions sequential for one store. Each mutation reloads the file
 /// under the lock, so an edit made between calls remains visible.
 pub struct ProviderConfigStore {
@@ -87,6 +124,7 @@ pub struct ProviderConfigStore {
     new_id: Box<dyn Fn() -> Uuid + Send + Sync>,
     now: Box<dyn Fn() -> SystemTime + Send + Sync>,
     writes: Mutex<()>,
+    subscription_status: Mutex<BTreeMap<String, SubscriptionAccountIdentity>>,
 }
 
 impl ProviderConfigStore {
@@ -107,12 +145,82 @@ impl ProviderConfigStore {
             new_id: Box::new(new_id),
             now: Box::new(now),
             writes: Mutex::new(()),
+            subscription_status: Mutex::default(),
         }
     }
 
     /// Read a redacted ProviderConfigSnapshot. Repairs stay in memory until a write.
     pub fn snapshot(&self) -> Result<Value> {
-        snapshot(&self.read()?)
+        let mut state = self.read()?;
+        let statuses = self.subscription_status.lock().unwrap();
+        for row in list_mut(&mut state, CLIS[0]) {
+            if let Some(identity) = subscription_identity(row)
+                && row["id"].as_str().and_then(|id| statuses.get(id)) == Some(&identity)
+            {
+                row["subscription"]["account"]["status"] = json!("needs-sign-in");
+            }
+        }
+        snapshot(&state)
+    }
+
+    pub fn has_subscription(&self, provider: &str) -> Result<bool> {
+        Ok(self.read()?["providers"][CLIS[0]]
+            .as_array()
+            .is_some_and(|rows| {
+                rows.iter().any(|row| {
+                    row["kind"] == "subscription" && row["subscription"]["provider"] == provider
+                })
+            }))
+    }
+
+    pub fn subscription(&self, id: &str) -> Result<Option<StoredSubscription>> {
+        let state = self.read()?;
+        let Some(row) = state["providers"][CLIS[0]].as_array().and_then(|rows| {
+            rows.iter()
+                .find(|row| row["id"] == id && row["kind"] == "subscription")
+        }) else {
+            return Ok(None);
+        };
+        let identity =
+            subscription_identity(row).context("Invalid subscription credential reference")?;
+        let subscription = &row["subscription"];
+        let mut account = subscription["account"].clone();
+        if self.subscription_status.lock().unwrap().get(id) == Some(&identity) {
+            account["status"] = json!("needs-sign-in");
+        }
+        Ok(Some(StoredSubscription {
+            name: row["name"].as_str().unwrap_or(id).to_owned(),
+            provider: subscription["provider"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+            identity,
+            account,
+            model_metadata: subscription["modelMetadata"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default(),
+            model_mapping: row["modelMapping"].clone(),
+            context_window: custom_context_window(&row["contextWindow"]),
+        }))
+    }
+
+    pub fn mark_subscription_needs_sign_in(
+        &self,
+        id: &str,
+        identity: &SubscriptionAccountIdentity,
+    ) -> Result<()> {
+        let _guard = self.writes.lock().unwrap();
+        if self
+            .subscription(id)?
+            .is_some_and(|row| row.identity == *identity)
+        {
+            self.subscription_status
+                .lock()
+                .unwrap()
+                .insert(id.to_owned(), identity.clone());
+        }
+        Ok(())
     }
 
     /// Resolve a key for a discovery request without exposing it in a settings reply.
@@ -470,14 +578,27 @@ impl ProviderConfigStore {
     }
 
     pub fn set_active(&self, cli: &str, id: &str) -> Result<Value> {
+        self.set_active_checked(cli, id, None)
+    }
+
+    pub fn set_active_checked(
+        &self,
+        cli: &str,
+        id: &str,
+        expected: Option<&SubscriptionAccountIdentity>,
+    ) -> Result<Value> {
         self.mutate(|state| {
             let cli = self.cli(cli)?;
-            ensure!(
-                list_mut(state, cli)
-                    .iter()
-                    .any(|provider| provider["id"] == id),
-                self.locale.text(NOT_FOUND)
-            );
+            let provider = list_mut(state, cli)
+                .iter()
+                .find(|provider| provider["id"] == id)
+                .context(self.locale.text(NOT_FOUND))?;
+            if let Some(expected) = expected {
+                ensure!(
+                    subscription_identity(provider).as_ref() == Some(expected),
+                    "Subscription account changed during activation"
+                );
+            }
             state["activeProviderIds"][cli] = json!(id);
             // The native contract advances the revision even when the ID matches.
             bump_revision(state);

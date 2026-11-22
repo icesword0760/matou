@@ -27,6 +27,8 @@ pub mod history_worker;
 pub mod host;
 mod host_control;
 mod model;
+#[doc(hidden)]
+pub mod model_router;
 pub mod mt_cli;
 pub mod owner;
 pub mod protocol;
@@ -38,6 +40,7 @@ pub mod search;
 pub mod session;
 mod shell_input;
 pub mod subscription_launch;
+mod subscription_service;
 pub mod worker;
 
 pub use model::{SessionEvent, SessionOptions, StorageFaultCode};

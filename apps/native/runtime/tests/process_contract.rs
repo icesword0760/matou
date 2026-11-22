@@ -14,6 +14,8 @@ mod codex_resume;
 mod database_recovery;
 #[path = "process_contract/quit.rs"]
 mod quit;
+#[path = "process_contract/subscription_router.rs"]
+mod subscription_router;
 #[path = "process_contract/time_zone_settings.rs"]
 mod time_zone_settings;
 
