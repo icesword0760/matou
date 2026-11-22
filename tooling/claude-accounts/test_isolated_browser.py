@@ -70,9 +70,26 @@ time.sleep(0.2)
             directory = Path(next(arg.split('=', 1)[1] for arg in args if arg.startswith('--user-data-dir=')))
             self.assertNotEqual(directory.parent, profile)
             self.assertNotIn(URL, args)
-            self.assertEqual((profile/'browser-start.html').stat().st_mode & 0o777, 0o600)
-            self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+            if os.name != 'nt':
+                self.assertEqual((profile/'browser-start.html').stat().st_mode & 0o777, 0o600)
+                self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
             shutil.rmtree(directory)
+
+    def test_timezone_validation_without_a_database(self):
+        with patch.object(browser, 'ZoneInfo', side_effect=browser.ZoneInfoNotFoundError), \
+                patch.object(browser, 'available_timezones', return_value=set()):
+            for timezone in ('Asia/Singapore', 'America/Argentina/Buenos_Aires'):
+                with self.subTest(timezone=timezone):
+                    self.assertTrue(browser._is_valid_timezone(timezone))
+            for timezone in ('../etc', '--flag', 'InvalidZone', 'Asia/Tokyo/A/B', '',
+                             'Asia/New Zone', 'Asia/Tokyo\x00', 'Asia/Tokyo\x7f', 'Asia/' + 'A' * 60):
+                with self.subTest(timezone=timezone):
+                    self.assertFalse(browser._is_valid_timezone(timezone))
+
+    def test_unknown_timezone_is_rejected_when_database_is_available(self):
+        with patch.object(browser, 'ZoneInfo', side_effect=browser.ZoneInfoNotFoundError), \
+                patch.object(browser, 'available_timezones', return_value={'Asia/Singapore'}):
+            self.assertFalse(browser._is_valid_timezone('Mars/Olympus'))
 
     def test_safe_kernel_takes_priority_and_returns_exact_parameters(self):
         env = {'MATOU_SAFE_BROWSER_BIN': '/fixture/safe-kernel',
@@ -83,7 +100,14 @@ time.sleep(0.2)
                 '--fingerprint=123456', '--fingerprint-platform=macos']))
             which.assert_not_called()
 
+    def browser_lookup_fixture(self):
+        if os.name == 'nt':
+            local = Path('C:/fixture/LocalAppData')
+            return str(local / 'Google/Chrome/Application/chrome.exe'), {'LOCALAPPDATA': str(local)}
+        return '/fixture/chrome', {}
+
     def test_missing_or_invalid_safe_env_falls_back_without_extra_parameters(self):
+        chrome, browser_env = self.browser_lookup_fixture()
         valid = {'MATOU_SAFE_BROWSER_BIN': '/fixture/safe-kernel',
                  'MATOU_SAFE_BROWSER_TZ': 'Asia/Tokyo', 'MATOU_SAFE_BROWSER_SEED': '123456'}
         cases = [{}, *[{k: v for k, v in valid.items() if k != missing} for missing in valid]]
@@ -91,14 +115,22 @@ time.sleep(0.2)
         cases += [dict(valid, MATOU_SAFE_BROWSER_SEED=seed) for seed in ('', '0', '000', '-1', '1.5', 'NaN', '1e3', ' 1', '+1', '1\n', '１２')]
         cases += [dict(valid, MATOU_SAFE_BROWSER_BIN='/fixture/missing')]
         for env in cases:
-            with self.subTest(env=env), patch.dict(os.environ, env, clear=True), patch.object(browser.Path, 'is_file', lambda p: str(p) in ('/fixture/chrome', '/fixture/safe-kernel')), patch.object(browser.os, 'access', return_value=True), patch.object(browser.shutil, 'which', side_effect=lambda name: '/fixture/chrome' if name == 'google-chrome' else None):
-                self.assertEqual(browser.find_browser(), ('/fixture/chrome', []))
+            with self.subTest(env=env), patch.dict(os.environ, browser_env | env, clear=True), \
+                    patch.object(browser.Path, 'is_file', lambda p: p in (Path(chrome), Path(valid['MATOU_SAFE_BROWSER_BIN']))), \
+                    patch.object(browser.os, 'access', return_value=True), \
+                    patch.object(browser.shutil, 'which', side_effect=lambda name: chrome if name == 'google-chrome' else None), \
+                    patch.object(browser, 'available_timezones', return_value={'Asia/Tokyo'}):
+                self.assertEqual(browser.find_browser(), (chrome, []))
 
     def test_non_executable_kernel_uses_existing_browser_selection(self):
-        env = {'MATOU_SAFE_BROWSER_BIN': '/fixture/safe-kernel',
-               'MATOU_SAFE_BROWSER_TZ': 'Asia/Tokyo', 'MATOU_SAFE_BROWSER_SEED': '123456'}
-        with patch.dict(os.environ, env, clear=True), patch.object(browser.Path, 'is_file', lambda p: str(p) in ('/fixture/chrome', '/fixture/safe-kernel')), patch.object(browser.os, 'access', side_effect=lambda p, mode: p == '/fixture/chrome'), patch.object(browser.shutil, 'which', side_effect=lambda name: '/fixture/chrome' if name == 'google-chrome' else None):
-            self.assertEqual(browser.find_browser(), ('/fixture/chrome', []))
+        chrome, env = self.browser_lookup_fixture()
+        env.update(MATOU_SAFE_BROWSER_BIN='/fixture/safe-kernel',
+                   MATOU_SAFE_BROWSER_TZ='Asia/Tokyo', MATOU_SAFE_BROWSER_SEED='123456')
+        with patch.dict(os.environ, env, clear=True), \
+                patch.object(browser.Path, 'is_file', lambda p: p in (Path(chrome), Path(env['MATOU_SAFE_BROWSER_BIN']))), \
+                patch.object(browser.os, 'access', side_effect=lambda p, mode: p == chrome), \
+                patch.object(browser.shutil, 'which', side_effect=lambda name: chrome if name == 'google-chrome' else None):
+            self.assertEqual(browser.find_browser(), (chrome, []))
 
     def test_safe_launch_has_exact_arguments_unique_profiles_and_no_redirect_file(self):
         extra = ['--timezone=Asia/Tokyo', '--accept-lang=zh-CN,zh', '--fingerprint=123456', '--fingerprint-platform=macos']
@@ -114,7 +146,8 @@ time.sleep(0.2)
                     self.assertEqual(args, ['/fixture/safe-kernel', '--user-data-dir=' + str(directory),
                         '--incognito', '--new-window', '--no-first-run', '--no-default-browser-check',
                         '--disable-sync', '--disable-background-mode', *extra, URL])
-                    self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+                    if os.name != 'nt':
+                        self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
                     self.assertFalse((profile / 'browser-start.html').exists())
                     self.assertEqual(start.call_args.kwargs['stdout'], subprocess.DEVNULL)
                     self.assertEqual(start.call_args.kwargs['stderr'], subprocess.DEVNULL)
@@ -139,6 +172,19 @@ time.sleep(0.2)
             self.assertFalse(directory.exists())
 
     def fake_cli(self, root, body):
+        if os.name == 'nt':
+            script = root / 'claude.py'
+            script.write_text(body, encoding='utf-8')
+            popen = browser.subprocess.Popen
+
+            def launch(args, **kwargs):
+                if args[0] == str(script):
+                    # Give login the Python process handle so terminating it also closes its pipes.
+                    args = [sys.executable, *args]
+                return popen(args, **kwargs)
+
+            self.enterContext(patch.object(browser.subprocess, 'Popen', new=launch))
+            return str(script)
         cli = root/'claude'
         cli.write_text('#!'+sys.executable+'\n'+body)
         cli.chmod(0o700)
@@ -201,7 +247,7 @@ time.sleep(0.2)
                 with patch.object(browser, 'find_browser', return_value=('/fixture/chrome', [])), patch.object(browser, 'start_browser', return_value=child):
                     browser.login(cli, profile, timeout=3, code_input=io.StringIO(''.join(json.dumps(m)+'\n' for m in messages)), nonce='current')
                 self.assertIsNone(child.poll())
-                self.assertFalse(any(code.encode() in f.read_bytes() for f in profile.iterdir() if f.is_file() and f.name != 'claude'))
+                self.assertFalse(any(code.encode() in f.read_bytes() for f in profile.iterdir() if f.is_file() and f != Path(cli)))
             finally:
                 browser.stop_process(child)
 
