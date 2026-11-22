@@ -97,12 +97,19 @@ pub struct HistorySearchResult {
 /// Reads archived terminal output without modifying the journal or its indexes.
 pub struct JournalHistoryReader {
     data_root: PathBuf,
+    #[cfg(test)]
+    after_initial_listing: Option<AfterInitialListing>,
 }
+
+#[cfg(test)]
+type AfterInitialListing = Box<dyn Fn(&BTreeMap<u32, Vec<PathBuf>>) -> Result<()> + Send + Sync>;
 
 impl JournalHistoryReader {
     pub fn new(data_root: impl Into<PathBuf>) -> Self {
         Self {
             data_root: data_root.into(),
+            #[cfg(test)]
+            after_initial_listing: None,
         }
     }
 
@@ -215,6 +222,10 @@ impl JournalHistoryReader {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(error) => return Err(error.into()),
         };
+        #[cfg(test)]
+        if let Some(after_initial_listing) = &self.after_initial_listing {
+            after_initial_listing(&groups)?;
+        }
         let mut previous = None;
         for &index in groups.keys() {
             if let Some(previous) = previous {
@@ -456,5 +467,90 @@ impl SearchPattern {
             Self::WholeWord(regex) => regex.find(&text).is_some(),
             Self::Regex(_) => unreachable!(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use matou_native_core::journal::{
+        JournalOptions, MAGIC, SegmentJournal, codec::encode_frame, wait_for_compression,
+    };
+
+    #[test]
+    fn search_relists_segment_published_as_gzip_after_initial_listing() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let session = "publishing";
+        let directory = root.path().join("journal").join(session);
+        fs::create_dir_all(&directory)?;
+        let raw = directory.join("segment-000001.mtj");
+        let gzip = raw.with_extension("mtj.gz");
+        let active = directory.join("segment-000002.mtj");
+        let output = |sequence, text: &str| {
+            encode_frame(&Record {
+                timestamp: 1_000,
+                frame: Frame::Output {
+                    sequence,
+                    data: text.as_bytes().to_vec(),
+                },
+            })
+        };
+        let mut bytes = MAGIC.to_vec();
+        bytes.extend(output(1, "match first\nmatch second\n")?);
+        bytes.extend(output(2, "match third\n")?);
+        fs::write(&raw, &bytes)?;
+        let mut bytes = MAGIC.to_vec();
+        bytes.extend(output(3, "match next segment\n")?);
+        fs::write(active, bytes)?;
+
+        let mut reader = JournalHistoryReader::new(root.path());
+        let data_root = root.path().to_owned();
+        reader.after_initial_listing = Some(Box::new(move |groups| {
+            assert_eq!(groups[&1], [raw.clone()]);
+            assert!(raw.is_file() && !gzip.exists());
+            // Start the real compressor only after the reader captured the raw
+            // path. Wait for publication and unlink to finish before first open.
+            let mut journal = SegmentJournal::open(
+                &data_root,
+                session,
+                JournalOptions {
+                    raw_hot_bytes: 0,
+                    ..JournalOptions::default()
+                },
+            )?;
+            wait_for_compression();
+            assert!(gzip.is_file());
+            assert_eq!(
+                fs::metadata(&raw).unwrap_err().kind(),
+                io::ErrorKind::NotFound
+            );
+            journal.close()
+        }));
+
+        let result = reader.search(
+            session,
+            HistorySearchInput {
+                query: "match".into(),
+                ..HistorySearchInput::default()
+            },
+        )?;
+        let expected = [
+            (3, 0, "match next segment"),
+            (2, 0, "match third"),
+            (1, 1, "match second"),
+            (1, 0, "match first"),
+        ]
+        .map(|(sequence, line_index, text)| HistoryLine {
+            sequence,
+            cursor: HistoryCursor {
+                sequence,
+                line_index,
+            },
+            text: text.into(),
+        });
+        assert!(result.gaps.is_empty(), "unexpected gaps: {:?}", result.gaps);
+        assert_eq!(result.matches, expected);
+        assert!(!result.has_more);
+        Ok(())
     }
 }
