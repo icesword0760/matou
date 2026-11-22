@@ -824,6 +824,18 @@ pub(super) fn usage_windows(hud: &Value, key: &str) -> Vec<UsageWindow> {
 }
 
 pub(super) fn quota_row(usage: &UsageWindow, dark: bool) -> Div {
+    quota_row_with_colors(
+        usage,
+        usage.color(dark),
+        rgb(if dark { 0x8b949e } else { 0x57606a }),
+    )
+}
+
+pub(super) fn claude_quota_row(usage: &UsageWindow) -> Div {
+    quota_row_with_colors(usage, rgb(0x58a6ff), rgb(0x6e7681))
+}
+
+fn quota_row_with_colors(usage: &UsageWindow, percent: Rgba, reset: Rgba) -> Div {
     div()
         .flex()
         .items_center()
@@ -833,14 +845,15 @@ pub(super) fn quota_row(usage: &UsageWindow, dark: bool) -> Div {
         .child(
             div()
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(usage.color(dark))
+                .text_color(percent)
                 .child(ui_text(format_context_percent(usage.percent))),
         )
-        .children(usage.reset.as_ref().map(|reset| {
-            div()
-                .text_color(rgb(if dark { 0x8b949e } else { 0x57606a }))
-                .child(ui_text(format!("· {reset}")))
-        }))
+        .children(
+            usage
+                .reset
+                .as_ref()
+                .map(|text| div().text_color(reset).child(ui_text(format!("· {text}")))),
+        )
 }
 
 #[cfg(test)]

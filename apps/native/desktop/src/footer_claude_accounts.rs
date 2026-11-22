@@ -47,6 +47,13 @@ pub(super) struct AccountUi {
 }
 
 impl AccountUi {
+    pub(super) fn quota_state(&self) -> Option<&ClaudeAccountsState> {
+        let loading = self.request.is_some_and(|(_, reply)| reply == Reply::List);
+        (self.requested
+            && (!loading || self.state.current_id.is_some() || self.state.detected.is_some()))
+        .then_some(&self.state)
+    }
+
     fn can_request(&self, reply: Reply) -> bool {
         match (self.request.map(|(_, pending)| pending), reply) {
             (Some(Reply::List), Reply::Login) => true,
@@ -180,6 +187,10 @@ impl Colors {
 }
 
 impl Workspace {
+    pub(in crate::workspace) fn claude_quota_state(&self) -> Option<&ClaudeAccountsState> {
+        self.wiring.accounts.quota_state()
+    }
+
     pub(super) fn account_footer_visible(&self, window: &Window) -> bool {
         self.footer_session(window)
             .and_then(|id| self.hud_node(id))
