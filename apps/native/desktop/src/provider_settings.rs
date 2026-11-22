@@ -1,8 +1,17 @@
 //! Provider settings use the runtime's redacted Graph replies.
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::{
+    collections::HashMap,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use matou_native_core::{claude_role_budget::CLAUDE_ROLES as ROLES, provider_launch::EFFORTS};
-use matou_native_runtime::protocol::{ProviderSettingsReply, ProviderSettingsResult};
+use matou_native_runtime::{
+    protocol::{
+        ClaudeModelPreferencesReply, ProviderSettingsReply, ProviderSettingsResult,
+        SubscriptionLoginStatus, SubscriptionLoginView,
+    },
+    subscription_launch::SubscriptionProvider,
+};
 use serde_json::{Value, json};
 
 use crate::runtime_bridge::{Command, ConnectionPhase, RuntimeCommands};
@@ -14,6 +23,10 @@ const SAVE_FAILED: &str = "供应商配置保存失败";
 pub(crate) const DELETE_FAILED: &str = "删除失败";
 const SWITCH_FAILED: &str = "切换失败";
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
+
+pub(crate) fn next_provider_settings_request() -> u64 {
+    NEXT_REQUEST.fetch_add(1, Ordering::Relaxed)
+}
 
 #[derive(Clone, Default, PartialEq)]
 pub(crate) struct ProviderDraft {
@@ -363,6 +376,7 @@ pub(crate) enum ProviderUpdate {
     Saved,
     SaveFailed(String),
     Models(Value),
+    SubscriptionDraft(ProviderDraft),
     Deleted,
     DeleteFailed,
 }
@@ -378,6 +392,28 @@ enum Operation {
         id: String,
         committed: Option<Value>,
     },
+}
+
+#[derive(Default)]
+pub(crate) struct SubscriptionLogin {
+    pub provider: String,
+    pub phase: &'static str,
+    pub busy: bool,
+    pub can_reopen: bool,
+    pub system_browser_available: bool,
+    pub error: Option<String>,
+    attempt_id: Option<String>,
+    details: Option<Value>,
+    chinese: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SubscriptionOperation {
+    ConfirmRisk,
+    Start,
+    Status,
+    Reopen,
+    Commit { activate: bool },
 }
 
 struct Pending {
@@ -397,6 +433,17 @@ pub(crate) struct ProviderSettings {
     notice: Option<(&'static str, String, bool)>,
     retry_switch_id: Option<String>,
     committed_provider: Option<Value>,
+    revision: u64,
+    subscription_round: Option<(u64, u64)>,
+    subscription_open_request: Option<u64>,
+    subscription_risk_accepted: bool,
+    subscription_login: SubscriptionLogin,
+    subscription_request: Option<(u64, SubscriptionOperation)>,
+    subscription_accounts: HashMap<String, Value>,
+    subscription_refreshes: HashMap<u64, String>,
+    compaction: Option<Value>,
+    compaction_request: Option<(u64, u64, bool)>,
+    compaction_error: Option<String>,
 }
 
 impl ProviderSettings {
@@ -412,6 +459,17 @@ impl ProviderSettings {
             notice: None,
             retry_switch_id: None,
             committed_provider: None,
+            revision: 0,
+            subscription_round: None,
+            subscription_open_request: None,
+            subscription_risk_accepted: false,
+            subscription_login: SubscriptionLogin::default(),
+            subscription_request: None,
+            subscription_accounts: HashMap::new(),
+            subscription_refreshes: HashMap::new(),
+            compaction: None,
+            compaction_request: None,
+            compaction_error: None,
         }
     }
 
@@ -428,6 +486,382 @@ impl ProviderSettings {
         {
             self.load_error = Some(CONNECTING.into());
         }
+    }
+
+    pub(crate) fn open_subscription_settings(&mut self) {
+        if self.subscription_round.is_some() {
+            return;
+        }
+        if let Some((id, generation)) =
+            self.dispatch(|request_id| Command::OpenSubscriptionSettings {
+                request_id,
+                settings_id: request_id,
+            })
+        {
+            self.subscription_round = Some((id, generation));
+            self.subscription_open_request = Some(id);
+        }
+    }
+
+    pub(crate) fn close_subscription_settings(&mut self) {
+        if let Some((settings_id, generation)) = self.subscription_round.take() {
+            let request_id = next_provider_settings_request();
+            let _ = self.commands.send_at(
+                generation,
+                Command::CloseSubscriptionSettings {
+                    request_id,
+                    settings_id,
+                },
+            );
+        }
+        self.subscription_open_request = None;
+        self.subscription_login = SubscriptionLogin::default();
+        self.subscription_request = None;
+        self.subscription_accounts.clear();
+        self.subscription_refreshes.clear();
+    }
+
+    pub(crate) fn begin_subscription(&mut self, provider: &str) {
+        self.subscription_login = SubscriptionLogin {
+            provider: provider.into(),
+            phase: if provider == "antigravity" && !self.subscription_risk_accepted {
+                "risk"
+            } else {
+                "login"
+            },
+            ..SubscriptionLogin::default()
+        };
+    }
+
+    pub(crate) fn subscription_login(&self) -> &SubscriptionLogin {
+        &self.subscription_login
+    }
+
+    pub(crate) fn subscription_details(&self, id: &str) -> Option<&Value> {
+        self.subscription_accounts.get(id)
+    }
+
+    pub(crate) fn confirm_subscription_risk(&mut self) {
+        if self.subscription_login.phase == "risk" {
+            self.send_subscription(SubscriptionOperation::ConfirmRisk, |request_id, _| {
+                Command::ConfirmAntigravityRisk { request_id }
+            });
+        }
+    }
+
+    pub(crate) fn start_subscription_login_localized(&mut self, chinese: bool) {
+        let provider = match self.subscription_login.provider.as_str() {
+            "codex" => SubscriptionProvider::ChatGpt,
+            "antigravity" if self.subscription_risk_accepted => SubscriptionProvider::Antigravity,
+            _ => return,
+        };
+        if !matches!(self.subscription_login.phase, "login" | "error") {
+            return;
+        }
+        self.subscription_login.chinese = chinese;
+        self.subscription_login.attempt_id = None;
+        self.subscription_login.can_reopen = false;
+        self.subscription_login.system_browser_available = false;
+        self.subscription_login.phase = "waiting";
+        if !self.send_subscription(SubscriptionOperation::Start, |request_id, settings_id| {
+            Command::StartSubscriptionLogin {
+                request_id,
+                settings_id,
+                provider,
+                chinese,
+            }
+        }) {
+            self.subscription_login.phase = "error";
+        }
+    }
+
+    pub(crate) fn poll_subscription_login(&mut self) -> ProviderUpdate {
+        if self.subscription_login.phase == "waiting"
+            && self.subscription_request.is_none()
+            && let Some(attempt_id) = self.subscription_login.attempt_id.clone()
+        {
+            self.send_subscription(SubscriptionOperation::Status, |request_id, settings_id| {
+                Command::GetSubscriptionLoginStatus {
+                    request_id,
+                    settings_id,
+                    attempt_id,
+                }
+            });
+        }
+        ProviderUpdate::None
+    }
+
+    pub(crate) fn reopen_subscription_login(&mut self) {
+        self.reopen_subscription(false);
+    }
+
+    pub(crate) fn reopen_subscription_in_system_browser(&mut self) {
+        self.reopen_subscription(true);
+    }
+
+    fn reopen_subscription(&mut self, system_browser: bool) {
+        if self.subscription_login.can_reopen
+            && (!system_browser || self.subscription_login.system_browser_available)
+            && let Some(attempt_id) = self.subscription_login.attempt_id.clone()
+        {
+            self.send_subscription(SubscriptionOperation::Reopen, |request_id, settings_id| {
+                Command::ReopenSubscriptionLogin {
+                    request_id,
+                    settings_id,
+                    attempt_id,
+                    system_browser,
+                }
+            });
+        }
+    }
+
+    pub(crate) fn cancel_subscription_login(&mut self) {
+        let attempt_id = self.subscription_login.attempt_id.take();
+        let starting = self
+            .subscription_request
+            .is_some_and(|(_, operation)| operation == SubscriptionOperation::Start);
+        if (attempt_id.is_some() || starting)
+            && let Some((settings_id, generation)) = self.subscription_round
+        {
+            let request_id = next_provider_settings_request();
+            let _ = self.commands.send_at(
+                generation,
+                Command::CancelSubscriptionLogin {
+                    request_id,
+                    settings_id,
+                    attempt_id,
+                },
+            );
+        }
+        self.subscription_request = None;
+        self.subscription_login.phase = "error";
+        self.subscription_login.busy = false;
+        self.subscription_login.can_reopen = false;
+        self.subscription_login.system_browser_available = false;
+        self.subscription_login.error = Some("Sign-in was cancelled".into());
+        self.subscription_login.details = None;
+    }
+
+    pub(crate) fn commit_subscription(&mut self, draft: &ProviderDraft, activate: bool) {
+        let Some(attempt_id) = self.subscription_login.attempt_id.clone() else {
+            return;
+        };
+        if self.subscription_login.phase != "models" {
+            return;
+        }
+        if let Some(error) = draft.validation_error() {
+            self.subscription_login.error = Some(error);
+            return;
+        }
+        let mut input = draft.input();
+        if input["modelMapping"]["fable"]
+            .as_str()
+            .is_none_or(str::is_empty)
+        {
+            input["modelMapping"]["fable"] = input["modelMapping"]["opus"].clone();
+        }
+        self.send_subscription(
+            SubscriptionOperation::Commit { activate },
+            |request_id, settings_id| Command::CommitSubscriptionDraft {
+                request_id,
+                settings_id,
+                attempt_id,
+                activate,
+                input,
+            },
+        );
+    }
+
+    pub(crate) fn refresh_subscription_models(&mut self, provider_id: &str) {
+        if self.refreshing_subscription(provider_id) {
+            return;
+        }
+        self.dismiss_notice();
+        if let Some(request_id) = self.dispatch_subscription(|request_id, settings_id| {
+            Command::RefreshSubscriptionModels {
+                request_id,
+                settings_id,
+                provider_id: provider_id.into(),
+            }
+        }) {
+            self.subscription_refreshes
+                .insert(request_id, provider_id.into());
+        } else {
+            self.notice = Some(("模型刷新失败", CONNECTING.into(), true));
+        }
+    }
+
+    pub(crate) fn refreshing_subscription(&self, id: &str) -> bool {
+        self.subscription_refreshes
+            .values()
+            .any(|provider_id| provider_id == id)
+    }
+
+    fn send_subscription(
+        &mut self,
+        operation: SubscriptionOperation,
+        command: impl FnOnce(u64, u64) -> Command,
+    ) -> bool {
+        if self.subscription_request.is_some() {
+            return false;
+        }
+        if let Some(request_id) = self.dispatch_subscription(command) {
+            self.subscription_request = Some((request_id, operation));
+            self.subscription_login.busy = operation != SubscriptionOperation::Status;
+            if self.subscription_login.busy {
+                self.subscription_login.error = None;
+            }
+            true
+        } else {
+            self.subscription_login.error = Some(CONNECTING.into());
+            false
+        }
+    }
+
+    fn dispatch_subscription(&self, command: impl FnOnce(u64, u64) -> Command) -> Option<u64> {
+        let (settings_id, generation) = self.subscription_round?;
+        let request_id = next_provider_settings_request();
+        self.commands
+            .send_at(generation, command(request_id, settings_id))
+            .ok()?;
+        Some(request_id)
+    }
+
+    fn apply_login_view(&mut self, view: SubscriptionLoginView) -> ProviderUpdate {
+        let login = &mut self.subscription_login;
+        login.attempt_id = Some(view.attempt_id);
+        login.can_reopen = view.can_reopen;
+        login.system_browser_available = view.system_browser_available;
+        login.error = view
+            .reason
+            .map(|reason| subscription_login_message(reason, login.chinese));
+        login.phase = match view.status {
+            SubscriptionLoginStatus::Waiting | SubscriptionLoginStatus::Exchanging => "waiting",
+            SubscriptionLoginStatus::Ready => "models",
+            _ => "error",
+        };
+        if let Some(mut draft) = view.draft {
+            if let Some(saved) = self.providers.iter().find(|row| row["id"] == draft["id"])
+                && let Some(mode) = saved.get("contextWindowMode")
+            {
+                draft["contextWindowMode"] = mode.clone();
+            }
+            login.details = Some(
+                json!({"account": draft["subscription"]["account"], "models": draft["subscription"]["modelMetadata"], "quota": draft["subscription"]["quota"]}),
+            );
+            return ProviderUpdate::SubscriptionDraft(ProviderDraft::from_provider(&draft));
+        }
+        ProviderUpdate::None
+    }
+
+    fn receive_subscription(
+        &mut self,
+        operation: SubscriptionOperation,
+        result: ProviderSettingsResult,
+    ) -> ProviderUpdate {
+        self.subscription_login.busy = false;
+        match (operation, result) {
+            (SubscriptionOperation::ConfirmRisk, ProviderSettingsResult::Accepted(true)) => {
+                self.subscription_risk_accepted = true;
+                self.subscription_login.phase = "login";
+                ProviderUpdate::None
+            }
+            (
+                SubscriptionOperation::Commit { activate },
+                ProviderSettingsResult::Provider(provider),
+            ) if provider["id"].is_string() => {
+                let id = field(&provider, "id");
+                if let Some(details) = self.subscription_login.details.take() {
+                    self.subscription_accounts.insert(id.clone(), details);
+                }
+                self.project_save(&provider);
+                if activate {
+                    self.active_id = Some(id);
+                    self.sort_providers();
+                }
+                self.subscription_login = SubscriptionLogin::default();
+                self.notice = Some(("配置已保存", "供应商配置已保存".into(), false));
+                ProviderUpdate::Saved
+            }
+            (_, ProviderSettingsResult::SubscriptionLogin(view)) => self.apply_login_view(view),
+            (operation, result) => {
+                let error = match result {
+                    ProviderSettingsResult::Error(error) => error,
+                    _ => CONNECTING.into(),
+                };
+                let error = subscription_login_message(error, self.subscription_login.chinese);
+                self.subscription_login.error = Some(error.clone());
+                match operation {
+                    SubscriptionOperation::Commit { .. } => ProviderUpdate::SaveFailed(error),
+                    SubscriptionOperation::ConfirmRisk | SubscriptionOperation::Reopen => {
+                        ProviderUpdate::None
+                    }
+                    _ => {
+                        self.subscription_login.phase = "error";
+                        ProviderUpdate::None
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn load_compaction(&mut self) {
+        if self.compaction_request.is_none() && self.compaction.is_none() {
+            self.compaction_request = self
+                .dispatch(|request_id| Command::GetClaudeModelPreferences { request_id })
+                .map(|(request_id, generation)| (request_id, generation, false));
+            self.compaction_error = self.compaction_request.is_none().then(|| CONNECTING.into());
+        }
+    }
+
+    pub(crate) fn compaction(&self) -> Option<&Value> {
+        self.compaction.as_ref()
+    }
+
+    pub(crate) fn compaction_error(&self) -> Option<&str> {
+        self.compaction_error.as_deref()
+    }
+
+    pub(crate) fn saving_compaction(&self) -> bool {
+        self.compaction_request.is_some_and(|(_, _, saving)| saving)
+    }
+
+    pub(crate) fn save_compaction(&mut self, input: &Value) {
+        if self.compaction.is_none() || self.compaction_request.is_some() {
+            return;
+        }
+        self.compaction_request = self
+            .dispatch(|request_id| Command::SetClaudeModelPreferences {
+                request_id,
+                assignments: Value::Null,
+                web_search: None,
+                compaction: Some(input.clone()),
+            })
+            .map(|(request_id, generation)| (request_id, generation, true));
+        self.compaction_error = self.compaction_request.is_none().then(|| CONNECTING.into());
+    }
+
+    pub(crate) fn receive_compaction(&mut self, reply: &ClaudeModelPreferencesReply) -> bool {
+        if !self
+            .compaction_request
+            .is_some_and(|(request_id, _, _)| request_id == reply.roles.request_id)
+        {
+            return false;
+        }
+        self.compaction_request = None;
+        if let Some(compaction) = &reply.compaction {
+            self.compaction = Some(compaction.clone());
+            self.compaction_error = None;
+        } else {
+            self.compaction_error = Some(
+                reply
+                    .roles
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| LOAD_FAILED.into()),
+            );
+        }
+        true
     }
 
     pub(crate) fn loading(&self) -> bool {
@@ -615,7 +1049,7 @@ impl ProviderSettings {
         if phase != ConnectionPhase::Ready {
             return None;
         }
-        let request_id = NEXT_REQUEST.fetch_add(1, Ordering::Relaxed);
+        let request_id = next_provider_settings_request();
         self.commands
             .send_at(generation, command(request_id))
             .ok()?;
@@ -623,6 +1057,50 @@ impl ProviderSettings {
     }
 
     pub(crate) fn receive(&mut self, reply: ProviderSettingsReply) -> ProviderUpdate {
+        if self.subscription_open_request == Some(reply.request_id) {
+            self.subscription_open_request = None;
+            if let ProviderSettingsResult::SubscriptionSettings(view) = reply.result {
+                self.subscription_risk_accepted |= view.antigravity_risk_accepted;
+                if self.accept_subscription_snapshot(view.snapshot) {
+                    for (id, details) in view.accounts {
+                        self.accept_subscription_details(id, details);
+                    }
+                }
+            }
+            return ProviderUpdate::None;
+        }
+        if let Some((id, operation)) = self.subscription_request
+            && id == reply.request_id
+        {
+            self.subscription_request = None;
+            return self.receive_subscription(operation, reply.result);
+        }
+        if let Some(id) = self.subscription_refreshes.remove(&reply.request_id) {
+            match reply.result {
+                ProviderSettingsResult::SubscriptionModels(view) if view.provider_id == id => {
+                    if self.accept_subscription_snapshot(view.snapshot) {
+                        self.accept_subscription_details(id, view.details);
+                    }
+                    self.notice = Some(("模型已刷新", String::new(), false));
+                }
+                result => {
+                    let error = match result {
+                        ProviderSettingsResult::Error(error) => error,
+                        _ => "Model list could not be read".into(),
+                    };
+                    if error == "Subscription sign-in is required" {
+                        if let Some(provider) =
+                            self.providers.iter_mut().find(|row| row["id"] == id)
+                        {
+                            provider["subscription"]["account"]["status"] = json!("needs-sign-in");
+                        }
+                        self.subscription_accounts.remove(&id);
+                    }
+                    self.notice = Some(("模型刷新失败", error, true));
+                }
+            }
+            return ProviderUpdate::None;
+        }
         if self
             .pending_fetch
             .is_some_and(|(request_id, _)| request_id == reply.request_id)
@@ -707,6 +1185,21 @@ impl ProviderSettings {
 
     pub(crate) fn connection_changed(&mut self) -> ProviderUpdate {
         let (generation, phase) = self.commands.connection();
+        if self.subscription_round.is_some_and(|(_, requested)| {
+            requested != generation || phase != ConnectionPhase::Ready
+        }) {
+            self.close_subscription_settings();
+            self.subscription_risk_accepted = false;
+        }
+        if self.compaction_request.is_some_and(|(_, requested, _)| {
+            requested != generation || phase != ConnectionPhase::Ready
+        }) {
+            self.compaction_request = None;
+            self.compaction_error = Some(CONNECTING.into());
+        }
+        if phase != ConnectionPhase::Ready {
+            self.compaction = None;
+        }
         let fetch_lost = self.pending_fetch.is_some_and(|(_, requested)| {
             requested != generation || phase != ConnectionPhase::Ready
         });
@@ -758,6 +1251,16 @@ impl ProviderSettings {
         committed: Option<Value>,
         message: String,
     ) -> ProviderUpdate {
+        if (message.contains("Subscription sign-in is required")
+            || message.contains("Subscription credential is missing or no longer valid"))
+            && let Some(provider) = self
+                .providers
+                .iter_mut()
+                .find(|row| row["id"] == id && row["kind"] == "subscription")
+        {
+            provider["subscription"]["account"]["status"] = json!("needs-sign-in");
+            self.subscription_accounts.remove(&id);
+        }
         if committed.is_some() {
             self.committed_provider = committed;
             ProviderUpdate::SaveFailed(message)
@@ -768,11 +1271,44 @@ impl ProviderSettings {
         }
     }
 
+    fn accept_subscription_details(
+        &mut self,
+        id: String,
+        details: matou_native_runtime::protocol::SubscriptionDetails,
+    ) {
+        if let Some(provider) = self.providers.iter_mut().find(|row| row["id"] == id)
+            && project_account_details(provider, &details.account)
+            && let Ok(details) = serde_json::to_value(details)
+        {
+            self.subscription_accounts.insert(id, details);
+        } else {
+            self.subscription_accounts.remove(&id);
+        }
+    }
+
+    fn accept_subscription_snapshot(&mut self, snapshot: Value) -> bool {
+        if snapshot["revision"]
+            .as_u64()
+            .is_some_and(|revision| revision < self.revision)
+        {
+            return false;
+        }
+        self.accept_snapshot(snapshot)
+    }
+
     fn accept_snapshot(&mut self, mut snapshot: Value) -> bool {
+        let revision = snapshot["revision"].as_u64().unwrap_or(self.revision);
         let Some(rows) = snapshot["providers"][CLI].as_array_mut() else {
             return false;
         };
+        self.revision = revision;
         self.providers = std::mem::take(rows);
+        self.subscription_accounts.retain(|id, details| {
+            self.providers
+                .iter_mut()
+                .find(|row| row["id"] == id.as_str())
+                .is_some_and(|row| project_account_details(row, &details["account"]))
+        });
         self.active_id = snapshot["activeProviderIds"][CLI]
             .as_str()
             .map(str::to_owned);
@@ -796,6 +1332,7 @@ impl ProviderSettings {
         if provider["cli"] == "codex" {
             return;
         }
+        self.revision = self.revision.saturating_add(1);
         if let Some(row) = self
             .providers
             .iter_mut()
@@ -811,6 +1348,66 @@ impl ProviderSettings {
         } else {
             self.providers.push(provider.clone());
         }
+    }
+}
+
+fn subscription_login_message(reason: String, chinese: bool) -> String {
+    if !chinese {
+        return reason;
+    }
+    match reason.as_str() {
+        "Sign-in port is in use. Close the other sign-in window and try again." => {
+            "登录端口被占用。请关闭其他登录窗口后重试。"
+        }
+        "Could not listen for the browser sign-in callback" => {
+            "无法接收浏览器登录回调。请关闭其他登录页面后重试。"
+        }
+        "Sign-in is already in progress in another window. Finish it or cancel it there." => {
+            "另一个窗口正在登录。请在该窗口完成或取消登录。"
+        }
+        "Could not open the sign-in browser. Try again or use the system browser." => {
+            "浏览器没有打开。请重试，或选择使用系统浏览器。"
+        }
+        "Could not open the system browser. Check your browser and try again." => {
+            "系统浏览器没有打开。请检查默认浏览器设置后重试。"
+        }
+        "Sign-in timed out. Start again." => "登录超时，请重新登录。",
+        "Could not read sign-in status. Try again." => "无法读取登录状态，请重试。",
+        "Sign-in was not completed. Try again." => "登录未完成，请重试。",
+        "Could not read the signed-in account or its models. Try again." => {
+            "无法读取已登录账号或模型，请重试。"
+        }
+        "Subscription authorization address was rejected" => "无法打开授权地址，请重新开始登录。",
+        "Subscription service is unavailable" => "订阅服务暂不可用，请稍后重试。",
+        _ => return reason,
+    }
+    .into()
+}
+
+fn project_account_details(provider: &mut Value, details: &Value) -> bool {
+    if provider["kind"] != "subscription" || !details.is_object() {
+        return false;
+    }
+    let account = &mut provider["subscription"]["account"];
+    if account["status"] == "needs-sign-in" {
+        return false;
+    }
+    if let (Some(saved), Some(read)) = (account["email"].as_str(), details["email"].as_str())
+        && saved != read
+    {
+        return false;
+    }
+    for key in ["status", "email", "plan"] {
+        if let Some(value) = details.get(key) {
+            account[key] = value.clone();
+        }
+    }
+    true
+}
+
+impl Drop for ProviderSettings {
+    fn drop(&mut self) {
+        self.close_subscription_settings();
     }
 }
 

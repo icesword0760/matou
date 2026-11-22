@@ -286,6 +286,43 @@ impl ProviderConfigStore {
         input: &Value,
         updated_at: i64,
     ) -> Result<Value> {
+        self.write_with_context_window(db, input, updated_at, |state| {
+            self.apply_upsert(state, input)
+        })
+    }
+
+    pub fn adopt_subscription_with_context_window(
+        &self,
+        db: &mut Connection,
+        input: &Value,
+        updated_at: i64,
+        activate: bool,
+    ) -> Result<Value> {
+        let apply = |state: &mut Value| {
+            let row = self.apply_subscription(state, input)?;
+            if activate {
+                state["activeProviderIds"][CLIS[0]] = row["id"].clone();
+            }
+            Ok(row)
+        };
+        let row = if input.get(CONTEXT_WINDOW_MODE).is_some() {
+            self.write_with_context_window(db, input, updated_at, apply)?
+        } else {
+            self.mutate(apply)?
+        };
+        if let Some(id) = row["id"].as_str() {
+            self.subscription_status.lock().unwrap().remove(id);
+        }
+        Ok(row)
+    }
+
+    fn write_with_context_window(
+        &self,
+        db: &mut Connection,
+        input: &Value,
+        updated_at: i64,
+        apply: impl FnOnce(&mut Value) -> Result<Value>,
+    ) -> Result<Value> {
         let mode = input[CONTEXT_WINDOW_MODE]
             .as_str()
             .filter(|mode| valid_context_mode(mode))
@@ -300,7 +337,7 @@ impl ProviderConfigStore {
             .map_err(|_| anyhow::anyhow!("Provider configuration write lock failed"))?;
         let previous = self.read_bytes()?;
         let mut state = self.decode(previous.as_deref())?;
-        let mut public = self.apply_upsert(&mut state, input)?;
+        let mut public = apply(&mut state)?;
         let id = public["id"]
             .as_str()
             .filter(|id| !id.is_empty() && id.encode_utf16().count() <= 256)
@@ -483,29 +520,12 @@ impl ProviderConfigStore {
             if role == "fable" && id.is_empty() {
                 continue;
             }
-            let normalized = id.to_ascii_lowercase();
-            let model = models
-                .iter()
-                .find(|model| model["id"] == id)
-                .filter(|_| {
-                    !id.is_empty()
-                        && !["image", "video", "codex-auto-review"]
-                            .iter()
-                            .any(|part| normalized.contains(part))
-                })
-                .context("Selected model is not available")?;
-            if let Some(effort) = input["effortMapping"][role].as_str()
-                && effort != "follow"
-            {
-                let supported = model["supportedEfforts"].as_array().map_or_else(
-                    || effort != "max" || subscription_max_effort(subscription, model),
-                    |values| values.iter().any(|value| value == effort),
-                );
-                ensure!(
-                    supported && (effort != "max" || subscription["provider"] != "codex"),
-                    "Selected model does not support this reasoning effort"
-                );
-            }
+            validate_subscription_role(
+                subscription,
+                models,
+                id,
+                input["effortMapping"][role].as_str(),
+            )?;
         }
         let mut row = existing.clone();
         row["name"] = json!(name);
@@ -623,97 +643,157 @@ impl ProviderConfigStore {
         })
     }
 
+    pub fn antigravity_risk_accepted(&self) -> Result<bool> {
+        Ok(truthy(&self.read()?["policies"][RISK_POLICY]))
+    }
+
+    pub fn cache_subscription_models(
+        &self,
+        id: &str,
+        identity: &SubscriptionAccountIdentity,
+        models: &[Value],
+    ) -> Result<()> {
+        self.mutate(|state| {
+            let row = list_mut(state, CLIS[0])
+                .iter_mut()
+                .find(|row| {
+                    row["id"] == id && subscription_identity(row).as_ref() == Some(identity)
+                })
+                .context("Subscription account changed during refresh")?;
+            row["subscription"]["modelMetadata"] =
+                Value::Array(models.iter().map(subscription_model).collect());
+            bump_revision(state);
+            Ok(())
+        })
+    }
+
+    pub fn validate_subscription_draft(input: &Value) -> Result<()> {
+        ensure!(
+            input["cli"] == CLIS[0] && input["kind"] == "subscription",
+            "Invalid subscription draft"
+        );
+        let name = input["name"].as_str().unwrap_or_default();
+        ensure!(
+            !trim(name).is_empty() && name.encode_utf16().count() <= 256,
+            "Invalid provider name"
+        );
+        if let Some(mode) = input.get(CONTEXT_WINDOW_MODE) {
+            ensure!(
+                mode.as_str().is_some_and(valid_context_mode),
+                "Invalid provider context window mode"
+            );
+        }
+        validate_efforts(input)?;
+        let subscription = &input["subscription"];
+        let models = subscription["modelMetadata"]
+            .as_array()
+            .context("Invalid subscription model directory")?;
+        for role in ROLES {
+            validate_subscription_role(
+                subscription,
+                models,
+                input["modelMapping"][role].as_str().unwrap_or_default(),
+                input["effortMapping"][role].as_str(),
+            )?;
+        }
+        Ok(())
+    }
+
     /// Internal store commit for an account already adopted by the caller.
     /// The credential reference stays on disk and is omitted from the returned view.
     pub fn adopt_subscription(&self, input: &Value) -> Result<Value> {
-        self.mutate(|state| {
-            validate_efforts(input)?;
-            let incoming = &input["subscription"];
-            let provider = incoming["provider"].as_str().unwrap_or_default();
-            ensure!(
-                matches!(provider, "codex" | "antigravity"),
-                "Invalid subscription provider"
-            );
-            ensure!(
-                provider != "antigravity" || truthy(&state["policies"][RISK_POLICY]),
-                "Antigravity risk confirmation is required"
-            );
-            let name = input["name"].as_str().unwrap_or_default();
-            ensure!(
-                !trim(name).is_empty() && name.encode_utf16().count() <= 256,
-                "Invalid provider name"
-            );
-            let credential = &incoming["credentialRef"];
-            let filename = credential["name"]
-                .as_str()
-                .and_then(|name| name.strip_suffix(".json"))
-                .unwrap_or_default();
-            ensure!(
-                !filename.is_empty() && !filename.contains(['/', '\\', '\0']),
-                "Invalid credential reference"
-            );
-            let models = incoming["modelMetadata"]
-                .as_array()
-                .context("Selected model is not available")?;
-            let mapping =
-                require_object(&input["modelMapping"], "Selected model is not available")?;
-            for role in ROLES {
-                if role == "fable" && mapping.get(role).is_none_or(|id| id == "") {
-                    continue;
-                }
-                ensure!(
-                    mapping.get(role).is_some_and(
-                        |id| id.is_string() && models.iter().any(|model| model["id"] == *id)
-                    ),
-                    "Selected model is not available"
-                );
+        self.mutate(|state| self.apply_subscription(state, input))
+    }
+
+    fn apply_subscription(&self, state: &mut Value, input: &Value) -> Result<Value> {
+        validate_efforts(input)?;
+        let incoming = &input["subscription"];
+        let provider = incoming["provider"].as_str().unwrap_or_default();
+        ensure!(
+            matches!(provider, "codex" | "antigravity"),
+            "Invalid subscription provider"
+        );
+        ensure!(
+            provider != "antigravity" || truthy(&state["policies"][RISK_POLICY]),
+            "Antigravity risk confirmation is required"
+        );
+        let name = input["name"].as_str().unwrap_or_default();
+        ensure!(
+            !trim(name).is_empty() && name.encode_utf16().count() <= 256,
+            "Invalid provider name"
+        );
+        let credential = &incoming["credentialRef"];
+        let filename = credential["name"]
+            .as_str()
+            .and_then(|name| name.strip_suffix(".json"))
+            .unwrap_or_default();
+        ensure!(
+            !filename.is_empty() && !filename.contains(['/', '\\', '\0']),
+            "Invalid credential reference"
+        );
+        let models = incoming["modelMetadata"]
+            .as_array()
+            .context("Selected model is not available")?;
+        let mapping = require_object(&input["modelMapping"], "Selected model is not available")?;
+        for role in ROLES {
+            if role == "fable" && mapping.get(role).is_none_or(|id| id == "") {
+                continue;
             }
-            let list = list_mut(state, CLIS[0]);
-            let existing = list.iter().find(|row| {
-                row["kind"] == "subscription" && row["subscription"]["provider"] == provider
-            });
-            if let Some(id) = input.get("id").filter(|id| truthy(id)) {
-                ensure!(
-                    existing.and_then(|row| row.get("id")) == Some(id),
-                    "Subscription identity does not match"
-                );
-            }
-            let mut row = existing
-                .and_then(Value::as_object)
-                .cloned()
-                .unwrap_or_default();
-            let mut subscription = row.get("subscription").map(spread).unwrap_or_default();
-            let mut credential_ref = Map::new();
-            copy_present(&mut credential_ref, credential, &["name"]);
-            copy_truthy(&mut credential_ref, credential, &["authIndex"]);
-            let mut account = Map::new();
-            copy_present(&mut account, &incoming["account"], &["status"]);
-            copy_truthy(&mut account, &incoming["account"], &["email", "plan"]);
-            subscription.insert("provider".into(), json!(provider));
-            subscription.insert("credentialRef".into(), Value::Object(credential_ref));
-            subscription.insert("account".into(), Value::Object(account));
-            subscription.insert(
-                "modelMetadata".into(),
-                Value::Array(models.iter().map(subscription_model).collect()),
+            validate_subscription_role(
+                incoming,
+                models,
+                mapping
+                    .get(role)
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+                input["effortMapping"][role].as_str(),
+            )?;
+        }
+        let list = list_mut(state, CLIS[0]);
+        let existing = list.iter().find(|row| {
+            row["kind"] == "subscription" && row["subscription"]["provider"] == provider
+        });
+        if let Some(id) = input.get("id").filter(|id| truthy(id)) {
+            ensure!(
+                existing.and_then(|row| row.get("id")) == Some(id),
+                "Subscription identity does not match"
             );
-            let id = self.id_for(&row);
-            row.insert("id".into(), id);
-            row.insert("cli".into(), json!(CLIS[0]));
-            row.insert("kind".into(), json!("subscription"));
-            row.insert("name".into(), json!(trim(name)));
-            row.insert("endpoint".into(), json!(""));
-            row.insert("model".into(), mapping["sonnet"].clone());
-            // The internal input mapping is spread in its original order.
-            row.insert("modelMapping".into(), Value::Object(mapping.clone()));
-            copy_present(&mut row, input, &["effortMapping"]);
-            row.insert("subscription".into(), Value::Object(subscription));
-            row.shift_remove("apiKey");
-            let row = Value::Object(row);
-            let public = view(&row)?;
-            replace_row(list, row);
-            bump_revision(state);
-            Ok(public)
-        })
+        }
+        let mut row = existing
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        let mut subscription = row.get("subscription").map(spread).unwrap_or_default();
+        let mut credential_ref = Map::new();
+        copy_present(&mut credential_ref, credential, &["name"]);
+        copy_truthy(&mut credential_ref, credential, &["authIndex"]);
+        let mut account = Map::new();
+        copy_present(&mut account, &incoming["account"], &["status"]);
+        copy_truthy(&mut account, &incoming["account"], &["email", "plan"]);
+        subscription.insert("provider".into(), json!(provider));
+        subscription.insert("credentialRef".into(), Value::Object(credential_ref));
+        subscription.insert("account".into(), Value::Object(account));
+        subscription.insert(
+            "modelMetadata".into(),
+            Value::Array(models.iter().map(subscription_model).collect()),
+        );
+        let id = self.id_for(&row);
+        row.insert("id".into(), id);
+        row.insert("cli".into(), json!(CLIS[0]));
+        row.insert("kind".into(), json!("subscription"));
+        row.insert("name".into(), json!(trim(name)));
+        row.insert("endpoint".into(), json!(""));
+        row.insert("model".into(), mapping["sonnet"].clone());
+        // The internal input mapping is spread in its original order.
+        row.insert("modelMapping".into(), Value::Object(mapping.clone()));
+        copy_present(&mut row, input, &["effortMapping"]);
+        row.insert("subscription".into(), Value::Object(subscription));
+        row.shift_remove("apiKey");
+        let row = Value::Object(row);
+        let public = view(&row)?;
+        replace_row(list, row);
+        bump_revision(state);
+        Ok(public)
     }
 
     fn id_for(&self, row: &Map<String, Value>) -> Value {
@@ -875,6 +955,36 @@ fn replace_row(list: &mut Vec<Value>, row: Value) {
     } else {
         list.push(row);
     }
+}
+
+fn validate_subscription_role(
+    subscription: &Value,
+    models: &[Value],
+    id: &str,
+    effort: Option<&str>,
+) -> Result<()> {
+    let normalized = id.to_ascii_lowercase();
+    let model = models
+        .iter()
+        .find(|model| model["id"] == id)
+        .filter(|_| {
+            !id.is_empty()
+                && !["image", "video", "codex-auto-review"]
+                    .iter()
+                    .any(|part| normalized.contains(part))
+        })
+        .context("Selected model is not available")?;
+    if let Some(effort) = effort.filter(|effort| *effort != "follow") {
+        let supported = model["supportedEfforts"].as_array().map_or_else(
+            || effort != "max" || subscription_max_effort(subscription, model),
+            |values| values.iter().any(|value| value == effort),
+        );
+        ensure!(
+            supported && (effort != "max" || subscription["provider"] != "codex"),
+            "Selected model does not support this reasoning effort"
+        );
+    }
+    Ok(())
 }
 
 fn validate_efforts(input: &Value) -> Result<()> {
@@ -1173,7 +1283,7 @@ fn write_atomic(root: &Path, bytes: &[u8]) -> io::Result<()> {
     result
 }
 
-fn iso_time(time: SystemTime) -> Result<String> {
+pub fn iso_time(time: SystemTime) -> Result<String> {
     let milliseconds = match time.duration_since(UNIX_EPOCH) {
         Ok(duration) => i64::try_from(duration.as_millis())?,
         Err(error) => -i64::try_from(error.duration().as_millis())?,

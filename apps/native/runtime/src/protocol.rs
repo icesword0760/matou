@@ -52,8 +52,8 @@ pub struct ClaudeRoleAssignmentsReply {
     pub error: Option<String>,
 }
 
-#[derive(Serialize)]
-pub(crate) struct ClaudeModelPreferencesReply {
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ClaudeModelPreferencesReply {
     #[serde(flatten)]
     pub roles: ClaudeRoleAssignmentsReply,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -126,7 +126,7 @@ pub enum ClaudeModelCatalogResult {
 }
 
 /// Returned in the Graph event's `providerSettingsResult` field.
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderSettingsReply {
     pub request_id: u64,
@@ -134,14 +134,74 @@ pub struct ProviderSettingsReply {
     pub result: ProviderSettingsResult,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ProviderSettingsResult {
     Snapshot(serde_json::Value),
     Provider(serde_json::Value),
     Models(serde_json::Value),
     Accepted(bool),
+    SubscriptionLogin(SubscriptionLoginView),
+    SubscriptionSettings(SubscriptionSettingsView),
+    SubscriptionModels(SubscriptionModelsView),
     Error(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SubscriptionLoginStatus {
+    Waiting,
+    Exchanging,
+    Ready,
+    Failed,
+    Expired,
+    Cancelled,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubscriptionLoginView {
+    pub attempt_id: String,
+    pub provider: crate::subscription_launch::SubscriptionProvider,
+    pub status: SubscriptionLoginStatus,
+    pub can_reopen: bool,
+    pub system_browser_available: bool,
+    pub reason: Option<String>,
+    pub draft: Option<Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubscriptionDetails {
+    pub account: Value,
+    pub models: Vec<Value>,
+    pub quota: Vec<SubscriptionQuota>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubscriptionQuota {
+    pub name: String,
+    pub group: Option<String>,
+    pub used_percent: f64,
+    pub window_seconds: Option<u64>,
+    pub resets_at: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubscriptionSettingsView {
+    pub snapshot: Value,
+    pub accounts: std::collections::BTreeMap<String, SubscriptionDetails>,
+    pub antigravity_risk_accepted: bool,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubscriptionModelsView {
+    pub snapshot: Value,
+    pub provider_id: String,
+    pub details: SubscriptionDetails,
 }
 
 pub fn check_version(version: u32) -> Result<()> {
