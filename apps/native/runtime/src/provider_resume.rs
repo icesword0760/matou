@@ -10,7 +10,7 @@ pub(crate) const IDENTITY_MISMATCH: &str = "The context returned by the AI sessi
 
 static ANSI: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\x1b\[[0-?]*[ -/]*[@-~]").unwrap());
 static MISSING: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"no session.{0,96}found|session.{0,96}not found|no conversation.{0,96}found|invalid session|failed to resume").unwrap()
+    Regex::new(r"nosession.{0,96}found|session.{0,96}notfound|noconversation.{0,96}found|invalidsession|failedtoresume").unwrap()
 });
 static TRUST_OPTION: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?:^| )([>❯] *)?(?:[12][.)] *)?(no, exit|yes, i trust this folder)").unwrap()
@@ -235,23 +235,23 @@ impl ResumeMonitor {
 
     fn failure_in(&self, output: &str) -> Option<&'static str> {
         let id = self.expected_id.as_ref()?.to_ascii_lowercase();
+        // Terminal wrapping and cursor moves can split both the error text and the ID.
+        let compact: String = output.split_whitespace().collect();
         if id.len() == 36
             && uuid::Uuid::parse_str(&id).is_ok()
-            && output.contains(&format!(
-                "that session is running in the background ({}).",
+            && compact.contains(&format!(
+                "thatsessionisrunninginthebackground({}).",
                 &id[..8]
             ))
         {
             return Some("provider session running in background");
         }
-        if let Some(at) = output.rfind(&id) {
-            let start = output.floor_char_boundary(at.saturating_sub(320));
-            let end = output.ceil_char_boundary((at + id.len() + 320).min(output.len()));
-            if MISSING.is_match(&output[start..end]) {
-                return Some("provider session not found");
-            }
-        }
-        None
+        let at = compact.rfind(&id)?;
+        let start = compact.floor_char_boundary(at.saturating_sub(320));
+        let end = compact.ceil_char_boundary((at + id.len() + 320).min(compact.len()));
+        MISSING
+            .is_match(&compact[start..end])
+            .then_some("provider session not found")
     }
 
     pub(crate) fn due_input(&mut self) -> Option<&'static [u8]> {
@@ -286,6 +286,7 @@ impl ResumeMonitor {
 mod tests {
     use super::*;
 
+    const SESSION_ID: &str = "7ec4132a-f6f8-4b49-9f6d-4b07be37f5c2";
     const CLAUDE_TRUST_HEADER: &str = "Accessing workspace: /tmp/project\r\n\
         Quick safety check: Is this a project you created or one you trust?\r\n\
         Claude Code'll be able to read, edit, and execute files here.\r\n";
@@ -371,7 +372,7 @@ mod tests {
 
     #[test]
     fn startup_failures_are_scoped_to_the_requested_conversation() {
-        let id = "7ec4132a-f6f8-4b49-9f6d-4b07be37f5c2";
+        let id = SESSION_ID;
         let binding = ClaudeBinding {
             id: "binding".into(),
             provider_session_id: id.into(),
@@ -421,5 +422,100 @@ mod tests {
                 .0,
             Some("provider session not found")
         );
+    }
+
+    #[test]
+    fn missing_session_is_recognized_with_a_wrapped_uuid() {
+        for reason in [
+            "No session found",
+            "Session not found",
+            "No conversation found",
+            "Invalid session",
+            "Failed to resume",
+        ] {
+            let mut monitor = ResumeMonitor::for_id(SESSION_ID.into());
+            assert_eq!(
+                monitor.ingest(&format!("{reason}: {SESSION_ID}")).0,
+                Some("provider session not found"),
+                "{reason}"
+            );
+        }
+        for separator in ["\n", "\x1b[2G"] {
+            for at in 1..SESSION_ID.len() {
+                let (left, right) = SESSION_ID.split_at(at);
+                let mut monitor = ResumeMonitor::for_id(SESSION_ID.to_ascii_uppercase());
+                let output = format!(
+                    "No conver{separator}sation found with session ID: {left}{separator}{right}"
+                );
+                assert_eq!(
+                    monitor.ingest(&output).0,
+                    Some("provider session not found"),
+                    "ID split at {at} by {separator:?}"
+                );
+            }
+        }
+
+        for output in [
+            "No conver\nsation found with session ID: 7ec4132a-f6f8-4b49-9\x1b[2Gf6d-4b07be37f5c3"
+                .into(),
+            format!("Session ID: {SESSION_ID}"),
+            format!("No conversation found {} {SESSION_ID}", "界".repeat(330)),
+        ] {
+            let mut monitor = ResumeMonitor::for_id(SESSION_ID.into());
+            assert_eq!(monitor.ingest(&output).0, None, "{output:?}");
+        }
+    }
+
+    #[test]
+    fn background_session_is_recognized_with_wrapped_output() {
+        let background = "That session is running in the background (7ec4132a).";
+        for separator in ["\n", "\x1b[2G"] {
+            for at in 1..background.len() {
+                let (left, right) = background.split_at(at);
+                let mut monitor = ResumeMonitor::for_id(SESSION_ID.into());
+                assert_eq!(
+                    monitor.ingest(&format!("{left}{separator}{right}")).0,
+                    Some("provider session running in background"),
+                    "Background message split at {at} by {separator:?}"
+                );
+            }
+        }
+
+        for output in [
+            "That session is running in the back\nground (7ec4\x1b[2G132b).",
+            "That session is running in the back\nground (7ec4\x1b[2G132aff).",
+        ] {
+            let mut monitor = ResumeMonitor::for_id(SESSION_ID.into());
+            assert_eq!(monitor.ingest(output).0, None, "{output:?}");
+        }
+
+        let mut monitor = ResumeMonitor::for_id("7ec4132a-not-a-uuid".into());
+        assert_eq!(monitor.ingest(background).0, None);
+    }
+
+    #[test]
+    fn recorded_32_column_claude_error_is_recognized_on_arrival() {
+        // PTY reads from cli-fgw0b807/lost-resume-32cols.tty and its .reads.json.
+        // Only the UUID bytes were replaced.
+        let chunks = [
+            "\x1b7\x1b[r\x1b8\x1b[?25h",
+            "\x1b[38;5;211mNo\x1b[4Gconversation\x1b[17Gfound\x1b[23Gwith\x1b[39m\r\r\n\
+             \x1b[38;5;211msession\x1b[9GID:\x1b[13G7ec4132a-f6f8-4b49-9\x1b[39m\r\r\n\
+             \x1b[38;5;211mf6d-4b07be37f5c2\x1b[39m\r\r\n",
+            "\x1b[?25h",
+            "\x1b(B\x0f\x1b[?1016l\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[>4m\x1b[?1004l\
+             \x1b[?2031l\x1b[?2004l\x1b[?7h\x1b[<u\x1b[?25h\x1b7\x1b[r\x1b8",
+            "\x1b[?25h",
+            "\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l",
+            "\x1b(B\x0f\x1b[?1016l\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[>4m\x1b[?1004l\
+             \x1b[?2031l\x1b[?2004l\x1b[?7h\x1b[<u\x1b[?25h\x1b7\x1b[r\x1b8\x1b]0;\x07",
+            "\x1b[?25h",
+        ];
+        let mut monitor = ResumeMonitor::for_id(SESSION_ID.into());
+        let first_error = chunks
+            .iter()
+            .enumerate()
+            .find_map(|(index, chunk)| monitor.ingest(chunk).0.map(|error| (index + 1, error)));
+        assert_eq!(first_error, Some((2, "provider session not found")));
     }
 }
