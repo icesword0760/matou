@@ -1620,6 +1620,51 @@ mod workspace {
             self.pending_provider_restores.contains_key(session_id)
         }
 
+        pub(super) fn provider_restore_terminal_id(&self, id: &str) -> gpui::EntityId {
+            self.terminals[id].entity_id()
+        }
+
+        pub(super) fn focus_provider_terminal(&self, id: &str, window: &mut Window, cx: &App) {
+            window.focus(&self.terminals[id].read(cx).focus);
+        }
+
+        pub(super) fn provider_restore_frame(
+            &mut self,
+            id: &str,
+            sequence: u64,
+            content: &[u8],
+            color: u32,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            let mut terminal = Terminal::new(TerminalOptions::new(80, 24, 8, 16)).unwrap();
+            terminal.feed(content);
+            let mut screen = terminal.screen().unwrap();
+            screen.background = color;
+            self.deliver(
+                Event::Frame {
+                    session_id: id.into(),
+                    screen,
+                    modes: terminal.input_modes().unwrap(),
+                    selection: None,
+                    sequence,
+                    scroll_request_id: 0,
+                },
+                window,
+                cx,
+            );
+        }
+
+        pub(super) fn assert_provider_history_open(
+            &mut self,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            assert!(self.loader().history);
+            assert_eq!(self.loader().session_id, PEER);
+            self.close_dialog(window, cx);
+        }
+
         pub(super) fn assert_no_provider_restore(&self, id: &str) {
             assert!(
                 self.graph_node(id)
@@ -1687,14 +1732,19 @@ mod workspace {
             window.focus(&self.provider_restore_controls[id][button]);
         }
 
-        pub(super) fn provider_restore_button_positions(&self, id: &str) -> [Point<Pixels>; 2] {
-            let index = self.order.iter().position(|card| card == id).unwrap();
-            let bounds = self.carousel_scroll.bounds_for_item(index).unwrap();
-            let right = bounds.right() + self.carousel_scroll.offset().x;
-            [
-                point(right - px(136.), bounds.top() + px(58.)),
-                point(right - px(45.), bounds.top() + px(58.)),
-            ]
+        pub(super) fn provider_restore_probe_theme(
+            &mut self,
+            dark: bool,
+            focused: bool,
+            cx: &mut Context<Self>,
+        ) {
+            assert_eq!(self.active_level_focus() == Some(PEER), focused);
+            self.theme.set_preference(if dark {
+                ThemePreference::Dark
+            } else {
+                ThemePreference::Light
+            });
+            cx.notify();
         }
 
         pub(super) fn assert_provider_bridge_error(&self) {
@@ -4038,9 +4088,11 @@ mod probe {
         deliver(window, cx, fixture.graph_event());
         inspect(cx, Some(&reason), false, NO_BLOCK);
 
-        let [retry_position, fresh_position] = window
-            .update(cx, |view, _, _| {
-                view.provider_restore_button_positions(PEER)
+        let [retry_position, fresh_position] = AnyWindowHandle::from(window)
+            .update(cx, |_, window, cx| {
+                let bounds = Workspace::capture_render_bounds(window, cx);
+                ["retry-provider-restore", "start-fresh-provider"]
+                    .map(|key| bounds[&format!("{key}-{PEER}")].center())
             })
             .unwrap();
         deliver(
@@ -4158,6 +4210,154 @@ mod probe {
         assert!(fixture.process(window, cx, &sink).is_empty());
         println!("Missing runtime acknowledgement unlocks both controls without another command");
 
+        const FAILED_BACKGROUND: u32 = 0x503232;
+        const RECOVERED_BACKGROUND: u32 = 0x234466;
+        let paint = |cx: &mut AsyncApp| {
+            crate::terminal_surface::probe_terminal_background(|| draw(window, cx))
+        };
+        let frame = |cx: &mut AsyncApp, sequence, content: &[u8], color| {
+            window
+                .update(cx, |view, window, cx| {
+                    view.provider_restore_frame(PEER, sequence, content, color, window, cx)
+                })
+                .unwrap();
+        };
+        fixture.set_provider_restore("none", None, 2);
+        deliver(window, cx, fixture.graph_event());
+        deliver(
+            window,
+            cx,
+            Event::Recovery {
+                session_id: PEER.into(),
+                state: RecoveryState::Ready,
+            },
+        );
+        frame(cx, 2, b"\x1b[31mNo conversation found", FAILED_BACKGROUND);
+        assert_eq!(
+            paint(cx),
+            Some(FAILED_BACKGROUND),
+            "failure text was in a rendered terminal frame before the banner"
+        );
+        let terminal_id = window
+            .update(cx, |view, window, cx| {
+                view.focus_provider_terminal(PEER, window, cx);
+                view.provider_restore_terminal_id(PEER)
+            })
+            .unwrap();
+
+        fixture.set_provider_restore("failed", Some(BACKGROUND), 2);
+        let Event::Graph(mut failed) = fixture.graph_event() else {
+            unreachable!()
+        };
+        failed["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|node| node["sessionId"] == PEER)
+            .unwrap()["historyProviderSessionId"] = "probe-conversation".into();
+        deliver(window, cx, Event::Graph(failed));
+        assert_ne!(
+            paint(cx),
+            Some(FAILED_BACKGROUND),
+            "restore failure painted the CLI terminal"
+        );
+        frame(cx, 3, b"\x1b[31mNo conversation found", FAILED_BACKGROUND);
+        assert_ne!(paint(cx), Some(FAILED_BACKGROUND), "late failed CLI frame painted");
+        window
+            .update(cx, |view, window, cx| view.assert_terminal_focus(PEER, false, window, cx))
+            .unwrap();
+        let hit = AnyWindowHandle::from(window)
+            .update(cx, |_, window, cx| {
+                let bounds = Workspace::capture_render_bounds(window, cx);
+                let header = bounds[&format!("session-header-{PEER}")];
+                point(header.center().x, header.bottom() + px(130.))
+            })
+            .unwrap();
+        let drain = || std::iter::from_fn(|| sink.try_recv().ok());
+        drain().for_each(drop);
+        click(window, cx, hit);
+        dispatch_key(window, cx, "a");
+        window
+            .update(cx, |view, window, cx| view.assert_terminal_focus(PEER, false, window, cx))
+            .unwrap();
+        assert!(!drain().any(|command| matches!(command, Command::Input { .. })));
+
+        let history = AnyWindowHandle::from(window)
+            .update(cx, |_, window, cx| {
+                Workspace::header_action_position(
+                    &format!("session-history-open-{PEER}"),
+                    window,
+                    cx,
+                )
+            })
+            .unwrap();
+        click(window, cx, history);
+        window
+            .update(cx, |view, window, cx| view.assert_provider_history_open(window, cx))
+            .unwrap();
+        assert!(drain().any(|command| matches!(
+            command,
+            Command::GetProviderSession { provider_session_id, .. }
+                if provider_session_id == "probe-conversation"
+        )));
+
+        fixture.set_provider_restore("none", None, 3);
+        deliver(window, cx, fixture.graph_event());
+        frame(cx, 4, b"recovered frame", RECOVERED_BACKGROUND);
+        assert_eq!(paint(cx), Some(RECOVERED_BACKGROUND));
+        click(window, cx, hit);
+        window
+            .update(cx, |view, window, cx| {
+                assert_eq!(view.provider_restore_terminal_id(PEER), terminal_id);
+                view.assert_terminal_focus(PEER, true, window, cx);
+            })
+            .unwrap();
+        println!("Failed CLI frame did not paint or accept keys | history opens | same terminal paints recovered frame");
+
+        for (width, focused) in [(610., true), (1125., false)] {
+            let mut narrow_fixture = Fixture::new();
+            narrow_fixture.set_provider_restore("failed", Some(&reason), 0);
+            if !focused {
+                narrow_fixture.focus(SCENE, PARENT);
+            }
+            let (narrow, _sink) = open_hidden(cx, width);
+            deliver(narrow, cx, narrow_fixture.event(true));
+            for dark in [false, true] {
+                narrow
+                    .update(cx, |view, _, cx| view.provider_restore_probe_theme(dark, focused, cx))
+                    .unwrap();
+                let bounds = AnyWindowHandle::from(narrow)
+                    .update(cx, |_, window, cx| Workspace::capture_render_bounds(window, cx))
+                    .unwrap();
+                let [banner, title, reason, retry, fresh] = [
+                    "provider-restore-banner",
+                    "provider-restore-title",
+                    "provider-restore-reason",
+                    "retry-provider-restore",
+                    "start-fresh-provider",
+                ]
+                .map(|key| bounds[&format!("{key}-{PEER}")]);
+                assert!(
+                    banner.size.width <= px(300.),
+                    "tested a wide card: {banner:?}"
+                );
+                assert!(title.size.width >= px(90.) && title.size.height <= px(15.));
+                assert!(title.right() <= reason.left());
+                for part in [title, reason, retry, fresh] {
+                    assert!(part.left() >= banner.left() && part.right() <= banner.right());
+                }
+                assert!(retry.top() == fresh.top() && retry.right() <= fresh.left());
+                assert!(reason.right() <= retry.left() || reason.bottom() <= retry.top());
+                println!(
+                    "Narrow restore layout | width={} | focused={focused} | dark={dark}",
+                    f32::from(banner.size.width)
+                );
+            }
+            narrow
+                .update(cx, |_, window, _| window.remove_window())
+                .unwrap();
+        }
+
         // Deferred cards own the whole card, so the provider banner must never
         // duplicate that surface. The loading badge follows the same state.
         fixture.set_provider_restore("restoring", None, 2);
@@ -4238,6 +4438,7 @@ mod probe {
                 window.remove_window();
             })
             .unwrap();
+        println!("Provider restore hidden GPUI probe passed");
     }
 
     fn verify_card_actions(cx: &mut AsyncApp) {
