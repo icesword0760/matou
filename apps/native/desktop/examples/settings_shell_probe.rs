@@ -42,6 +42,8 @@ mod ui_text;
 #[cfg(all(target_os = "macos", debug_assertions))]
 #[allow(dead_code)]
 mod workspace {
+    use matou_native_runtime::protocol::ClaudeRoleAssignmentsReply;
+
     include!("../src/workspace.rs");
 
     impl Workspace {
@@ -152,6 +154,24 @@ mod workspace {
             );
         }
 
+        pub(super) fn compaction_reply(
+            &mut self,
+            reply: ClaudeModelPreferencesReply,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            self.apply(
+                BridgeEvent::Runtime {
+                    generation: 1,
+                    event: Event::Graph(
+                        serde_json::json!({ "claudeRoleAssignmentsResult": reply }),
+                    ),
+                },
+                window,
+                cx,
+            );
+        }
+
         pub(super) fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
             self.toggle_settings(window, cx);
         }
@@ -206,9 +226,12 @@ mod probe {
         AppTheme, ThemePreference, read_theme_preference, write_theme_preference,
     };
     use matou_native_runtime::protocol::{
-        ClaudeRoleAssignmentsReply, ProviderSettingsReply, ProviderSettingsResult,
+        ClaudeModelPreferencesReply, ClaudeRoleAssignmentsReply, ProviderSettingsReply,
+        ProviderSettingsResult, SubscriptionDetails, SubscriptionLoginStatus,
+        SubscriptionLoginView, SubscriptionModelsView, SubscriptionQuota, SubscriptionSettingsView,
         TimeZoneSettingsError, TimeZoneSettingsReply, TimeZoneSettingsSnapshot,
     };
+    use matou_native_runtime::subscription_launch::SubscriptionProvider;
     use serde_json::{Value, json};
 
     use crate::{
@@ -223,15 +246,26 @@ mod probe {
         workspace::Workspace,
     };
 
+    fn business(sink: &ProbeReceiver) -> Result<Command, std::sync::mpsc::TryRecvError> {
+        loop {
+            match sink.try_recv()? {
+                Command::OpenSubscriptionSettings { .. }
+                | Command::CloseSubscriptionSettings { .. }
+                | Command::GetClaudeModelPreferences { .. } => {}
+                command => return Ok(command),
+            }
+        }
+    }
+
     fn request_id(sink: &ProbeReceiver) -> u64 {
-        match sink.try_recv().expect("settings should send a read") {
+        match business(sink).expect("settings should send a read") {
             Command::GetProviderSettings { request_id } => request_id,
             _ => panic!("unexpected command while waiting for provider settings"),
         }
     }
 
     fn assignment_request_id(sink: &ProbeReceiver) -> u64 {
-        match sink.try_recv().expect("settings should read assignments") {
+        match business(sink).expect("settings should read assignments") {
             Command::GetClaudeRoleAssignments { request_id } => request_id,
             _ => panic!("unexpected command while waiting for role assignments"),
         }
@@ -288,7 +322,7 @@ mod probe {
             request_id: switch_id,
             cli,
             id,
-        } = sink.try_recv().expect("switch should send an activation")
+        } = business(&sink).expect("switch should send an activation")
         else {
             panic!("unexpected command while checking activation");
         };
@@ -305,7 +339,7 @@ mod probe {
         let Command::SetActiveProvider {
             request_id: switch_id,
             ..
-        } = sink.try_recv().unwrap()
+        } = business(&sink).unwrap()
         else {
             panic!("retry did not send an activation");
         };
@@ -323,7 +357,7 @@ mod probe {
         let Command::SaveProvider {
             request_id: save_id,
             input,
-        } = sink.try_recv().unwrap()
+        } = business(&sink).unwrap()
         else {
             panic!("save did not send a provider write");
         };
@@ -347,7 +381,7 @@ mod probe {
         let Command::SaveProvider {
             request_id: save_id,
             ..
-        } = sink.try_recv().unwrap()
+        } = business(&sink).unwrap()
         else {
             panic!("retry did not send a provider write");
         };
@@ -368,7 +402,7 @@ mod probe {
         let Command::SaveProvider {
             request_id: add_id,
             input,
-        } = sink.try_recv().unwrap()
+        } = business(&sink).unwrap()
         else {
             panic!("add did not send a provider write");
         };
@@ -384,7 +418,7 @@ mod probe {
             request_id: switch_id,
             id,
             ..
-        } = sink.try_recv().unwrap()
+        } = business(&sink).unwrap()
         else {
             panic!("add-and-use should send activation after save");
         };
@@ -665,7 +699,7 @@ mod probe {
             shell.probe_language_page(window, cx)
         });
         assert!(matches!(
-            sink.try_recv().unwrap(),
+            business(&sink).unwrap(),
             Command::GetTimeZoneSettings { .. }
         ));
         draw(window, cx);
@@ -710,7 +744,7 @@ mod probe {
         choose(2, cx);
         verify(ThemePreference::Dark, AppTheme::Dark, cx);
         assert!(matches!(
-            sink.try_recv().unwrap(),
+            business(&sink).unwrap(),
             Command::Theme { session_id, theme }
                 if session_id == "settings-theme-terminal" && theme == AppTheme::Dark.palette().terminal
         ));
@@ -809,7 +843,7 @@ mod probe {
                 view.labels.get(control)
             );
         };
-        let save_command = || match sink.try_recv().unwrap() {
+        let save_command = || match business(&sink).unwrap() {
             Command::SaveProvider { request_id, input } => (request_id, input),
             _ => panic!("expected provider write"),
         };
@@ -833,7 +867,7 @@ mod probe {
 
         let view = activate(cx, "fetch");
         text(&view, "fetch", "正在获取");
-        let Command::FetchProviderModels { request_id, input } = sink.try_recv().unwrap() else {
+        let Command::FetchProviderModels { request_id, input } = business(&sink).unwrap() else {
             panic!("expected model discovery request");
         };
         assert_eq!(
@@ -978,7 +1012,7 @@ mod probe {
             request_id,
             cli,
             id,
-        } = sink.try_recv().unwrap()
+        } = business(&sink).unwrap()
         else {
             panic!("expected subscription switch after saving");
         };
@@ -1018,7 +1052,7 @@ mod probe {
         assert!(!view.bounds.contains_key("mapping-0") && !view.bounds.contains_key("context"));
         let view = activate(cx, "fetch");
         text(&view, "fetch", "正在获取");
-        let Command::FetchProviderModels { request_id, input } = sink.try_recv().unwrap() else {
+        let Command::FetchProviderModels { request_id, input } = business(&sink).unwrap() else {
             panic!("expected Codex model discovery request");
         };
         assert_eq!(
@@ -1048,6 +1082,458 @@ mod probe {
             .unwrap();
         println!(
             "Hidden GPUI provider editors: API headings, discovery, search, model details, manual mapping, dirty window choice, subscription validation and save/switch, Codex fields"
+        );
+    }
+
+    fn verify_subscription_window(cx: &mut AsyncApp) {
+        let (window, sink) = cx.update(|cx| open_window(None, cx)).unwrap();
+        window
+            .update(cx, |view, window, cx| view.open_settings(window, cx))
+            .unwrap();
+        let (mut read, mut settings, mut assignments, mut compaction) = (None, None, None, None);
+        for command in std::iter::from_fn(|| sink.try_recv().ok()) {
+            match command {
+                Command::GetProviderSettings { request_id } => read = Some(request_id),
+                Command::OpenSubscriptionSettings {
+                    request_id,
+                    settings_id,
+                } => {
+                    assert_eq!(request_id, settings_id);
+                    settings = Some(settings_id);
+                }
+                Command::GetClaudeRoleAssignments { request_id } => assignments = Some(request_id),
+                Command::GetClaudeModelPreferences { request_id } => compaction = Some(request_id),
+                _ => panic!("unexpected settings start"),
+            }
+        }
+        let settings = settings.unwrap();
+        let reply = |cx: &mut AsyncApp, request, response| {
+            window
+                .update(cx, |view, window, cx| {
+                    view.provider_reply(result(request, response), window, cx);
+                })
+                .unwrap();
+        };
+        let model_preferences = |cx: &mut AsyncApp, request_id, compaction| {
+            window
+                .update(cx, |view, window, cx| {
+                    view.compaction_reply(
+                        ClaudeModelPreferencesReply {
+                            roles: ClaudeRoleAssignmentsReply {
+                                request_id,
+                                assignments: Some(Default::default()),
+                                web_search: None,
+                                error: None,
+                            },
+                            compaction: Some(compaction),
+                        },
+                        window,
+                        cx,
+                    )
+                })
+                .unwrap();
+        };
+        model_preferences(
+            cx,
+            compaction.unwrap(),
+            json!({"mode": "follow", "effort": "follow"}),
+        );
+        window
+            .update(cx, |view, window, cx| {
+                view.assignment_reply(
+                    ClaudeRoleAssignmentsReply {
+                        request_id: assignments.unwrap(),
+                        assignments: Some(Default::default()),
+                        web_search: None,
+                        error: None,
+                    },
+                    window,
+                    cx,
+                )
+            })
+            .unwrap();
+        let mut api = row("api", "隔离 API");
+        api["modelMapping"] = json!({"opus": "probe-model", "fable": "probe-model", "sonnet": "probe-model", "haiku": "probe-model"});
+        reply(cx, read.unwrap(), snapshot(vec![api.clone()], "api"));
+        let ProviderSettingsResult::Snapshot(base) = snapshot(vec![api.clone()], "api") else {
+            unreachable!()
+        };
+        reply(
+            cx,
+            settings,
+            ProviderSettingsResult::SubscriptionSettings(SubscriptionSettingsView {
+                snapshot: base,
+                accounts: Default::default(),
+                antigravity_risk_accepted: false,
+            }),
+        );
+        let frame = |cx: &mut AsyncApp| probe_provider_editor(|| draw(window, cx));
+        let activate = |cx: &mut AsyncApp, control| {
+            draw(window, cx);
+            update_shell(window, cx, |shell, window, _| {
+                shell.probe_provider_editor_focus(control, window)
+            });
+            press(window, "enter", cx);
+            frame(cx)
+        };
+        let pick = |cx: &mut AsyncApp, provider: &str| {
+            let view = activate(cx, "new");
+            assert!(view.labels["subscription-codex"].contains("ChatGPT"));
+            assert!(view.labels["subscription-antigravity"].contains("Antigravity"));
+            click_hidden_view(window, view.bounds[provider].center(), cx);
+            activate(cx, "next")
+        };
+        let view = pick(cx, "subscription-antigravity");
+        assert!(view.labels["subscription-risk-body"].contains("申诉机会有限"));
+        assert!(!view.enabled["subscription-continue"]);
+        click_hidden_view(window, view.bounds["subscription-continue"].center(), cx);
+        assert!(business(&sink).is_err());
+        let view = activate(cx, "subscription-risk");
+        assert!(view.enabled["subscription-continue"]);
+        activate(cx, "subscription-continue");
+        let Command::ConfirmAntigravityRisk { request_id } = business(&sink).unwrap() else {
+            panic!("risk acknowledgement must be sent before sign-in");
+        };
+        reply(cx, request_id, ProviderSettingsResult::Accepted(true));
+        activate(cx, "subscription-login");
+        let Command::StartSubscriptionLogin {
+            request_id,
+            settings_id,
+            provider,
+            ..
+        } = business(&sink).unwrap()
+        else {
+            panic!("expected Antigravity login");
+        };
+        assert_eq!(
+            (settings_id, provider),
+            (settings, SubscriptionProvider::Antigravity)
+        );
+        let login = |provider, attempt_id: &str, status, can_reopen, reason, draft| {
+            ProviderSettingsResult::SubscriptionLogin(SubscriptionLoginView {
+                attempt_id: attempt_id.into(),
+                provider,
+                status,
+                can_reopen,
+                system_browser_available: can_reopen,
+                reason,
+                draft,
+            })
+        };
+        reply(
+            cx,
+            request_id,
+            login(
+                provider,
+                "agy-attempt",
+                SubscriptionLoginStatus::Waiting,
+                true,
+                Some(
+                    "Could not open the sign-in browser. Try again or use the system browser."
+                        .into(),
+                ),
+                None,
+            ),
+        );
+        let view = frame(cx);
+        assert!(view.labels["subscription-waiting"].contains("等待浏览器完成登录"));
+        assert!(view.enabled["subscription-reopen"]);
+        activate(cx, "subscription-reopen");
+        let Command::ReopenSubscriptionLogin {
+            request_id,
+            settings_id,
+            attempt_id,
+            system_browser,
+        } = business(&sink).unwrap()
+        else {
+            panic!("expected controlled browser retry");
+        };
+        assert_eq!(
+            (settings_id, attempt_id.as_str(), system_browser),
+            (settings, "agy-attempt", false)
+        );
+        reply(
+            cx,
+            request_id,
+            login(
+                provider,
+                "agy-attempt",
+                SubscriptionLoginStatus::Waiting,
+                true,
+                None,
+                None,
+            ),
+        );
+        activate(cx, "subscription-system-browser");
+        let Command::ReopenSubscriptionLogin {
+            request_id,
+            system_browser: true,
+            ..
+        } = business(&sink).unwrap()
+        else {
+            panic!("expected explicit system browser fallback");
+        };
+        reply(
+            cx,
+            request_id,
+            login(
+                provider,
+                "agy-attempt",
+                SubscriptionLoginStatus::Waiting,
+                false,
+                None,
+                None,
+            ),
+        );
+        activate(cx, "subscription-cancel");
+        let Command::CancelSubscriptionLogin {
+            settings_id,
+            attempt_id,
+            ..
+        } = business(&sink).unwrap()
+        else {
+            panic!("expected cancellation");
+        };
+        assert_eq!(
+            (settings_id, attempt_id.as_deref()),
+            (settings, Some("agy-attempt"))
+        );
+        activate(cx, "subscription-cancel");
+
+        pick(cx, "subscription-codex");
+        activate(cx, "subscription-login");
+        let Command::StartSubscriptionLogin {
+            request_id,
+            provider: SubscriptionProvider::ChatGpt,
+            ..
+        } = business(&sink).unwrap()
+        else {
+            panic!("expected Codex login");
+        };
+        let account = json!({"status": "ready", "email": "test@example.invalid", "plan": "Plus"});
+        let details = SubscriptionDetails {
+            account: account.clone(),
+            models: vec![
+                json!({"id": "probe-opus", "supportedEfforts": ["high"], "contextWindow": 512000}),
+                json!({"id": "probe-fable", "supportedEfforts": ["low"], "contextWindow": 512000}),
+            ],
+            quota: vec![SubscriptionQuota {
+                name: "five_hour".into(),
+                group: None,
+                used_percent: 20.0,
+                window_seconds: Some(18000),
+                resets_at: None,
+            }],
+        };
+        let mut codex = json!({
+            "name": "隔离订阅", "kind": "subscription", "cli": "claude-code",
+            "modelMapping": {"opus": "probe-opus", "fable": "probe-fable",
+                             "sonnet": "probe-opus", "haiku": "probe-opus"},
+            "effortMapping": {"opus": "high", "fable": "low", "sonnet": "follow", "haiku": "follow"},
+            "subscription": {"provider": "codex", "account": account, "modelMetadata": details.models,
+                             "quota": details.quota},
+        });
+        reply(
+            cx,
+            request_id,
+            login(
+                SubscriptionProvider::ChatGpt,
+                "codex-attempt",
+                SubscriptionLoginStatus::Ready,
+                false,
+                None,
+                Some(codex.clone()),
+            ),
+        );
+        let view = frame(cx);
+        for role in 0..4 {
+            assert!(view.bounds.contains_key(format!("mapping-{role}").as_str()));
+            assert!(view.bounds.contains_key(format!("effort-{role}").as_str()));
+        }
+        activate(cx, "context-maximum");
+        activate(cx, "save");
+        let Command::CommitSubscriptionDraft {
+            request_id,
+            settings_id,
+            attempt_id,
+            input,
+            activate: switch_after_save,
+        } = business(&sink).unwrap()
+        else {
+            panic!("expected atomic subscription draft commit");
+        };
+        assert_eq!(
+            (settings_id, attempt_id.as_str(), switch_after_save),
+            (settings, "codex-attempt", false)
+        );
+        assert_eq!(input["modelMapping"]["fable"], "probe-fable");
+        assert_eq!(input["effortMapping"]["fable"], "low");
+        assert_eq!(input["contextWindowMode"], "maximum");
+        assert!(input.get("subscription").is_none());
+        codex["id"] = json!("codex");
+        codex["contextWindowMode"] = input["contextWindowMode"].clone();
+        reply(
+            cx,
+            request_id,
+            ProviderSettingsResult::Provider(codex.clone()),
+        );
+
+        draw(window, cx);
+        let card_action = |cx: &mut AsyncApp, action| {
+            draw(window, cx);
+            update_shell(window, cx, |shell, window, _| {
+                shell.probe_subscription_card_focus("codex", action, window)
+            });
+            press(window, "enter", cx);
+        };
+        check_shell(window, cx, |shell, _| {
+            assert!(shell.probe_subscription_quota("codex").contains("20%"))
+        });
+        update_shell(window, cx, |shell, _, cx| {
+            shell.probe_compaction_mode("custom", cx);
+            shell.probe_compaction_set_provider("codex", cx);
+            shell.probe_compaction_set_model("probe-fable", cx);
+            shell.probe_compaction_set_effort("low", cx);
+            assert!(shell.probe_compaction_validation().is_none());
+            shell.probe_compaction_save(cx);
+        });
+        let Command::SetClaudeModelPreferences {
+            request_id,
+            assignments,
+            compaction: Some(compaction),
+            web_search: None,
+        } = business(&sink).unwrap()
+        else {
+            panic!("expected independent compaction save");
+        };
+        assert!(assignments.is_null());
+        assert_eq!(
+            compaction,
+            json!({"mode": "custom", "effort": "low", "providerId": "codex", "model": "probe-fable"})
+        );
+        model_preferences(cx, request_id, compaction);
+        check_shell(window, cx, |shell, _| {
+            assert!(shell.probe_compaction_state().unwrap().5)
+        });
+        update_shell(window, cx, |shell, _, cx| {
+            let actions = [
+                AssignmentAction::Provider(1, "codex".into()),
+                AssignmentAction::Model(1, "probe-fable".into()),
+                AssignmentAction::Provider(4, "codex".into()),
+                AssignmentAction::Model(4, "probe-opus".into()),
+                AssignmentAction::Save,
+            ];
+            for action in actions {
+                shell.diagnostics_assignment_action(&action, cx);
+            }
+        });
+        let Command::SetClaudeRoleAssignments {
+            request_id,
+            assignments,
+            web_search: Some(search),
+        } = business(&sink).unwrap()
+        else {
+            panic!("expected subscription role and independent search save");
+        };
+        assert_eq!(assignments["fable"]["providerId"], "codex");
+        assert_eq!(assignments["fable"]["model"], "probe-fable");
+        assert_eq!(search["providerId"], "codex");
+        assert_eq!(search["model"], "probe-opus");
+        window
+            .update(cx, |view, window, cx| {
+                view.assignment_reply(
+                    ClaudeRoleAssignmentsReply {
+                        request_id,
+                        assignments: Some(serde_json::from_value(assignments).unwrap()),
+                        web_search: Some(Some(serde_json::from_value(search).unwrap())),
+                        error: None,
+                    },
+                    window,
+                    cx,
+                )
+            })
+            .unwrap();
+        card_action(cx, "refresh");
+        let Command::RefreshSubscriptionModels {
+            request_id,
+            provider_id,
+            ..
+        } = business(&sink).unwrap()
+        else {
+            panic!("expected explicit catalog refresh");
+        };
+        assert_eq!(provider_id, "codex");
+        let ProviderSettingsResult::Snapshot(mut refreshed) =
+            snapshot(vec![api, codex.clone()], "api")
+        else {
+            unreachable!()
+        };
+        let mut next_details = details;
+        next_details.account["plan"] = json!("Pro 200");
+        next_details.models.push(json!({"id": "probe-new"}));
+        refreshed["providers"]["claude-code"][1]["subscription"]["modelMetadata"] =
+            json!(next_details.models);
+        reply(
+            cx,
+            request_id,
+            ProviderSettingsResult::SubscriptionModels(SubscriptionModelsView {
+                snapshot: refreshed,
+                provider_id,
+                details: next_details,
+            }),
+        );
+        check_shell(window, cx, |shell, _| {
+            let (rows, _) = shell.diagnostics_providers();
+            assert_eq!(rows[1]["subscription"]["account"]["plan"], "Pro 200");
+            assert!(
+                rows[1]["subscription"]["modelMetadata"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|model| model["id"] == "probe-new")
+            );
+        });
+        card_action(cx, "refresh");
+        let Command::RefreshSubscriptionModels { request_id, .. } = business(&sink).unwrap() else {
+            panic!("expected second explicit refresh");
+        };
+        reply(
+            cx,
+            request_id,
+            ProviderSettingsResult::Error("Subscription sign-in is required".into()),
+        );
+        card_action(cx, "relogin");
+        check_shell(window, cx, |shell, _| {
+            assert_eq!(shell.probe_subscription_state().unwrap().0, "login")
+        });
+        activate(cx, "subscription-cancel");
+        check_shell(window, cx, |shell, _| {
+            let (panel, _) = shell.diagnostics_assignments();
+            assert_eq!(panel.rows[1].relogin.as_deref(), Some("codex"));
+            assert_eq!(panel.rows[4].relogin.as_deref(), Some("codex"));
+        });
+        update_shell(window, cx, |shell, window, cx| {
+            shell.diagnostics_assignment_action_with_window(
+                &AssignmentAction::Relogin("codex".into()),
+                window,
+                cx,
+            );
+        });
+        check_shell(window, cx, |shell, _| {
+            assert_eq!(shell.probe_subscription_state().unwrap().0, "login");
+        });
+        activate(cx, "subscription-cancel");
+        window
+            .update(cx, |view, window, cx| view.open_settings(window, cx))
+            .unwrap();
+        assert!(std::iter::from_fn(|| sink.try_recv().ok()).any(|command| matches!(
+            command, Command::CloseSubscriptionSettings { settings_id, .. } if settings_id == settings
+        )));
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        println!(
+            "Hidden GPUI subscription: provider chooser, risk gate, browser reopen and cancel, Fable draft commit, quota, catalog refresh, re-login, and close"
         );
     }
 
@@ -1123,7 +1609,7 @@ mod probe {
             assert!(shell.page() == SettingsPage::ClaudeCode);
         });
         assert!(matches!(
-            sink.try_recv(),
+            business(&sink),
             Err(std::sync::mpsc::TryRecvError::Empty)
         ));
         press(window, "tab", cx);
@@ -1133,7 +1619,7 @@ mod probe {
             assert!(shell.page() == SettingsPage::Language);
         });
         assert!(matches!(
-            sink.try_recv(),
+            business(&sink),
             Ok(Command::GetTimeZoneSettings { .. })
         ));
         press(window, "shift-tab", cx);
@@ -1176,7 +1662,7 @@ mod probe {
         let Command::SaveProvider {
             request_id: write_id,
             input,
-        } = sink.try_recv().unwrap()
+        } = business(&sink).unwrap()
         else {
             panic!("editor did not send a provider save");
         };
@@ -1297,7 +1783,7 @@ mod probe {
                 press(window, "escape", cx);
                 draw(window, cx);
                 assert!(matches!(
-                    sink.try_recv(),
+                    business(&sink),
                     Err(std::sync::mpsc::TryRecvError::Empty)
                 ));
             }
@@ -1311,7 +1797,7 @@ mod probe {
         draw(window, cx);
         assert_eq!(editor_state(cx), (true, false, "x".to_owned()));
         assert!(matches!(
-            sink.try_recv(),
+            business(&sink),
             Err(std::sync::mpsc::TryRecvError::Empty)
         ));
         assert_eq!(
@@ -1331,7 +1817,7 @@ mod probe {
                 request_id,
                 cli,
                 id,
-            } = sink.try_recv().unwrap()
+            } = business(&sink).unwrap()
             else {
                 panic!("Confirm delete did not send the runtime command");
             };
@@ -1350,7 +1836,7 @@ mod probe {
             .unwrap();
         assert!(editor_state(cx).1);
         assert!(matches!(
-            sink.try_recv(),
+            business(&sink),
             Err(std::sync::mpsc::TryRecvError::Empty)
         ));
 
@@ -1426,7 +1912,7 @@ mod probe {
         let mut subscription = row("subscription", "隔离订阅");
         subscription["kind"] = json!("subscription");
         subscription["subscription"] = json!({
-            "account": {"status": "ready"}, "modelMetadata": [{"id": "subscriber-model"}],
+            "provider": "codex", "account": {"status": "ready"}, "modelMetadata": [{"id": "subscriber-model"}],
         });
         window
             .update(cx, |view, window, cx| {
@@ -1495,14 +1981,17 @@ mod probe {
                 .provider
                 .items
                 .iter()
-                .all(|item| item.value != "subscription")
+                .any(|item| item.value == "subscription")
         );
-        assert_eq!(panel.rows[3].provider.label, "subscription · 不可用");
-        assert_eq!(
-            panel.rows[3].problem.as_deref(),
-            Some("账号已失效，请重新登录或选择其他供应商。")
+        assert_eq!(panel.rows[3].provider.label, "隔离订阅");
+        assert!(panel.rows[3].problem.is_none());
+        assert!(
+            panel.rows[4]
+                .provider
+                .items
+                .iter()
+                .any(|item| item.value == "subscription")
         );
-        assert!(!panel.can_save);
 
         action(cx, AssignmentAction::Provider(3, "".into()));
         action(cx, AssignmentAction::Provider(2, "".into()));
@@ -1550,7 +2039,7 @@ mod probe {
                 request_id,
                 assignments,
                 ..
-            } = sink.try_recv().unwrap()
+            } = business(&sink).unwrap()
             else {
                 panic!("allocation did not issue a save");
             };
@@ -1582,7 +2071,7 @@ mod probe {
         );
         assert!(!panel.can_save);
         action(cx, AssignmentAction::Save);
-        assert!(sink.try_recv().is_err());
+        assert!(business(&sink).is_err());
         action(cx, AssignmentAction::Restore);
         let (panel, _) = data(cx);
         assert!(
@@ -1674,7 +2163,7 @@ mod probe {
                 .unwrap();
         };
         let catalog_request = || {
-            let Command::GetClaudeModelCatalog { request_id } = sink.try_recv().unwrap() else {
+            let Command::GetClaudeModelCatalog { request_id } = business(&sink).unwrap() else {
                 panic!("settings did not request the native model catalog");
             };
             request_id
@@ -1692,7 +2181,7 @@ mod probe {
         );
         action(cx, AssignmentAction::Model(0, "opus".into()));
         assert!(
-            sink.try_recv().is_err(),
+            business(&sink).is_err(),
             "same settings mount repeated the request"
         );
 
@@ -1725,7 +2214,7 @@ mod probe {
             assert!(current.rows[0].retry_catalog);
             assert!(!current.can_save);
             action(cx, AssignmentAction::Save);
-            assert!(sink.try_recv().is_err());
+            assert!(business(&sink).is_err());
         }
         action(cx, AssignmentAction::RetryCatalog(0));
         let successful = catalog_request();
@@ -1795,7 +2284,7 @@ mod probe {
         action(cx, AssignmentAction::Save);
         let Command::SetClaudeRoleAssignments {
             assignments: saved, ..
-        } = sink.try_recv().unwrap()
+        } = business(&sink).unwrap()
         else {
             panic!("catalog alias should be savable");
         };
@@ -1803,7 +2292,7 @@ mod probe {
             saved,
             json!({"opus": {"providerId": "anthropic-official", "model": "opus"}})
         );
-        assert!(sink.try_recv().is_err());
+        assert!(business(&sink).is_err());
 
         toggle(cx);
         reply(cx, successful, rows.clone());
@@ -1812,7 +2301,7 @@ mod probe {
         let assignment_read = assignment_request_id(&sink);
         providers(cx, provider_read, "custom");
         assert!(
-            sink.try_recv().is_err(),
+            business(&sink).is_err(),
             "unused official provider should not request its catalog"
         );
         assignments(cx, assignment_read, saved);
@@ -1874,11 +2363,11 @@ mod probe {
                     .unwrap();
             };
         update(cx, SettingsShell::probe_language_page);
-        let get = || match sink.try_recv().unwrap() {
+        let get = || match business(&sink).unwrap() {
             Command::GetTimeZoneSettings { request_id } => request_id,
             _ => panic!("time-zone read expected"),
         };
-        let set = |expected: &str| match sink.try_recv().unwrap() {
+        let set = |expected: &str| match business(&sink).unwrap() {
             Command::SetTimeZoneSettings {
                 request_id,
                 time_zone,
@@ -2001,7 +2490,7 @@ mod probe {
         assert!(rejected.enabled["settings-time-zone-save"]);
         activate(cx, "zone-cancel");
         assert!(!frame(cx).enabled["settings-time-zone-save"]);
-        assert!(sink.try_recv().is_err());
+        assert!(business(&sink).is_err());
         activate(cx, "zone-reset");
         frame(cx);
         activate(cx, "zone-save");
@@ -2018,7 +2507,7 @@ mod probe {
         wait_for_language_frame(window, cx, "Language & time zone").await;
         assert_eq!(read_locale_preference(&root), LocalePreference::English);
         assert!(
-            sink.try_recv().is_err(),
+            business(&sink).is_err(),
             "language save must send no runtime command"
         );
         let english = frame(cx);
@@ -2090,7 +2579,7 @@ mod probe {
             wait_for_language_frame(window, cx, "The database is read-only.").await;
             let read_only = frame(cx);
             has(&read_only.labels, "Asia/Tokyo");
-            assert!(sink.try_recv().is_err());
+            assert!(business(&sink).is_err());
             println!(
                 "Hidden GPUI 720pt: read-only time zone value and disabled controls, bilingual reason, locale still saves"
             );
@@ -2119,7 +2608,7 @@ mod probe {
                 });
             })
             .unwrap();
-        let request_id = std::iter::from_fn(|| sink.try_recv().ok())
+        let request_id = std::iter::from_fn(|| business(&sink).ok())
             .find_map(|command| {
                 if let Command::RunRetentionCleanup { request_id } = command {
                     Some(request_id)
@@ -2204,6 +2693,7 @@ mod probe {
                     verify_dispatch_window(cx);
                     verify_theme_window(cx);
                     verify_provider_editors(cx);
+                    verify_subscription_window(cx);
                     verify_window(cx);
                     verify_delete_window(cx);
                     verify_assignments_window(cx);

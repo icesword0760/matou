@@ -100,6 +100,51 @@ pub fn inspect_executable(path: &Path) -> io::Result<bool> {
     Ok(true)
 }
 
+/// Open a trusted URL through the controlled browser shared by the desktop
+/// and subscription setup. A result reports whether the OS accepted launch.
+pub fn open_controlled_url(url: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let browser = Path::new(DEFAULT_BROWSER_EXECUTABLE);
+        if !browser.is_file() {
+            return false;
+        }
+        return run_url_opener("/usr/bin/open", &["-a", "/Applications/Mantle.app", url]);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = url;
+        false
+    }
+}
+
+pub(crate) fn open_system_url(url: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    return run_url_opener("/usr/bin/open", &[url]);
+    #[cfg(windows)]
+    {
+        let target = url
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        return crate::update_download::shell_open(&target) > 32;
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    return run_url_opener("/usr/bin/xdg-open", &[url]);
+}
+
+#[cfg(not(windows))]
+fn run_url_opener(program: &str, args: &[&str]) -> bool {
+    use std::process::{Command, Stdio};
+    Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

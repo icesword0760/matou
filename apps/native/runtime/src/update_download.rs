@@ -895,21 +895,8 @@ pub(crate) fn open_installer(path: &Path) -> anyhow::Result<()> {
 
 #[cfg(windows)]
 pub(crate) fn open_installer(path: &Path) -> anyhow::Result<()> {
-    use std::ffi::{OsString, c_void};
+    use std::ffi::OsString;
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
-    use std::ptr::null;
-
-    #[link(name = "shell32")]
-    unsafe extern "system" {
-        fn ShellExecuteW(
-            window: *mut c_void,
-            operation: *const u16,
-            file: *const u16,
-            parameters: *const u16,
-            directory: *const u16,
-            show: i32,
-        ) -> isize;
-    }
 
     // Shell paths use DOS or UNC syntax. Verify that removing the verbatim prefix
     // still resolves to the same path before handing it to the shell.
@@ -931,23 +918,44 @@ pub(crate) fn open_installer(path: &Path) -> anyhow::Result<()> {
         "Installer shell path resolves to a different file"
     );
     shell_path.push(0);
-    let operation = [b'o' as u16, b'p' as u16, b'e' as u16, b'n' as u16, 0];
-    // The shell receives one absolute file path and no argument string.
-    let result = unsafe {
-        ShellExecuteW(
-            std::ptr::null_mut(),
-            operation.as_ptr(),
-            shell_path.as_ptr(),
-            null(),
-            null(),
-            1,
-        )
-    };
+    let result = shell_open(&shell_path);
     anyhow::ensure!(
         result > 32,
         "Could not open the downloaded installer (Windows shell error {result})"
     );
     Ok(())
+}
+
+#[cfg(windows)]
+pub(crate) fn shell_open(target: &[u16]) -> isize {
+    use std::{ffi::c_void, ptr::null};
+
+    if target.last() != Some(&0) {
+        return 0;
+    }
+    #[link(name = "shell32")]
+    unsafe extern "system" {
+        fn ShellExecuteW(
+            window: *mut c_void,
+            operation: *const u16,
+            file: *const u16,
+            parameters: *const u16,
+            directory: *const u16,
+            show: i32,
+        ) -> isize;
+    }
+
+    let operation = [b'o' as u16, b'p' as u16, b'e' as u16, b'n' as u16, 0];
+    unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            operation.as_ptr(),
+            target.as_ptr(),
+            null(),
+            null(),
+            1,
+        )
+    }
 }
 
 #[cfg(not(any(target_os = "macos", windows)))]

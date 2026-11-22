@@ -113,12 +113,7 @@ fn launch_link(
             {
                 return Err(ControlledBrowserFailure::Missing);
             }
-            let opened = std::process::Command::new("/usr/bin/open")
-                .args(["-a", app, &url])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .is_ok_and(|status| status.success());
+            let opened = matou_native_runtime::browser_integration::open_controlled_url(&url);
             opened
                 .then_some(())
                 .ok_or(ControlledBrowserFailure::LaunchFailed)
