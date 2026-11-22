@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+import { createReadStream } from 'node:fs'
 import { copyFile, cp, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep, win32 } from 'node:path'
@@ -23,6 +25,9 @@ const accountsResource = 'claude-accounts'
 const accountsDirectory = 'matou-claude-accounts'
 const accountsExecutable = accountsDirectory + '.exe'
 const defaultAccountsDir = fileURLToPath(new URL('../claude-accounts/dist/matou-claude-accounts/', import.meta.url))
+const modelRouterResource = 'model-router'
+const modelRouterExecutable = 'model-router.exe'
+const modelRouterFiles = [modelRouterExecutable, 'LICENSE', 'source.json']
 const machines = { x64: 0x8664, arm64: 0xaa64 }
 const versionPattern = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/
 
@@ -383,12 +388,12 @@ async function resolveGhosttyDll(explicit, runtimeBin, arch) {
   })
 }
 
-async function optionalDirectory(path) {
+async function optionalDirectory(path, label = 'Claude accounts path') {
   const stat = await lstat(path).catch(error => {
     if (error.code !== 'ENOENT') throw error
   })
   if (!stat) return
-  if (!stat.isDirectory()) throw new Error('Claude accounts path must be a real directory: ' + path)
+  if (!stat.isDirectory()) throw new Error(label + ' must be a real directory: ' + path)
   return path
 }
 
@@ -403,6 +408,21 @@ async function requireEntries(directory, expected, label) {
   if (!isDeepStrictEqual(entries, [...expected].sort())) {
     throw new Error(`Invalid ${label} entries at ${directory}: expected ${expected.join(', ')}; found ${entries.join(', ')}`)
   }
+}
+
+async function verifyModelRouter(directory, arch) {
+  await requireEntries(directory, modelRouterFiles, 'model-router directory')
+  const binary = join(directory, modelRouterExecutable)
+  await checkPe(binary, 'model-router binary', arch)
+  await requirePath(join(directory, 'LICENSE'), 'model-router LICENSE')
+  const manifest = join(directory, 'source.json')
+  await requirePath(manifest, 'model-router source.json')
+  const source = await readFile(manifest, 'utf8').then(JSON.parse).catch(error => {
+    throw new Error(`Invalid model-router source.json: ${error.message}`)
+  })
+  const hash = createHash('sha256')
+  for await (const chunk of createReadStream(binary)) hash.update(chunk)
+  if (source?.binarySha256 !== hash.digest('hex')) throw new Error('model-router binarySha256 mismatch')
 }
 
 async function verifyClaudePlugin(resources) {
@@ -439,6 +459,11 @@ export async function verifyWindowsDirPackage(path, options) {
     expectedResources.push(accountsResource)
     await requireEntries(accounts, [accountsDirectory], 'Claude accounts resources')
     await verifyAccountsDirectory(join(accounts, accountsDirectory), plan.arch)
+  }
+  const modelRouter = join(resources, modelRouterResource)
+  if (options.modelRouterDir !== undefined || await optionalDirectory(modelRouter, 'model-router path')) {
+    expectedResources.push(modelRouterResource)
+    await verifyModelRouter(modelRouter, plan.arch)
   }
   await requireEntries(resources, expectedResources, 'resources')
   await verifyClaudePlugin(resources)
@@ -541,6 +566,11 @@ export async function assembleWindowsDirPackage({ desktopBin, runtimeBin, ghostt
   if (options.accountsDir !== undefined && (typeof options.accountsDir !== 'string' || !options.accountsDir.trim())) throw new Error('Missing Claude accounts directory')
   const accounts = options.accountsDir ?? await optionalDirectory(defaultAccountsDir)
   if (accounts) await verifyAccountsDirectory(accounts, plan.arch)
+  const modelRouter = options.modelRouterDir
+  if (modelRouter !== undefined) {
+    if (typeof modelRouter !== 'string' || !modelRouter.trim()) throw new Error('Missing model-router directory')
+    await requirePath(modelRouter, 'model-router directory', true)
+  }
 
   await mkdir(output, { recursive: true })
   if (await safeOutput(outDir) !== output) throw new Error('Output path changed during assembly')
@@ -555,6 +585,15 @@ export async function assembleWindowsDirPackage({ desktopBin, runtimeBin, ghostt
     await cp(claudePluginSource, join(resources, 'control-assets', 'providers', 'claude-plugin'), { recursive: true })
     if (accounts) {
       await cp(accounts, join(resources, accountsResource, accountsDirectory), { recursive: true })
+    }
+    if (modelRouter !== undefined) {
+      const directory = join(resources, modelRouterResource)
+      await mkdir(directory)
+      for (const name of modelRouterFiles) {
+        const source = join(modelRouter, name)
+        await requirePath(source, `model-router ${name}`)
+        await copyFile(source, join(directory, name))
+      }
     }
     const { manifest, version } = packageMetadata(plan)
     await writeFile(join(resources, plan.manifestFilename), pretty(manifest) + '\n')
@@ -578,6 +617,7 @@ const usage = `Usage:
   node tooling/native-parity/package-native-win.mjs --arch <x64|arm64> [--target dir]
     --desktop-bin <file> --runtime-bin <file> --out-dir <temporary-subdirectory>
     --version <X.Y.Z> [--update-base-url <http(s) URL>] [--ghostty-dll <file>] [--accounts-dir <dir>]
+    [--model-router <dir>]
 
 Assembles and verifies an offline Windows directory package. The approved output
 location is a subdirectory of the host temporary directory (or /tmp on POSIX).`
@@ -585,7 +625,7 @@ location is a subdirectory of the host temporary directory (or /tmp on POSIX).`
 async function main() {
   const { values } = parseArgs({
     options: {
-      ...Object.fromEntries([...requiredOptions, 'target', 'update-base-url', 'ghostty-dll', 'accounts-dir'].map(name => [name, { type: 'string' }])),
+      ...Object.fromEntries([...requiredOptions, 'target', 'update-base-url', 'ghostty-dll', 'accounts-dir', 'model-router'].map(name => [name, { type: 'string' }])),
       help: { type: 'boolean', short: 'h' }
     }
   })
@@ -596,7 +636,7 @@ async function main() {
   const result = await assembleWindowsDirPackage({
     arch: values.arch, target: values.target, version: values.version,
     desktopBin: values['desktop-bin'], runtimeBin: values['runtime-bin'],
-    ghosttyDll: values['ghostty-dll'], accountsDir: values['accounts-dir'],
+    ghosttyDll: values['ghostty-dll'], accountsDir: values['accounts-dir'], modelRouterDir: values['model-router'],
     outDir: values['out-dir'], updateBaseUrl: values['update-base-url']
   })
   console.log(pretty(result))
