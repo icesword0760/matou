@@ -21,6 +21,10 @@ use crate::{
     sessions::ClaudeRoleLaunchPreferences,
 };
 
+mod official_oauth;
+use official_oauth::OfficialClaudeEnvironment;
+pub use official_oauth::OfficialClaudeOAuth;
+
 const OFFICIAL_ID: &str = "anthropic-official";
 const OFFICIAL_ENDPOINT: &str = "https://api.anthropic.com";
 const CLI_DEFAULT_MODEL: &str = "CLI 默认";
@@ -371,7 +375,7 @@ pub fn validate_claude_web_search(
     validate_assignment_effort(metadata, &assignment).context("当前模型不支持所选推理强度")?;
     if !assignments.is_empty() {
         let source = read_provider(data_root, &config, &Value::Null)?;
-        snapshot_api_roles(&config, &source, assignments, &catalog)?;
+        snapshot_api_roles(&config, &source, assignments, &catalog, None)?;
     }
     Ok(assignment)
 }
@@ -389,7 +393,7 @@ pub fn validate_claude_compaction(
         let assignment = parse_assignment(&compaction)?;
         let (provider, metadata) = exact_api_provider(&config, &assignment, &catalog)?;
         ensure!(
-            gateway_connection(&provider).is_some(),
+            gateway_connection(&provider).is_some() || keyless_official(&config, &provider),
             "Compaction provider endpoint is unavailable"
         );
         validate_assignment_effort(metadata, &assignment).context("当前模型不支持所选推理强度")?;
@@ -512,7 +516,7 @@ pub struct ClaudeLazyCompaction {
     data_root: PathBuf,
     compaction: Value,
     context_windows: Map<String, Value>,
-    loopback_only: bool,
+    official_environment: OfficialClaudeEnvironment,
     subscription_provider: Option<&'static str>,
 }
 
@@ -524,11 +528,8 @@ impl ClaudeLazyCompaction {
         let config = read_provider_config(&self.data_root)?;
         let native_catalog = std::cell::OnceCell::new();
         let catalog = || native_catalog.get_or_init(load_native_catalog).as_slice();
-        let mut target = compaction_target(&config, &self.compaction, &catalog)?;
-        ensure!(
-            !self.loopback_only || loopback_connection(&target.connection),
-            "Custom compaction target is unavailable"
-        );
+        let official = OfficialCapture::new(&config, self.official_environment.clone());
+        let mut target = compaction_target(&config, &self.compaction, &catalog, &official)?;
         // The old API route has no directory output cap. A missing explicit
         // effort follows the working supplier, not the compaction supplier.
         if self.compaction["effort"] == "follow" {
@@ -603,6 +604,7 @@ pub struct PreparedSubscriptionTarget {
 pub struct ClaudeGatewayConnection {
     pub endpoint: url::Url,
     pub api_key: String,
+    pub official_oauth: Option<OfficialClaudeOAuth>,
     pub subscription: Option<PreparedSubscriptionTarget>,
 }
 
@@ -682,12 +684,6 @@ impl ClaudeGatewayRole {
 }
 
 impl ClaudeGatewayProjection {
-    pub fn supports_environment(&self, env: &BTreeMap<OsString, OsString>) -> bool {
-        // Preserve the CLI's existing outbound route when an external target
-        // might require a proxy. The gateway currently handles direct HTTP(S).
-        !gateway_loopback_only(env) || self.connections().all(loopback_connection)
-    }
-
     pub fn connections(&self) -> impl Iterator<Item = &ClaudeGatewayConnection> {
         self.source
             .iter()
@@ -845,8 +841,9 @@ impl ClaudeGatewayProjection {
             ("CLAUDE_CODE_OAUTH_TOKEN".into(), String::new()),
             ("CLAUDE_CODE_GATEWAY_HINT_HEADERS".into(), "1".into()),
         ]);
-        let no_proxy = get_var(&launch.env, "no_proxy")
-            .or_else(|| get_var(&launch.env, "NO_PROXY"))
+        let env = |key| get_var(&launch.env, key).or_else(|| get_var(&launch.inherited_env, key));
+        let no_proxy = env("no_proxy")
+            .or_else(|| env("NO_PROXY"))
             .map(|value| value.to_string_lossy())
             .unwrap_or_default();
         let mut exclusions: Vec<_> = no_proxy
@@ -934,40 +931,12 @@ impl ClaudeGatewayProjection {
     }
 }
 
-fn gateway_loopback_only(env: &BTreeMap<OsString, OsString>) -> bool {
-    let bypass_all = get_var(env, "no_proxy")
-        .or_else(|| get_var(env, "NO_PROXY"))
-        .is_some_and(|value| {
-            value
-                .to_string_lossy()
-                .split(',')
-                .any(|part| part.trim() == "*")
-        });
-    !bypass_all
-        && [
-            "HTTP_PROXY",
-            "http_proxy",
-            "HTTPS_PROXY",
-            "https_proxy",
-            "ALL_PROXY",
-            "all_proxy",
-        ]
-        .into_iter()
-        .any(|name| get_var(env, name).is_some_and(|value| !value.is_empty()))
-}
-
-fn loopback_connection(connection: &ClaudeGatewayConnection) -> bool {
-    matches!(
-        connection.endpoint.host_str(),
-        Some("127.0.0.1" | "localhost" | "[::1]")
-    )
-}
-
 impl ClaudeLaunch {
     pub fn capture_restart_gateway(
         &mut self,
         preferences: &ClaudeRoleLaunchPreferences,
         load_native_catalog: &dyn Fn() -> Vec<Value>,
+        launch_environment: &BTreeMap<OsString, OsString>,
     ) -> Result<()> {
         let data_root = &self.launch.data_root;
         let config = read_provider_config(data_root)?;
@@ -984,23 +953,26 @@ impl ClaudeLaunch {
         let role = self
             .assigned_role
             .or_else(|| model_role(&source, &self.model));
-        self.gateway = if independent || managed_role_snapshot(&config, &source, preferences) {
-            let (projection, context_window) = independent_gateway_projection(
-                &config,
-                &source,
-                preferences,
-                role,
-                data_root,
-                &self.launch.env,
-                load_native_catalog,
-            )?;
-            if role_snapshot {
-                project_context_window(&mut self.launch.env, context_window);
-            }
-            Some(projection)
-        } else {
-            gateway_projection(&config, &source, Some(&preferences.assignments), role)
-        };
+        let official =
+            OfficialCapture::new(&config, OfficialClaudeEnvironment::new(launch_environment));
+        self.gateway =
+            if independent || requires_role_snapshot(&config, &source, preferences, &official) {
+                let (projection, context_window) = independent_gateway_projection(
+                    &config,
+                    &source,
+                    preferences,
+                    role,
+                    data_root,
+                    &official,
+                    load_native_catalog,
+                )?;
+                if role_snapshot {
+                    project_context_window(&mut self.launch.env, context_window);
+                }
+                Some(projection)
+            } else {
+                gateway_projection(&config, &source, Some(&preferences.assignments), role)
+            };
         if let Some(projection) = &mut self.gateway {
             projection.context_window = get_var(&self.launch.env, "CLAUDE_CODE_MAX_CONTEXT_TOKENS")
                 .and_then(|value| value.to_str())
@@ -1325,12 +1297,13 @@ fn prepare_claude(
         Some(assignments) => resolve_startup_assignment(&config, &provider, assignments)?,
         None => None,
     };
+    let official = OfficialCapture::new(&config, OfficialClaudeEnvironment::new(&environment));
     let (mut gateway, context_window) = match target {
         Some(ClaudeTarget::New {
             budget_preferences: Some((preferences, catalog)),
             ..
         }) if has_independent_target(preferences)
-            || managed_role_snapshot(&config, &provider, preferences) =>
+            || requires_role_snapshot(&config, &provider, preferences, &official) =>
         {
             let (projection, context_window) = independent_gateway_projection(
                 &config,
@@ -1338,7 +1311,7 @@ fn prepare_claude(
                 preferences,
                 startup_role(&provider),
                 data_root,
-                &environment,
+                &official,
                 catalog,
             )?;
             (Some(projection), context_window)
@@ -1509,10 +1482,7 @@ fn gateway_projection(
     };
     // A keyless source needs API targets for every role. Fable can use Opus.
     if projection.source.is_none()
-        && (startup_role.is_none()
-            || ROLES
-                .into_iter()
-                .any(|role| !assignments.contains_key(fallback_role(source, assignments, role))))
+        && (startup_role.is_none() || roles_need_source(source, assignments))
     {
         return None;
     }
@@ -1529,6 +1499,7 @@ fn gateway_projection(
                     .find(|item| item["id"].as_str() == Some(model.trim()))
             });
         gateway_target(
+            gateway_connection(provider)?,
             provider,
             provider_name(entry, &provider.id),
             model,
@@ -1630,6 +1601,7 @@ fn source_context_windows(
 }
 
 fn gateway_target(
+    mut connection: ClaudeGatewayConnection,
     provider: &Provider,
     provider_name: &str,
     model: &str,
@@ -1637,7 +1609,6 @@ fn gateway_target(
     role: Option<&str>,
     effort: Option<&str>,
 ) -> Option<ClaudeGatewayRole> {
-    let mut connection = gateway_connection(provider)?;
     if let Some(subscription) = &mut connection.subscription {
         subscription.model = Some(model.trim().to_owned());
     }
@@ -1699,16 +1670,36 @@ fn has_independent_target(preferences: &ClaudeRoleLaunchPreferences) -> bool {
     preferences.web_search.is_some() || preferences.compaction["mode"] == "custom"
 }
 
-fn managed_role_snapshot(
+fn requires_role_snapshot(
     config: &Value,
     source: &Provider,
     preferences: &ClaudeRoleLaunchPreferences,
+    official: &OfficialCapture<'_>,
 ) -> bool {
     has_role_snapshot(preferences)
         && (source.is_subscription()
             || preferences.assignments.values().any(|target| {
-                provider_entry(config, &target.provider_id)
-                    .is_some_and(|row| row["kind"] == "subscription")
+                match provider_entry(config, &target.provider_id) {
+                    Some(row) => {
+                        row["kind"] == "subscription"
+                            || (target.provider_id == OFFICIAL_ID
+                                && uses_native_catalog(row)
+                                && has_no_api_key(row["apiKey"].as_str())
+                                // A partial snapshot still needs a working source.
+                                // Keep legacy direct launches for an unbound source.
+                                && (!roles_need_source(source, &preferences.assignments)
+                                    || keyless_official(config, source)
+                                    || gateway_connection(source).is_some()))
+                    }
+                    // Preserve direct CLI login for a role on the built-in
+                    // default when the user hasn't configured an account yet.
+                    None => {
+                        target.provider_id == OFFICIAL_ID
+                            && source.id == OFFICIAL_ID
+                            && provider_entries(config).is_none()
+                            && official.connection(source, OFFICIAL_ID).is_some()
+                    }
+                }
             }))
 }
 
@@ -1718,13 +1709,17 @@ fn independent_gateway_projection(
     preferences: &ClaudeRoleLaunchPreferences,
     startup_role: Option<&'static str>,
     data_root: &Path,
-    environment: &BTreeMap<OsString, OsString>,
+    official: &OfficialCapture<'_>,
     load_native_catalog: &dyn Fn() -> Vec<Value>,
 ) -> Result<(ClaudeGatewayProjection, Option<u64>)> {
     let mut projection = api_projection(config, source);
     if !has_role_snapshot(preferences) {
+        if projection.source.is_none() {
+            let name = provider_name(routing_provider_entry(config, &source.id), &source.id);
+            projection.source = official.connection(source, name);
+        }
         ensure!(
-            projection.source.is_some() && projection.supports_environment(environment),
+            projection.source.is_some(),
             "Original supplier source connection was not bound at startup; choose a configured role"
         );
         projection.compaction = Some(ClaudeGatewayCompaction::OnFirstRequest(
@@ -1732,7 +1727,7 @@ fn independent_gateway_projection(
                 data_root: data_root.to_owned(),
                 compaction: preferences.compaction.clone(),
                 context_windows: preferences.context_windows.clone(),
-                loopback_only: gateway_loopback_only(environment),
+                official_environment: official.environment.clone(),
                 subscription_provider: preferences.compaction["providerId"]
                     .as_str()
                     .and_then(|id| provider_entry(config, id))
@@ -1746,14 +1741,18 @@ fn independent_gateway_projection(
     let catalog = || native_catalog.get_or_init(load_native_catalog).as_slice();
     if let Some(assignment) = &preferences.web_search {
         let name = provider_name(
-            provider_entry(config, &assignment.provider_id),
+            routing_provider_entry(config, &assignment.provider_id),
             &assignment.provider_id,
         );
         let unavailable = || format!("网页搜索 · {name}: model target is unavailable");
         let (provider, metadata) = exact_api_provider(config, assignment, &catalog)
             .map_err(|_| anyhow::anyhow!(unavailable()))?;
+        let connection = official
+            .connection(&provider, name)
+            .with_context(unavailable)?;
         projection.web_search = Some(
             gateway_target(
+                connection,
                 &provider,
                 name,
                 &assignment.model,
@@ -1765,41 +1764,49 @@ fn independent_gateway_projection(
         );
     }
     if preferences.compaction["mode"] == "custom" {
-        let target = compaction_target(config, &preferences.compaction, &catalog)?;
+        let target = compaction_target(config, &preferences.compaction, &catalog, official)?;
         projection.compaction = Some(ClaudeGatewayCompaction::Snapshot {
             target,
             inherit_role_effort: preferences.compaction["effort"] == "follow",
         });
     }
-    projection.roles = snapshot_api_roles(config, source, &preferences.assignments, &catalog)?;
-    if source.is_subscription() {
-        // Every used subscription role has its own exact target in a snapshot.
-        projection.source = None;
+    projection.roles = snapshot_api_roles(
+        config,
+        source,
+        &preferences.assignments,
+        &catalog,
+        Some(official),
+    )?;
+    if source.is_subscription() || keyless_official(config, source) {
+        let default_model = source
+            .model_mapping
+            .get("opus")
+            .filter(|model| !model.is_empty())
+            .unwrap_or(&source.model);
+        // Reuse an already prepared connection. The original source does not
+        // require its own subscription router or official account capture.
+        projection.source = projection
+            .roles
+            .iter()
+            .flatten()
+            .chain(projection.web_search.iter())
+            .chain(
+                projection
+                    .compaction
+                    .iter()
+                    .filter_map(|compaction| match compaction {
+                        ClaudeGatewayCompaction::Snapshot { target, .. } => Some(target),
+                        ClaudeGatewayCompaction::OnFirstRequest(_) => None,
+                    }),
+            )
+            .find(|target| {
+                target.provider_id == source.id
+                    && (!source.is_subscription() || target.catalog_model == *default_model)
+            })
+            .map(|target| target.connection.clone());
     }
     projection.has_role_assignments = true;
     projection.startup_role = startup_role;
-    if gateway_loopback_only(environment) {
-        if let Some(target) = &projection.web_search {
-            ensure!(
-                projection.source.iter().all(loopback_connection)
-                    && projection
-                        .roles
-                        .iter()
-                        .flatten()
-                        .all(|role| loopback_connection(&role.connection))
-                    && loopback_connection(&target.connection),
-                "网页搜索 · {}: model target is unavailable",
-                target.provider_name
-            );
-        }
-        if let Some(ClaudeGatewayCompaction::Snapshot { target, .. }) = &projection.compaction {
-            ensure!(
-                projection.supports_environment(environment),
-                "compaction · {}: model target is unavailable",
-                target.provider_name
-            );
-        }
-    }
     let compaction = match &projection.compaction {
         Some(ClaudeGatewayCompaction::Snapshot { target, .. }) => {
             ClaudeBudgetCompaction::Custom(target.budget_target())
@@ -1829,10 +1836,11 @@ fn compaction_target<'a>(
     config: &'a Value,
     compaction: &Value,
     native_catalog: &impl Fn() -> &'a [Value],
+    official: &OfficialCapture<'_>,
 ) -> Result<ClaudeGatewayRole> {
     let mut assignment = parse_assignment(compaction)?;
     let name = provider_name(
-        provider_entry(config, &assignment.provider_id),
+        routing_provider_entry(config, &assignment.provider_id),
         &assignment.provider_id,
     );
     let unavailable = || format!("compaction · {name}: model target is unavailable");
@@ -1844,7 +1852,11 @@ fn compaction_target<'a>(
     validate_assignment_effort(metadata, &assignment).context(format!(
         "compaction · {name}: model target or reasoning effort is unavailable"
     ))?;
+    let connection = official
+        .connection(&provider, name)
+        .with_context(unavailable)?;
     gateway_target(
+        connection,
         &provider,
         name,
         &assignment.model,
@@ -1859,6 +1871,14 @@ fn provider_entry<'a>(config: &'a Value, id: &str) -> Option<&'a Value> {
     provider_entries(config)?
         .iter()
         .find(|entry| entry["id"].as_str() == Some(id))
+}
+
+fn routing_provider_entry<'a>(config: &'a Value, id: &str) -> Option<&'a Value> {
+    static OFFICIAL: std::sync::LazyLock<Value> = std::sync::LazyLock::new(
+        || json!({"id": OFFICIAL_ID, "endpoint": OFFICIAL_ENDPOINT, "builtIn": true, "model": ""}),
+    );
+    provider_entry(config, id)
+        .or_else(|| (id == OFFICIAL_ID && provider_entries(config).is_none()).then_some(&*OFFICIAL))
 }
 
 fn context_windows(
@@ -1889,20 +1909,18 @@ fn exact_api_provider<'a>(
     assignment: &ClaudeRoleAssignment,
     native_catalog: &impl Fn() -> &'a [Value],
 ) -> Result<(Provider, Option<&'a Value>)> {
-    if assignment.provider_id == OFFICIAL_ID && provider_entries(config).is_none() {
-        // The built-in default exists without a provider file, with no Key.
-        bail!("API Key 未配置");
-    }
-    let entry = provider_entry(config, &assignment.provider_id)
+    let entry = routing_provider_entry(config, &assignment.provider_id)
         .filter(|entry| entry["cli"].as_str().is_none_or(|cli| cli == "claude-code"))
         .context("供应商已不存在")?;
     if entry["kind"] == "subscription" {
         ensure!(subscription_kind(entry).is_some(), "供应商已不存在");
     } else {
+        let key = entry["apiKey"].as_str();
         ensure!(
-            entry["apiKey"].as_str().is_some_and(
-                |key| !key.is_empty() && key.bytes().all(|byte| byte.is_ascii_graphic())
-            ),
+            valid_api_key(key).is_some()
+                || (assignment.provider_id == OFFICIAL_ID
+                    && has_no_api_key(key)
+                    && uses_native_catalog(entry)),
             "API Key 未配置"
         );
     }
@@ -1941,6 +1959,7 @@ fn snapshot_api_roles<'a>(
     source: &Provider,
     assignments: &ClaudeRoleAssignments,
     native_catalog: &impl Fn() -> &'a [Value],
+    official: Option<&OfficialCapture<'_>>,
 ) -> Result<[Option<ClaudeGatewayRole>; ROLES.len()]> {
     let mut targets = [const { None }; ROLES.len()];
     for (index, role) in ROLES.into_iter().enumerate() {
@@ -1949,7 +1968,7 @@ fn snapshot_api_roles<'a>(
         }
         let assignment = assignments.get(role);
         let id = assignment.map_or(source.id.as_str(), |target| target.provider_id.as_str());
-        let entry = provider_entry(config, id)
+        let entry = routing_provider_entry(config, id)
             .with_context(|| format!("{role} · {id}: model target is unavailable"))?;
         let name = provider_name(Some(entry), id);
         let provider;
@@ -1981,8 +2000,21 @@ fn snapshot_api_roles<'a>(
             validate_assignment_effort(metadata, assignment)
                 .with_context(|| format!("{role} · {name}: 当前模型不支持所选推理强度"))?;
         }
+        let unavailable = || format!("{role} · {name}: model target is unavailable");
+        let Some(official) = official else {
+            ensure!(
+                gateway_connection(provider).is_some() || keyless_official(config, provider),
+                "{}",
+                unavailable()
+            );
+            continue;
+        };
+        let connection = official
+            .connection(provider, name)
+            .with_context(unavailable)?;
         targets[index] = Some(
             gateway_target(
+                connection,
                 provider,
                 name,
                 model,
@@ -1990,7 +2022,7 @@ fn snapshot_api_roles<'a>(
                 Some(role),
                 assignment.and_then(|target| target.effort.as_deref()),
             )
-            .with_context(|| format!("{role} · {name}: model target is unavailable"))?,
+            .with_context(unavailable)?,
         );
     }
     Ok(targets)
@@ -2026,12 +2058,60 @@ fn subscription_provider(subscription: &Value) -> Option<&'static str> {
     }
 }
 
+fn has_no_api_key(key: Option<&str>) -> bool {
+    key.is_none_or(|key| key.trim().is_empty())
+}
+
+fn valid_api_key(key: Option<&str>) -> Option<&str> {
+    key.filter(|key| !key.is_empty() && key.bytes().all(|byte| byte.is_ascii_graphic()))
+}
+
+fn keyless_official(config: &Value, provider: &Provider) -> bool {
+    provider.id == OFFICIAL_ID
+        && !provider.is_subscription()
+        && provider.subscription.is_none()
+        && has_no_api_key(provider.api_key.as_deref())
+        && routing_provider_entry(config, &provider.id).is_some_and(uses_native_catalog)
+}
+
+struct OfficialCapture<'a> {
+    config: &'a Value,
+    environment: OfficialClaudeEnvironment,
+    account: std::cell::OnceCell<Option<OfficialClaudeOAuth>>,
+}
+
+impl<'a> OfficialCapture<'a> {
+    fn new(config: &'a Value, environment: OfficialClaudeEnvironment) -> Self {
+        Self {
+            config,
+            environment,
+            account: std::cell::OnceCell::new(),
+        }
+    }
+
+    fn connection(&self, provider: &Provider, name: &str) -> Option<ClaudeGatewayConnection> {
+        if !keyless_official(self.config, provider) {
+            return gateway_connection(provider);
+        }
+        let account = self
+            .account
+            .get_or_init(|| self.environment.capture(name).ok());
+        Some(ClaudeGatewayConnection {
+            endpoint: url::Url::parse(OFFICIAL_ENDPOINT).expect("official HTTPS endpoint"),
+            api_key: String::new(),
+            official_oauth: Some(account.as_ref()?.clone()),
+            subscription: None,
+        })
+    }
+}
+
 fn gateway_connection(provider: &Provider) -> Option<ClaudeGatewayConnection> {
     if provider.is_subscription() {
         let provider_kind = subscription_provider(provider.subscription.as_ref()?)?;
         return Some(ClaudeGatewayConnection {
             endpoint: url::Url::parse("http://127.0.0.1").expect("loopback endpoint"),
             api_key: String::new(),
+            official_oauth: None,
             subscription: Some(PreparedSubscriptionTarget {
                 provider_id: provider.id.clone(),
                 provider: provider_kind,
@@ -2039,10 +2119,7 @@ fn gateway_connection(provider: &Provider) -> Option<ClaudeGatewayConnection> {
             }),
         });
     }
-    let api_key = provider
-        .api_key
-        .as_deref()
-        .filter(|key| !key.trim().is_empty() && key.bytes().all(|byte| byte.is_ascii_graphic()))?;
+    let api_key = valid_api_key(provider.api_key.as_deref())?;
     let endpoint = url::Url::parse(&provider.endpoint).ok()?;
     if provider.kind.as_deref() == Some("subscription")
         || provider.subscription.is_some()
@@ -2057,6 +2134,7 @@ fn gateway_connection(provider: &Provider) -> Option<ClaudeGatewayConnection> {
     Some(ClaudeGatewayConnection {
         endpoint,
         api_key: api_key.into(),
+        official_oauth: None,
         subscription: None,
     })
 }
@@ -2459,6 +2537,12 @@ fn provider_mapping_role<'a>(provider: &Provider, role: &'a str) -> &'a str {
 
 fn effective_role_model<'a>(provider: &'a Provider, role: &str) -> Option<&'a str> {
     mapped_role_model(provider, provider_mapping_role(provider, role))
+}
+
+fn roles_need_source(source: &Provider, assignments: &ClaudeRoleAssignments) -> bool {
+    ROLES
+        .into_iter()
+        .any(|role| !assignments.contains_key(fallback_role(source, assignments, role)))
 }
 
 fn fallback_role(

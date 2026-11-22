@@ -9158,6 +9158,7 @@ fn prepare_launch(
             );
             let data_root = options.data_root.clone();
             let environment = owner.launch_environment();
+            let restart_environment = (!fresh_launch).then(|| environment.clone());
             let subscriptions = owner.subscriptions.clone();
             let codex_exit = owner
                 .egress()
@@ -9242,8 +9243,12 @@ fn prepare_launch(
                                 terminal.rows,
                             )
                         }?;
-                        if !fresh_launch {
-                            launch.capture_restart_gateway(&preferences, &native_role_catalog)?;
+                        if let Some(environment) = &restart_environment {
+                            launch.capture_restart_gateway(
+                                &preferences,
+                                &native_role_catalog,
+                                environment,
+                            )?;
                         }
                         let zone = startup::open_read_only(&data_root.join("matou.sqlite"))
                             .and_then(|db| read_claude_time_zone(&db))

@@ -245,9 +245,10 @@ fn web_search_preferences_resolve_exactly_for_new_launches_in_two_workspaces() -
         read_claude_role_launch_preferences(&db).web_search.as_ref(),
         Some(&target)
     );
-    let error = validate_claude_web_search(&data, &follow, &assignments, &catalog)
-        .expect_err("official without a key");
-    assert_eq!(error.to_string(), "API Key 未配置");
+    assert_eq!(
+        validate_claude_web_search(&data, &follow, &assignments, &catalog)?.provider_id,
+        "anthropic-official"
+    );
     Ok(())
 }
 
@@ -1683,7 +1684,7 @@ fn direct_deepseek_resume_retains_real_context_window() -> Result<()> {
         80,
         24,
     )?;
-    plan.capture_restart_gateway(&Default::default(), &Vec::new)?;
+    plan.capture_restart_gateway(&Default::default(), &Vec::new, &BTreeMap::new())?;
     let gateway = plan
         .gateway
         .context("DeepSeek resume must use the gateway")?;

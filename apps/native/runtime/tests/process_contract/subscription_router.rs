@@ -1217,6 +1217,49 @@ fn mixed_targets_route_exact_models_and_revoke_only_the_replaced_subscription() 
     stop(&mut host)
 }
 
+fn source_models(launch: &Launch) -> Result<(u16, String)> {
+    let mut socket = TcpStream::connect((Ipv4Addr::LOCALHOST, launch.url.port().unwrap()))?;
+    socket.set_read_timeout(Some(TIMEOUT))?;
+    write!(
+        socket,
+        "GET {}/v1/models?limit=1 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nx-api-key: discard-me\r\n\r\n",
+        launch.url.path(),
+    )?;
+    response(BufReader::new(socket))
+}
+
+#[test]
+fn subscription_snapshot_reuses_its_prebound_default_connection_for_models() -> Result<()> {
+    let fixture = Fixture::new()?;
+    fs::write(fixture.cli.with_extension("skip-messages"), "")?;
+    let mut host = fixture.spawn(None)?;
+    host.hello()?;
+    let codex = codex(false);
+    // The provider's generic model is sonnet. Its configured Opus mapping
+    // supplies the exact default subscription route for this snapshot.
+    write_config(&host, CODEX_ID, &[api(), codex.clone()])?;
+    credential(&host, &codex, &["codex-opus"])?;
+    preferences(
+        &mut host,
+        json!({
+            "opus": target(CODEX_ID, "codex-opus"), "sonnet": target("api", "api-primary"),
+            "haiku": target("api", "api-primary")
+        }),
+        None,
+        None,
+    )?;
+    host.input_bytes(b"claude\r")?;
+    let launch = fixture.launch(&mut host, "initial")?;
+    let (status, body) = source_models(&launch)?;
+    assert_eq!(status, 200);
+    assert!(body.contains("fixture-subscription-default"));
+    let calls = router_events(&host, "inference-models")?;
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0]["query"], "limit=1");
+    assert_eq!(router_events(&host, "engine-start")?.len(), 1);
+    stop(&mut host)
+}
+
 #[test]
 fn complete_api_assignments_do_not_start_the_unused_subscription() -> Result<()> {
     let fixture = Fixture::new()?;
@@ -1236,7 +1279,11 @@ fn complete_api_assignments_do_not_start_the_unused_subscription() -> Result<()>
     host.input_bytes(b"claude\r")?;
     let launch = fixture.launch(&mut host, "initial")?;
     assert_eq!(launch.args, ["--model", "matou-role/opus"]);
+    let (status, body) = source_models(&launch)?;
+    assert_eq!(status, 502);
+    assert!(body.contains("Original supplier source connection was not bound at startup"));
     assert!(!host.data.join("model-router/keys.json").exists());
+    assert!(router_events(&host, "engine-start")?.is_empty());
     stop(&mut host)
 }
 

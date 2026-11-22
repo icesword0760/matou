@@ -2217,7 +2217,11 @@ fn compaction_legacy_resolves_lazily_retries_then_caches_and_preserves_legacy_ge
         80,
         24,
     )?;
-    resumed.capture_restart_gateway(&read_claude_role_launch_preferences(&db), &Vec::new)?;
+    resumed.capture_restart_gateway(
+        &read_claude_role_launch_preferences(&db),
+        &Vec::new,
+        &BTreeMap::new(),
+    )?;
     let next = Gateway::start(Arc::new(resumed.gateway.unwrap()))?;
     let (working, work_tasks) = record(work.try_clone()?, 1, "200 OK", "", b"ok");
     assert_eq!(exchange(&next, COUNT, &bytes, AUTO)?.0, 200);
@@ -2328,7 +2332,12 @@ fn deepseek_gateway_reads_resumed_usage_from_hud_before_any_upstream_response() 
         None,
         Arc::default(),
         InterfaceLocale::default(),
-        Some(address),
+        ProxyEnvironment::default(),
+        Some(FixtureUpstream {
+            host: deepseek_tools::HOST,
+            address,
+            catalog: None,
+        }),
     )?;
     let (requests, workers) = record(server, 2, "200 OK", "", b"ok");
     let send = || -> Result<Value> {
@@ -2348,3 +2357,6 @@ fn deepseek_gateway_reads_resumed_usage_from_hud_before_any_upstream_response() 
     }
     Ok(())
 }
+
+#[path = "tests/proxy_and_oauth.rs"]
+mod proxy_and_oauth;
