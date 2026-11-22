@@ -58,6 +58,15 @@ _matou_precmd() {
 typeset -ga preexec_functions precmd_functions
 preexec_functions=(_matou_preexec ${preexec_functions:#_matou_preexec})
 precmd_functions=(_matou_precmd ${precmd_functions:#_matou_precmd})
+
+unalias cc 2>/dev/null
+cc() {
+  if [[ $# -eq 0 && -n "$MATOU_CONTROL_ENDPOINT" && -n "$MATOU_CONTROL_TOKEN" ]] && command -v mt >/dev/null 2>&1; then
+    mt create session --canvas current --profile claude-code --permission-mode bypassPermissions --cwd "$PWD" --enter >/dev/null
+    return $?
+  fi
+  claude --dangerously-skip-permissions "$@"
+}
 "#;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
