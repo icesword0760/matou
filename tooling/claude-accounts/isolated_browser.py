@@ -18,7 +18,23 @@ import threading
 import tempfile
 import time
 from urllib.parse import parse_qs, urlsplit
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
+
+
+def _is_valid_timezone(timezone: str) -> bool:
+    if (not timezone or len(timezone) > 64 or timezone.startswith("-") or ".." in timezone
+            or re.search(r"[\x00-\x1f\x7f-\x9f\s]", timezone)):
+        return False
+    try:
+        ZoneInfo(timezone)
+    except ZoneInfoNotFoundError:
+        # Windows may have neither a system IANA database nor the tzdata package.
+        return not available_timezones() and re.fullmatch(
+            r"[A-Za-z][A-Za-z0-9_+-]*(?:/[A-Za-z0-9_+-]+){1,2}", timezone
+        ) is not None
+    except ValueError:
+        return False
+    return True
 
 
 def find_browser() -> tuple[str, list[str]]:
@@ -26,14 +42,9 @@ def find_browser() -> tuple[str, list[str]]:
     timezone = os.environ.get("MATOU_SAFE_BROWSER_TZ", "")
     seed = os.environ.get("MATOU_SAFE_BROWSER_SEED", "")
     if (executable and Path(executable).is_file() and os.access(executable, os.X_OK)
-            and timezone and re.fullmatch(r"0*[1-9][0-9]*", seed)):
-        try:
-            ZoneInfo(timezone)
-        except (ValueError, ZoneInfoNotFoundError):
-            pass
-        else:
-            return executable, ["--timezone=" + timezone, "--accept-lang=zh-CN,zh",
-                                "--fingerprint=" + seed, "--fingerprint-platform=macos"]
+            and re.fullmatch(r"0*[1-9][0-9]*", seed) and _is_valid_timezone(timezone)):
+        return executable, ["--timezone=" + timezone, "--accept-lang=zh-CN,zh",
+                            "--fingerprint=" + seed, "--fingerprint-platform=macos"]
     candidates = []
     if os.name == "nt":
         for base in (os.environ.get("PROGRAMFILES"), os.environ.get("PROGRAMFILES(X86)"), os.environ.get("LOCALAPPDATA")):
