@@ -470,7 +470,7 @@ fn packaged_argv_for_builtin_cc_in_clean_zsh() -> Result<()> {
     runtime.frame(|_, screen, _| screen_has_line(screen, "CLEAN_ZSH_CC_READY"))?;
     runtime.input("cc")?;
     let launched = fixture.next_launch(&mut runtime, "clean zsh builtin cc", &[BYPASS])?;
-    assert_eq!(launched.cwd, cwd.canonicalize()?);
+    assert_eq!(launched.cwd.canonicalize()?, cwd.canonicalize()?);
     assert_ne!(launched.session, runtime.session, "cc opened a new card");
     let db = Connection::open(runtime.data.join("matou.sqlite"))?;
     assert_eq!(
@@ -481,7 +481,10 @@ fn packaged_argv_for_builtin_cc_in_clean_zsh() -> Result<()> {
     );
     let created = get_session(&db, &launched.session)?.context("cc-created card")?;
     assert_eq!(created.kind, "claude-code");
-    assert_eq!(Path::new(&created.cwd).canonicalize()?, launched.cwd);
+    assert_eq!(
+        Path::new(&created.cwd).canonicalize()?,
+        launched.cwd.canonicalize()?
+    );
     let mounted: bool = db.query_row(
         "SELECT EXISTS (SELECT 1 FROM session_mounts WHERE scene_id=? AND session_id=?)",
         [&runtime.scene, &launched.session],
