@@ -16796,6 +16796,11 @@ fn notification_time(timestamp: u64) -> String {
 }
 
 fn local_date_time(timestamp: u64) -> (String, String) {
+    let (_, date, time) = local_date_time_with_year(timestamp);
+    (date, time)
+}
+
+fn local_date_time_with_year(timestamp: u64) -> (Option<i32>, String, String) {
     // Use the system's local zone, including its offset at the event time.
     #[repr(C)]
     #[derive(Default)]
@@ -16831,11 +16836,13 @@ fn local_date_time(timestamp: u64) -> (String, String) {
     let valid = unsafe { _localtime64_s(&mut local, &seconds) == 0 };
     if valid {
         (
+            Some(local.year + 1900),
             format!("{:02}/{:02}", local.month + 1, local.day),
             format!("{:02}:{:02}", local.hour, local.minute),
         )
     } else {
         (
+            None,
             "—".into(),
             format!("{:02}:{:02}", seconds / 3_600 % 24, seconds / 60 % 60),
         )
@@ -18463,7 +18470,7 @@ fn fork_failure_button(
         .rounded(px(7.))
         .text_color(if dark { rgb(0xd9dce2) } else { rgb(0x333b48) })
         .bg(if dark { rgb(0x282b31) } else { rgb(0xffffff) })
-        .text_size(px(16.))
+        .text_size(px(12.))
         .whitespace_nowrap()
         .child(ui_text(label).normal_line_height());
     if let Some(reason) = blocked_reason {
@@ -18624,10 +18631,20 @@ fn fork_progress_panel(dark: bool) -> Div {
 mod fork_surface_tests {
     use super::{
         CARD_HEADER_SHADOW_INSET, CARD_HEADER_SHADOW_TOP, ForkProgressCopy,
-        card_header_shadow_bands, fork_dialog_name_counter, fork_dialog_panel, fork_progress_body,
-        fork_progress_panel, fork_worktree_card,
+        card_header_shadow_bands, fork_dialog_name_counter, fork_dialog_panel, fork_failure_button,
+        fork_progress_body, fork_progress_panel, fork_worktree_card,
     };
     use gpui::{IntoElement, Styled, div, px, rgb, rgba};
+
+    #[test]
+    fn failure_action_text_fits_the_thirty_point_button() {
+        for dark in [false, true] {
+            let mut button = fork_failure_button("retry".into(), "重试创建分支", None, false, dark);
+            let style = button.style();
+            assert_eq!(style.text.as_ref().unwrap().font_size, Some(px(12.).into()));
+            assert_eq!(style.size.height, Some(px(30.).into()));
+        }
+    }
 
     #[test]
     fn branch_dialog_surfaces_follow_the_workspace_theme() {

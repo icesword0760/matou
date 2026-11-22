@@ -14,7 +14,7 @@ use matou_native_core::{
     },
     ownership::DatabaseOwner,
     provider_launch::{ClaudeGatewayProjection, ClaudeLaunch, EFFORTS, attach_claude_settings},
-    pty::{LaunchProfile, get_var, set_var},
+    pty::{LaunchProfile, ShellLaunch, get_var, set_var},
     session_graph,
     sessions::{
         self, ClaudeBinding, ClaudeFork, ClaudeRestore, ProviderBinding, SessionRun, StartRunInput,
@@ -156,6 +156,7 @@ struct RunHook {
     launch_metadata: Value,
     secrets: Vec<String>,
     uses_gateway: bool,
+    default_claude_login: bool,
     deadline: Option<Instant>,
     last_observation: Option<Observation>,
     last_submission: Option<Instant>,
@@ -880,6 +881,14 @@ impl ShellOwner {
             .map(|codex| codex.hud_agents(time))
             .unwrap_or_default();
         let mut hud = json!(hook.hud.snapshot_with_agents(time, agents));
+        hud["defaultAccountUsage"] = json!(
+            hook.default_claude_login
+                && (hook.last_observation.is_some()
+                    || hook
+                        .resume
+                        .as_ref()
+                        .is_some_and(|resume| resume.binding_id.is_some()))
+        );
         hud["gitBranch"] = json!(branch);
         hud["gitDirty"] = json!(dirty);
         if let Some((_, _, config)) = &hook.hud_config
@@ -2797,6 +2806,19 @@ impl ShellOwner {
         let mut gateway = None;
         let mut agent_status_directory = None;
         let hook = if let Some((launch_metadata, mut secrets, resume, gateway_plan)) = provider {
+            let default_claude_login = profile == LaunchProfile::ClaudeCode
+                && gateway_plan.is_none()
+                && uses_default_claude_login(
+                    launch_metadata["providerConfigId"].as_str(),
+                    &options.launch,
+                    self.provider_environment.as_ref().map_or_else(
+                        || {
+                            std::env::var_os("ANTHROPIC_BASE_URL")
+                                .is_some_and(|url| !url.is_empty())
+                        },
+                        |env| get_var(env, "ANTHROPIC_BASE_URL").is_some_and(|url| !url.is_empty()),
+                    ),
+                );
             let resume = resume.or_else(|| {
                 matches!(
                     profile,
@@ -3074,6 +3096,7 @@ impl ShellOwner {
                 launch_metadata,
                 secrets,
                 uses_gateway: gateway.is_some(),
+                default_claude_login,
                 deadline,
                 last_observation: None,
                 last_submission: None,
@@ -5885,6 +5908,80 @@ fn safe_hook_text<'a>(value: &'a str, secrets: &[String]) -> Option<&'a str> {
     .then_some(value)
 }
 
+fn uses_default_claude_login(
+    provider: Option<&str>,
+    launch: &ShellLaunch,
+    inherited_endpoint_override: bool,
+) -> bool {
+    let env = |key| get_var(&launch.env, key).or_else(|| get_var(&launch.inherited_env, key));
+    matches!(provider, None | Some("" | "anthropic-official"))
+        && !inherited_endpoint_override
+        // Native launch supplies this endpoint even for the built-in account.
+        && env("ANTHROPIC_BASE_URL")
+            .is_none_or(|url| url.is_empty() || url == "https://api.anthropic.com")
+        && ![
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "CLAUDE_CODE_USE_BEDROCK",
+            "CLAUDE_CODE_USE_VERTEX",
+            "CLAUDE_CODE_USE_FOUNDRY",
+            "CLAUDE_CONFIG_DIR",
+            "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+        ]
+        .into_iter()
+        .any(|key| env(key).is_some_and(|value| !value.is_empty()))
+}
+
+#[test]
+fn default_claude_login_requires_builtin_provider_and_no_auth_override() {
+    let mut launch = ShellLaunch {
+        profile: LaunchProfile::ClaudeCode,
+        executable: PathBuf::new(),
+        argv: Vec::new(),
+        cwd: PathBuf::new(),
+        data_root: PathBuf::new(),
+        inherited_env: Default::default(),
+        env: [(
+            "ANTHROPIC_BASE_URL".into(),
+            "https://api.anthropic.com".into(),
+        )]
+        .into(),
+        cols: 80,
+        rows: 24,
+    };
+    assert!(uses_default_claude_login(None, &launch, false));
+    let official = Some("anthropic-official");
+    assert!(uses_default_claude_login(official, &launch, false));
+    assert!(!uses_default_claude_login(official, &launch, true));
+    assert!(!uses_default_claude_login(Some("custom"), &launch, false));
+    for key in [
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+        "CLAUDE_CODE_USE_FOUNDRY",
+        "CLAUDE_CONFIG_DIR",
+        "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+    ] {
+        launch.inherited_env.insert(key.into(), "fixture".into());
+        assert!(
+            !uses_default_claude_login(official, &launch, false),
+            "{key}"
+        );
+        launch.env.insert(key.into(), "".into());
+        assert!(uses_default_claude_login(official, &launch, false), "{key}");
+        launch.env.remove(std::ffi::OsStr::new(key));
+        launch.inherited_env.remove(std::ffi::OsStr::new(key));
+    }
+    launch.env.insert(
+        "ANTHROPIC_BASE_URL".into(),
+        "https://example.invalid".into(),
+    );
+    assert!(!uses_default_claude_login(official, &launch, false));
+}
+
 fn reject_identity(events: &mut Vec<OwnerEvent>, scope: &Scope, reason: &str) {
     events.push(OwnerEvent::ProviderIdentity(json!({
         "result": "rejected", "sessionId": scope.session_id, "runId": scope.run_id,
@@ -7027,6 +7124,7 @@ mod provider_tests {
         owner.observe_claude_transcript(session, &mut events);
         assert_eq!(owner.session(session)?.unwrap().title, "Native migration");
         let hud = owner.agent_hud(session, root.path())?;
+        assert_eq!(hud["hud"]["defaultAccountUsage"], false);
         assert_eq!(hud["hud"]["gitBranch"], "main");
         assert_eq!(hud["hud"]["toolCounts"], json!([{"name":"Read","count":1}]));
         assert_eq!(hud["hud"]["subagentCount"], 2);
@@ -7049,7 +7147,22 @@ mod provider_tests {
             owner.poll(Duration::from_millis(25))?;
         }
         assert!(!owner.has_shell_worker(session));
-        owner.launch_claude(session.into(), terminal, plan(), None)?;
+        let mut default_login = plan();
+        default_login.provider_config_id = "anthropic-official".into();
+        default_login.launch.env = [
+            ("HOME".into(), root.path().as_os_str().to_owned()),
+            (
+                "ANTHROPIC_BASE_URL".into(),
+                "https://api.anthropic.com".into(),
+            ),
+        ]
+        .into();
+        owner.provider_environment = Some(Default::default());
+        owner.launch_claude(session.into(), terminal, default_login, None)?;
+        assert_eq!(
+            owner.agent_hud(session, root.path())?["hud"]["defaultAccountUsage"],
+            false
+        );
         let current = Scope {
             run_id: owner.shells[session].run_id.clone(),
             ..scope.clone()
@@ -7059,6 +7172,10 @@ mod provider_tests {
         let previous_notifications = notification_count(&owner)?;
         let start_event = events.len();
         owner.apply_hook(current.clone(), stop("current-id"), &mut events);
+        assert_eq!(
+            owner.agent_hud(session, root.path())?["hud"]["defaultAccountUsage"],
+            true
+        );
         assert!(owner.provider_allows_derivation(session));
         assert_eq!(work_state(&owner, session)?, before);
         assert_eq!(notification_count(&owner)?, previous_notifications + 1);
