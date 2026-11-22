@@ -74,29 +74,22 @@ impl Resume {
 
     pub fn ingest(&mut self, data: &str) -> Option<&'static str> {
         static FAILURE: LazyLock<Regex> = LazyLock::new(|| {
-            Regex::new(r"no session.{0,96}found|session.{0,96}not found|no conversation.{0,96}found|invalid session|failed to resume").unwrap()
+            Regex::new(r"nosession.{0,96}found|session.{0,96}notfound|noconversation.{0,96}found|invalidsession|failedtoresume").unwrap()
         });
         self.recent.push_str(data);
         let keep = self
             .recent
             .ceil_char_boundary(self.recent.len().saturating_sub(8192));
         self.recent.drain(..keep);
-        let plain = ANSI.replace_all(&self.recent, |captures: &regex::Captures<'_>| {
-            if captures[0].ends_with(['C', 'G']) {
-                " "
-            } else {
-                ""
-            }
-        });
+        // Terminal wrapping and cursor moves can split both the error text and the ID.
+        let plain = ANSI.replace_all(&self.recent, "");
         let output = plain
             .split(|ch: char| ch.is_control() || ch.is_whitespace())
-            .filter(|word| !word.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ")
+            .collect::<String>()
             .to_ascii_lowercase();
         let identity = self.identity.to_string();
         if output.contains(&format!(
-            "that session is running in the background ({}).",
+            "thatsessionisrunninginthebackground({}).",
             &identity[..8]
         )) {
             return Some("provider session running in background");
@@ -228,4 +221,73 @@ fn replace_model(plan: &mut CodexLaunch, model: &str) {
         argv.splice(index..index, ["--model".into(), model.into()]);
     }
     plan.model = model.to_owned();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SESSION_ID: &str = "01a1ddc1-88fd-7fc1-8c66-ab8d38719da8";
+
+    fn resume() -> Resume {
+        Resume::from_binding(&ProviderBinding {
+            id: "binding".into(),
+            provider_session_id: SESSION_ID.to_ascii_uppercase(),
+            metadata: Value::Null,
+            resumable: true,
+            restore_state: "restoring".into(),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn missing_session_is_recognized_with_a_wrapped_uuid() {
+        for separator in ["\n", "\x1b[2G"] {
+            for at in 1..SESSION_ID.len() {
+                let (left, right) = SESSION_ID.split_at(at);
+                let mut resume = resume();
+                assert_eq!(
+                    resume.ingest(&format!(
+                        "No conver{separator}sation found with session ID: {left}"
+                    )),
+                    None
+                );
+                assert_eq!(
+                    resume.ingest(&format!("{separator}{right}")),
+                    Some(MISSING),
+                    "UUID split at {at} by {separator:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn background_session_is_recognized_with_wrapped_output() {
+        let message = "That session is running in the background (01a1ddc1).";
+        for separator in ["\n", "\x1b[2G"] {
+            for at in 1..message.len() {
+                let (left, right) = message.split_at(at);
+                assert_eq!(
+                    resume().ingest(&format!("{left}{separator}{right}")),
+                    Some("provider session running in background"),
+                    "Background message split at {at} by {separator:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn startup_failures_require_a_matching_identity_and_nearby_reason() {
+        for output in [
+            format!("Resuming session {SESSION_ID}"),
+            "No conversation found".into(),
+            "No conver\nsation found with session ID: 01a1ddc1-88fd-7fc1-8c66-\x1b[2Gab8d38719da9"
+                .into(),
+            "That session is running in the back\nground (01a1\x1b[2Gddc2).".into(),
+            "That session is running in the back\nground (01a1\x1b[2Gddc1ff).".into(),
+            format!("Session not found {} {SESSION_ID}", "界".repeat(330)),
+        ] {
+            assert_eq!(resume().ingest(&output), None, "{output:?}");
+        }
+    }
 }
