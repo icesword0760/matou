@@ -1764,15 +1764,19 @@ fn subscription(provider: &Value) -> bool {
     provider["subscription"].is_object()
 }
 
-fn official(provider: &Value) -> bool {
-    provider["builtIn"] == true
-        && provider.get("modelMetadata").is_none()
-        && provider["endpoint"].as_str().is_some_and(|endpoint| {
-            endpoint.strip_suffix('/').unwrap_or(endpoint) == "https://api.anthropic.com"
-        })
+pub(super) fn is_official_endpoint(endpoint: &str) -> bool {
+    endpoint.strip_suffix('/').unwrap_or(endpoint) == "https://api.anthropic.com"
 }
 
-fn catalog<'a>(provider: &'a Value, native: &'a [Value]) -> Option<&'a [Value]> {
+pub(super) fn official(provider: &Value) -> bool {
+    provider["builtIn"] == true
+        && provider.get("modelMetadata").is_none()
+        && provider["endpoint"]
+            .as_str()
+            .is_some_and(is_official_endpoint)
+}
+
+pub(crate) fn catalog<'a>(provider: &'a Value, native: &'a [Value]) -> Option<&'a [Value]> {
     if official(provider) {
         return Some(native);
     }
@@ -2210,17 +2214,7 @@ impl ClaudeAssignments {
         {
             return None;
         }
-        let needed = providers.providers().iter().any(|provider| {
-            official(provider)
-                && provider["id"].as_str().is_some_and(|id| {
-                    providers.active_id() == Some(id)
-                        || self.draft.values().any(|row| row.provider_id == id)
-                        || self
-                            .search_draft
-                            .as_ref()
-                            .is_some_and(|row| row.provider_id == id)
-                })
-        });
+        let needed = providers.providers().iter().any(official);
         let (generation, phase) = self.commands.connection();
         if !needed || phase != ConnectionPhase::Ready {
             return None;
@@ -2254,6 +2248,10 @@ impl ClaudeAssignments {
             ClaudeModelCatalogResult::Error(_) => Vec::new(),
         };
         self.native_catalog = NativeCatalog::Loaded(models);
+    }
+
+    pub(crate) fn native_catalog_models(&self) -> &[Value] {
+        self.native_catalog.models()
     }
 
     pub(crate) fn saving(&self) -> bool {

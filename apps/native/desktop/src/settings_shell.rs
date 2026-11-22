@@ -35,8 +35,8 @@ use matou_native_core::sessions::{InterfaceLocale, LocalePreference};
 use matou_native_desktop::dispatch_settings::DispatchSettingsPanel;
 use matou_native_desktop::provider_context_editor::{
     ACTIVE_PROVIDER_BOTTOM_EDGE_RGB, context_mode_subtitle, context_mode_title,
-    context_mode_tokens, context_multi_model_hint, context_unknown_hint, format_tokens,
-    provider_switch_impact_row, provider_window_badge, resolve_context_tokens,
+    context_mode_tokens, context_multi_model_hint, context_unknown_hint, context_window_badge_view,
+    format_tokens, provider_switch_impact_row, provider_window_badge_label, resolve_context_tokens,
 };
 use matou_native_desktop::theme_tokens::{
     AppTheme, ThemePalette, ThemePreference, ThemeState, theme_preference_picker,
@@ -62,7 +62,9 @@ pub mod compaction_settings;
 pub mod subscription_settings;
 #[cfg(any(test, debug_assertions))]
 use self::claude_role_assignments::AssignmentPanel;
-use self::claude_role_assignments::{AssignmentAction, AssignmentView, ClaudeAssignments};
+use self::claude_role_assignments::{
+    AssignmentAction, AssignmentView, ClaudeAssignments, is_official_endpoint, official,
+};
 use self::compaction_settings::{
     CompactionDraft, CompactionOption, effort_fallback, effort_label as compaction_effort_label,
     effort_values, model_name as compaction_model_name, model_options, provider_available,
@@ -6314,7 +6316,7 @@ impl SettingsShell {
                                 .child(self.locale.text("使用中", "In use")),
                         )
                     })
-                    .child(provider_window_badge(provider, self.locale)),
+                    .child(self.render_provider_window_badge(provider)),
             )
             .child(
                 div()
@@ -6499,7 +6501,7 @@ impl SettingsShell {
                     .child(status_label),
             );
         }
-        name_row = name_row.child(provider_window_badge(provider, self.locale));
+        name_row = name_row.child(self.render_provider_window_badge(provider));
         let mut details = div()
             .flex()
             .flex_col()
@@ -9297,6 +9299,23 @@ impl SettingsShell {
         )
     }
 
+    fn render_provider_window_badge(&self, provider: &Value) -> Div {
+        let label = provider_window_badge_label(
+            provider,
+            self.assignments.native_catalog_models(),
+            self.locale,
+        );
+        mark_provider(
+            context_window_badge_view(label.clone()),
+            format!(
+                "provider-window-badge-{}",
+                provider["id"].as_str().unwrap_or_default()
+            ),
+            label,
+            true,
+        )
+    }
+
     fn render_context_picker(
         &self,
         editor: &Editor,
@@ -9305,7 +9324,17 @@ impl SettingsShell {
         colors: &EditorColors,
         cx: &mut Context<Self>,
     ) -> Div {
-        let catalog: Vec<_> = models.iter().map(|row| (*row).clone()).collect();
+        let local_models;
+        let catalog = if let Some(native) = official_context_picker_models(
+            work,
+            self.providers.providers(),
+            self.assignments.native_catalog_models(),
+        ) {
+            native
+        } else {
+            local_models = models.iter().map(|row| (*row).clone()).collect::<Vec<_>>();
+            &local_models
+        };
         let selected_ids: Vec<_> = work
             .model_mapping
             .iter()
@@ -9319,7 +9348,7 @@ impl SettingsShell {
         for (index, choice) in CONTEXT_MODES.into_iter().enumerate() {
             let selected = choice == mode;
             let label = context_mode_title(choice, self.locale);
-            let tokens = context_mode_tokens(choice, &catalog, &selected_ids, self.locale);
+            let tokens = context_mode_tokens(choice, catalog, &selected_ids, self.locale);
             let option = div()
                 .id(SharedString::from(format!("provider-context-{choice}")))
                 .flex()
@@ -9359,13 +9388,16 @@ impl SettingsShell {
                                 .text_size(px(12.))
                                 .child(label),
                         )
-                        .child(
+                        .child(mark_provider(
                             div()
                                 .font_weight(FontWeight(650.))
                                 .text_size(px(11.))
                                 .text_color(rgba(colors.link))
-                                .child(tokens),
-                        )
+                                .child(tokens.clone()),
+                            format!("context-{choice}-tokens"),
+                            tokens,
+                            true,
+                        ))
                         .child(help_text(
                             context_mode_subtitle(choice, self.locale),
                             colors,
@@ -9420,7 +9452,7 @@ impl SettingsShell {
         {
             picker = picker.child(help_text(context_multi_model_hint(self.locale), colors));
         }
-        if mode != "512k" && resolve_context_tokens(mode, &catalog, &selected_ids).is_none() {
+        if mode != "512k" && resolve_context_tokens(mode, catalog, &selected_ids).is_none() {
             let hint = context_unknown_hint(self.locale);
             picker = picker.child(mark_provider(
                 help_text(hint, colors),
@@ -9935,6 +9967,56 @@ impl SettingsShell {
             .with_priority(101)
             .into_any_element(),
         )
+    }
+}
+
+fn official_context_picker_models<'a>(
+    draft: &ProviderDraft,
+    providers: &[Value],
+    native_catalog: &'a [Value],
+) -> Option<&'a [Value]> {
+    if !draft.built_in
+        || draft.fetched_metadata.is_some()
+        || !is_official_endpoint(draft.endpoint.trim())
+    {
+        return None;
+    }
+    let id = draft.id.as_deref()?;
+    let saved = providers.iter().find(|provider| provider["id"] == id)?;
+    official(saved).then_some(native_catalog)
+}
+
+#[cfg(test)]
+mod official_context_picker_tests {
+    use super::{ProviderDraft, official_context_picker_models};
+    use serde_json::json;
+
+    #[test]
+    fn official_editor_uses_native_catalog_until_endpoint_or_metadata_overrides_it() {
+        let mut provider = json!({
+            "id": "anthropic-official", "builtIn": true,
+            "endpoint": "https://api.anthropic.com/",
+        });
+        let native = [json!({
+            "id": "default", "contextWindow": 1_000_000, "maxContextWindow": 1_000_000,
+        })];
+        let mut draft = ProviderDraft::from_provider(&provider);
+        let models = |draft: &ProviderDraft| {
+            official_context_picker_models(draft, std::slice::from_ref(&provider), &native)
+        };
+        assert_eq!(models(&draft), Some(native.as_slice()));
+        draft.endpoint = "https://proxy.example.invalid".into();
+        assert_eq!(models(&draft), None);
+        draft.endpoint = "https://api.anthropic.com".into();
+        draft.fetched_metadata = Some(json!([]));
+        assert_eq!(models(&draft), None);
+
+        draft.fetched_metadata = None;
+        provider["modelMetadata"] = json!([]);
+        assert_eq!(
+            official_context_picker_models(&draft, &[provider], &native),
+            None
+        );
     }
 }
 

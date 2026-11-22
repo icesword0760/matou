@@ -8,7 +8,10 @@ use gpui::{
 };
 use serde_json::Value;
 
-use crate::rename_input::{RenameInput, RenameInputEvent};
+use crate::{
+    claude_role_assignments::catalog,
+    rename_input::{RenameInput, RenameInputEvent},
+};
 
 use matou_native_core::sessions::InterfaceLocale;
 
@@ -293,30 +296,29 @@ pub fn format_context_window_badge(
 /// Card badge that reads the concrete mode plus the provider's model directory.
 /// Rows written before the mode selector existed keep their numeric capacity so
 /// old saved data does not silently lose its label.
-pub fn provider_window_badge(provider: &Value, locale: InterfaceLocale) -> Div {
+pub fn provider_window_badge_label(
+    provider: &Value,
+    native_catalog: &[Value],
+    locale: InterfaceLocale,
+) -> String {
     if provider["contextWindowMode"].as_str().is_none()
         && let Some(tokens) = provider["contextWindow"]
             .as_u64()
             .filter(|tokens| *tokens > 0)
     {
-        return context_window_badge_view(format!(
+        return format!(
             "{}{}",
             locale.text("最大 ", "Max "),
             context_window_badge(Some(tokens), locale)
-        ));
+        );
     }
     let models = provider["modelMetadata"]
         .as_array()
-        .or_else(|| provider["subscription"]["modelMetadata"].as_array())
-        .cloned()
+        .map(Vec::as_slice)
+        .or_else(|| catalog(provider, native_catalog))
         .unwrap_or_default();
     let selected = provider_context_model_ids(provider);
-    context_window_badge_view(format_context_window_badge(
-        provider_context_mode(provider),
-        &models,
-        &selected,
-        locale,
-    ))
+    format_context_window_badge(provider_context_mode(provider), models, &selected, locale)
 }
 
 pub fn context_mode_title(mode: &str, locale: InterfaceLocale) -> &'static str {
@@ -905,6 +907,46 @@ mod tests {
             context_mode_tokens("maximum", &models, &["unknown-a".into()], Chinese),
             "未提供（沿用默认）"
         );
+    }
+
+    #[test]
+    fn official_provider_badge_uses_native_windows_with_metadata_and_endpoint_guards() {
+        let mut provider = json!({
+            "builtIn": true, "endpoint": "https://api.anthropic.com/",
+            "model": "__cli_default__",
+        });
+        let native = [json!({
+            "id": "default", "contextWindow": 1_000_000, "maxContextWindow": 1_000_000,
+        })];
+        assert_eq!(
+            provider_window_badge_label(&provider, &native, Chinese),
+            "默认 1M 窗口"
+        );
+        assert_eq!(
+            provider_window_badge_label(&provider, &native, English),
+            "Default 1M"
+        );
+        assert_eq!(
+            provider_window_badge_label(&provider, &[], Chinese),
+            "默认窗口"
+        );
+        provider["endpoint"] = json!("https://proxy.example.invalid");
+        assert_eq!(
+            provider_window_badge_label(&provider, &native, Chinese),
+            "默认窗口"
+        );
+        provider["endpoint"] = json!("https://api.anthropic.com");
+        provider["modelMetadata"] = json!([{"id": "default", "contextWindow": 200_000}]);
+        assert_eq!(
+            provider_window_badge_label(&provider, &native, Chinese),
+            "默认 200K 窗口"
+        );
+        provider["modelMetadata"] = json!([]);
+        assert_eq!(
+            provider_window_badge_label(&provider, &native, Chinese),
+            "默认窗口"
+        );
+        assert_eq!(compact_tokens(1_048_576), "1,048,576");
     }
 
     #[test]
