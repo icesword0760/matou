@@ -18,7 +18,11 @@ class EngineIntegration(unittest.TestCase):
         self.home = Path(self.temp.name)
         self.profile = self.home / ".claude"
         self.profile.mkdir()
-        self.env = patch.dict(os.environ, {"HOME": str(self.home), "XDG_DATA_HOME": str(self.home / "data")}, clear=True)
+        self.env = patch.dict(os.environ, {
+            "HOME": str(self.home),
+            "USERPROFILE": str(self.home),
+            "XDG_DATA_HOME": str(self.home / "data"),
+        }, clear=True)
         self.env.start()
         self.platform = patch("claude_swap.models.Platform.detect", return_value=Platform.LINUX)
         self.platform.start()
