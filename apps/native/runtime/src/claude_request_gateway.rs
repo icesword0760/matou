@@ -1,4 +1,4 @@
-//! Per-run API Key transport. The URL's unguessable path is the local credential.
+//! Per-run Claude request transport. The URL's unguessable path is the local credential.
 use std::{
     borrow::Cow,
     collections::VecDeque,
@@ -38,8 +38,7 @@ use matou_native_core::{
     claude_role_budget::CLAUDE_ROLES,
     provider_launch::{
         ClaudeGatewayCompaction, ClaudeGatewayConnection, ClaudeGatewayProjection,
-        ClaudeGatewayRole, EFFORTS, PreparedSubscriptionTarget, decode_claude_gateway_error,
-        startup_role_alias,
+        ClaudeGatewayRole, EFFORTS, decode_claude_gateway_error, startup_role_alias,
     },
     sessions::InterfaceLocale,
 };
@@ -66,6 +65,8 @@ mod main_delta_contract;
 mod deepseek_token_usage;
 #[path = "claude_request_gateway/gemini_sse_keepalive.rs"]
 mod gemini_sse_keepalive;
+mod proxy;
+pub(crate) use proxy::ProxyEnvironment;
 
 const MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 const MAX_AUTH_ERROR_BYTES: usize = 256 * 1024;
@@ -110,6 +111,7 @@ impl Gateway {
         subscriptions: Option<SessionSubscriptions>,
         blocked_families: Arc<AtomicU8>,
         locale: InterfaceLocale,
+        proxy_env: ProxyEnvironment,
     ) -> Result<Self> {
         Self::start_gateway(
             projection,
@@ -118,6 +120,7 @@ impl Gateway {
             subscriptions,
             blocked_families,
             locale,
+            proxy_env,
             #[cfg(test)]
             None,
         )
@@ -136,7 +139,12 @@ impl Gateway {
             None,
             Arc::default(),
             InterfaceLocale::default(),
-            loopback,
+            ProxyEnvironment::default(),
+            loopback.map(|address| FixtureUpstream {
+                host: deepseek_tools::HOST,
+                address,
+                catalog: None,
+            }),
         )
     }
 
@@ -147,7 +155,8 @@ impl Gateway {
         subscriptions: Option<SessionSubscriptions>,
         blocked_families: Arc<AtomicU8>,
         locale: InterfaceLocale,
-        #[cfg(test)] loopback: Option<std::net::SocketAddr>,
+        proxy_env: ProxyEnvironment,
+        #[cfg(test)] fixture: Option<FixtureUpstream>,
     ) -> Result<Self> {
         let mut random = [0u8; 32];
         getrandom::fill(&mut random).map_err(|_| anyhow!("Generate Claude gateway credential"))?;
@@ -169,8 +178,9 @@ impl Gateway {
             locale,
             blocked_families,
             keep_alive_interval,
+            proxy_env,
             #[cfg(test)]
-            loopback,
+            fixture,
         });
         let (stop, closed) = oneshot::channel();
         let (ready, bound) = mpsc::sync_channel(1);
@@ -244,8 +254,16 @@ struct State {
     token_usage: Arc<Mutex<deepseek_token_usage::Tracker>>,
     read_context_usage: Option<ReadContextUsage>,
     keep_alive_interval: Duration,
+    proxy_env: ProxyEnvironment,
     #[cfg(test)]
-    loopback: Option<std::net::SocketAddr>,
+    fixture: Option<FixtureUpstream>,
+}
+
+#[cfg(test)]
+struct FixtureUpstream {
+    host: &'static str,
+    address: std::net::SocketAddr,
+    catalog: Option<fn() -> Vec<Value>>,
 }
 
 #[derive(Default)]
@@ -253,7 +271,7 @@ struct MessageResponse {
     track_usage: bool,
     gemini_stream: bool,
     lazy_compaction: bool,
-    subscription_label: Option<&'static str>,
+    authentication_label: Option<&'static str>,
 }
 
 async fn serve(listener: TcpListener, state: Arc<State>) {
@@ -350,6 +368,7 @@ impl State {
                     MessageResponse::default(),
                 )
             };
+        self.check_egress(connection, &destination)?;
         if connection.subscription.is_some() {
             if !matches!(
                 path,
@@ -358,6 +377,30 @@ impl State {
                 return Err(Fault::new(StatusCode::NOT_FOUND, PATH_ERROR));
             }
             request_headers(&mut parts.headers, []);
+            parts.headers.insert(
+                header::ACCEPT_ENCODING,
+                HeaderValue::from_static("identity"),
+            );
+        } else if let Some(official) = &connection.official_oauth {
+            let official = official.clone();
+            let token = tokio::task::spawn_blocking(move || official.read_token())
+                .await
+                .map_err(|_| Fault::bad_gateway(CONNECTION_ERROR))?
+                .map_err(|error| Fault::bad_gateway(error.to_string()))?;
+            let mut bearer = HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_| {
+                Fault::bad_gateway("Claude model target credential is unavailable.")
+            })?;
+            bearer.set_sensitive(true);
+            request_headers(
+                &mut parts.headers,
+                [
+                    (header::AUTHORIZATION, bearer),
+                    (
+                        header::HeaderName::from_static("anthropic-beta"),
+                        HeaderValue::from_static("oauth-2025-04-20"),
+                    ),
+                ],
+            );
             parts.headers.insert(
                 header::ACCEPT_ENCODING,
                 HeaderValue::from_static("identity"),
@@ -412,48 +455,61 @@ impl State {
         if self.stopped.load(Ordering::Acquire) {
             return Err(Fault::new(StatusCode::NOT_FOUND, PATH_ERROR));
         }
-        // Tests remap only the socket destination, after routing, rewriting and Host selection.
-        #[cfg(test)]
-        let destination = match self
-            .loopback
-            .filter(|_| destination.host() == Some(deepseek_tools::HOST))
-        {
-            Some(address) => Uri::builder()
-                .scheme("http")
-                .authority(address.to_string())
-                .path_and_query(destination.path_and_query().unwrap().clone())
-                .build()
-                .expect("local fixture destination"),
-            None => destination,
-        };
-        let (mut response, mut body) = if let Some(target) = &connection.subscription {
+        let label = message_response.authentication_label.unwrap_or("main");
+        let (mut response, mut body) = if connection.subscription.is_some() {
             let subscriptions = self.subscriptions.as_ref().ok_or(Fault::bad_gateway(
                 "Subscription launch service is unavailable",
             ))?;
             let (response, body, binding) = self
                 .send_subscription(
                     subscriptions,
-                    target,
+                    connection,
+                    &destination,
                     parts,
                     body,
                     buffered,
                     message_response.lazy_compaction,
                 )
                 .await?;
-            if response.status.as_u16() >= 400 {
+            if response.status.is_client_error() || response.status.is_server_error() {
                 return self
-                    .forward_subscription_error(
-                        subscriptions,
-                        binding,
+                    .forward_authenticated_error(
+                        &binding.provider_name,
+                        Some((subscriptions, &binding)),
                         response,
                         body,
-                        message_response.subscription_label.unwrap_or("main"),
+                        label,
                     )
                     .await;
             }
             (response, body)
         } else {
-            send_once(destination, Request::from_parts(parts, body)).await?
+            self.check_egress(connection, &destination)?;
+            let (response, body) = send_once(
+                destination.clone(),
+                Request::from_parts(parts, body),
+                &self.proxy_env,
+                #[cfg(test)]
+                self.fixture
+                    .as_ref()
+                    .filter(|fixture| destination.host() == Some(fixture.host))
+                    .map(|fixture| fixture.address),
+            )
+            .await?;
+            if let Some(official) = &connection.official_oauth
+                && (response.status.is_client_error() || response.status.is_server_error())
+            {
+                return self
+                    .forward_authenticated_error(
+                        &official.provider_name,
+                        None,
+                        response,
+                        body,
+                        label,
+                    )
+                    .await;
+            }
+            (response, body)
         };
         if (message_response.track_usage || message_response.gemini_stream)
             && response.status.is_success()
@@ -479,7 +535,8 @@ impl State {
     async fn send_subscription(
         &self,
         subscriptions: &SessionSubscriptions,
-        target: &PreparedSubscriptionTarget,
+        target_connection: &ClaudeGatewayConnection,
+        destination: &Uri,
         parts: hyper::http::request::Parts,
         body: GatewayBody,
         buffered: Option<Bytes>,
@@ -492,7 +549,10 @@ impl State {
         ),
         Fault,
     > {
-        self.check_subscription_egress(target)?;
+        let target = target_connection
+            .subscription
+            .as_ref()
+            .expect("subscription target");
         let binding = match subscriptions.targets.get(target) {
             Some(binding) => Arc::clone(binding),
             None if lazy => {
@@ -533,7 +593,7 @@ impl State {
         };
         let mut revoked = Box::pin(binding.cancelled());
         let connection = with_revocation(revoked.as_mut(), route(None)).await?;
-        self.check_subscription_egress(target)?;
+        self.check_egress(target_connection, destination)?;
         let first = with_revocation(
             revoked.as_mut(),
             send_router(&connection, parts.clone(), body),
@@ -553,9 +613,10 @@ impl State {
                     .should_reconnect(kind)
                 }) =>
             {
+                self.check_egress(target_connection, destination)?;
                 let recovered =
                     with_revocation(revoked.as_mut(), route(Some(connection.generation))).await?;
-                self.check_subscription_egress(target)?;
+                self.check_egress(target_connection, destination)?;
                 with_revocation(
                     revoked.as_mut(),
                     send_router(
@@ -574,10 +635,10 @@ impl State {
         Ok((response, body, binding))
     }
 
-    async fn forward_subscription_error(
+    async fn forward_authenticated_error(
         &self,
-        subscriptions: &SessionSubscriptions,
-        binding: Arc<TargetBinding>,
+        provider_name: &str,
+        subscription: Option<(&SessionSubscriptions, &Arc<TargetBinding>)>,
         mut response: hyper::http::response::Parts,
         mut body: UpstreamBody,
         label: &str,
@@ -621,19 +682,39 @@ impl State {
             "登录已过期，请到 设置 → Claude Code 重新登录后重试。",
             "sign-in has expired. Go to Settings → Claude Code, sign in again, then retry.",
         );
-        let message = format!("{label} · {} {guidance}", binding.provider_name);
-        let service = Arc::clone(&subscriptions.service);
-        // Account-state notification failures must not replace the sanitized response.
-        let _ = tokio::task::spawn_blocking(move || service.mark_needs_sign_in(&binding)).await;
+        let message = format!("{label} · {provider_name} {guidance}");
+        if let Some((subscriptions, binding)) = subscription {
+            let service = Arc::clone(&subscriptions.service);
+            let binding = Arc::clone(binding);
+            // Account-state notification failures must not replace the sanitized response.
+            let _ = tokio::task::spawn_blocking(move || service.mark_needs_sign_in(&binding)).await;
+        }
         Ok(error_response(status, "authentication_error", &message))
     }
 
-    fn check_subscription_egress(&self, target: &PreparedSubscriptionTarget) -> Result<(), Fault> {
-        if target.provider == "codex"
-            && self.blocked_families.load(Ordering::Acquire)
-                & (1 << Family::ChatgptSubscription as u8)
-                != 0
+    fn check_egress(
+        &self,
+        connection: &ClaudeGatewayConnection,
+        destination: &Uri,
+    ) -> Result<(), Fault> {
+        let family = if connection
+            .subscription
+            .as_ref()
+            .is_some_and(|target| target.provider == "codex")
         {
+            Some(Family::ChatgptSubscription)
+        } else if connection.official_oauth.is_some()
+            || destination
+                .host()
+                .is_some_and(|host| host.eq_ignore_ascii_case("api.anthropic.com"))
+        {
+            Some(Family::Anthropic)
+        } else {
+            None
+        };
+        if family.is_some_and(|family| {
+            self.blocked_families.load(Ordering::Acquire) & (1 << family as u8) != 0
+        }) {
             return Err(Fault::bad_gateway(
                 "出口异常，已暂停。请在网络检查中恢复出口或明确豁免后重试。 Network egress protection is active.",
             ));
@@ -682,9 +763,16 @@ impl State {
                 self.lazy_compaction
                     .get_or_try_init(|| async move {
                         let preparation = preparation.clone();
+                        let catalog: fn() -> Vec<Value> = crate::host::native_role_catalog;
+                        #[cfg(test)]
+                        let catalog = self
+                            .fixture
+                            .as_ref()
+                            .and_then(|fixture| fixture.catalog)
+                            .unwrap_or(catalog);
                         tokio::task::spawn_blocking(move || {
                             preparation
-                                .resolve(&crate::host::native_role_catalog)
+                                .resolve(&catalog)
                                 .map_err(|_| Fault::bad_gateway(CONNECTION_ERROR))
                         })
                         .await
@@ -695,7 +783,7 @@ impl State {
             None => None,
         };
         let target = custom.or(search).or(role_target);
-        let subscription_label = if search.is_some() {
+        let authentication_label = if search.is_some() {
             Some("webSearch")
         } else {
             role.map(|index| CLAUDE_ROLES[index])
@@ -819,7 +907,7 @@ impl State {
         let message_response = MessageResponse {
             track_usage: is_message && !marked,
             lazy_compaction: matches!(compaction, Some(ClaudeGatewayCompaction::OnFirstRequest(_))),
-            subscription_label,
+            authentication_label,
             gemini_stream: is_message
                 && message.as_ref().is_some_and(|message| {
                     message.get("stream").and_then(Value::as_bool) == Some(true)
@@ -1174,49 +1262,78 @@ async fn send_router(
         header::HOST,
         HeaderValue::from_str(&authority).map_err(|_| Fault::bad_gateway(CONNECTION_ERROR))?,
     );
-    send_once(destination, Request::from_parts(parts, body)).await
+    send_once(
+        destination,
+        Request::from_parts(parts, body),
+        &ProxyEnvironment::default(),
+        #[cfg(test)]
+        None,
+    )
+    .await
+}
+
+async fn direct_https(
+    destination: Uri,
+) -> Result<hyper_rustls::MaybeHttpsStream<TokioIo<tokio::net::TcpStream>>, Fault> {
+    static CONNECTOR: OnceLock<Option<HttpsConnector<HttpConnector>>> = OnceLock::new();
+    let mut connector = CONNECTOR
+        .get_or_init(|| {
+            let mut http = http_connector();
+            http.enforce_http(false);
+            Some(
+                HttpsConnectorBuilder::new()
+                    .with_native_roots()
+                    .ok()?
+                    .https_only()
+                    .enable_http1()
+                    .wrap_connector(http),
+            )
+        })
+        .as_ref()
+        .ok_or_else(|| Fault::bad_gateway(CONNECTION_ERROR))?
+        .clone();
+    connector
+        .call(destination)
+        .await
+        .map_err(|error| Fault::transport(error.as_ref()))
 }
 
 async fn send_once(
     destination: Uri,
-    request: Request<GatewayBody>,
+    mut request: Request<GatewayBody>,
+    proxy_env: &ProxyEnvironment,
+    #[cfg(test)] fixture: Option<std::net::SocketAddr>,
 ) -> Result<(hyper::http::response::Parts, UpstreamBody), Fault> {
     // The low-level HTTP/1 connection has no redirect, decompression, retry,
     // or pooling layer. Keep the driver owned by this downstream exchange.
-    let failure = || Fault::bad_gateway(CONNECTION_ERROR);
-    let (mut sender, task) = if destination.scheme_str() == Some("https") {
-        static CONNECTOR: OnceLock<Option<HttpsConnector<HttpConnector>>> = OnceLock::new();
-        let mut connector = CONNECTOR
-            .get_or_init(|| {
-                let mut http = http_connector();
-                http.enforce_http(false);
-                Some(
-                    HttpsConnectorBuilder::new()
-                        .with_native_roots()
-                        .ok()?
-                        .https_only()
-                        .enable_http1()
-                        .wrap_connector(http),
-                )
-            })
-            .as_ref()
-            .ok_or_else(failure)?
-            .clone();
-        connect(
-            connector
-                .call(destination)
-                .await
-                .map_err(|error| Fault::transport(error.as_ref()))?,
-        )
-        .await?
+    let (mut sender, task) = if let Some(exchange) =
+        proxy::connect_proxy(proxy_env, &destination, &mut request).await?
+    {
+        exchange
     } else {
-        connect(
-            http_connector()
-                .call(destination)
-                .await
-                .map_err(|error| Fault::transport(&error))?,
-        )
-        .await?
+        // Only the actual connection is overridden, after route and proxy selection.
+        #[cfg(test)]
+        let destination = if let Some(address) = fixture {
+            Uri::builder()
+                .scheme("http")
+                .authority(address.to_string())
+                .path_and_query(destination.path_and_query().unwrap().clone())
+                .build()
+                .expect("local fixture destination")
+        } else {
+            destination
+        };
+        if destination.scheme_str() == Some("https") {
+            connect(direct_https(destination).await?).await?
+        } else {
+            connect(
+                http_connector()
+                    .call(destination)
+                    .await
+                    .map_err(|error| Fault::transport(&error))?,
+            )
+            .await?
+        }
     };
     let response = sender.send_request(request).await.map_err(|error| {
         if error.is_user()

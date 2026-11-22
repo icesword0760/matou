@@ -3048,7 +3048,6 @@ fn first_claude_start_and_recovery_without_binding_use_saved_opus_assignment() -
                 "id": "target", "model": "target-default", "apiKey": "target-fixture-key",
                 "endpoint": "https://target.example.invalid/",
                 "modelMapping": {"opus": "target-opus", "sonnet": "target-sonnet", "haiku": "target-haiku"},
-                "effortMapping": {"opus": "high"}, "reasoningEffort": "medium",
                 "modelMetadata": [{"id": "assigned-model", "supportedEfforts": ["high"]}]
             }
         ]},
@@ -3375,8 +3374,10 @@ exec /bin/sleep 60
     );
     let mut edited_config: Value = serde_json::from_str(&stored_config)?;
     let target = &mut edited_config["providers"]["claude-code"][1];
-    target["effortMapping"]["opus"] = json!("low");
-    target["reasoningEffort"] = json!("low");
+    // The retained explicit effort survives changes to the provider's
+    // fallback. Keep this direct-launch fixture on follow for other models.
+    target["effortMapping"] = json!({"opus": "follow"});
+    target["reasoningEffort"] = json!("follow");
     fs::write(&config, edited_config.to_string())?;
     next.send(Command::SetProviderPermissionMode {
         session_id: next.session.clone(),
@@ -3685,8 +3686,7 @@ exec /bin/sleep 60
 "#,
         )?;
         fs::set_permissions(&stub, fs::Permissions::from_mode(0o700))?;
-        // Keep this direct-launch contract deterministic on machines with or
-        // without an inherited proxy. The gateway has a separate loopback test.
+        // The explicit proxy must leave the queued assignment's gateway enabled.
         let mut child = RuntimeChild::spawn_configured_with(
             root.path(),
             "",
@@ -3775,20 +3775,36 @@ exec /bin/sleep 60
         let settings: Value = serde_json::from_slice(&fs::read(
             argv.lines().nth(1).context("direct CLI settings path")?,
         )?)?;
-        assert_eq!(
-            settings
-                .as_object()
-                .unwrap()
-                .keys()
-                .map(String::as_str)
-                .collect::<Vec<_>>(),
-            ["hooks", "statusLine"],
-            "{scenario}: direct launch only writes the hook settings",
-        );
+        if scenario == "save" {
+            assert_eq!(
+                settings["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"],
+                "matou-role/opus"
+            );
+            assert_eq!(
+                settings["modelPicker"]["options"][0]["label"],
+                "Opus · next-opus"
+            );
+            assert!(
+                settings["env"]["ANTHROPIC_BASE_URL"]
+                    .as_str()
+                    .is_some_and(|url| url.starts_with("http://127.0.0.1:"))
+            );
+        } else {
+            assert_eq!(
+                settings
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                ["hooks", "statusLine"],
+                "{scenario}: direct launch only writes the hook settings",
+            );
+        }
         let expected: &[&str] = if scenario == "save" {
             &[
                 "--model",
-                "next-opus",
+                "matou-role/opus",
                 "--effort",
                 "high",
                 "--permission-mode",
@@ -3803,7 +3819,9 @@ exec /bin/sleep 60
             "{scenario}"
         );
         let endpoint = if scenario == "save" {
-            "https://target.example.invalid"
+            settings["env"]["ANTHROPIC_BASE_URL"]
+                .as_str()
+                .context("gateway endpoint")?
         } else {
             "https://active.example.invalid"
         };

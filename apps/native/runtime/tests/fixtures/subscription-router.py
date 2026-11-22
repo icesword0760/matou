@@ -235,6 +235,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.headers.get("Authorization") != "Bearer " + client or self.headers.get("x-api-key"):
             audit("wrong-inference-bearer")
             return self.response(401, {})
+        if path.path == "/v1/models" and self.command == "GET":
+            audit("inference-models", query=path.query)
+            return self.response(200, {"data": [{"id": "fixture-subscription-default"}]})
         if path.path not in ("/v1/messages", "/v1/messages/count_tokens"):
             return self.response(404, {})
         operation = body.get("fixture", "")

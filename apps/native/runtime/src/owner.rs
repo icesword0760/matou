@@ -42,7 +42,7 @@ use crate::{
     antigravity_launch::{
         self, LaunchMode as AntigravityMode, PermissionMode as AntigravityPermission,
     },
-    claude_request_gateway::Gateway,
+    claude_request_gateway::{Gateway, ProxyEnvironment},
     codex_events::{self, title as codex_title},
     codex_fork::{
         CodexForkAuthority, CodexForkCandidate, CodexForkHook, CodexForkSettings, CodexForkSource,
@@ -2644,17 +2644,11 @@ impl ShellOwner {
             && gateway.subscription_providers().next().is_some()
         {
             ensure!(
-                gateway.supports_environment(&launch.env),
-                "Claude model targets are unavailable through the configured proxy"
-            );
-            ensure!(
                 subscriptions.is_some(),
                 "Subscription launch service is unavailable"
             );
         }
-        let gateway = plan
-            .gateway
-            .filter(|plan| plan.supports_environment(&launch.env));
+        let gateway = plan.gateway;
         let mut secrets = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]
             .into_iter()
             .filter_map(|name| {
@@ -3125,6 +3119,7 @@ impl ShellOwner {
                     sessions::current_interface_locale(sessions::read_locale_preference(
                         &options.launch.data_root,
                     )),
+                    ProxyEnvironment::capture(&options.launch.inherited_env, &options.launch.env),
                 )?;
                 gateway_context = Some(context);
                 let env = plan.project_environment(&mut options.launch, listener.base_url());
