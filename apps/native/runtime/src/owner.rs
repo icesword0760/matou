@@ -2447,26 +2447,11 @@ impl ShellOwner {
         )
     }
 
-    pub(crate) fn failed_claude_fork_parent(&self, session_id: &str) -> Result<Option<String>> {
-        let Some(binding) = self
-            .claude_binding(session_id)?
-            .filter(|binding| binding.restore_state == "failed")
-        else {
-            return Ok(None);
-        };
-        provider_resume::empty_fork_parent(
-            &self.connection,
-            session_id,
-            &binding,
-            SESSION_NOT_FOUND,
-        )
-    }
-
     pub(crate) fn launch_claude_restore(
         &mut self,
         session_id: String,
         terminal: matou_native_terminal::TerminalOptions,
-        plan: PreparedClaudeLaunch,
+        mut plan: PreparedClaudeLaunch,
         binding: &ClaudeBinding,
         rebuild: Option<(String, String)>,
     ) -> Result<()> {
@@ -2503,16 +2488,27 @@ impl ShellOwner {
             }
             monitor.rebuild_parent = Some(parent);
             None
-        } else {
-            provider_resume::empty_fork_parent(
-                &self.connection,
-                &session_id,
-                binding,
-                SESSION_NOT_FOUND,
-            )?
-            .map(|parent| {
-                let child = binding.provider_session_id.clone();
-                let launch = plan.launch.for_fork_rebuild(&parent, &child)?;
+        } else if let Some(parent) = provider_resume::empty_fork_parent(
+            &self.connection,
+            &session_id,
+            binding,
+            SESSION_NOT_FOUND,
+        )? {
+            let child = &binding.provider_session_id;
+            let launch = plan.launch.for_fork_rebuild(&parent, child)?;
+            if provider_resume::fork_rebuild_blocker(
+                claude_projects(&plan.launch.launch).as_deref(),
+                &parent,
+                child,
+            )
+            .is_none()
+            {
+                self.change_claude_restore(&session_id, ClaudeRestore::Begin(&binding.id))?;
+                plan.launch = launch;
+                monitor.rebuild_parent = Some(parent);
+                None
+            } else {
+                // A transcript may appear while the ordinary resume starts.
                 let subscriptions =
                     plan.subscriptions
                         .as_ref()
@@ -2520,16 +2516,17 @@ impl ShellOwner {
                             service: subscriptions.service.clone(),
                             targets: subscriptions.targets.clone(),
                         });
-                Ok::<_, anyhow::Error>(ClaudeForkRebuild {
+                Some(ClaudeForkRebuild {
                     parent,
-                    child,
+                    child: child.clone(),
                     plan: PreparedClaudeLaunch {
                         launch,
                         subscriptions,
                     },
                 })
-            })
-            .transpose()?
+            }
+        } else {
+            None
         };
         self.launch_claude_with_monitor(
             session_id.clone(),
