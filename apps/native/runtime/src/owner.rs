@@ -3122,6 +3122,9 @@ impl ShellOwner {
                     })),
                     subscriptions,
                     Arc::clone(&self.blocked_gateway_families),
+                    sessions::current_interface_locale(sessions::read_locale_preference(
+                        &options.launch.data_root,
+                    )),
                 )?;
                 gateway_context = Some(context);
                 let env = plan.project_environment(&mut options.launch, listener.base_url());
@@ -3492,11 +3495,12 @@ impl ShellOwner {
             registration.attach_codex(&mut options.launch)?;
         } else if options.launch.profile == LaunchProfile::ClaudeCode {
             attach_claude_settings(&mut options.launch, &registration.settings_path)?;
-            if let Some(plugin) = std::env::current_exe()
-                .ok()
-                .as_deref()
-                .and_then(crate::provider_hook::bundled_claude_plugin)
-            {
+            let control_asset_root = std::env::var_os("MATOU_CONTROL_ASSET_ROOT");
+            let executable = std::env::current_exe().ok();
+            if let Some(plugin) = crate::provider_hook::bundled_claude_plugin(
+                executable.as_deref(),
+                control_asset_root.as_deref().map(Path::new),
+            ) {
                 let path = plugin.to_str().context("Claude plugin path is not UTF-8")?;
                 options
                     .launch
