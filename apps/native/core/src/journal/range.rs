@@ -237,37 +237,84 @@ pub(super) fn visit_preferred(
 ) -> Result<bool> {
     let mut failure = None;
     let mut previous = 0;
-    for variant in variants {
-        let reader = match read_segment(&variant.path) {
-            Ok(reader) => reader,
-            Err(error) => {
-                failure = Some(error);
-                continue;
-            }
-        };
-        let mut clean = true;
-        for record in reader {
-            match record {
-                Ok(record) if record.frame.sequence() > previous => {
-                    previous = record.frame.sequence();
-                    if !visitor(record)? {
-                        return Ok(false);
-                    }
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    failure = Some(error);
-                    clean = false;
-                    break;
-                }
-            }
-        }
-        if clean {
-            return Ok(true);
+    let mut saw_not_found = false;
+    if let Some(result) = try_variants(
+        variants.iter().copied(),
+        &mut previous,
+        &mut failure,
+        &mut saw_not_found,
+        &mut visitor,
+    )? {
+        return Ok(result);
+    }
+
+    // Compression publishes gzip before deleting raw. Refresh the listing once
+    // when an initially listed path went missing.
+    if saw_not_found
+        && let Some(first) = variants.first()
+        && let Some(directory) = first.path.parent()
+        && let Ok(mut described) = describe_segments(directory)
+    {
+        described.retain(|candidate| {
+            candidate.index == first.index
+                && !variants
+                    .iter()
+                    .any(|initial| initial.path == candidate.path)
+        });
+        let new_variants = groups(&described).remove(&first.index).unwrap_or_default();
+        if let Some(result) = try_variants(
+            new_variants,
+            &mut previous,
+            &mut failure,
+            &mut saw_not_found,
+            &mut visitor,
+        )? {
+            return Ok(result);
         }
     }
     Err(failure
         .unwrap_or_else(|| JournalCorruptionError::new("Journal segment is unavailable", 0).into()))
+}
+
+fn try_variants<'a>(
+    variants: impl IntoIterator<Item = &'a Segment>,
+    previous: &mut u64,
+    failure: &mut Option<anyhow::Error>,
+    saw_not_found: &mut bool,
+    visitor: &mut impl FnMut(Record) -> Result<bool>,
+) -> Result<Option<bool>> {
+    let mut record_failure = |error: anyhow::Error| {
+        *saw_not_found |= error
+            .downcast_ref::<io::Error>()
+            .is_some_and(|error| error.kind() == io::ErrorKind::NotFound);
+        *failure = Some(error);
+    };
+    'variants: for variant in variants {
+        let reader = match read_segment(&variant.path) {
+            Ok(reader) => reader,
+            Err(error) => {
+                record_failure(error);
+                continue;
+            }
+        };
+        for record in reader {
+            match record {
+                Ok(record) if record.frame.sequence() > *previous => {
+                    *previous = record.frame.sequence();
+                    if !visitor(record)? {
+                        return Ok(Some(false));
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    record_failure(error);
+                    continue 'variants;
+                }
+            }
+        }
+        return Ok(Some(true));
+    }
+    Ok(None)
 }
 
 pub fn for_each_frame(
@@ -307,6 +354,10 @@ pub fn visit_frames(
     let directory = directory(data_root, session_id)?;
     let described = describe_segments(&directory)?;
     let grouped = groups(&described);
+    #[cfg(test)]
+    if let Some(after_initial_listing) = tests::AFTER_INITIAL_LISTING.take() {
+        after_initial_listing(&described)?;
+    }
     let mut previous = 0;
     let mut visit_segment = |variants: &[&Segment]| {
         visit_preferred(variants, |record| {
@@ -356,8 +407,114 @@ pub fn visit_frames(
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use super::*;
-    use crate::journal::{Frame, JournalOptions, SegmentJournal};
+    use crate::journal::{Frame, JournalOptions, SegmentJournal, wait_for_compression};
+
+    type ListingHook = Box<dyn FnOnce(&[Segment]) -> Result<()>>;
+
+    thread_local! {
+        pub(super) static AFTER_INITIAL_LISTING: Cell<Option<ListingHook>> = const { Cell::new(None) };
+    }
+
+    const SESSION_ID: &str = "publish-race";
+
+    fn prepare_raw_segments(root: &Path) -> Result<Vec<Record>> {
+        let options = JournalOptions {
+            max_segment_bytes: 400,
+            compress_sealed: false,
+            ..JournalOptions::default()
+        };
+        let mut journal = SegmentJournal::open(root, SESSION_ID, options)?;
+        let mut expected = Vec::new();
+        for sequence in 1..=4 {
+            let record = Record {
+                timestamp: sequence as i64,
+                frame: Frame::Output {
+                    sequence,
+                    data: vec![b'a' + sequence as u8; 100],
+                },
+            };
+            journal.append(&record)?;
+            expected.push(record);
+        }
+        journal.close()?;
+        let index = load_range(journal.directory()).context("missing fixture range index")?;
+        let bounds: Vec<_> = index
+            .segments
+            .iter()
+            .map(|bound| (bound.index, bound.first_sequence, bound.last_sequence))
+            .collect();
+        assert_eq!(bounds, [(1, 1, 2), (2, 3, 4)]);
+        Ok(expected)
+    }
+
+    fn publish_after_listing(root: &Path) {
+        let root = root.to_owned();
+        AFTER_INITIAL_LISTING.set(Some(Box::new(move |described| {
+            let raw = directory(&root, SESSION_ID)?.join("segment-000001.mtj");
+            let gzip = raw.with_extension("mtj.gz");
+            let listed: Vec<_> = described
+                .iter()
+                .filter(|segment| segment.index == 1)
+                .map(|segment| &segment.path)
+                .collect();
+            assert_eq!(listed, [&raw]);
+            assert!(raw.is_file());
+            assert!(!gzip.try_exists()?);
+
+            let options = JournalOptions {
+                raw_hot_bytes: 0,
+                ..JournalOptions::default()
+            };
+            let mut journal = SegmentJournal::open(&root, SESSION_ID, options)?;
+            wait_for_compression();
+            assert!(gzip.is_file());
+            assert!(!raw.try_exists()?);
+            journal.close()
+        })));
+    }
+
+    #[test]
+    fn publish_race_replays_with_range_index() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let expected = prepare_raw_segments(root.path())?;
+        publish_after_listing(root.path());
+
+        let mut observed = Vec::new();
+        visit_frames(root.path(), SESSION_ID, 1, None, |record| {
+            observed.push(record);
+            Ok(true)
+        })?;
+        assert_eq!(observed, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn publish_race_streams_valid_prefix_before_bad_tail() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let expected = prepare_raw_segments(root.path())?;
+        // An unindexed gzip tail is scanned for bounds, but reopening the raw
+        // journal for compression leaves this truncated header in place.
+        let tail = directory(root.path(), SESSION_ID)?.join("segment-000003.mtj.gz");
+        fs::write(tail, b"\x1f\x8b")?;
+        publish_after_listing(root.path());
+
+        let mut observed = Vec::new();
+        let error = for_each_frame(root.path(), SESSION_ID, 1, None, |record| {
+            observed.push(record);
+            Ok(())
+        })
+        .expect_err("the damaged tail must still be reported");
+        assert_eq!(observed, expected, "replay stopped early: {error:#}");
+        assert!(error.downcast_ref::<JournalCorruptionError>().is_some());
+        assert_eq!(
+            error.to_string(),
+            "unexpected end of file while reading gzip journal"
+        );
+        Ok(())
+    }
 
     #[test]
     fn visitor_false_stops_after_first_frame() -> Result<()> {
