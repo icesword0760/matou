@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process'
-import { constants } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { constants, createReadStream } from 'node:fs'
 import {
   access, chmod, copyFile, cp, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, writeFile
 } from 'node:fs/promises'
@@ -13,6 +14,10 @@ const desktopProject = fileURLToPath(new URL('../../apps/desktop/', import.meta.
 const accountEngine = 'matou-claude-accounts'
 const accountEnginePath = join('claude-accounts', accountEngine)
 const accountBuild = fileURLToPath(new URL('../../tooling/claude-accounts/build/', import.meta.url))
+const modelRouterName = 'model-router'
+const modelRouterFiles = [modelRouterName, 'LICENSE', 'source.json']
+const modelRouterVersion = '8.0.69'
+const defaultModelRouter = join(desktopProject, 'package-resources', modelRouterName)
 const claudePlugin = 'control-assets/providers/claude-plugin'
 const runtimeProject = fileURLToPath(new URL('../../apps/runtime/', import.meta.url))
 const desktopName = 'matou-native-desktop'
@@ -27,12 +32,18 @@ const usage = `Usage:
   node tooling/native-parity/package-native-mac.mjs --desktop-bin <file> --runtime-bin <file>
       --out-dir <directory> --version <X.Y.Z> [--app-name <name>] [--bundle-id <id>]
       [--entitlements <plist>] [--claude-accounts-engine <directory>] [--unsigned]
+      [--model-router <directory>] [--allow-missing-model-router]
   node tooling/native-parity/package-native-mac.mjs --verify <path.app>
       [--app-name <name>] [--bundle-id <id>] [--require-release-signature]
+      [--allow-missing-model-router]
 
 The defaults are 码头 and com.matou.desktop. Assembly copies the binaries as
 supplied and adds no signature. --unsigned explicitly selects that same offline mode.
 The Finder workflow uses the selected app name and bundle ID.
+The default model-router source is apps/desktop/package-resources/model-router.
+--allow-missing-model-router is for fixtures without an engine.
+For release, sign model-router as com.matou.desktop.model-router and record its
+signed SHA-256 in source.json before sealing the outer app.
 Use a new output directory or remove an old build before assembling again.
 Verification reads the bundle without launching it.`
 
@@ -133,9 +144,11 @@ async function machoArchitectures(path) {
   }
 }
 
-async function signatureSummary(path) {
+async function signatureSummary(path, arch) {
   try {
-    const { stdout, stderr } = await run('/usr/bin/codesign', ['--display', '--verbose=4', '-r-', path])
+    const args = ['--display', '--verbose=4', '-r-']
+    if (arch) args.push('--arch', arch)
+    const { stdout, stderr } = await run('/usr/bin/codesign', [...args, path])
     const output = `${stdout}\n${stderr}`
     const field = name => output.match(new RegExp(`^${name}=(.+)$`, 'm'))?.[1] ?? null
     const authorities = [...output.matchAll(/^Authority=(.+)$/gm)].map(match => match[1])
@@ -162,6 +175,30 @@ async function optionalPath(path) {
     if (error.code === 'ENOENT') return null
     throw error
   })
+}
+
+async function verifyModelRouter(directory, desktopArchitectures, allowMissing) {
+  if (allowMissing && !await optionalPath(directory)) return
+  await requirePath(directory, 'model-router directory', 'directory')
+  const binary = join(directory, modelRouterName)
+  await requireExecutable(binary, 'model-router binary', true)
+  const architectures = await machoArchitectures(binary)
+  if (desktopArchitectures.some(arch => !architectures.includes(arch))) {
+    throw new Error(`model-router architecture mismatch: desktop requires ${desktopArchitectures.join(', ')}, found ${architectures.join(', ')}`)
+  }
+  await requirePath(join(directory, 'LICENSE'), 'model-router LICENSE')
+  const manifest = join(directory, 'source.json')
+  await requirePath(manifest, 'model-router source.json')
+  const source = await readFile(manifest, 'utf8').then(JSON.parse).catch(error => {
+    throw new Error(`Invalid model-router source.json: ${error.message}`)
+  })
+  if (source?.version !== modelRouterVersion) {
+    throw new Error(`model-router source.json version must be ${modelRouterVersion}`)
+  }
+  const hash = createHash('sha256')
+  for await (const chunk of createReadStream(binary)) hash.update(chunk)
+  if (source.binarySha256 !== hash.digest('hex')) throw new Error('model-router binarySha256 mismatch')
+  return { binary, architectures }
 }
 
 async function accountEngineSource(explicit) {
@@ -200,12 +237,21 @@ async function verifyEngineCode(directory, requirement) {
   }
 }
 
-async function requireReleaseSignature(bundle, runtime, engine, signatures, config, bundleId) {
+function requireDeveloperId(label, signature, config) {
+  if (signature.status !== 'developer-id' || signature.teamIdentifier !== teamId ||
+      signature.authorities[0] !== `Developer ID Application: ${config.build.mac.identity}`) {
+    throw new Error(`${label} requires the Matou Developer ID signature (Team ${teamId}); found ${signature.status}`)
+  }
+}
+
+function requirementClauses(value) {
+  return value?.replaceAll(/\/\*\s*exists\s*\*\//g, 'exists')
+    .replaceAll(/"([\w.-]+)"/g, '$1').trim().split(/\s+and\s+/).sort()
+}
+
+async function requireReleaseSignature(bundle, runtime, engine, modelRouter, signatures, config, bundleId) {
   for (const [label, signature] of Object.entries(signatures)) {
-    if (signature.status !== 'developer-id' || signature.teamIdentifier !== teamId ||
-        signature.authorities[0] !== `Developer ID Application: ${config.build.mac.identity}`) {
-      throw new Error(`${label} requires the Matou Developer ID signature (Team ${teamId}); found ${signature.status}`)
-    }
+    requireDeveloperId(label, signature, config)
   }
   const runtimeRequirement = [
     'anchor apple generic',
@@ -218,10 +264,8 @@ async function requireReleaseSignature(bundle, runtime, engine, signatures, conf
     await verifyInstallSource(bundle)
   } else {
     const requirement = `identifier "${bundleId}" and ${runtimeRequirement}`
-    const clauses = value => value?.replaceAll(/\/\*\s*exists\s*\*\//g, 'exists')
-      .replaceAll(/"([\w.-]+)"/g, '$1').trim().split(/\s+and\s+/).sort()
     if (signatures.app.identifier !== bundleId ||
-        !isDeepStrictEqual(clauses(signatures.app.designatedRequirement), clauses(requirement))) {
+        !isDeepStrictEqual(requirementClauses(signatures.app.designatedRequirement), requirementClauses(requirement))) {
       throw new Error(`App signature requires the designated requirement for ${bundleId}`)
     }
     await run('/usr/bin/codesign', ['--verify', '--deep', '--strict', bundle])
@@ -229,6 +273,17 @@ async function requireReleaseSignature(bundle, runtime, engine, signatures, conf
   }
   await run('/usr/bin/codesign', ['--verify', '--strict', '-R', `=${runtimeRequirement}`, runtime])
   if (engine) await verifyEngineCode(dirname(engine), runtimeRequirement)
+  const identifier = `${config.build.appId}.${modelRouterName}`
+  const requirement = `identifier "${identifier}" and ${runtimeRequirement}`
+  for (const arch of modelRouter.architectures) {
+    const signature = await signatureSummary(modelRouter.binary, arch)
+    requireDeveloperId(`modelRouter (${arch})`, signature, config)
+    if (signature.identifier !== identifier ||
+        !isDeepStrictEqual(requirementClauses(signature.designatedRequirement), requirementClauses(requirement))) {
+      throw new Error(`modelRouter (${arch}) requires the designated requirement for ${identifier}`)
+    }
+  }
+  await run('/usr/bin/codesign', ['--verify', '--strict', '--all-architectures', '-R', `=${requirement}`, modelRouter.binary])
 }
 
 function validateVersion(version) {
@@ -274,7 +329,7 @@ function workflowPath(resources, workflow, appName) {
   return join(resources, dirname(workflow.to), `${workflowName(appName)}.workflow`)
 }
 
-async function verifyLayout(bundle, config, bundleId, workflow, requestedAppName) {
+async function verifyLayout(bundle, config, bundleId, workflow, requestedAppName, allowMissingModelRouter) {
   const contents = join(bundle, 'Contents')
   const macos = join(contents, 'MacOS')
   const resources = join(contents, 'Resources')
@@ -335,7 +390,10 @@ async function verifyLayout(bundle, config, bundleId, workflow, requestedAppName
     await requireExecutable(engine, 'account engine', true)
     await machoArchitectures(engine)
   }
-  return { info, runtime, engine, architectures: { desktop: desktopArchitectures, runtime: runtimeArchitectures } }
+  const modelRouter = await verifyModelRouter(join(resources, modelRouterName), desktopArchitectures, allowMissingModelRouter)
+  const architectures = { desktop: desktopArchitectures, runtime: runtimeArchitectures }
+  if (modelRouter) architectures.modelRouter = modelRouter.architectures
+  return { info, runtime, engine, modelRouter, architectures }
 }
 
 async function canonicalOutput(path) {
@@ -390,6 +448,13 @@ async function assemble(options, config, bundleId, workflow) {
     await requirePath(engineSource, 'account engine directory', 'directory')
     await requireExecutable(join(engineSource, accountEngine), 'account engine')
   }
+  const allowMissingModelRouter = options['allow-missing-model-router'] && options['model-router'] === undefined
+  const modelRouterSource = options['model-router'] ?? defaultModelRouter
+  const hasModelRouter = !allowMissingModelRouter || await optionalPath(modelRouterSource)
+  if (hasModelRouter) {
+    await requirePath(modelRouterSource, 'model-router directory', 'directory')
+    await requireExecutable(join(modelRouterSource, modelRouterName), 'model-router binary')
+  }
   const icon = await sourceFile(join(desktopProject, 'build', iconName), 'icon resource')
   const entitlements = await sourceFile(
     options.entitlements ?? join(desktopProject, config.build.mac.entitlements), 'entitlements resource'
@@ -418,6 +483,16 @@ async function assemble(options, config, bundleId, workflow) {
     if (engineSource) {
       await cp(engineSource, join(resources, accountEnginePath), { recursive: true, verbatimSymlinks: true })
     }
+    if (hasModelRouter) {
+      const directory = join(resources, modelRouterName)
+      await mkdir(directory)
+      for (const name of modelRouterFiles) {
+        const source = join(modelRouterSource, name)
+        await requirePath(source, `model-router ${name}`)
+        await copyFile(source, join(directory, name))
+      }
+      await chmod(join(directory, modelRouterName), 0o755)
+    }
     await copyFile(entitlements, join(resources, entitlementsName))
     const bundledWorkflow = workflowPath(resources, workflow, appName)
     for (const [index, file] of workflowFiles.entries()) {
@@ -438,7 +513,7 @@ async function assemble(options, config, bundleId, workflow) {
     await writeFile(infoPath, JSON.stringify(manifest(config, bundleId, options.version, appName, executableName)))
     await run('/usr/bin/plutil', ['-convert', 'xml1', '--', infoPath])
 
-    const { architectures } = await verifyLayout(bundle, config, bundleId, workflow, appName)
+    const { architectures } = await verifyLayout(bundle, config, bundleId, workflow, appName, allowMissingModelRouter)
     await requireAbsent(destination)
     await rename(bundle, destination)
     return { path: destination, bundleId, version: options.version, architectures }
@@ -450,19 +525,23 @@ async function assemble(options, config, bundleId, workflow) {
 async function main() {
   const input = ['desktop-bin', 'runtime-bin', 'out-dir', 'version']
   const { values } = parseArgs({ options: {
-    ...Object.fromEntries([...input, 'app-name', 'bundle-id', 'entitlements', 'claude-accounts-engine', 'verify'].map(name => [name, { type: 'string' }])),
+    ...Object.fromEntries([...input, 'app-name', 'bundle-id', 'entitlements', 'claude-accounts-engine', 'model-router', 'verify'].map(name => [name, { type: 'string' }])),
     unsigned: { type: 'boolean' },
+    'allow-missing-model-router': { type: 'boolean' },
     'require-release-signature': { type: 'boolean' },
     help: { type: 'boolean', short: 'h' }
   } })
   if (values.help) return console.log(usage)
   if (process.platform !== 'darwin') throw new Error('This toolkit requires macOS')
   const verifying = values.verify !== undefined
-  if (verifying && (!values.verify || [...input, 'entitlements', 'claude-accounts-engine', 'unsigned'].some(name => name in values))) {
-    throw new Error('--verify requires a .app path and accepts only --app-name, --bundle-id and --require-release-signature')
+  if (verifying && (!values.verify || [...input, 'entitlements', 'claude-accounts-engine', 'model-router', 'unsigned'].some(name => name in values))) {
+    throw new Error('--verify requires a .app path and accepts only --app-name, --bundle-id, --require-release-signature and --allow-missing-model-router')
   }
   if (!verifying && values['require-release-signature']) {
     throw new Error('--require-release-signature is only available with --verify')
+  }
+  if (values['require-release-signature'] && values['allow-missing-model-router']) {
+    throw new Error('--require-release-signature requires model-router')
   }
   if (!verifying) {
     for (const flag of input) {
@@ -483,11 +562,16 @@ async function main() {
 
   const path = resolve(values.verify)
   if (!path.endsWith('.app')) throw new Error('--verify requires a .app directory')
-  const { info, runtime, engine, architectures } = await verifyLayout(path, config, bundleId, workflow, values['app-name'])
+  const { info, runtime, engine, modelRouter, architectures } = await verifyLayout(
+    path, config, bundleId, workflow, values['app-name'], values['allow-missing-model-router']
+  )
   const [appSignature, runtimeSignature] = await Promise.all([signatureSummary(path), signatureSummary(runtime)])
   const signatures = { app: appSignature, runtime: runtimeSignature }
   if (engine) signatures.claudeAccounts = await signatureSummary(engine)
-  if (values['require-release-signature']) await requireReleaseSignature(path, runtime, engine, signatures, config, bundleId)
+  if (modelRouter) signatures.modelRouter = await signatureSummary(modelRouter.binary)
+  if (values['require-release-signature']) {
+    await requireReleaseSignature(path, runtime, engine, modelRouter, signatures, config, bundleId)
+  }
   console.log(JSON.stringify({ path, info, architectures, signatures }, null, 2))
 }
 
