@@ -174,6 +174,31 @@ enum Probe {
     DagWindow,
 }
 
+#[cfg(any(target_os = "windows", test))]
+fn should_save_window_bounds(probe: Option<Probe>, is_read_only: bool) -> bool {
+    probe.is_none() && !is_read_only
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Probe, should_save_window_bounds};
+
+    #[test]
+    fn saves_window_bounds_only_when_writable_and_not_probing() {
+        assert!(should_save_window_bounds(None, false));
+        assert!(!should_save_window_bounds(None, true));
+        for probe in [
+            Probe::Hidden,
+            Probe::Startup,
+            Probe::NoWindow,
+            Probe::DagWindow,
+        ] {
+            assert!(!should_save_window_bounds(Some(probe), false));
+            assert!(!should_save_window_bounds(Some(probe), true));
+        }
+    }
+}
+
 struct Desktop {
     instance: RefCell<Option<InstanceOwner>>,
     runtime: Rc<RefCell<RuntimeBridge>>,
@@ -318,10 +343,16 @@ impl Desktop {
                 let workspace = workspace.downgrade();
                 let desktop = self.clone();
                 window.on_window_should_close(cx, move |window, cx| {
-                    if let Err(error) = workspace.update(cx, |view, cx| view.flush_geometry(cx)) {
-                        eprintln!("Flush native window geometry before closing: {error:#}");
-                    }
-                    if desktop.probe.is_none()
+                    let save_bounds = workspace
+                        .update(cx, |view, cx| {
+                            view.flush_geometry(cx);
+                            should_save_window_bounds(desktop.probe, view.is_read_only())
+                        })
+                        .unwrap_or_else(|error| {
+                            eprintln!("Flush native window geometry before closing: {error:#}");
+                            false
+                        });
+                    if save_bounds
                         && let Err(error) =
                             windows_bounds::save(&desktop.bounds_path, window.window_bounds())
                     {
