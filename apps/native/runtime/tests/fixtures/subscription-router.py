@@ -1,5 +1,6 @@
 #!/usr/bin/python3
 """Pinned router contract fixture. All traffic stays on the test loopback."""
+import gzip
 import http.server
 import json
 import os
@@ -8,6 +9,7 @@ import sys
 import time
 import urllib.parse
 import uuid
+import zlib
 
 config_path = Path(sys.argv[sys.argv.index("-config") + 1])
 config = json.loads(config_path.read_text())
@@ -63,17 +65,28 @@ class Handler(http.server.BaseHTTPRequestHandler):
         pass
 
     def response(self, status, body, headers=()):
-        data = json.dumps(body).encode()
+        return self.raw_response(status, json.dumps(body).encode(), headers)
+
+    def raw_response(self, status, data, headers=(), chunked=False):
         self.send_response(status)
         self.send_header("x-cpa-version", "8.0.68" if mode == "wrong-version" else "8.0.69")
         self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
+        if chunked:
+            self.send_header("Transfer-Encoding", "chunked")
+        else:
+            self.send_header("Content-Length", str(len(data)))
         self.send_header("Connection", "close")
         for name, value in headers:
             self.send_header(name, value)
         self.end_headers()
         try:
-            self.wfile.write(data)
+            if chunked:
+                for offset in range(0, len(data), 32 * 1024):
+                    chunk = data[offset:offset + 32 * 1024]
+                    self.wfile.write(f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n")
+                self.wfile.write(b"0\r\n\r\n")
+            else:
+                self.wfile.write(data)
         except (BrokenPipeError, ConnectionResetError):
             pass
 
@@ -237,7 +250,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if operation == "rate":
             return self.response(429, {"model": model}, [("Retry-After", "7")])
         if operation in ("401", "403"):
-            return self.response(int(operation), {"type": "authentication_error"})
+            return self.response(int(operation), {"secret": "upstream-private"}, [("X-Upstream", "private")])
+        if operation == "expired":
+            return self.response(429, {"error": {"code": "token_expired", "message": "private"}})
+        if operation == "expired-gzip":
+            data = gzip.compress(b'{"error":{"type":"token_expired","message":"private"}}')
+            return self.raw_response(500, data, [("Content-Encoding", "gzip")])
+        if operation == "expired-deflate":
+            data = zlib.compress(b'{"error":{"message":"Please sign in again"}}')
+            return self.raw_response(502, data, [("Content-Encoding", "deflate")])
+        if operation == "ordinary-bad-gateway":
+            return self.raw_response(502, b'{"error":{"message":"upstream overloaded"}}', [("X-Upstream", "fixture")])
+        if operation in ("large", "large-gzip"):
+            data = b'{"error":{"code":"token_expired","message":"' + b"x" * (256 * 1024) + b'"}}'
+            if operation == "large-gzip":
+                encoded = gzip.compress(data)
+                (directory / "fixture-large-gzip").write_bytes(encoded)
+                return self.raw_response(429, encoded, [("Content-Encoding", "gzip")])
+            return self.raw_response(502, data, [("X-Upstream", "fixture")], chunked=True)
         if operation in ("sse-crash", "sse-hold"):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")

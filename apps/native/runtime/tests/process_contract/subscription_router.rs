@@ -319,12 +319,21 @@ fn router_events(host: &RuntimeChild, event: &str) -> Result<Vec<Value>> {
 }
 
 fn gateway(launch: &Launch, body: Value, header: &str) -> Result<BufReader<TcpStream>> {
+    gateway_http(launch, body, header, "1.1")
+}
+
+fn gateway_http(
+    launch: &Launch,
+    body: Value,
+    header: &str,
+    version: &str,
+) -> Result<BufReader<TcpStream>> {
     let mut socket = TcpStream::connect((Ipv4Addr::LOCALHOST, launch.url.port().unwrap()))?;
     socket.set_read_timeout(Some(TIMEOUT))?;
     let body = body.to_string();
     write!(
         socket,
-        "POST {}/v1/messages?fixture=1 HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\nAuthorization: Bearer discard-me\r\n{header}\r\n{body}",
+        "POST {}/v1/messages?fixture=1 HTTP/{version}\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\nAuthorization: Bearer discard-me\r\n{header}\r\n{body}",
         launch.url.path(),
         body.len()
     )?;
@@ -350,6 +359,138 @@ fn request(launch: &Launch, model: &str, fixture: &str) -> Result<(u16, String)>
         json!({"model": model, "fixture": fixture}),
         "",
     )?)
+}
+
+fn assert_auth_error(
+    (status, response): (u16, String),
+    expected_status: u16,
+    message: &str,
+) -> Result<()> {
+    assert_eq!(status, expected_status);
+    let (headers, body) = response.split_once("\r\n\r\n").context("HTTP headers")?;
+    assert!(headers.contains("content-type: application/json"));
+    assert!(!headers.contains("content-encoding:"));
+    assert!(!headers.contains("x-upstream:"));
+    assert_eq!(
+        serde_json::from_str::<Value>(body)?,
+        json!({"type": "error", "error": {"type": "authentication_error", "message": message}})
+    );
+    Ok(())
+}
+
+fn english_subscription_launch() -> Result<(Fixture, RuntimeChild, Launch)> {
+    let fixture = Fixture::new()?;
+    let mut host = fixture.spawn(None)?;
+    host.hello()?;
+    fs::write(host.data.join("locale.json"), r#"{"preference":"en"}"#)?;
+    let row = antigravity();
+    write_config(&host, ANTIGRAVITY_ID, std::slice::from_ref(&row))?;
+    credential(&host, &row, &["agy-opus", "agy-haiku"])?;
+    preferences(
+        &mut host,
+        json!({
+            "opus": target(ANTIGRAVITY_ID, "agy-opus"),
+            "sonnet": target(ANTIGRAVITY_ID, "agy-sonnet"),
+            "haiku": target(ANTIGRAVITY_ID, "agy-haiku"),
+        }),
+        Some(target(ANTIGRAVITY_ID, "agy-search")),
+        Some(compact(ANTIGRAVITY_ID, "agy-compact")),
+    )?;
+    host.input_bytes(b"claude\r")?;
+    let launch = fixture.launch(&mut host, "initial")?;
+    Ok((fixture, host, launch))
+}
+
+#[test]
+fn managed_subscription_classifies_only_bounded_auth_errors() -> Result<()> {
+    let account_status = |host: &mut RuntimeChild| -> Result<Value> {
+        let ProviderSettingsResult::Snapshot(snapshot) =
+            settings(host, Command::GetProviderSettings { request_id: 56 }, 56)?
+        else {
+            bail!("provider status snapshot missing");
+        };
+        Ok(snapshot["providers"]["claude-code"]
+            .as_array()
+            .and_then(|rows| rows.iter().find(|row| row["id"] == ANTIGRAVITY_ID))
+            .context("subscription provider snapshot")?["subscription"]["account"]["status"]
+            .clone())
+    };
+    let body = |fixture| json!({"model": "matou-role/opus", "fixture": fixture});
+
+    let (_fixture, mut host, launch) = english_subscription_launch()?;
+    for (operation, expected_status, header) in [
+        ("rate", 429, "retry-after: 7"),
+        ("ordinary-bad-gateway", 502, "x-upstream: fixture"),
+        ("large", 502, "x-upstream: fixture"),
+        ("large-gzip", 429, "content-encoding: gzip"),
+    ] {
+        let mut socket = gateway_http(&launch, body(operation), "", "1.0")?;
+        let mut headers = String::new();
+        loop {
+            let mut line = String::new();
+            ensure!(socket.read_line(&mut line)? > 0, "missing HTTP headers");
+            if line == "\r\n" {
+                break;
+            }
+            headers.push_str(&line);
+        }
+        assert_eq!(
+            headers.split_ascii_whitespace().nth(1),
+            Some(expected_status.to_string().as_str())
+        );
+        assert!(headers.lines().any(|line| line == header), "{headers}");
+        let mut actual = Vec::new();
+        socket.read_to_end(&mut actual)?;
+        let expected = match operation {
+            "rate" => br#"{"model": "matou-antigravity/agy-opus"}"#.to_vec(),
+            "ordinary-bad-gateway" => br#"{"error":{"message":"upstream overloaded"}}"#.to_vec(),
+            "large" => [
+                br#"{"error":{"code":"token_expired","message":""#.as_slice(),
+                &vec![b'x'; 256 * 1024],
+                br#""}}"#,
+            ]
+            .concat(),
+            _ => fs::read(host.data.join("model-router/fixture-large-gzip"))?,
+        };
+        assert!(
+            actual == expected,
+            "{operation}: {} bytes instead of {}",
+            actual.len(),
+            expected.len()
+        );
+        assert_eq!(account_status(&mut host)?, "ready");
+    }
+    stop(&mut host)?;
+
+    for (operation, status, label) in [
+        ("expired", 429, "Web search"),
+        ("expired-gzip", 500, "compaction"),
+        ("expired-deflate", 502, "opus"),
+    ] {
+        let (_fixture, mut host, launch) = english_subscription_launch()?;
+        let mut payload = body(operation);
+        let marker = match label {
+            "Web search" => {
+                payload["tools"] = json!([{"type": "web_search_20250305", "name": "web_search"}]);
+                ""
+            }
+            "compaction" => {
+                payload["model"] = json!("unassigned-model");
+                "x-claude-code-compaction: manual\r\n"
+            }
+            _ => "",
+        };
+        assert_auth_error(
+            response(gateway(&launch, payload, marker)?)?,
+            status,
+            &format!(
+                "{label} · agy sign-in has expired. Go to Settings → Claude Code, sign in again, then retry."
+            ),
+        )?;
+        assert_eq!(account_status(&mut host)?, "needs-sign-in");
+        stop(&mut host)?;
+    }
+    Ok(())
 }
 
 fn confirm(
@@ -862,6 +1003,7 @@ fn mixed_targets_route_exact_models_and_revoke_only_the_replaced_subscription() 
     let trace = Trace::start()?;
     let mut host = fixture.spawn(Some(&trace.url))?;
     host.hello()?;
+    fs::write(host.data.join("locale.json"), r#"{"preference":"zh-CN"}"#)?;
     let codex = codex(false);
     let agy = antigravity();
     write_config(&host, CODEX_ID, &[api(), codex.clone(), agy.clone()])?;
@@ -964,8 +1106,17 @@ fn mixed_targets_route_exact_models_and_revoke_only_the_replaced_subscription() 
     );
     trace.mainland.store(false, Ordering::Release);
 
-    assert_eq!(request(&launch, "matou-role/sonnet", "401")?.0, 401);
-    assert_eq!(request(&launch, "matou-role/opus", "403")?.0, 403);
+    for (model, fixture, status, label) in [
+        ("matou-role/sonnet", "401", 401, "sonnet · codex"),
+        ("matou-role/opus", "403", 403, "opus · agy"),
+    ] {
+        let result = request(&launch, model, fixture)?;
+        assert_auth_error(
+            result,
+            status,
+            &format!("{label} 登录已过期，请到 设置 → Claude Code 重新登录后重试。"),
+        )?;
+    }
     let ProviderSettingsResult::Snapshot(snapshot) =
         settings(&mut host, Command::GetProviderSettings { request_id: 4 }, 4)?
     else {
@@ -1090,6 +1241,48 @@ fn complete_api_assignments_do_not_start_the_unused_subscription() -> Result<()>
 }
 
 #[test]
+fn claude_launch_uses_explicit_control_asset_root() -> Result<()> {
+    let fixture = Fixture::new()?;
+    fs::write(fixture.cli.with_extension("skip-messages"), "")?;
+    let assets = fixture.root.path().join("control assets");
+    let plugin = assets.join("providers/claude-plugin");
+    fs::create_dir_all(plugin.join(".claude-plugin"))?;
+    fs::write(plugin.join(".claude-plugin/plugin.json"), "{}")?;
+    let mut host = RuntimeChild::spawn_configured_with(
+        fixture.root.path(),
+        &format!("PROMPT='{PROMPT} '\n"),
+        Path::new("/bin/zsh"),
+        Some(&fixture.cli),
+        |command| {
+            command.env("MATOU_CONTROL_ASSET_ROOT", &assets);
+        },
+    )?;
+    host.hello()?;
+    write_config(&host, "api", &[api()])?;
+    preferences(
+        &mut host,
+        json!({
+            "opus": target("api", "api-primary"), "sonnet": target("api", "api-primary"),
+            "haiku": target("api", "api-primary")
+        }),
+        None,
+        None,
+    )?;
+    host.input_bytes(b"claude\r")?;
+    let launch = fixture.launch(&mut host, "initial")?;
+    assert_eq!(
+        launch.args,
+        [
+            "--plugin-dir",
+            plugin.to_str().unwrap(),
+            "--model",
+            "matou-role/opus"
+        ]
+    );
+    stop(&mut host)
+}
+
+#[test]
 fn lazy_compaction_binds_only_on_request_and_watchdog_reaps_after_host_kill() -> Result<()> {
     let fixture = Fixture::new()?;
     let mut seed = fixture.spawn_with_shell(None, &fixture.root.path().join("missing-shell"))?;
@@ -1145,6 +1338,41 @@ fn lazy_compaction_binds_only_on_request_and_watchdog_reaps_after_host_kill() ->
         router_events(&host, "model-list")?
             .iter()
             .any(|event| event["name"] == CODEX_REF)
+    );
+    let model_lists = router_events(&host, "model-list")?.len();
+    let compact = || {
+        response(gateway(
+            &launch,
+            json!({"model": "matou-antigravity/matou-opus"}),
+            "x-claude-code-compaction: auto\r\n",
+        )?)
+    };
+    assert_eq!(compact()?.0, 200);
+    assert_eq!(router_events(&host, "model-list")?.len(), model_lists);
+
+    assert!(matches!(
+        settings(
+            &mut host,
+            Command::DeleteProvider {
+                request_id: 95,
+                cli: "claude-code".into(),
+                id: CODEX_ID.into(),
+            },
+            95
+        )?,
+        ProviderSettingsResult::Snapshot(_)
+    ));
+    assert_eq!(compact()?.0, 502);
+    let mut replacement = codex;
+    replacement["subscription"]["credentialRef"] =
+        json!({"name": "replacement-codex.json", "authIndex": "replacement-c-index"});
+    write_config(&host, ANTIGRAVITY_ID, &[api(), agy, replacement.clone()])?;
+    credential(&host, &replacement, &["codex-opus"])?;
+    assert!(compact()?.1.contains("matou-chatgpt/codex-compact"));
+    assert!(
+        router_events(&host, "model-list")?
+            .iter()
+            .any(|event| event["name"] == "replacement-codex.json")
     );
     let engines = router_events(&host, "engine-start")?;
     assert_eq!(engines.len(), 1);

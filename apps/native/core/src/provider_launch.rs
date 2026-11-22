@@ -2,7 +2,8 @@
 use std::{
     collections::BTreeMap,
     ffi::{OsStr, OsString},
-    fs, io,
+    fs,
+    io::{self, Read},
     path::{Path, PathBuf},
 };
 
@@ -17,8 +18,7 @@ use crate::{
     },
     provider_config::custom_context_window,
     pty::{CALLER_SESSION_MARKERS, LaunchProfile, ShellLaunch, get_var, remove_var, set_var},
-    sessions::{ClaudeRoleLaunchPreferences, read_claude_role_launch_preferences},
-    startup,
+    sessions::ClaudeRoleLaunchPreferences,
 };
 
 const OFFICIAL_ID: &str = "anthropic-official";
@@ -459,12 +459,16 @@ impl ClaudeLaunch {
             "api.anthropic.com",
         ) || self.gateway.as_ref().is_some_and(|gateway| {
             gateway.subscription_providers().next().is_some()
-                || gateway.connections().skip(usize::from(gateway.source.is_some()))
+                || gateway
+                    .connections()
+                    .skip(usize::from(gateway.source.is_some()))
                     .any(|target| target.endpoint.host_str() == Some("api.anthropic.com"))
         });
         let exit = codex_exit.filter(|_| {
             self.gateway.as_ref().is_some_and(|gateway| {
-                gateway.subscription_providers().any(|provider| provider == "codex")
+                gateway
+                    .subscription_providers()
+                    .any(|provider| provider == "codex")
             })
         });
         if let Some(zone) = cli_time_zone("claude-code", setting, system, exit, official) {
@@ -506,6 +510,8 @@ pub enum ClaudeGatewayCompaction {
 #[derive(Clone)]
 pub struct ClaudeLazyCompaction {
     data_root: PathBuf,
+    compaction: Value,
+    context_windows: Map<String, Value>,
     loopback_only: bool,
     subscription_provider: Option<&'static str>,
 }
@@ -515,25 +521,17 @@ impl ClaudeLazyCompaction {
         &self,
         load_native_catalog: &dyn Fn() -> Vec<Value>,
     ) -> Result<ClaudeGatewayRole> {
-        let preferences = {
-            let db = startup::open_read_only(&self.data_root.join("matou.sqlite"))?;
-            read_claude_role_launch_preferences(&db)
-        };
-        ensure!(
-            preferences.compaction["mode"] == "custom",
-            "Custom compaction target is unavailable"
-        );
         let config = read_provider_config(&self.data_root)?;
         let native_catalog = std::cell::OnceCell::new();
         let catalog = || native_catalog.get_or_init(load_native_catalog).as_slice();
-        let mut target = compaction_target(&config, &preferences.compaction, &catalog)?;
+        let mut target = compaction_target(&config, &self.compaction, &catalog)?;
         ensure!(
             !self.loopback_only || loopback_connection(&target.connection),
             "Custom compaction target is unavailable"
         );
         // The old API route has no directory output cap. A missing explicit
         // effort follows the working supplier, not the compaction supplier.
-        if preferences.compaction["effort"] == "follow" {
+        if self.compaction["effort"] == "follow" {
             target.effort = None;
         }
         target.model = if let Some(subscription) = &target.connection.subscription {
@@ -555,12 +553,41 @@ impl ClaudeLazyCompaction {
         target.context_window = effective_context_window(
             target.context_window,
             target.max_context_window,
-            preferences.context_windows.get(&target.provider_id),
+            self.context_windows.get(&target.provider_id),
         );
         target.stream_keep_alive |= is_gemini_model(&target.model);
         target.max_output_tokens = None;
         Ok(target)
     }
+}
+
+/// Decode a compressed gateway error within the caller's inspection budget.
+pub fn decode_claude_gateway_error(encoding: &str, body: &[u8], limit: usize) -> Option<Vec<u8>> {
+    use flate2::{Decompress, FlushDecompress, Status, read::MultiGzDecoder};
+
+    let mut decoded = Vec::new();
+    match encoding {
+        "gzip" => {
+            MultiGzDecoder::new(body)
+                .take((limit + 1) as u64)
+                .read_to_end(&mut decoded)
+                .ok()?;
+        }
+        "deflate" => {
+            let mut decoder = Decompress::new(true);
+            decoded.resize(limit + 1, 0);
+            if decoder
+                .decompress(body, &mut decoded, FlushDecompress::Finish)
+                .ok()?
+                != Status::StreamEnd
+            {
+                return None;
+            }
+            decoded.truncate(decoder.total_out() as usize);
+        }
+        _ => return None,
+    }
+    (decoded.len() <= limit).then_some(decoded)
 }
 
 /// A route the runtime must bind before opening a connection.
@@ -1254,7 +1281,10 @@ fn prepare_claude(
     );
     let mut provider = read_provider(data_root, &config, provider_binding)?;
     if subscriptions && provider.is_subscription() {
-        ensure!(gateway_connection(&provider).is_some(), "Subscription provider is unavailable");
+        ensure!(
+            gateway_connection(&provider).is_some(),
+            "Subscription provider is unavailable"
+        );
     }
     let bound_role = if matches!(
         target,
@@ -1333,7 +1363,8 @@ fn prepare_claude(
     let selected_model = match provider_binding["model"].as_str() {
         Some(bound)
             if !provider.is_subscription()
-                && (bound.starts_with("matou-chatgpt/") || bound.starts_with("matou-antigravity/")) =>
+                && (bound.starts_with("matou-chatgpt/")
+                    || bound.starts_with("matou-antigravity/")) =>
         {
             &provider.model
         }
@@ -1699,6 +1730,8 @@ fn independent_gateway_projection(
         projection.compaction = Some(ClaudeGatewayCompaction::OnFirstRequest(
             ClaudeLazyCompaction {
                 data_root: data_root.to_owned(),
+                compaction: preferences.compaction.clone(),
+                context_windows: preferences.context_windows.clone(),
                 loopback_only: gateway_loopback_only(environment),
                 subscription_provider: preferences.compaction["providerId"]
                     .as_str()
@@ -2133,7 +2166,10 @@ fn assignment_provider(config: &Value, assignment: &ClaudeRoleAssignment) -> Res
     let mut provider: Provider = serde_json::from_value(entry.clone())
         .map_err(|_| anyhow::anyhow!("Invalid assignment provider entry"))?;
     if provider.is_subscription() {
-        ensure!(subscription_kind(entry).is_some(), "Assignment provider is unavailable");
+        ensure!(
+            subscription_kind(entry).is_some(),
+            "Assignment provider is unavailable"
+        );
         validate_assignment_model(
             &entry["subscription"]["modelMetadata"],
             &provider,
@@ -2229,7 +2265,8 @@ fn model_role(source: &Provider, model: &str) -> Option<&'static str> {
     })
 }
 
-fn startup_role_alias(model: &str) -> Option<&'static str> {
+pub fn startup_role_alias(model: &str) -> Option<&'static str> {
+    let model = without_context_suffix(model);
     if model == "matou-role/opus-fallback" {
         return Some("opus");
     }

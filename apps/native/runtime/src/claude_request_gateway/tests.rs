@@ -2110,7 +2110,8 @@ fn compaction_legacy_resolves_lazily_retries_then_caches_and_preserves_legacy_ge
         work.local_addr()?,
         &format!("http://{}/first", compact.local_addr()?),
     );
-    let preferences = compaction_preferences(false, "custom", "follow");
+    let mut preferences = compaction_preferences(false, "custom", "follow");
+    preferences["contextWindows"]["compact"] = json!("512k");
     let original = config["providers"]["claude-code"][2].clone();
     config["providers"]["claude-code"][2]
         .as_object_mut()
@@ -2124,7 +2125,8 @@ fn compaction_legacy_resolves_lazily_retries_then_caches_and_preserves_legacy_ge
             .env
             .contains_key(std::ffi::OsStr::new(CONTEXT_ENV))
     );
-    let gateway = Gateway::start(Arc::new(plan.gateway.unwrap()))?;
+    let gateway_plan = Arc::new(plan.gateway.unwrap());
+    let gateway = Gateway::start(Arc::clone(&gateway_plan))?;
     let input = search_payload(json!("matou-api/sonnet"));
     let bytes = serde_json::to_vec(&input)?;
     let (work_requests, work_tasks) = record(work.try_clone()?, 2, "200 OK", "", b"ok");
@@ -2153,8 +2155,21 @@ fn compaction_legacy_resolves_lazily_retries_then_caches_and_preserves_legacy_ge
     println!("PASS legacy first parse fails at request time; no source fallback or cached error");
 
     config["providers"]["claude-code"][2] = original;
-    config["providers"]["claude-code"][2]["modelMetadata"][0]["contextWindow"] = json!(50_000);
-    persist_compaction(root.path(), &config, &preferences)?;
+    config["providers"]["claude-code"][2]["modelMetadata"][0]["contextWindow"] = json!(600_000);
+    config["providers"]["claude-code"][2]["modelMetadata"][0]["maxContextWindow"] =
+        json!(1_000_000);
+    let mut changed = compaction_preferences(false, "follow", "follow");
+    changed["contextWindows"]["compact"] = json!("maximum");
+    persist_compaction(root.path(), &config, &changed)?;
+    let Some(ClaudeGatewayCompaction::OnFirstRequest(preparation)) =
+        gateway_plan.compaction.as_ref()
+    else {
+        panic!("expected legacy compaction");
+    };
+    assert_eq!(
+        preparation.resolve(&Vec::new)?.context_window,
+        Some(512_000)
+    );
     let (received, tasks) = record(compact.try_clone()?, 2, "200 OK", "", b"ok");
     for attempt in [
         "retry after repair",
@@ -2312,6 +2327,7 @@ fn deepseek_gateway_reads_resumed_usage_from_hud_before_any_upstream_response() 
         Some(Arc::new(move || observed.lock().ok().map(|usage| *usage))),
         None,
         Arc::default(),
+        InterfaceLocale::default(),
         Some(address),
     )?;
     let (requests, workers) = record(server, 2, "200 OK", "", b"ok");

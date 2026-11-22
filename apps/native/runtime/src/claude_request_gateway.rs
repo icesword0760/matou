@@ -1,6 +1,7 @@
 //! Per-run API Key transport. The URL's unguessable path is the local credential.
 use std::{
     borrow::Cow,
+    collections::VecDeque,
     convert::Infallible,
     error::Error as _,
     fmt::Write as _,
@@ -37,20 +38,24 @@ use matou_native_core::{
     claude_role_budget::CLAUDE_ROLES,
     provider_launch::{
         ClaudeGatewayCompaction, ClaudeGatewayConnection, ClaudeGatewayProjection,
-        ClaudeGatewayRole, EFFORTS, PreparedSubscriptionTarget,
+        ClaudeGatewayRole, EFFORTS, PreparedSubscriptionTarget, decode_claude_gateway_error,
+        startup_role_alias,
     },
+    sessions::InterfaceLocale,
 };
 use serde_json::{Map, Value, json};
 use tokio::{
     net::TcpListener,
-    sync::{OnceCell, oneshot},
+    sync::{Mutex as AsyncMutex, OnceCell, oneshot},
     task::AbortHandle,
 };
 use tower_service::Service;
 
 use crate::{
-    egress_probe::Family, model_router::RouterConnection, subscription_launch::RouterRequest,
-    subscription_service::SessionSubscriptions,
+    egress_probe::Family,
+    model_router::RouterConnection,
+    subscription_launch::RouterRequest,
+    subscription_service::{SessionSubscriptions, TargetBinding},
 };
 
 #[cfg(test)]
@@ -63,6 +68,7 @@ mod deepseek_token_usage;
 mod gemini_sse_keepalive;
 
 const MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
+const MAX_AUTH_ERROR_BYTES: usize = 256 * 1024;
 const PATH_ERROR: &str = "Claude request gateway route was not found.";
 const LIMIT_ERROR: &str = "Claude request exceeds the gateway size limit.";
 const CONNECTION_ERROR: &str = "Claude request gateway could not reach the upstream service.";
@@ -103,6 +109,7 @@ impl Gateway {
         read_context_usage: Option<ReadContextUsage>,
         subscriptions: Option<SessionSubscriptions>,
         blocked_families: Arc<AtomicU8>,
+        locale: InterfaceLocale,
     ) -> Result<Self> {
         Self::start_gateway(
             projection,
@@ -110,6 +117,7 @@ impl Gateway {
             read_context_usage,
             subscriptions,
             blocked_families,
+            locale,
             #[cfg(test)]
             None,
         )
@@ -127,6 +135,7 @@ impl Gateway {
             None,
             None,
             Arc::default(),
+            InterfaceLocale::default(),
             loopback,
         )
     }
@@ -137,6 +146,7 @@ impl Gateway {
         read_context_usage: Option<ReadContextUsage>,
         subscriptions: Option<SessionSubscriptions>,
         blocked_families: Arc<AtomicU8>,
+        locale: InterfaceLocale,
         #[cfg(test)] loopback: Option<std::net::SocketAddr>,
     ) -> Result<Self> {
         let mut random = [0u8; 32];
@@ -151,10 +161,12 @@ impl Gateway {
             prefix,
             projection,
             lazy_compaction: OnceCell::new(),
+            lazy_subscription: AsyncMutex::default(),
             stopped: Arc::clone(&stopped),
             token_usage: Arc::default(),
             read_context_usage,
             subscriptions,
+            locale,
             blocked_families,
             keep_alive_interval,
             #[cfg(test)]
@@ -224,7 +236,9 @@ struct State {
     prefix: String,
     projection: Arc<ClaudeGatewayProjection>,
     lazy_compaction: OnceCell<ClaudeGatewayRole>,
+    lazy_subscription: AsyncMutex<Option<Arc<TargetBinding>>>,
     subscriptions: Option<SessionSubscriptions>,
+    locale: InterfaceLocale,
     blocked_families: Arc<AtomicU8>,
     stopped: Arc<AtomicBool>,
     token_usage: Arc<Mutex<deepseek_token_usage::Tracker>>,
@@ -239,6 +253,7 @@ struct MessageResponse {
     track_usage: bool,
     gemini_stream: bool,
     lazy_compaction: bool,
+    subscription_label: Option<&'static str>,
 }
 
 async fn serve(listener: TcpListener, state: Arc<State>) {
@@ -412,14 +427,31 @@ impl State {
             None => destination,
         };
         let (mut response, mut body) = if let Some(target) = &connection.subscription {
-            self.send_subscription(
-                target,
-                parts,
-                body,
-                buffered,
-                message_response.lazy_compaction,
-            )
-            .await?
+            let subscriptions = self.subscriptions.as_ref().ok_or(Fault::bad_gateway(
+                "Subscription launch service is unavailable",
+            ))?;
+            let (response, body, binding) = self
+                .send_subscription(
+                    subscriptions,
+                    target,
+                    parts,
+                    body,
+                    buffered,
+                    message_response.lazy_compaction,
+                )
+                .await?;
+            if response.status.as_u16() >= 400 {
+                return self
+                    .forward_subscription_error(
+                        subscriptions,
+                        binding,
+                        response,
+                        body,
+                        message_response.subscription_label.unwrap_or("main"),
+                    )
+                    .await;
+            }
+            (response, body)
         } else {
             send_once(destination, Request::from_parts(parts, body)).await?
         };
@@ -446,27 +478,41 @@ impl State {
 
     async fn send_subscription(
         &self,
+        subscriptions: &SessionSubscriptions,
         target: &PreparedSubscriptionTarget,
         parts: hyper::http::request::Parts,
         body: GatewayBody,
         buffered: Option<Bytes>,
         lazy: bool,
-    ) -> Result<(hyper::http::response::Parts, UpstreamBody), Fault> {
-        let subscriptions = self.subscriptions.as_ref().ok_or(Fault::bad_gateway(
-            "Subscription launch service is unavailable",
-        ))?;
+    ) -> Result<
+        (
+            hyper::http::response::Parts,
+            UpstreamBody,
+            Arc<TargetBinding>,
+        ),
+        Fault,
+    > {
         self.check_subscription_egress(target)?;
         let binding = match subscriptions.targets.get(target) {
             Some(binding) => Arc::clone(binding),
             None if lazy => {
-                let service = Arc::clone(&subscriptions.service);
-                let target = target.clone();
-                tokio::task::spawn_blocking(move || service.prepare_model_target(&target))
-                    .await
-                    .map_err(|_| Fault::bad_gateway(CONNECTION_ERROR))?
-                    .map_err(|_| {
-                        Fault::bad_gateway("Subscription compaction target is unavailable")
-                    })?
+                let mut cached = self.lazy_subscription.lock().await;
+                if let Some(binding) = cached.as_ref().filter(|binding| !binding.is_revoked()) {
+                    Arc::clone(binding)
+                } else {
+                    cached.take();
+                    let service = Arc::clone(&subscriptions.service);
+                    let target = target.clone();
+                    let binding =
+                        tokio::task::spawn_blocking(move || service.prepare_model_target(&target))
+                            .await
+                            .map_err(|_| Fault::bad_gateway(CONNECTION_ERROR))?
+                            .map_err(|_| {
+                                Fault::bad_gateway("Subscription compaction target is unavailable")
+                            })?;
+                    *cached = Some(Arc::clone(&binding));
+                    binding
+                }
             }
             None => return Err(Fault::bad_gateway("Subscription target was not prepared")),
         };
@@ -522,19 +568,64 @@ impl State {
             }
             result => result?,
         };
-        if matches!(
-            response.status,
-            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
-        ) {
-            let service = Arc::clone(&subscriptions.service);
-            let failed = Arc::clone(&binding);
-            tokio::task::spawn_blocking(move || service.mark_needs_sign_in(&failed))
-                .await
-                .map_err(|_| Fault::bad_gateway(CONNECTION_ERROR))?;
-        }
         drop(revoked);
-        body.cancelled = Some(Box::pin(async move { binding.cancelled().await }));
-        Ok((response, body))
+        let active = Arc::clone(&binding);
+        body.cancelled = Some(Box::pin(async move { active.cancelled().await }));
+        Ok((response, body, binding))
+    }
+
+    async fn forward_subscription_error(
+        &self,
+        subscriptions: &SessionSubscriptions,
+        binding: Arc<TargetBinding>,
+        mut response: hyper::http::response::Parts,
+        mut body: UpstreamBody,
+        label: &str,
+    ) -> Result<Response<GatewayBody>, Fault> {
+        let status = response.status;
+        let expired = matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN);
+        if !expired {
+            filter_hop_by_hop(&mut response.headers);
+            if body.size_hint().lower() > MAX_AUTH_ERROR_BYTES as u64 {
+                return Ok(Response::from_parts(response, body.boxed_unsync()));
+            }
+            let mut buffered = Vec::new();
+            while let Some(frame) = body.frame().await {
+                let frame = frame.map_err(|_| {
+                    Fault::bad_gateway(
+                        "Claude request gateway could not read the upstream response.",
+                    )
+                })?;
+                if let Ok(data) = frame.into_data() {
+                    if data.len() > MAX_AUTH_ERROR_BYTES - buffered.len() {
+                        // Preserve the already-read bytes and resume streaming on overflow.
+                        body.prefetched = VecDeque::from([buffered.into(), data]);
+                        return Ok(Response::from_parts(response, body.boxed_unsync()));
+                    }
+                    buffered.extend_from_slice(&data);
+                }
+            }
+            if !explicit_authentication_error(&response.headers, &buffered) {
+                body.prefetched.push_back(buffered.into());
+                return Ok(Response::from_parts(response, body.boxed_unsync()));
+            }
+        }
+
+        drop(body);
+        let label = if label == "webSearch" {
+            self.locale.text("网页搜索", "Web search")
+        } else {
+            label
+        };
+        let guidance = self.locale.text(
+            "登录已过期，请到 设置 → Claude Code 重新登录后重试。",
+            "sign-in has expired. Go to Settings → Claude Code, sign in again, then retry.",
+        );
+        let message = format!("{label} · {} {guidance}", binding.provider_name);
+        let service = Arc::clone(&subscriptions.service);
+        // Account-state notification failures must not replace the sanitized response.
+        let _ = tokio::task::spawn_blocking(move || service.mark_needs_sign_in(&binding)).await;
+        Ok(error_response(status, "authentication_error", &message))
     }
 
     fn check_subscription_egress(&self, target: &PreparedSubscriptionTarget) -> Result<(), Fault> {
@@ -604,6 +695,13 @@ impl State {
             None => None,
         };
         let target = custom.or(search).or(role_target);
+        let subscription_label = if search.is_some() {
+            Some("webSearch")
+        } else {
+            role.map(|index| CLAUDE_ROLES[index])
+                .or_else(|| model.and_then(startup_role_alias))
+                .or(compaction.map(|_| "compaction"))
+        };
         if target.is_none() && role.is_some() {
             return Err(Fault::bad_gateway(
                 "Claude model role target is unavailable.",
@@ -721,6 +819,7 @@ impl State {
         let message_response = MessageResponse {
             track_usage: is_message && !marked,
             lazy_compaction: matches!(compaction, Some(ClaudeGatewayCompaction::OnFirstRequest(_))),
+            subscription_label,
             gemini_stream: is_message
                 && message.as_ref().is_some_and(|message| {
                     message.get("stream").and_then(Value::as_bool) == Some(true)
@@ -983,6 +1082,55 @@ fn full_body(bytes: Bytes) -> GatewayBody {
         .boxed_unsync()
 }
 
+fn explicit_authentication_error(headers: &HeaderMap, body: &[u8]) -> bool {
+    static EXPIRED_MESSAGE: OnceLock<regress::Regex> = OnceLock::new();
+    const EXPIRED_CODES: [&str; 6] = [
+        "invalid_grant",
+        "invalid_token",
+        "token_expired",
+        "authentication_error",
+        "login_required",
+        "reauthentication_required",
+    ];
+    let decoded;
+    let body = match headers.get(header::CONTENT_ENCODING) {
+        None => body,
+        Some(encoding) if encoding.as_bytes().eq_ignore_ascii_case(b"identity") => body,
+        Some(encoding) => {
+            let Ok(encoding) = encoding.to_str() else {
+                return false;
+            };
+            let Some(bytes) = decode_claude_gateway_error(
+                &encoding.trim().to_ascii_lowercase(),
+                body,
+                MAX_AUTH_ERROR_BYTES,
+            ) else {
+                return false;
+            };
+            decoded = bytes;
+            &decoded
+        }
+    };
+    let Ok(payload) = serde_json::from_slice::<Value>(body) else {
+        return false;
+    };
+    let error = &payload["error"];
+    ["code", "type"]
+        .into_iter()
+        .filter_map(|field| error[field].as_str())
+        .any(|code| EXPIRED_CODES.contains(&code))
+        || error["message"].as_str().is_some_and(|message| {
+            let pattern = EXPIRED_MESSAGE.get_or_init(|| {
+                regress::Regex::with_flags(
+                    r"(?:\b(?:access token|refresh token|oauth token|session|authentication|credentials?)\b.{0,40}\b(?:expired|revoked)\b|\b(?:please|must|need to|required to) (?:re-?authenticate|(?:sign|log) in again)\b)",
+                    "i",
+                ).expect("static authentication error pattern")
+            });
+            let units = message.encode_utf16().collect::<Vec<_>>();
+            pattern.find_from_ucs2(&units, 0).next().is_some()
+        })
+}
+
 async fn with_revocation<T>(
     mut cancelled: Pin<&mut impl Future<Output = ()>>,
     send: impl Future<Output = Result<T, Fault>>,
@@ -1089,6 +1237,7 @@ async fn send_once(
     }
     let body = UpstreamBody {
         incoming,
+        prefetched: VecDeque::new(),
         _connection: task,
         usage: None,
         keep_alive: None,
@@ -1099,6 +1248,7 @@ async fn send_once(
 
 struct UpstreamBody {
     incoming: Incoming,
+    prefetched: VecDeque<Bytes>,
     _connection: AbortOnDrop,
     usage: Option<deepseek_token_usage::Observer>,
     keep_alive: Option<gemini_sse_keepalive::KeepAlive>,
@@ -1133,6 +1283,9 @@ impl Body for UpstreamBody {
                 "Subscription account changed",
             )
             .into())));
+        }
+        if let Some(bytes) = self.prefetched.pop_front() {
+            return Poll::Ready(Some(Ok(Frame::data(bytes))));
         }
         loop {
             match Pin::new(&mut self.incoming).poll_frame(cx) {
@@ -1177,7 +1330,7 @@ impl Body for UpstreamBody {
     }
 
     fn size_hint(&self) -> SizeHint {
-        if self.keep_alive.is_some() {
+        if self.keep_alive.is_some() || !self.prefetched.is_empty() {
             SizeHint::default()
         } else {
             self.incoming.size_hint()
@@ -1256,18 +1409,18 @@ impl Fault {
         } else {
             "invalid_request_error"
         };
-        let payload = json!({ "type": "error", "error": { "type": kind, "message": self.1 } });
-        Response::builder()
-            .status(self.0)
-            .header(header::CONTENT_TYPE, "application/json")
-            .header(header::CONNECTION, "close")
-            .body(
-                Full::new(Bytes::from(payload.to_string()))
-                    .map_err(|never| match never {})
-                    .boxed_unsync(),
-            )
-            .expect("static gateway response")
+        error_response(self.0, kind, &self.1)
     }
+}
+
+fn error_response(status: StatusCode, kind: &str, message: &str) -> Response<GatewayBody> {
+    let payload = json!({ "type": "error", "error": { "type": kind, "message": message } });
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::CONNECTION, "close")
+        .body(full_body(Bytes::from(payload.to_string())))
+        .expect("static gateway response")
 }
 
 mod deepseek_tools {

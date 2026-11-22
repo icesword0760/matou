@@ -652,7 +652,24 @@ fn windows_callback_command(url: &str) -> String {
     )
 }
 
-pub(crate) fn bundled_claude_plugin(executable: &Path) -> Option<PathBuf> {
+pub(crate) fn bundled_claude_plugin(
+    executable: Option<&Path>,
+    control_asset_root: Option<&Path>,
+) -> Option<PathBuf> {
+    let valid_plugin = |root: &Path| {
+        let plugin = root.join("providers/claude-plugin");
+        plugin
+            .join(".claude-plugin/plugin.json")
+            .is_file()
+            .then_some(plugin)
+    };
+    if let Some(plugin) = control_asset_root
+        .filter(|root| !root.as_os_str().is_empty())
+        .and_then(valid_plugin)
+    {
+        return Some(plugin);
+    }
+    let executable = executable?;
     let executable_dir = executable.parent()?;
     let resources = if executable
         .extension()
@@ -667,11 +684,7 @@ pub(crate) fn bundled_claude_plugin(executable: &Path) -> Option<PathBuf> {
         }
         contents.join("Resources")
     };
-    let plugin = resources.join("control-assets/providers/claude-plugin");
-    plugin
-        .join(".claude-plugin/plugin.json")
-        .is_file()
-        .then_some(plugin)
+    valid_plugin(&resources.join("control-assets"))
 }
 
 pub(crate) fn claude_config_counts(cwd: &Path, config: &Path) -> Value {
@@ -1205,6 +1218,20 @@ mod tests {
     #[test]
     fn bundled_claude_plugin_resolves_both_package_layouts() -> Result<()> {
         let root = tempfile::tempdir()?;
+        let missing_manifest = root.path().join("missing manifest");
+        fs::create_dir_all(missing_manifest.join("providers/claude-plugin/.claude-plugin"))?;
+        let manifest_is_directory = root.path().join("manifest is directory");
+        fs::create_dir_all(
+            manifest_is_directory.join("providers/claude-plugin/.claude-plugin/plugin.json"),
+        )?;
+        let explicit = root.path().join("explicit assets");
+        let explicit_plugin = explicit.join("providers/claude-plugin");
+        fs::create_dir_all(explicit_plugin.join(".claude-plugin"))?;
+        fs::write(explicit_plugin.join(".claude-plugin/plugin.json"), "{}")?;
+        assert_eq!(
+            bundled_claude_plugin(None, Some(&explicit)),
+            Some(explicit_plugin.clone()),
+        );
         for (executable, plugin) in [
             (
                 root.path().join("Matou package/matou-native-runtime.exe"),
@@ -1219,9 +1246,23 @@ mod tests {
             let plugin = plugin.join("control-assets/providers/claude-plugin");
             let metadata = plugin.join(".claude-plugin");
             fs::create_dir_all(&metadata)?;
-            assert_eq!(bundled_claude_plugin(&executable), None);
+            assert_eq!(bundled_claude_plugin(Some(&executable), None), None);
             fs::write(metadata.join("plugin.json"), "{}")?;
-            assert_eq!(bundled_claude_plugin(&executable), Some(plugin));
+            for unavailable in [
+                None,
+                Some(Path::new("")),
+                Some(missing_manifest.as_path()),
+                Some(manifest_is_directory.as_path()),
+            ] {
+                assert_eq!(
+                    bundled_claude_plugin(Some(&executable), unavailable),
+                    Some(plugin.clone()),
+                );
+            }
+            assert_eq!(
+                bundled_claude_plugin(Some(&executable), Some(&explicit)),
+                Some(explicit_plugin.clone()),
+            );
         }
         Ok(())
     }

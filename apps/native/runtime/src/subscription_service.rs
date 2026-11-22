@@ -51,6 +51,7 @@ pub(crate) struct SubscriptionService {
 
 pub(crate) struct TargetBinding {
     target: PreparedSubscriptionTarget,
+    pub provider_name: String,
     identity: SubscriptionAccountIdentity,
     auth_index: String,
     validated_generation: Mutex<u64>,
@@ -512,6 +513,7 @@ impl SubscriptionService {
         let id = target.provider_id.clone();
         let binding = Arc::new(TargetBinding {
             target,
+            provider_name: account.row.name,
             identity: account.row.identity,
             auth_index: account.auth_index,
             validated_generation: Mutex::new(account.connection.generation),
