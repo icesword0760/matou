@@ -1,5 +1,15 @@
 # Native parity execution state
 
+## Current checkpoint — 2026-11-23, v20 file-drop foreground activation & bare-metal Windows closure (`186641cf`)
+
+- Merged `186641cf` (`apps/native/desktop/src/terminal_surface.rs`: `cx.activate(true); window.activate_window();` inside `TerminalSurface::on_drop` before `this.focus.focus(window)`): desktop **217/217** pass, Windows x64 `--tests` 0 errors, `pnpm check:identifiers` & `git diff --check` clean.
+- Refreshed all 3 Release ZIPs at `186641cf` in `artifacts/native-parity/release/`:
+  - **Windows x64 v20**: `Matou-Native-0.2.26-win-x64.zip` (`60,251,219 B`, PE Subsystem `2` GUI, `verifyWindowsDirPackage` passed, SHA-256 `47babcbed0e319afa4024cb06df795b2761a7af110a9cb78400f466786d0c3b4`, deployed to `192.168.68.162:D:\MatouTest\release\Matou-Native-0.2.26-win-x64.zip`).
+  - **Windows ARM64 v20**: `Matou-Native-0.2.26-win-arm64.zip` (`55,381,091 B`, PE Subsystem `2` GUI, `verifyWindowsDirPackage` passed, SHA-256 `78efb1dbc845ff4b280e5721a7b7051bb522cbbaab6432a94eb74d1e804145f3`).
+  - **macOS ARM64 v20**: `Matou-Native-0.2.26-arm64-signed.zip` (`57,292,144 B`, 4/4 Developer ID signatures Team `JAKX72KQ6X` + hardened runtime + stable DR verified in-place & re-extracted, `--timestamp=none`, SHA-256 `052487b8b208c599f7f3c8d6b8f4b938b72778f0617d4dc95bd6f747741decfd`, `/Applications/码头.app` `65267` & `/Applications/码头测试版.app` `27893` untouched).
+- Bare-metal x64 Windows 11 v20 B4 auto-focus acceptance (`matou-win-v20-drop-focus-01`, `/tmp/matou-pc-v20-evidence/report.md`, `01-b4-drop-focus-verified.png`, `01a-b4-drop-focus-ime-composition.png`, `02-final-v20-preview.png`, SceneCraft PID `8928` untouched): **PASS** — dragging `drop test.txt` from foreground Explorer (`HWND 1245964`) onto Matou terminal (`HWND 264132`) and releasing without clicking automatically switched `GetForegroundWindow()` to Matou in `401.38 ms` (English) / `408.90 ms` (Sogou Chinese), inserted `"D:\MatouTest\v20-drop-test\drop test.txt"`, and direct `SendInput` typing `DROP_FOCUS_OK` at `401.60 ms` landed directly in PowerShell (and in Sogou candidate box anchored at the caret during Chinese mode); clean v20 left running in foreground (PID `4672`, Runtime PID `8684`, `HWND 12649696`, 0 console popups, 0 leftover tasks).
+- macOS v20 Finder real-drop acceptance (`matou-mac-v20-build-and-drop-01`, `/tmp/matou-mac-release-v20/report.md`): **deferred to idle desktop window** — user was actively using macOS and foreground returned to production `/Applications/码头.app` right before drag (1 accidental selection/copy of 175 chars in production terminal, zero commands sent, zero files modified); GUI interaction halted immediately, isolated instance & Finder window cleaned (0 leftovers).
+
 ## Current checkpoint — 2026-11-23, Windows v19 bare-metal full matrix, file drop & live `claude.exe 2.1.330` + DeepSeek E2E (`8d02a1b9`)
 
 - Bare-metal x64 Windows 11 10-item gap-closing matrix (`matou-win-pc-v18-matrix-01`, `/tmp/matou-pc-v18-matrix/report.md`, 10 verified 2880×1800 @ 200% DPI PNGs): **8/10 passed, 2 diagnosed** —
