@@ -9453,7 +9453,13 @@ fn dump_dsh_config(plan: &crate::dsh_launch::DshLaunchPlan, data_root: &Path) ->
     use std::io::Read;
     const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
     let mut output = tempfile::tempfile_in(data_root)?;
-    let mut child = std::process::Command::new(&plan.executable)
+    let mut command = std::process::Command::new(&plan.executable);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    let mut child = command
         .args(crate::dsh_launch::DUMP_CONFIG_ARGS)
         .current_dir(&plan.cwd)
         .env_clear()
