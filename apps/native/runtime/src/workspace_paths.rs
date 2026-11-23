@@ -9,8 +9,7 @@ use std::{
 };
 #[derive(Default)]
 pub struct WorkspacePathChecks {
-    generations: HashMap<String, i64>,
-    pending: HashMap<String, Receiver<WorkspacePathState>>,
+    pending: HashMap<String, Receiver<(&'static str, i64)>>,
 }
 impl WorkspacePathChecks {
     /// Coalesce checks for a workspace exactly as the original path service does.
@@ -19,34 +18,17 @@ impl WorkspacePathChecks {
             return Ok(());
         }
         let root = owner.workspace_path_target(workspace_id)?;
-        let stored = owner
-            .workspace_path_state(workspace_id)?
-            .map_or(0, |s| s.validation_generation);
-        let generation = stored.max(*self.generations.get(workspace_id).unwrap_or(&0)) + 1;
-        let id = workspace_id.to_owned();
         let (send, receive) = mpsc::channel();
         thread::Builder::new()
             .name("workspace-path".into())
             .spawn(move || {
                 let reason = inspect(std::path::Path::new(&root));
-                let state = WorkspacePathState {
-                    workspace_id: id,
-                    status: if reason.is_empty() {
-                        "valid"
-                    } else {
-                        "invalid"
-                    }
-                    .into(),
-                    reason: reason.into(),
-                    checked_at: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as i64,
-                    validation_generation: generation,
-                };
-                let _ = send.send(state);
+                let checked_at = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64;
+                let _ = send.send((reason, checked_at));
             })?;
-        self.generations.insert(workspace_id.into(), generation);
         self.pending.insert(workspace_id.into(), receive);
         Ok(())
     }
@@ -55,8 +37,8 @@ impl WorkspacePathChecks {
         let mut done = Vec::new();
         self.pending
             .retain(|id, receiver| match receiver.try_recv() {
-                Ok(state) => {
-                    done.push(owner.commit_workspace_path(&state).map(|()| state));
+                Ok((reason, checked_at)) => {
+                    done.push(record_check(owner, id, reason, checked_at));
                     false
                 }
                 Err(TryRecvError::Empty) => true,
@@ -67,4 +49,32 @@ impl WorkspacePathChecks {
             });
         done
     }
+}
+
+fn record_check(
+    owner: &mut ShellOwner,
+    workspace_id: &str,
+    reason: &str,
+    checked_at: i64,
+) -> Result<WorkspacePathState> {
+    let status = if reason.is_empty() {
+        "valid"
+    } else {
+        "invalid"
+    };
+    // An unchanged check still completes pending launches with the saved state.
+    let generation = match owner.workspace_path_state(workspace_id)? {
+        Some(state) if state.status == status && state.reason == reason => return Ok(state),
+        Some(state) => state.validation_generation + 1,
+        None => owner.last_workspace_validation_generation(workspace_id)? + 1,
+    };
+    let state = WorkspacePathState {
+        workspace_id: workspace_id.into(),
+        status: status.into(),
+        reason: reason.into(),
+        checked_at,
+        validation_generation: generation,
+    };
+    owner.commit_workspace_path(&state)?;
+    Ok(state)
 }

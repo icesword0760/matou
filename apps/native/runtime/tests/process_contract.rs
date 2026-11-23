@@ -245,6 +245,23 @@ impl RuntimeChild {
         })
     }
 
+    fn expect_diagnostic(&mut self, expected: &str) -> Result<()> {
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            match self.event(deadline, true)? {
+                Event::Diagnostic(message) => {
+                    ensure!(
+                        message.contains(expected),
+                        "unexpected diagnostic: {message}"
+                    );
+                    return Ok(());
+                }
+                Event::Closed => bail!("host closed while waiting for {expected}"),
+                _ => {}
+            }
+        }
+    }
+
     fn frame(&mut self, mut accept: impl FnMut(&[String], &Screen, u64) -> bool) -> Result<u64> {
         let deadline = Instant::now() + TIMEOUT;
         let mut last = Vec::new();
@@ -771,6 +788,102 @@ fn domain_error_after_ready_releases_real_owner_and_shell_without_backup() -> Re
     assert_no_clean_exit_backup(&child.data)?;
     drop(source);
     assert_runtime_released(&child.data)?;
+    Ok(())
+}
+
+#[test]
+fn active_workspace_path_poll_only_persists_and_publishes_changes() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let mut child = RuntimeChild::spawn(root.path())?;
+    child.ready()?;
+    let database = child.data.join("matou.sqlite");
+    let db = startup::open_read_only(&database)?;
+    let await_state = |child: &mut RuntimeChild, status, reason, generation| -> Result<String> {
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            match child.event(deadline, true)? {
+                Event::WorkspacePaths(paths) => {
+                    let [state] = paths.as_slice() else {
+                        bail!("expected one workspace path: {paths:?}");
+                    };
+                    assert_eq!(
+                        (
+                            state.status.as_str(),
+                            state.reason.as_str(),
+                            state.validation_generation
+                        ),
+                        (status, reason, generation)
+                    );
+                    assert_eq!(
+                        matou_native_core::workspace_paths::get(&db, &state.workspace_id)?.as_ref(),
+                        Some(state)
+                    );
+                    return Ok(state.workspace_id.clone());
+                }
+                Event::Diagnostic(error) => bail!("path check diagnostic: {error}"),
+                Event::Closed => bail!("host closed while waiting for {status}"),
+                _ => {}
+            }
+        }
+    };
+    let receipt_count = || -> Result<i64> {
+        Ok(db.query_row(
+            "SELECT COUNT(*) FROM command_deduplication WHERE command_type='workspace.validate-path'",
+            [],
+            |row| row.get(0),
+        )?)
+    };
+    let workspace_id = await_state(&mut child, "valid", "", 1)?;
+    // Drain two scheduled checks while the directory is healthy.
+    let deadline = Instant::now() + Duration::from_millis(4_250);
+    while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+        match child.messages.recv_timeout(left) {
+            Ok(message) => {
+                assert!(
+                    !matches!(
+                        message?,
+                        ServerMessage::Event(
+                            Event::WorkspacePaths(_) | Event::Diagnostic(_) | Event::Closed
+                        )
+                    ),
+                    "unexpected event during unchanged checks"
+                );
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => break,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    assert_eq!(receipt_count()?, 1);
+
+    let moved = root.path().join("moved-workspace");
+    fs::rename(&child.workspace, &moved)?;
+    await_state(&mut child, "invalid", "missing", 2)?;
+    assert_eq!(receipt_count()?, 2);
+    fs::rename(&moved, &child.workspace)?;
+    await_state(&mut child, "valid", "", 3)?;
+    assert_eq!(receipt_count()?, 3);
+
+    child.send(Command::Shutdown)?;
+    assert!(child.closed()?.is_empty());
+    let (status, stderr) = child.wait()?;
+    ensure!(status.success(), "{stderr}");
+
+    // Relinking clears the row before the async check. Model a stop in between.
+    assert_eq!(
+        Connection::open(&database)?.execute(
+            "DELETE FROM workspace_path_state WHERE workspace_id = ?",
+            [&workspace_id],
+        )?,
+        1
+    );
+    let mut reopened = RuntimeChild::spawn(root.path())?;
+    reopened.connect()?;
+    assert_eq!(await_state(&mut reopened, "valid", "", 4)?, workspace_id);
+    assert_eq!(receipt_count()?, 4);
+    reopened.send(Command::Shutdown)?;
+    assert!(reopened.closed()?.is_empty());
+    let (status, stderr) = reopened.wait()?;
+    ensure!(status.success(), "{stderr}");
     Ok(())
 }
 
@@ -2298,6 +2411,47 @@ exit 24
 }
 
 #[test]
+fn missing_claude_reports_diagnostic_and_restores_usable_shell() -> Result<()> {
+    use matou_native_core::sessions::{get_session, list_runs};
+
+    let root = tempfile::tempdir()?;
+    let missing = root.path().join("missing-claude");
+    let mut child = RuntimeChild::spawn_configured(
+        root.path(),
+        &format!("PROMPT='{PROMPT} '\n"),
+        Path::new("/bin/zsh"),
+        Some(&missing),
+    )?;
+    child.hello()?;
+    let old_pid = child.shell_pid()?;
+
+    child.input("claude")?;
+    child.expect_diagnostic("未检测到 Claude Code")?;
+    child.input("printf '%s\\n' SHELL_RESTORED")?;
+    child.frame(|rows, _, _| rows.iter().any(|row| row == "SHELL_RESTORED"))?;
+    assert_shell_gone(old_pid)?;
+    let db = startup::open_read_only(&child.data.join("matou.sqlite"))?;
+    let session = get_session(&db, &child.session)?.context("original Shell card")?;
+    assert_eq!(
+        (session.kind.as_str(), session.status.as_str()),
+        ("shell", "running")
+    );
+    assert_eq!(
+        list_runs(&db, &child.session)?
+            .iter()
+            .map(|run| run.profile.as_str())
+            .collect::<Vec<_>>(),
+        ["shell", "shell"]
+    );
+
+    child.send(Command::Shutdown)?;
+    assert!(child.closed()?.is_empty());
+    let (status, stderr) = child.wait()?;
+    ensure!(status.success(), "{stderr}");
+    Ok(())
+}
+
+#[test]
 fn shell_promotion_rolls_back_an_immediate_cli_exit_and_replays_input() -> Result<()> {
     use matou_native_core::sessions::{get_session, list_runs};
 
@@ -2316,6 +2470,7 @@ fn shell_promotion_rolls_back_an_immediate_cli_exit_and_replays_input() -> Resul
     child.input_bytes(b"claude\r\xe4\xbd")?;
     child.input("printf '%s\\n' READY_AFTER_ROLLBACK")?;
     let db = Connection::open(child.data.join("matou.sqlite"))?;
+    child.expect_diagnostic("process exited with code 23")?;
     child
         .frame(|rows, _, _| rows.iter().any(|row| row == "READY_AFTER_ROLLBACK"))
         .with_context(|| format!("rollback runs: {:?}", list_runs(&db, &child.session)))?;
@@ -2336,6 +2491,7 @@ fn shell_promotion_rolls_back_an_immediate_cli_exit_and_replays_input() -> Resul
     assert_eq!(runs[1].exit_code, Some(23));
     child.input("claude")?;
     child.input("printf '%s\\n' READY_AFTER_SECOND_ROLLBACK")?;
+    child.expect_diagnostic("process exited with code 23")?;
     child.frame(|rows, _, _| rows.iter().any(|row| row == "READY_AFTER_SECOND_ROLLBACK"))?;
     let runs = list_runs(&db, &child.session)?;
     assert_eq!(

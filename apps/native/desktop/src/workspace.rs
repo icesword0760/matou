@@ -99,6 +99,89 @@ use crate::{
     workspace_drag::{self, WorkspaceDragSnapshot, WorkspaceDragTask},
 };
 
+fn diagnostic_toast_text(message: &str, locale: InterfaceLocale) -> String {
+    let line = message.lines().next().unwrap_or_default().trim();
+    let actionable = [
+        "未检测到 Claude Code",
+        "未检测到 Codex",
+        "未检测到 Antigravity CLI",
+        "未检测到 DSH",
+        "启动准备失败：",
+        "Launch preparation failed:",
+        "Codex 启动失败：",
+        "Codex failed to start:",
+    ]
+    .iter()
+    .any(|prefix| line.starts_with(prefix))
+        || ["Claude Code", "Codex", "Antigravity", "DSH"]
+            .iter()
+            .any(|provider| {
+                line.strip_prefix(provider).is_some_and(|suffix| {
+                    (suffix.starts_with(" CLI (") || suffix.starts_with(" ("))
+                        && suffix.contains(") was not found.")
+                })
+            });
+    if !actionable {
+        return locale
+            .text(
+                "终端操作未完成，请重试。",
+                "The terminal action could not be completed. Try again.",
+            )
+            .into();
+    }
+    let text = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut characters = text.chars().filter(|ch| !ch.is_control());
+    let mut toast: String = characters.by_ref().take(160).collect();
+    if characters.next().is_some() {
+        toast.push('…');
+    }
+    toast
+}
+
+#[cfg(test)]
+mod diagnostic_toast_tests {
+    use super::{InterfaceLocale, diagnostic_toast_text};
+
+    #[test]
+    fn launch_diagnostics_keep_actionable_details_in_both_locales() {
+        let claude = "未检测到 Claude Code，请先安装并确认 `claude` 在 PATH 中，再重试。";
+        assert_eq!(
+            diagnostic_toast_text(
+                &format!("{claude}\r\ninternal details"),
+                InterfaceLocale::Chinese
+            ),
+            claude
+        );
+        let codex = "Codex CLI (codex) was not found. Install it and ensure `codex` is on PATH, then try again.";
+        assert_eq!(
+            diagnostic_toast_text(codex, InterfaceLocale::English),
+            codex
+        );
+        let launch_failure = "Codex failed to start: Sign in and try again.";
+        assert_eq!(
+            diagnostic_toast_text(launch_failure, InterfaceLocale::English),
+            launch_failure
+        );
+    }
+
+    #[test]
+    fn diagnostic_toast_bounds_length_and_keeps_unknown_errors_generic() {
+        let long = format!("启动准备失败：{}", "目录不可用".repeat(80));
+        let toast = diagnostic_toast_text(&long, InterfaceLocale::Chinese);
+        assert!(toast.starts_with("启动准备失败：目录不可用"));
+        assert!(toast.ends_with('…'));
+        assert_eq!(toast.chars().count(), 161);
+        assert_eq!(
+            diagnostic_toast_text("spawn PTY: internal error", InterfaceLocale::Chinese),
+            "终端操作未完成，请重试。"
+        );
+        assert_eq!(
+            diagnostic_toast_text("spawn PTY: internal error", InterfaceLocale::English),
+            "The terminal action could not be completed. Try again."
+        );
+    }
+}
+
 fn is_child_window_close_shortcut(stroke: &Keystroke) -> bool {
     stroke.key.eq_ignore_ascii_case("w")
         && stroke.modifiers
@@ -4892,8 +4975,9 @@ impl Workspace {
                     // Launch failures already carry this diagnostic in their card.
                     matches!(state, RecoveryState::StartFailed(error) | RecoveryState::Failed(error) if error == &message)
                 }) {
+                    let toast = diagnostic_toast_text(&message, self.locale);
                     self.fault = Some(message);
-                    self.show_error_toast(self.locale.text("终端操作未完成，请重试。", "The terminal action could not be completed. Try again."), cx);
+                    self.show_error_toast(toast, cx);
                 }
             }
             Event::StorageRecovered { .. } => self.fault = None,
@@ -5071,7 +5155,8 @@ impl Workspace {
             return;
         }
         if !matches!(event.kind, SurfaceEventKind::Resize { .. })
-            && (self.recovery_blocked(session_id) || self.provider_restore_hides_terminal(session_id))
+            && (self.recovery_blocked(session_id)
+                || self.provider_restore_hides_terminal(session_id))
         {
             return;
         }
@@ -12102,7 +12187,9 @@ impl Workspace {
                         .bg(button_background)
                         .whitespace_nowrap()
                         .cursor_pointer()
-                        .children(workspace_wiring::wiring_probe_bounds(format!("{name}-{id}")))
+                        .children(workspace_wiring::wiring_probe_bounds(format!(
+                            "{name}-{id}"
+                        )))
                         .child(label);
                     let button = measure_card_action(button, action_bounds);
                     if let Some(blocked) = blocked {
@@ -15824,7 +15911,8 @@ impl Render for Workspace {
                                 .borrow()
                                 .iter()
                                 .any(|bounds| bounds.contains(&event.position))
-                            || (!compact && !restore_hidden
+                            || (!compact
+                                && !restore_hidden
                                 && capture_terminal.read(cx).scrollbar_hit(event.position))
                         {
                             return;
