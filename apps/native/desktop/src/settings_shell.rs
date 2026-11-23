@@ -10521,6 +10521,11 @@ impl Render for SettingsShell {
             surface = surface.child(nav);
         }
         surface = surface.child(main);
+        // The fused Windows title bar occupies the first 48px of the stage.
+        // Reserve it as padding so no settings control can slide under the
+        // caption cluster; the drag strip itself is added below.
+        #[cfg(target_os = "windows")]
+        let surface = surface.pt(px(48.));
         let duration_ms = if reduced_motion() {
             1
         } else {
@@ -10534,7 +10539,7 @@ impl Render for SettingsShell {
         let dialog = self.render_editor(window, cx);
         let compaction_menu = self.render_compaction_menu(window, cx);
         let menu = self.render_provider_select(cx);
-        div()
+        let root = div()
             .id("settings-shell")
             .relative()
             .size_full()
@@ -10555,8 +10560,20 @@ impl Render for SettingsShell {
                     cx.notify();
                 }
             }))
-            .child(surface)
-            .children(dialog)
+            .child(surface);
+        #[cfg(target_os = "windows")]
+        let root = root.child(
+            div()
+                .id("settings-windows-drag")
+                .absolute()
+                .top_0()
+                .left_0()
+                .right(px(crate::windows_titlebar::WINDOWS_CAPTION_CONTROLS_WIDTH))
+                .h(px(48.))
+                .window_control_area(WindowControlArea::Drag)
+                .occlude(),
+        );
+        root.children(dialog)
             .children(menu)
             .children(compaction_menu)
     }
