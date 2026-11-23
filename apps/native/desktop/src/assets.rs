@@ -36,6 +36,20 @@ impl AssetSource for NativeAssets {
             "icons/pencil.svg" => include_bytes!("../assets/icons/pencil.svg"),
             "icons/task.svg" => include_bytes!("../assets/icons/task.svg"),
             "icons/download.svg" => include_bytes!("../assets/icons/download.svg"),
+            #[cfg(any(target_os = "windows", test))]
+            "icons/window-minimize.svg" => {
+                include_bytes!("../assets/icons/window-minimize.svg")
+            }
+            #[cfg(any(target_os = "windows", test))]
+            "icons/window-maximize.svg" => {
+                include_bytes!("../assets/icons/window-maximize.svg")
+            }
+            #[cfg(any(target_os = "windows", test))]
+            "icons/window-restore.svg" => {
+                include_bytes!("../assets/icons/window-restore.svg")
+            }
+            #[cfg(any(target_os = "windows", test))]
+            "icons/window-close.svg" => include_bytes!("../assets/icons/window-close.svg"),
             _ => return Ok(None),
         };
         Ok(Some(Cow::Borrowed(bytes)))

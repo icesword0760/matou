@@ -49,3 +49,4 @@ pub mod workspace_board;
 
 #[cfg(target_os = "windows")]
 pub mod windows_theme;
+pub mod windows_titlebar;

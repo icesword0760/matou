@@ -14,6 +14,60 @@ use serde_json::Value;
 
 pub const MAX_LAYOUT_NODES: usize = 10_000;
 pub const SEARCH_DISPLAY_LIMIT: usize = 12;
+
+#[cfg(any(target_os = "windows", test))]
+pub(crate) const DAG_WINDOWS_TOOLBAR_RIGHT_INSET: f32 =
+    crate::windows_titlebar::WINDOWS_CAPTION_CONTROLS_WIDTH + 12.;
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_TOOLBAR_LEFT: f32 = 16.;
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_TOOLBAR_DRAG_MIN: f32 = 24.;
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_TOOLBAR_GAP: f32 = 12.;
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_ZOOM_RESERVE: f32 = 164.;
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_LEGEND_RESERVE: f32 = 180.;
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_toolbar_widths(viewport: f32) -> (f32, f32) {
+    let available = (viewport
+        - WINDOWS_TOOLBAR_LEFT
+        - DAG_WINDOWS_TOOLBAR_RIGHT_INSET
+        - WINDOWS_TOOLBAR_DRAG_MIN
+        - WINDOWS_TOOLBAR_GAP
+        - WINDOWS_ZOOM_RESERVE)
+        .max(0.);
+    let search = (viewport * 0.44)
+        .clamp(180., 380.)
+        .min((available - WINDOWS_LEGEND_RESERVE).max(0.));
+    (search, available - search)
+}
+
+#[cfg(test)]
+mod windows_toolbar_tests {
+    use super::*;
+
+    #[test]
+    fn windows_toolbar_stays_outside_caption_controls() {
+        assert_eq!(WINDOWS_TOOLBAR_LEFT, 16.);
+        assert_eq!(DAG_WINDOWS_TOOLBAR_RIGHT_INSET, 150.);
+        assert_eq!(windows_toolbar_widths(680.), (134., 180.));
+        assert_eq!(windows_toolbar_widths(1440.).0, 380.);
+        for viewport in [680., 720., 960., 1440.] {
+            let (search, legend) = windows_toolbar_widths(viewport);
+            assert!(
+                search
+                    + legend
+                    + WINDOWS_ZOOM_RESERVE
+                    + WINDOWS_TOOLBAR_GAP
+                    + WINDOWS_TOOLBAR_DRAG_MIN
+                    <= viewport - WINDOWS_TOOLBAR_LEFT - DAG_WINDOWS_TOOLBAR_RIGHT_INSET
+            );
+        }
+    }
+}
+
 const NODE_WIDTH: f64 = 260.;
 const BASE_HEIGHT: f64 = 174.;
 const X_GAP: f64 = 110.;
@@ -2010,8 +2064,13 @@ mod view {
         fn render_toolbar(&self, window: &Window, cx: &mut Context<Self>) -> Div {
             let p = Palette::new(self.dark);
             let scale = self.canvas.transform.scale;
-            let viewport_width = self.canvas.viewport.width;
-            let search_width = (viewport_width * 0.44).clamp(180., 380.) as f32;
+            #[cfg(target_os = "windows")]
+            let (search_width, legend_max_width) =
+                windows_toolbar_widths(f32::from(window.viewport_size().width));
+            #[cfg(target_os = "windows")]
+            let compact_legend = legend_max_width < 320.;
+            #[cfg(not(target_os = "windows"))]
+            let search_width = (self.canvas.viewport.width * 0.44).clamp(180., 380.) as f32;
             let search_focused = self.search_input.read(cx).focus.is_focused(window);
             let query = self.canvas.search.query.clone();
             let selected = self.canvas.search.selected;
@@ -2143,6 +2202,11 @@ mod view {
                     )
                 });
 
+            #[cfg(target_os = "windows")]
+            let search = search
+                .flex_none()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+
             let zoom_label = format!("{}%", (scale * 100.).round() as i32);
             let tooltip_zoom_out = self.locale.text("缩小", "Zoom out");
             let tooltip_reset = self.locale.text("恢复 100%", "Reset to 100%");
@@ -2254,6 +2318,8 @@ mod view {
                         .text("Fork：继承对话", "Fork: inherits the conversation"),
                     FORK_EDGE,
                     false,
+                    #[cfg(target_os = "windows")]
+                    compact_legend,
                 ))
                 .child(legend_item(
                     self.locale.text(
@@ -2262,28 +2328,57 @@ mod view {
                     ),
                     p.legend_derived,
                     true,
+                    #[cfg(target_os = "windows")]
+                    compact_legend,
                 ));
+            #[cfg(target_os = "windows")]
+            let legend = legend
+                .max_w(px(legend_max_width))
+                .when(compact_legend, |legend| {
+                    // Stack the full labels when there is too little room for a horizontal legend.
+                    legend
+                        .flex_col()
+                        .items_start()
+                        .gap(px(6.))
+                        .w(px(legend_max_width))
+                });
 
-            div()
+            let right = div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(px(12.))
+                .child(zoom)
+                .child(legend);
+            let toolbar = div()
                 .absolute()
                 .top(px(14.))
-                .left(px(80.))
                 .right(self.toolbar_right_inset)
                 .flex()
                 .items_start()
-                .justify_between()
-                .gap(px(12.))
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .justify_between();
+            #[cfg(target_os = "windows")]
+            let toolbar = toolbar
+                .left(px(WINDOWS_TOOLBAR_LEFT))
                 .child(search)
                 .child(
                     div()
-                        .flex()
-                        .flex_none()
-                        .items_center()
-                        .gap(px(12.))
-                        .child(zoom)
-                        .child(legend),
+                        .id("dag-toolbar-drag")
+                        .flex_1()
+                        .min_w(px(WINDOWS_TOOLBAR_DRAG_MIN))
+                        .h(px(38.))
+                        .window_control_area(WindowControlArea::Drag)
+                        .occlude(),
                 )
+                .child(right.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()));
+            #[cfg(not(target_os = "windows"))]
+            let toolbar = toolbar
+                .left(px(80.))
+                .gap(px(12.))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(search)
+                .child(right);
+            toolbar
         }
     }
 
@@ -2920,32 +3015,40 @@ mod view {
             .bg(rgb(color))
     }
 
-    fn legend_item(label: &'static str, color: u32, dashed: bool) -> Div {
-        div()
-            .flex()
-            .items_center()
-            .gap(px(5.))
-            .child(
-                canvas(
-                    |_, _, _| (),
-                    move |bounds, _, window, _| {
-                        let y = bounds.origin.y + bounds.size.height * 0.5;
-                        let mut path = PathBuilder::stroke(px(2.));
-                        if dashed {
-                            path = path.dash_array(&[px(4.), px(3.)]);
-                        }
-                        path.move_to(point(bounds.origin.x, y));
-                        path.line_to(point(bounds.origin.x + bounds.size.width, y));
-                        if let Ok(path) = path.build() {
-                            window.paint_path(path, rgb(color));
-                        }
-                    },
-                )
-                .w(px(18.))
-                .h(px(4.))
-                .flex_none(),
+    fn legend_item(
+        label: &'static str,
+        color: u32,
+        dashed: bool,
+        #[cfg(target_os = "windows")] compact: bool,
+    ) -> Div {
+        let item = div().flex().items_center().gap(px(5.)).child(
+            canvas(
+                |_, _, _| (),
+                move |bounds, _, window, _| {
+                    let y = bounds.origin.y + bounds.size.height * 0.5;
+                    let mut path = PathBuilder::stroke(px(2.));
+                    if dashed {
+                        path = path.dash_array(&[px(4.), px(3.)]);
+                    }
+                    path.move_to(point(bounds.origin.x, y));
+                    path.line_to(point(bounds.origin.x + bounds.size.width, y));
+                    if let Ok(path) = path.build() {
+                        window.paint_path(path, rgb(color));
+                    }
+                },
             )
-            .child(ui_text(label))
+            .w(px(18.))
+            .h(px(4.))
+            .flex_none(),
+        );
+        #[cfg(target_os = "windows")]
+        if compact {
+            return item
+                .w_full()
+                .min_w_0()
+                .child(div().min_w_0().child(ui_text(label)));
+        }
+        item.child(ui_text(label))
     }
 
     fn count_running(count: usize, locale: InterfaceLocale) -> String {

@@ -11,6 +11,8 @@ use std::{
 use crate::history_view::{HistoryView, HistoryViewEvent, HistoryViewState};
 #[cfg(target_os = "macos")]
 use crate::recovery_water_view::RecoveryWater;
+#[cfg(target_os = "windows")]
+use crate::windows_titlebar::{WINDOWS_CAPTION_CONTROLS_WIDTH, windows_caption_controls};
 use database_recovery_page::{ConfirmationFocus, PageAction, PageOperation, PagePresentation};
 use gpui::{prelude::*, *};
 use matou_native_core::geometry::GeometryUpdate;
@@ -5071,7 +5073,8 @@ impl Workspace {
             return;
         }
         if !matches!(event.kind, SurfaceEventKind::Resize { .. })
-            && (self.recovery_blocked(session_id) || self.provider_restore_hides_terminal(session_id))
+            && (self.recovery_blocked(session_id)
+                || self.provider_restore_hides_terminal(session_id))
         {
             return;
         }
@@ -6759,6 +6762,25 @@ impl Workspace {
                 cx,
             )
         };
+        let header = div()
+            .h(px(NOTIFICATION_UI_SIDEBAR_HEADER_HEIGHT))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_between()
+            .pl(px(if cfg!(target_os = "macos") { 74. } else { 12. }))
+            .pr(px(NOTIFICATION_UI_SIDEBAR_RIGHT_PADDING))
+            .gap(px(4.))
+            .child(new_workspace);
+        #[cfg(target_os = "windows")]
+        let header = header.child(
+            div()
+                .id("windows-sidebar-drag")
+                .flex_1()
+                .h_full()
+                .window_control_area(WindowControlArea::Drag)
+                .occlude(),
+        );
         div()
             .w(px(NOTIFICATION_UI_SIDEBAR_WIDTH))
             .h_full()
@@ -6768,19 +6790,7 @@ impl Workspace {
             .border_r_1()
             .border_color(rgba(sidebar_palette.divider))
             .bg(background)
-            .child(
-                div()
-                    .h(px(NOTIFICATION_UI_SIDEBAR_HEADER_HEIGHT))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .pl(px(if cfg!(target_os = "macos") { 74. } else { 12. }))
-                    .pr(px(NOTIFICATION_UI_SIDEBAR_RIGHT_PADDING))
-                    .gap(px(4.))
-                    .child(new_workspace)
-                    .child(self.notification_bell(cx)),
-            )
+            .child(header.child(self.notification_bell(cx)))
             .child(
                 div()
                     .flex_1()
@@ -11126,7 +11136,7 @@ impl Workspace {
             .as_ref()
             .and_then(|h| h.scene.as_ref())
             .map(|s| &s.id);
-        let mut tabs = div()
+        let tabs = div()
             .id("scene-tabs")
             .flex_1()
             .min_w_0()
@@ -11135,6 +11145,9 @@ impl Workspace {
             .overflow_x_scroll()
             .overflow_y_hidden()
             .track_scroll(&self.tab_scroll);
+        #[cfg(target_os = "windows")]
+        let tabs = tabs.h_full();
+        let mut tabs = tabs;
         for scene in &self.scenes {
             let active = active_id == Some(&scene.id);
             let select_id = scene.id.clone();
@@ -11291,77 +11304,109 @@ impl Workspace {
                 ))
                 .child(add);
         }
-        div()
+        #[cfg(target_os = "windows")]
+        if !self.tab_overflow {
+            // A zero-basis trailing child only consumes leftover tab space, so
+            // it never adds scroll extent and cannot flip `tab_overflow` back
+            // and forth. The fixed 24px strip below covers the fully-scrolled
+            // overflow state.
+            tabs = tabs.child(
+                div()
+                    .id("windows-tabs-drag")
+                    .flex_1()
+                    .min_w(px(0.))
+                    .h_full()
+                    .window_control_area(WindowControlArea::Drag)
+                    .occlude(),
+            );
+        }
+        let bar = div()
             .h(px(48.))
             .flex_none()
             .px(px(8.))
             .flex()
             .items_center()
             .bg(background)
-            .children(workspace_wiring::wiring_probe_bounds("scene-bar".into()))
-            .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
+            .children(workspace_wiring::wiring_probe_bounds("scene-bar".into()));
+        #[cfg(not(target_os = "windows"))]
+        let bar = bar.on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move());
+        #[cfg(target_os = "windows")]
+        let bar = bar.pr(px(WINDOWS_CAPTION_CONTROLS_WIDTH + 8.));
+        let bar = bar
             .child(tabs)
-            .when(self.tab_overflow, |bar| bar.child(overflow_actions))
-            .child(
-                self.button(
-                    div()
-                        .id("graph")
-                        .size(px(28.))
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .cursor_pointer()
-                        .tooltip({
-                            let title = self.locale.text("打开会话 DAG", "Open session DAG");
-                            move |_, cx| cx.new(|_| CardTooltip(title.into())).into()
-                        })
-                        .child(icon("graph-ring", 16., rgba(palette.tabs.action_text))),
-                    &self.control_focus["graph"],
-                    Self::open_dag_window,
-                    cx,
-                ),
+            .when(self.tab_overflow, |bar| bar.child(overflow_actions));
+        #[cfg(target_os = "windows")]
+        let bar = bar.when(self.tab_overflow, |bar| {
+            bar.child(
+                div()
+                    .id("windows-overflow-drag")
+                    .w(px(24.))
+                    .h_full()
+                    .flex_none()
+                    .window_control_area(WindowControlArea::Drag)
+                    .occlude(),
             )
-            .child({
-                let split_disabled = !path_valid
-                    || self.active_scene_id().is_none()
-                    || self.active_level_focus().is_none();
-                let split_btn = div()
-                    .id("create-shell")
-                    .relative()
-                    .children(workspace_wiring::wiring_probe_bounds("create-shell".into()))
+        });
+        bar.child(
+            self.button(
+                div()
+                    .id("graph")
                     .size(px(28.))
                     .flex_none()
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(icon(
-                        "panel-right-open",
-                        16.,
-                        rgba(palette.tabs.action_text),
-                    ));
-                if self.read_only.is_some() {
-                    self.read_only_disabled(split_btn).into_any_element()
-                } else if split_disabled {
-                    split_btn
-                        .opacity(0.5)
-                        .cursor(CursorStyle::OperationNotAllowed)
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .into_any_element()
-                } else {
-                    self.button(
-                        split_btn.cursor_pointer().tooltip({
-                            let label = self.locale.text("横向新增卡", "Add shell card");
-                            move |_, cx| cx.new(|_| CardTooltip(label.into())).into()
-                        }),
-                        &self.control_focus["split"],
-                        |this, _, cx| this.create_shell_sibling(cx),
-                        cx,
-                    )
+                    .cursor_pointer()
+                    .tooltip({
+                        let title = self.locale.text("打开会话 DAG", "Open session DAG");
+                        move |_, cx| cx.new(|_| CardTooltip(title.into())).into()
+                    })
+                    .child(icon("graph-ring", 16., rgba(palette.tabs.action_text))),
+                &self.control_focus["graph"],
+                Self::open_dag_window,
+                cx,
+            ),
+        )
+        .child({
+            let split_disabled = !path_valid
+                || self.active_scene_id().is_none()
+                || self.active_level_focus().is_none();
+            let split_btn = div()
+                .id("create-shell")
+                .relative()
+                .children(workspace_wiring::wiring_probe_bounds("create-shell".into()))
+                .size(px(28.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(icon(
+                    "panel-right-open",
+                    16.,
+                    rgba(palette.tabs.action_text),
+                ));
+            if self.read_only.is_some() {
+                self.read_only_disabled(split_btn).into_any_element()
+            } else if split_disabled {
+                split_btn
+                    .opacity(0.5)
+                    .cursor(CursorStyle::OperationNotAllowed)
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .into_any_element()
-                }
-            })
-            .child(self.update_trigger(cx))
+            } else {
+                self.button(
+                    split_btn.cursor_pointer().tooltip({
+                        let label = self.locale.text("横向新增卡", "Add shell card");
+                        move |_, cx| cx.new(|_| CardTooltip(label.into())).into()
+                    }),
+                    &self.control_focus["split"],
+                    |this, _, cx| this.create_shell_sibling(cx),
+                    cx,
+                )
+                .into_any_element()
+            }
+        })
+        .child(self.update_trigger(cx))
     }
 
     fn remove_scope_choice(
@@ -12102,7 +12147,9 @@ impl Workspace {
                         .bg(button_background)
                         .whitespace_nowrap()
                         .cursor_pointer()
-                        .children(workspace_wiring::wiring_probe_bounds(format!("{name}-{id}")))
+                        .children(workspace_wiring::wiring_probe_bounds(format!(
+                            "{name}-{id}"
+                        )))
                         .child(label);
                     let button = measure_card_action(button, action_bounds);
                     if let Some(blocked) = blocked {
@@ -15211,11 +15258,40 @@ impl Workspace {
     fn workspace_frame(
         &self,
         root: Stateful<Div>,
+        _top_drag: bool,
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> AnyElement {
         #[cfg(debug_assertions)]
         database_recovery_page::probe_root(&root);
+        #[cfg(target_os = "windows")]
+        let root = {
+            let root = if _top_drag {
+                root.child(
+                    div()
+                        .id("windows-fullscreen-drag")
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right(px(WINDOWS_CAPTION_CONTROLS_WIDTH))
+                        .h(px(48.))
+                        .window_control_area(WindowControlArea::Drag)
+                        .occlude(),
+                )
+            } else {
+                root
+            };
+            // Both recovery views have a fixed light background.
+            let dark = !self.invalid_recovery_marker
+                && self.database_recovery.is_none()
+                && self.uses_dark_theme();
+            root.child(
+                windows_caption_controls(48., dark, _window.is_maximized())
+                    .absolute()
+                    .top_0()
+                    .right_0(),
+            )
+        };
         #[cfg(target_os = "windows")]
         let root = root.children(self.render_quit_confirmation(_window, _cx));
         root.into_any_element()
@@ -15284,6 +15360,7 @@ impl Render for Workspace {
                     window.viewport_size().height,
                     self.locale,
                 ),
+                true,
                 window,
                 cx,
             );
@@ -15312,7 +15389,7 @@ impl Render for Workspace {
                     this.database_recovery_action(&recovery_id, action, window, cx);
                 }),
             );
-            return self.workspace_frame(page, window, cx);
+            return self.workspace_frame(page, true, window, cx);
         }
         if self.hierarchy.is_none()
             && self.read_only.is_none()
@@ -15327,6 +15404,7 @@ impl Render for Workspace {
                     .id("startup-neutral")
                     .size_full()
                     .bg(rgba(palette.workspace.canvas)),
+                true,
                 window,
                 cx,
             );
@@ -15824,7 +15902,8 @@ impl Render for Workspace {
                                 .borrow()
                                 .iter()
                                 .any(|bounds| bounds.contains(&event.position))
-                            || (!compact && !restore_hidden
+                            || (!compact
+                                && !restore_hidden
                                 && capture_terminal.read(cx).scrollbar_hit(event.position))
                         {
                             return;
@@ -16399,23 +16478,33 @@ impl Render for Workspace {
                     .flex()
                     .flex_col()
                     .bg(stage_background)
-                    .child(
-                        div()
-                            .size_full()
-                            .flex()
-                            .flex_col()
-                            .when(self.settings.is_some(), |mut stage| {
+                    .child({
+                        let stage = div().size_full().flex().flex_col().when(
+                            self.settings.is_some(),
+                            |mut stage| {
                                 // Keep the terminal laid out while excluding it from focus and paint.
                                 stage.style().visibility = Some(Visibility::Hidden);
                                 stage
-                            })
-                            .children(self.dag_open_error_banner(cx))
+                            },
+                        );
+                        let dag_error_banner = self.dag_open_error_banner(cx);
+                        // Windows keeps the fused 48px topbar flush with the
+                        // window edge; the DAG failure banner sits below it.
+                        // Other platforms keep the frozen banner-first order.
+                        #[cfg(target_os = "windows")]
+                        let stage = stage
                             .child(self.topbar(window, cx))
+                            .children(dag_error_banner);
+                        #[cfg(not(target_os = "windows"))]
+                        let stage = stage
+                            .children(dag_error_banner)
+                            .child(self.topbar(window, cx));
+                        stage
                             .children(self.read_only_banner(cx))
                             .child(carousel)
                             .children(self.search_bar(cx))
-                            .child(self.footer(window, cx)),
-                    )
+                            .child(self.footer(window, cx))
+                    })
                     .children(self.settings.as_ref().map(|(settings, _)| {
                         div().absolute().inset_0().occlude().child(settings.clone())
                     })),
@@ -16470,7 +16559,7 @@ impl Render for Workspace {
             .children(self.project_instructions_overlay(window, cx))
             .children(self.render_wiring_overlay(window, cx))
             .children(permission_toast);
-        self.workspace_frame(root, window, cx)
+        self.workspace_frame(root, false, window, cx)
     }
 }
 
