@@ -261,7 +261,7 @@ index e187fc4b..b667427f 100644
                      &text_wide,
                      &format,
 diff --git a/src/platform/windows/events.rs b/src/platform/windows/events.rs
-index 9c10dcec..6bfc8675 100644
+index 9c10dcec..b097ce44 100644
 --- a/src/platform/windows/events.rs
 +++ b/src/platform/windows/events.rs
 @@ -1,4 +1,4 @@
@@ -270,30 +270,50 @@ index 9c10dcec..6bfc8675 100644
 
  use ::util::ResultExt;
  use anyhow::Context as _;
-@@ -39,7 +39,13 @@ impl WindowsWindowInner {
+@@ -39,7 +39,20 @@ impl WindowsWindowInner {
          lparam: LPARAM,
      ) -> LRESULT {
          let handled = match msg {
 -            WM_ACTIVATE => self.handle_activate_msg(wparam),
 +            WM_ACTIVATE => self.handle_activate_msg(handle, wparam),
++            WM_SETFOCUS => self.handle_set_focus(handle),
 +            WM_KILLFOCUS => {
-+                // Let Win32 finish the native focus transition without making
-+                // a synchronous IMM call from inside the focus notification.
++                let had_native_caret = {
++                    let mut state = self.state.borrow_mut();
++                    state.last_ime_caret = None;
++                    state.native_caret_height.take().is_some()
++                };
++                if had_native_caret {
++                    unsafe { DestroyCaret().log_err() };
++                }
 +                self.clear_ime_composition();
 +                None
 +            }
              WM_CREATE => self.handle_create_msg(handle),
              WM_MOVE => self.handle_move_msg(handle, lparam),
              WM_SIZE => self.handle_size_msg(wparam, lparam),
-@@ -101,6 +107,7 @@ impl WindowsWindowInner {
+@@ -99,8 +112,19 @@ impl WindowsWindowInner {
+             WM_KEYUP => self.handle_keyup_msg(handle, wparam, lparam),
+             WM_CHAR => self.handle_char_msg(wparam),
              WM_DEADCHAR => self.handle_dead_char_msg(wparam),
-             WM_IME_STARTCOMPOSITION => self.handle_ime_position(handle),
+-            WM_IME_STARTCOMPOSITION => self.handle_ime_position(handle),
++            WM_IME_SETCONTEXT => self.handle_ime_set_context(handle, wparam, lparam),
++            WM_IME_STARTCOMPOSITION => {
++                self.sync_ime_caret(handle, true);
++                Some(0)
++            }
++            WM_IME_NOTIFY => {
++                if should_sync_ime_notify(wparam) {
++                    self.sync_ime_caret(handle, true);
++                }
++                None
++            }
              WM_IME_COMPOSITION => self.handle_ime_composition(handle, lparam),
 +            WM_IME_ENDCOMPOSITION => self.handle_ime_end_composition(handle),
              WM_SETCURSOR => self.handle_set_cursor(handle, lparam),
              WM_SETTINGCHANGE => self.handle_system_settings_changed(handle, wparam, lparam),
              WM_INPUTLANGCHANGE => self.handle_input_language_changed(),
-@@ -173,7 +180,9 @@ impl WindowsWindowInner {
+@@ -173,7 +197,9 @@ impl WindowsWindowInner {
          // Don't resize the renderer when the window is minimized, but record that it was minimized so
          // that on restore the swap chain can be recreated via `update_drawable_size_even_if_unchanged`.
          if wparam.0 == SIZE_MINIMIZED as usize {
@@ -304,7 +324,7 @@ index 9c10dcec..6bfc8675 100644
              return Some(0);
          }
 
-@@ -185,6 +194,7 @@ impl WindowsWindowInner {
+@@ -185,6 +211,7 @@ impl WindowsWindowInner {
          let mut should_resize_renderer = false;
          if lock.restore_from_minimized.is_some() {
              lock.callbacks.request_frame = lock.restore_from_minimized.take();
@@ -312,7 +332,7 @@ index 9c10dcec..6bfc8675 100644
          } else {
              should_resize_renderer = true;
          }
-@@ -370,6 +380,12 @@ impl WindowsWindowInner {
+@@ -370,6 +397,12 @@ impl WindowsWindowInner {
      // It's a known bug that you can't trigger `ctrl-shift-0`. See:
      // https://superuser.com/questions/1455762/ctrl-shift-number-key-combination-has-stopped-working-for-a-few-numbers
      fn handle_keydown_msg(&self, handle: HWND, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
@@ -325,7 +345,7 @@ index 9c10dcec..6bfc8675 100644
          let mut lock = self.state.borrow_mut();
          let Some(input) = handle_key_event(handle, wparam, lparam, &mut lock, |keystroke| {
              PlatformInput::KeyDown(KeyDownEvent {
-@@ -407,6 +423,10 @@ impl WindowsWindowInner {
+@@ -407,6 +440,10 @@ impl WindowsWindowInner {
      }
 
      fn handle_keyup_msg(&self, handle: HWND, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
@@ -336,28 +356,107 @@ index 9c10dcec..6bfc8675 100644
          let mut lock = self.state.borrow_mut();
          let Some(input) = handle_key_event(handle, wparam, lparam, &mut lock, |keystroke| {
              PlatformInput::KeyUp(KeyUpEvent { keystroke })
-@@ -627,72 +647,97 @@ impl WindowsWindowInner {
+@@ -613,86 +650,174 @@ impl WindowsWindowInner {
+         if handled { Some(0) } else { Some(1) }
      }
 
-     fn handle_ime_position(&self, handle: HWND) -> Option<isize> {
--        unsafe {
--            let ctx = ImmGetContext(handle);
-+        self.set_ime_position(handle, true)?;
-+        Some(0)
+-    fn retrieve_caret_position(&self) -> Option<POINT> {
++    fn handle_set_focus(&self, handle: HWND) -> Option<isize> {
++        {
++            let mut state = self.state.borrow_mut();
++            state.last_ime_caret = None;
++            state.native_caret_height = None;
++        }
++        // Win32 can send this while GPUI is updating the window.
++        let this = self.this.clone();
++        self.executor
++            .spawn(async move {
++                if let Some(this) = this.upgrade()
++                    && unsafe { GetFocus() } == handle
++                {
++                    this.sync_ime_caret(handle, true);
++                }
++            })
++            .detach();
++        None
 +    }
++
++    fn handle_ime_set_context(
++        &self,
++        handle: HWND,
++        wparam: WPARAM,
++        lparam: LPARAM,
++    ) -> Option<isize> {
++        if wparam.0 == 0 {
++            return None;
++        }
++        self.sync_ime_caret(handle, true);
++        let new_lparam = strip_ime_composition_window_flag(lparam);
++        Some(unsafe { DefWindowProcW(handle, WM_IME_SETCONTEXT, wparam, new_lparam) }.0)
++    }
++
++    fn retrieve_caret_rect(&self) -> Option<RECT> {
+         self.with_input_handler_and_scale_factor(|input_handler, scale_factor| {
+             let caret_range = input_handler.selected_text_range(false)?;
+-            let caret_position = input_handler.bounds_for_range(caret_range.range)?;
+-            Some(POINT {
+-                // logical to physical
+-                x: (caret_position.origin.x.0 * scale_factor) as i32,
+-                y: (caret_position.origin.y.0 * scale_factor) as i32
+-                    + ((caret_position.size.height.0 * scale_factor) as i32 / 2),
+-            })
++            let bounds = input_handler.bounds_for_range(caret_range.range)?;
++            Some(caret_bounds_to_physical_rect(
++                bounds.origin.x.0,
++                bounds.origin.y.0,
++                bounds.size.width.0,
++                bounds.size.height.0,
++                scale_factor,
++            ))
+         })
+     }
+
+-    fn handle_ime_position(&self, handle: HWND) -> Option<isize> {
++    pub(super) fn sync_ime_caret(&self, handle: HWND, force: bool) -> Option<()> {
++        let caret = self.retrieve_caret_rect()?;
++        {
++            let mut state = self.state.borrow_mut();
++            if !force && state.last_ime_caret == Some(caret) {
++                return Some(());
++            }
++            state.last_ime_caret = Some(caret);
++        }
++
++        // Windows can query the native caret before the first IMM composition.
++        // Keep it hidden because GPUI draws the visible caret.
+         unsafe {
+-            let ctx = ImmGetContext(handle);
++            if GetFocus() == handle {
++                let height = caret.bottom - caret.top;
++                let needs_caret = self.state.borrow().native_caret_height != Some(height);
++                if needs_caret && CreateCaret(handle, None, 1, height).log_err().is_some() {
++                    self.state.borrow_mut().native_caret_height = Some(height);
++                }
++                SetCaretPos(caret.left, caret.top).log_err();
++            }
++        }
 
 -            let Some(caret_position) = self.retrieve_caret_position() else {
 -                return Some(0);
--            };
++        let context = ImeContext::acquire(handle)?;
++        let position = POINT {
++            x: caret.left,
++            y: caret.bottom,
++        };
++        unsafe {
++            let composition = COMPOSITIONFORM {
++                dwStyle: CFS_FORCE_POSITION,
++                ptCurrentPos: position,
++                ..Default::default()
+             };
 -            {
 -                let config = COMPOSITIONFORM {
-+    fn set_ime_position(&self, handle: HWND, start: bool) -> Option<()> {
-+        let caret = self.retrieve_caret_position()?;
-+        let context = ImeContext::acquire(handle)?;
-+        unsafe {
-+            if start {
-+                let form = COMPOSITIONFORM {
-                     dwStyle: CFS_POINT,
+-                    dwStyle: CFS_POINT,
 -                    ptCurrentPos: caret_position,
 -                    ..Default::default()
 -                };
@@ -365,22 +464,27 @@ index 9c10dcec..6bfc8675 100644
 -            }
 -            {
 -                let config = CANDIDATEFORM {
--                    dwStyle: CFS_CANDIDATEPOS,
++            ImmSetCompositionWindow(context.raw, &composition)
++                .ok()
++                .log_err();
++            let candidate = CANDIDATEFORM {
++                dwIndex: 0,
++                dwStyle: CFS_EXCLUDE,
++                ptCurrentPos: position,
++                rcArea: caret,
++            };
++            if !ImmSetCandidateWindow(context.raw, &candidate).as_bool() {
++                let fallback = CANDIDATEFORM {
+                     dwStyle: CFS_CANDIDATEPOS,
 -                    ptCurrentPos: caret_position,
-+                    ptCurrentPos: caret,
++                    ptCurrentPos: position,
                      ..Default::default()
                  };
 -                ImmSetCandidateWindow(ctx, &config as _).ok().log_err();
-+                ImmSetCompositionWindow(context.raw, &form).ok().log_err();
++                ImmSetCandidateWindow(context.raw, &fallback).ok().log_err();
              }
 -            ImmReleaseContext(handle, ctx).ok().log_err();
 -            Some(0)
-+            let form = CANDIDATEFORM {
-+                dwStyle: CFS_CANDIDATEPOS,
-+                ptCurrentPos: caret,
-+                ..Default::default()
-+            };
-+            ImmSetCandidateWindow(context.raw, &form).ok().log_err();
          }
 +        Some(())
      }
@@ -463,8 +567,8 @@ index 9c10dcec..6bfc8675 100644
 +            self.with_input_handler(|handler| {
 +                handler.replace_and_mark_text_in_range(None, &text, caret);
 +            })?;
-+            self.set_ime_position(handle, false);
 +        }
++        self.sync_ime_caret(handle, true);
 +        Some(())
 +    }
 +
@@ -486,7 +590,7 @@ index 9c10dcec..6bfc8675 100644
      }
 
      /// SEE: https://learn.microsoft.com/en-us/windows/win32/winmsg/wm-nccalcsize
-@@ -746,11 +791,19 @@ impl WindowsWindowInner {
+@@ -746,11 +871,19 @@ impl WindowsWindowInner {
          Some(0)
      }
 
@@ -508,7 +612,7 @@ index 9c10dcec..6bfc8675 100644
                  let mut lock = this.state.borrow_mut();
                  if let Some(mut func) = lock.callbacks.active_status_change.take() {
                      drop(lock);
-@@ -1165,6 +1218,7 @@ impl WindowsWindowInner {
+@@ -1165,6 +1298,7 @@ impl WindowsWindowInner {
      }
 
      fn handle_input_language_changed(&self) -> Option<isize> {
@@ -516,7 +620,7 @@ index 9c10dcec..6bfc8675 100644
          unsafe {
              PostMessageW(
                  Some(self.platform_window_handle),
-@@ -1174,7 +1228,7 @@ impl WindowsWindowInner {
+@@ -1174,7 +1308,7 @@ impl WindowsWindowInner {
              )
              .log_err();
          }
@@ -525,7 +629,7 @@ index 9c10dcec..6bfc8675 100644
      }
 
      fn handle_window_visibility_changed(&self, handle: HWND, wparam: WPARAM) -> Option<isize> {
-@@ -1195,12 +1249,13 @@ impl WindowsWindowInner {
+@@ -1195,12 +1329,13 @@ impl WindowsWindowInner {
      #[inline]
      fn draw_window(&self, handle: HWND, force_render: bool) -> Option<isize> {
          let mut request_frame = self.state.borrow_mut().callbacks.request_frame.take()?;
@@ -540,7 +644,7 @@ index 9c10dcec..6bfc8675 100644
          Some(0)
      }
 
-@@ -1293,7 +1348,8 @@ fn translate_message(handle: HWND, wparam: WPARAM, lparam: LPARAM) {
+@@ -1293,7 +1428,8 @@ fn translate_message(handle: HWND, wparam: WPARAM, lparam: LPARAM) {
          time: 0,
          pt: POINT::default(),
      };
@@ -550,7 +654,7 @@ index 9c10dcec..6bfc8675 100644
  }
 
  fn handle_key_event<F>(
-@@ -1341,12 +1397,8 @@ where
+@@ -1341,12 +1477,8 @@ where
                  capslock,
              }))
          }
@@ -564,7 +668,7 @@ index 9c10dcec..6bfc8675 100644
              let keystroke = parse_normal_key(vkey, lparam, modifiers)?;
              Some(f(keystroke))
          }
-@@ -1428,31 +1480,119 @@ fn parse_normal_key(
+@@ -1428,31 +1560,213 @@ fn parse_normal_key(
      })
  }
 
@@ -586,6 +690,31 @@ index 9c10dcec..6bfc8675 100644
 -            Some(String::from_utf16_lossy(wstring))
 +fn is_ime_process_key(wparam: WPARAM) -> bool {
 +    VIRTUAL_KEY(wparam.loword()) == VK_PROCESSKEY
++}
++
++fn caret_bounds_to_physical_rect(
++    origin_x: f32,
++    origin_y: f32,
++    width: f32,
++    height: f32,
++    scale_factor: f32,
++) -> RECT {
++    let left = (origin_x * scale_factor).round() as i32;
++    let top = (origin_y * scale_factor).round() as i32;
++    RECT {
++        left,
++        top,
++        right: left + (width * scale_factor).round().max(1.0) as i32,
++        bottom: top + (height * scale_factor).round().max(1.0) as i32,
++    }
++}
++
++fn strip_ime_composition_window_flag(lparam: LPARAM) -> LPARAM {
++    LPARAM(lparam.0 & !(ISC_SHOWUICOMPOSITIONWINDOW as isize))
++}
++
++fn should_sync_ime_notify(wparam: WPARAM) -> bool {
++    matches!(wparam.0 as u32, IMN_OPENCANDIDATE | IMN_CHANGECANDIDATE)
 +}
 +
 +#[derive(Debug, PartialEq, Eq)]
@@ -660,7 +789,76 @@ index 9c10dcec..6bfc8675 100644
 +
 +#[cfg(test)]
 +mod ime_tests {
-+    use super::*;
++    use windows::Win32::{
++        Foundation::{LPARAM, RECT, WPARAM},
++        UI::Input::{
++            Ime::{
++                GCS_COMPATTR, GCS_COMPSTR, GCS_CURSORPOS, GCS_RESULTSTR, IMN_CHANGECANDIDATE,
++                IMN_CLOSECANDIDATE, IMN_OPENCANDIDATE, IMN_SETCANDIDATEPOS,
++                IMN_SETCOMPOSITIONWINDOW, ISC_SHOWUICANDIDATEWINDOW, ISC_SHOWUICOMPOSITIONWINDOW,
++                ISC_SHOWUIGUIDELINE,
++            },
++            KeyboardAndMouse::{VK_A, VK_BACK, VK_LEFT, VK_PROCESSKEY, VK_RETURN, VK_SPACE},
++        },
++    };
++
++    use super::{
++        ImeUpdate, caret_bounds_to_physical_rect, is_ime_process_key, should_sync_ime_notify,
++        strip_ime_composition_window_flag,
++    };
++
++    #[test]
++    fn caret_rect_rounds_at_each_dpi_and_has_minimum_dimensions() {
++        for (scale, left, top, right, bottom) in [
++            (1.0, 10, 21, 13, 36),
++            (1.5, 15, 31, 19, 53),
++            (2.0, 21, 41, 26, 70),
++        ] {
++            assert_eq!(
++                caret_bounds_to_physical_rect(10.25, 20.5, 2.5, 14.5, scale),
++                RECT {
++                    left,
++                    top,
++                    right,
++                    bottom,
++                }
++            );
++        }
++        assert_eq!(
++            caret_bounds_to_physical_rect(10.0, 20.0, 0.1, 0.0, 2.0),
++            RECT {
++                left: 20,
++                top: 40,
++                right: 21,
++                bottom: 41,
++            }
++        );
++    }
++
++    #[test]
++    fn set_context_preserves_candidate_and_other_ui_flags() {
++        let other_flags = (ISC_SHOWUICANDIDATEWINDOW | ISC_SHOWUIGUIDELINE) as isize;
++        let flags = other_flags | ISC_SHOWUICOMPOSITIONWINDOW as isize;
++        assert_eq!(
++            strip_ime_composition_window_flag(LPARAM(flags)),
++            LPARAM(other_flags)
++        );
++        assert_eq!(strip_ime_composition_window_flag(LPARAM(0)), LPARAM(0));
++    }
++
++    #[test]
++    fn only_opening_or_changing_candidates_syncs_the_caret() {
++        for notification in [IMN_OPENCANDIDATE, IMN_CHANGECANDIDATE] {
++            assert!(should_sync_ime_notify(WPARAM(notification as usize)));
++        }
++        for notification in [
++            IMN_CLOSECANDIDATE,
++            IMN_SETCANDIDATEPOS,
++            IMN_SETCOMPOSITIONWINDOW,
++        ] {
++            assert!(!should_sync_ime_notify(WPARAM(notification as usize)));
++        }
++    }
 +
 +    #[test]
 +    fn process_key_is_reserved_for_ime() {
@@ -801,10 +999,16 @@ index 361d8e11..8186f377 100644
  ) {
      // Here we wait a bit to ensure the system has time to recover from the device lost state.
 diff --git a/src/platform/windows/window.rs b/src/platform/windows/window.rs
-index e765fa1a..53127343 100644
+index e765fa1a..ffaec8dd 100644
 --- a/src/platform/windows/window.rs
 +++ b/src/platform/windows/window.rs
-@@ -6,7 +6,7 @@ use std::{
+@@ -1,12 +1,12 @@
+ #![deny(unsafe_op_in_unsafe_fn)]
+
+ use std::{
+-    cell::RefCell,
++    cell::{Cell, RefCell},
+     num::NonZeroIsize,
      path::PathBuf,
      rc::{Rc, Weak},
      str::FromStr,
@@ -813,23 +1017,67 @@ index e765fa1a..53127343 100644
      time::{Duration, Instant},
  };
 
-@@ -74,6 +74,7 @@ pub(crate) struct WindowsWindowInner {
+@@ -42,6 +42,8 @@ pub struct WindowsWindowState {
+
+     pub callbacks: Callbacks,
+     pub input_handler: Option<PlatformInputHandler>,
++    pub(super) last_ime_caret: Option<RECT>,
++    pub(super) native_caret_height: Option<i32>,
+     pub pending_surrogate: Option<u16>,
+     pub last_reported_modifiers: Option<Modifiers>,
+     pub last_reported_capslock: Option<Capslock>,
+@@ -74,6 +76,8 @@ pub(crate) struct WindowsWindowInner {
      pub(crate) validation_number: usize,
      pub(crate) main_receiver: flume::Receiver<Runnable>,
      pub(crate) platform_window_handle: HWND,
 +    pub(super) frame_requested: Arc<AtomicBool>,
++    ime_sync_pending: Cell<bool>,
  }
 
  impl WindowsWindowState {
-@@ -231,6 +232,7 @@ impl WindowsWindowInner {
+@@ -130,6 +134,8 @@ impl WindowsWindowState {
+             min_size,
+             callbacks,
+             input_handler,
++            last_ime_caret: None,
++            native_caret_height: None,
+             pending_surrogate,
+             last_reported_modifiers,
+             last_reported_capslock,
+@@ -231,6 +237,8 @@ impl WindowsWindowInner {
              validation_number: context.validation_number,
              main_receiver: context.main_receiver.clone(),
              platform_window_handle: context.platform_window_handle,
 +            frame_requested: Arc::new(AtomicBool::new(true)),
++            ime_sync_pending: Cell::new(false),
              system_settings: RefCell::new(WindowsSystemSettings::new(context.display)),
          }))
      }
-@@ -801,6 +803,10 @@ impl PlatformWindow for WindowsWindow {
+@@ -597,6 +605,23 @@ impl PlatformWindow for WindowsWindow {
+
+     fn set_input_handler(&mut self, input_handler: PlatformInputHandler) {
+         self.0.state.borrow_mut().input_handler = Some(input_handler);
++        if self.0.ime_sync_pending.replace(true) {
++            return;
++        }
++
++        // Reading the caret reenters GPUI through the input handler. Wait until
++        // the current draw has released its borrow of the app and window.
++        let this = self.0.this.clone();
++        let hwnd = self.0.hwnd;
++        self.0
++            .executor
++            .spawn(async move {
++                if let Some(this) = this.upgrade() {
++                    this.ime_sync_pending.set(false);
++                    this.sync_ime_caret(hwnd, false);
++                }
++            })
++            .detach();
+     }
+
+     fn take_input_handler(&mut self) -> Option<PlatformInputHandler> {
+@@ -801,6 +826,10 @@ impl PlatformWindow for WindowsWindow {
          self.0.state.borrow().is_fullscreen()
      }
 

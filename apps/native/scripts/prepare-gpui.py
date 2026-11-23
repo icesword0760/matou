@@ -26,9 +26,9 @@ PATCHED_SHA256 = {
     "src/platform.rs": "a7a8075608b61796ba7871aa118f4c2c3efab97c3bc3ec0553ad4de32547b24c",
     "src/window.rs": "8560e49d65f7fcec992d2309d1fbff1d32cecac9fe4f39aab77f20d51e0fc639",
     "src/platform/windows/direct_write.rs": "e345de60957683a982c560a00f7d685b17d23b91e1c9b45c52f930a4e4c0f609",
-    "src/platform/windows/events.rs": "13d2d19bc906335c7cf25e420be76577f536f5bf6e77f600cd1ca96013d1c7ca",
+    "src/platform/windows/events.rs": "ee294c71a1324eda335786e9448b061a0c86e7abf858535715ef8dc38f0d3c1b",
     "src/platform/windows/platform.rs": "f56046900c173914859233aad5af10717ec115a701e545c905fe022f8de340a3",
-    "src/platform/windows/window.rs": "30e3c2ceb3dad569157874d99852d6a44b0b2cb3880a5a7d7abc11fdcdc7c736",
+    "src/platform/windows/window.rs": "b946befe60d271dc97dcad562da3bd70415bd4d138eaa5c0f1f53e516de25cfa",
 }
 SOURCES = tuple(map(Path, PATCHED_SHA256))
 ORIGINAL_SHA256 = {
@@ -40,7 +40,15 @@ ORIGINAL_SHA256 = {
     "src/platform/windows/platform.rs": "81ca3093537e9320e2e8a28bc15d9883080546b96a685c0662158d853e090334",
     "src/platform/windows/window.rs": "e8d8ce5c589e72ed3d6b86d8008b8e1cc0d4c471c272fd8e6c6f38351a714493",
 }
-PREVIOUS_WINDOWS_EVENTS_SHA256 = "01f741c6822215d75d76d46d3066bc0386d5d6f5667ee4fb8a6d877d27d223a5"
+PREVIOUS_SHA256 = {
+    "src/platform/windows/events.rs": (
+        "01f741c6822215d75d76d46d3066bc0386d5d6f5667ee4fb8a6d877d27d223a5",
+        "13d2d19bc906335c7cf25e420be76577f536f5bf6e77f600cd1ca96013d1c7ca",
+    ),
+    "src/platform/windows/window.rs": (
+        "30e3c2ceb3dad569157874d99852d6a44b0b2cb3880a5a7d7abc11fdcdc7c736",
+    ),
+}
 MARKER = ".matou-patch.json"
 
 
@@ -55,9 +63,8 @@ def current_sources():
     except OSError as error:
         raise SystemExit(f"Unrecognized GPUI source tree; preserve it before preparing: {error}")
     for name, source_hash in hashes.items():
-        if source_hash == PREVIOUS_WINDOWS_EVENTS_SHA256 and name == "src/platform/windows/events.rs":
-            continue
-        if source_hash not in (PATCHED_SHA256[name], ORIGINAL_SHA256.get(name)):
+        if (source_hash not in (PATCHED_SHA256[name], ORIGINAL_SHA256.get(name)) and
+                source_hash not in PREVIOUS_SHA256.get(name, ())):
             raise SystemExit(f"The generated GPUI source {name} has local changes; preserve it before preparing again.")
     return hashes
 
