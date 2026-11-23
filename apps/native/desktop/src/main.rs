@@ -23,7 +23,7 @@ use matou_native_desktop::{macos, window_registry::file_url_path};
 #[cfg(target_os = "windows")]
 mod windows_bounds;
 #[cfg(target_os = "windows")]
-use matou_native_desktop::windows_theme;
+use matou_native_desktop::{windows_theme, workspace::QuitConfirmed};
 
 actions!(matou_native, [Quit]);
 
@@ -179,9 +179,54 @@ fn should_save_window_bounds(probe: Option<Probe>, is_read_only: bool) -> bool {
     probe.is_none() && !is_read_only
 }
 
+#[cfg(any(target_os = "windows", test))]
+fn should_confirm_main_window_close(probe: Option<Probe>, confirmed: bool) -> bool {
+    probe.is_none() && !confirmed
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn is_windows_close_shortcut(stroke: &Keystroke) -> bool {
+    let mods = stroke.modifiers;
+    stroke.key.eq_ignore_ascii_case("f4") && mods.alt && !mods.control && !mods.platform
+}
+
+#[cfg(target_os = "windows")]
+fn post_windows_close(window: &Window) -> bool {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
+
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return false;
+    };
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return false;
+    };
+    // Route the system shortcut through the same native callback as the title-bar X,
+    // even when a focused control would otherwise consume Alt+F4.
+    unsafe { PostMessageW(handle.hwnd.get() as _, WM_CLOSE, 0, 0) != 0 }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Probe, should_save_window_bounds};
+    use super::{
+        Probe, is_windows_close_shortcut, should_confirm_main_window_close,
+        should_save_window_bounds,
+    };
+    use gpui::Keystroke;
+
+    #[test]
+    fn windows_main_close_requires_confirmation_unless_probing() {
+        assert!(should_confirm_main_window_close(None, false));
+        assert!(!should_confirm_main_window_close(None, true));
+        for probe in [
+            Probe::Hidden,
+            Probe::Startup,
+            Probe::NoWindow,
+            Probe::DagWindow,
+        ] {
+            assert!(!should_confirm_main_window_close(Some(probe), false));
+        }
+    }
 
     #[test]
     fn saves_window_bounds_only_when_writable_and_not_probing() {
@@ -197,6 +242,22 @@ mod tests {
             assert!(!should_save_window_bounds(Some(probe), true));
         }
     }
+
+    #[test]
+    fn windows_close_shortcut_requires_alt_f4() {
+        for (stroke, closes) in [
+            ("alt-f4", true),
+            ("f4", false),
+            ("ctrl-alt-f4", false),
+            ("alt-f3", false),
+        ] {
+            assert_eq!(
+                is_windows_close_shortcut(&Keystroke::parse(stroke).unwrap()),
+                closes,
+                "{stroke}"
+            );
+        }
+    }
 }
 
 struct Desktop {
@@ -210,17 +271,51 @@ struct Desktop {
 }
 
 impl Desktop {
-    fn begin_quit(&self, cx: &mut App) {
+    fn stop_forwarding_for_quit(&self) -> bool {
         if self.quitting.replace(true) {
-            return;
+            return false;
         }
         if let Some(instance) = self.instance.borrow().as_ref() {
             instance.stop_forwarding();
+        }
+        true
+    }
+
+    fn begin_quit(&self, cx: &mut App) {
+        if !self.stop_forwarding_for_quit() {
+            return;
         }
         if let Some(window) = self.live_window(cx)
             && let Err(error) = window.update(cx, |view, _, cx| view.flush_geometry(cx))
         {
             eprintln!("Flush native window geometry before quitting: {error:#}");
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn finish_windows_main_close(
+        &self,
+        workspace: &Entity<Workspace>,
+        window: &Window,
+        cx: &mut App,
+    ) {
+        let confirmed = workspace.read(cx).is_quit_confirmed();
+        if confirmed && !self.stop_forwarding_for_quit() {
+            return;
+        }
+        let save_bounds = workspace.update(cx, |view, cx| {
+            view.flush_geometry(cx);
+            should_save_window_bounds(self.probe, view.is_read_only())
+        });
+        if save_bounds
+            && let Err(error) = windows_bounds::save(&self.bounds_path, window.window_bounds())
+        {
+            eprintln!("Save native window bounds: {error:#}");
+        }
+        if confirmed {
+            // Quit the app even if detached windows are still open. The existing
+            // app-quit observer owns runtime shutdown and instance cleanup.
+            cx.quit();
         }
     }
 
@@ -340,24 +435,42 @@ impl Desktop {
             .detach();
             #[cfg(target_os = "windows")]
             {
+                if self.probe.is_none() {
+                    let main_window = window.window_handle();
+                    cx.intercept_keystrokes(move |event, window, cx| {
+                        if window.window_handle() == main_window
+                            && is_windows_close_shortcut(&event.keystroke)
+                            && post_windows_close(window)
+                        {
+                            cx.stop_propagation();
+                        }
+                    })
+                    .detach();
+                    let desktop = self.clone();
+                    window
+                        .subscribe(
+                            &workspace,
+                            cx,
+                            move |workspace, _: &QuitConfirmed, window, cx| {
+                                desktop.finish_windows_main_close(&workspace, window, cx);
+                            },
+                        )
+                        .detach();
+                }
                 let workspace = workspace.downgrade();
                 let desktop = self.clone();
                 window.on_window_should_close(cx, move |window, cx| {
-                    let save_bounds = workspace
-                        .update(cx, |view, cx| {
-                            view.flush_geometry(cx);
-                            should_save_window_bounds(desktop.probe, view.is_read_only())
-                        })
-                        .unwrap_or_else(|error| {
-                            eprintln!("Flush native window geometry before closing: {error:#}");
-                            false
-                        });
-                    if save_bounds
-                        && let Err(error) =
-                            windows_bounds::save(&desktop.bounds_path, window.window_bounds())
-                    {
-                        eprintln!("Save native window bounds: {error:#}");
+                    let Some(workspace) = workspace.upgrade() else {
+                        return true;
+                    };
+                    if should_confirm_main_window_close(
+                        desktop.probe,
+                        workspace.read(cx).is_quit_confirmed(),
+                    ) {
+                        workspace.update(cx, |view, cx| view.open_quit_confirmation(window, cx));
+                        return false;
                     }
+                    desktop.finish_windows_main_close(&workspace, window, cx);
                     true
                 });
             }
