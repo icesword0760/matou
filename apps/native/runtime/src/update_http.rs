@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -6,8 +7,8 @@ use std::time::Duration;
 
 use http_body_util::{BodyExt, Empty};
 use hyper::body::{Body, Bytes};
-use hyper::header::{CONTENT_LENGTH, LOCATION};
-use hyper::{Response, StatusCode, Uri, body::Incoming};
+use hyper::header::{CONTENT_LENGTH, HOST, LOCATION};
+use hyper::{Request, Response, StatusCode, Uri, body::Incoming};
 use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
 use hyper_util::client::legacy::{Client, connect::HttpConnector};
 use hyper_util::rt::TokioExecutor;
@@ -19,6 +20,8 @@ use tokio::runtime::{Builder, Runtime};
 use tokio::time::Instant;
 use url::Url;
 
+use crate::egress_probe::read_system_proxy;
+use crate::http_proxy::{AbortOnDrop, ProxyEnvironment, connect_proxy};
 use crate::update_download::{
     DownloadError, DownloadResponse, Manifest, ManifestFile, ManualDownload, Progress, Release,
     UpdateError, UpdateFetcher,
@@ -217,12 +220,14 @@ impl From<RequestError> for io::Error {
 }
 
 type HttpsClient = Client<HttpsConnector<HttpConnector>, Empty<Bytes>>;
+type RequestResponse = (Response<Incoming>, Option<AbortOnDrop>);
 
 /// Blocking adapter for the update manager. Run it on a dedicated worker.
 pub struct HttpUpdateFetcher {
     runtime: Arc<Runtime>,
     http: Client<HttpConnector, Empty<Bytes>>,
     https: OnceLock<Result<HttpsClient, RequestError>>,
+    proxy_env: ProxyEnvironment,
     timeout: Duration,
     platform: Platform,
 }
@@ -233,6 +238,7 @@ impl HttpUpdateFetcher {
             runtime: Arc::new(Builder::new_current_thread().enable_all().build()?),
             http: Client::builder(TokioExecutor::new()).build_http(),
             https: OnceLock::new(),
+            proxy_env: ProxyEnvironment::capture(&std::env::vars_os().collect(), &BTreeMap::new()),
             timeout: REQUEST_TIMEOUT,
             platform,
         })
@@ -243,35 +249,82 @@ impl HttpUpdateFetcher {
         self
     }
 
+    async fn request(
+        &self,
+        target: Uri,
+        deadline: Instant,
+        system_proxy: &OnceLock<Option<String>>,
+    ) -> Result<RequestResponse, RequestError> {
+        let proxy = self
+            .proxy_env
+            .resolve(&target, || {
+                system_proxy
+                    .get_or_init(|| {
+                        read_system_proxy(
+                            deadline
+                                .into_std()
+                                .min(std::time::Instant::now() + Duration::from_secs(2)),
+                        )
+                    })
+                    .clone()
+            })
+            .map_err(|error| RequestError::transport(&error))?;
+        if Instant::now() >= deadline {
+            return Err(RequestError::timeout());
+        }
+        if let Some(proxy) = proxy {
+            let mut request = Request::builder()
+                .uri(target.path_and_query().ok_or_else(invalid_url)?.as_str())
+                .header(HOST, target.authority().ok_or_else(invalid_url)?.as_str())
+                .body(Empty::<Bytes>::new())
+                .map_err(|_| invalid_url())?;
+            let (mut sender, connection) = connect_proxy(&proxy, &target, &mut request)
+                .await
+                .map_err(|error| RequestError::transport(error.as_ref()))?;
+            let response = sender
+                .send_request(request)
+                .await
+                .map_err(|error| RequestError::transport(&error))?;
+            return Ok((response, Some(connection)));
+        }
+
+        let response = if target.scheme_str() == Some("https") {
+            let client = self
+                .https
+                .get_or_init(https_client)
+                .as_ref()
+                .map_err(Clone::clone)?;
+            client.get(target).await
+        } else {
+            self.http.get(target).await
+        }
+        .map_err(|error| RequestError::transport(&error))?;
+        Ok((response, None))
+    }
+
     fn get(
         &self,
         mut url: Url,
         deadline: Instant,
-    ) -> Result<(Url, Response<Incoming>), RequestError> {
+    ) -> Result<(Url, Url, Response<HttpBody>), RequestError> {
+        url.set_fragment(None);
+        let origin = url.origin();
+        let mut artifact_base = url.clone();
+        let system_proxy = OnceLock::new();
         for redirects in 0..=MAX_REDIRECTS {
             validate_url(&url)?;
-            url.set_fragment(None);
             let target: Uri = url.as_str().parse().map_err(|_| invalid_url())?;
-            let response = self.runtime.block_on(async {
-                let request = async {
-                    if url.scheme() == "https" {
-                        let client = self
-                            .https
-                            .get_or_init(https_client)
-                            .as_ref()
-                            .map_err(Clone::clone)?;
-                        client.get(target).await
-                    } else {
-                        self.http.get(target).await
-                    }
-                    .map_err(|error| RequestError::transport(&error))
-                };
-                tokio::time::timeout_at(deadline, request)
+            let (response, connection) = self.runtime.block_on(async {
+                tokio::time::timeout_at(deadline, self.request(target, deadline, &system_proxy))
                     .await
                     .map_err(|_| RequestError::timeout())?
             })?;
             if !matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
-                return Ok((url, response));
+                return Ok((
+                    url,
+                    artifact_base,
+                    response.map(|body| self.body(body, connection)),
+                ));
             }
             if redirects == MAX_REDIRECTS {
                 return Err(RequestError::redirect("Too many update HTTP redirects"));
@@ -284,40 +337,47 @@ impl HttpUpdateFetcher {
                     RequestError::redirect("Missing or invalid update redirect location")
                 })?;
             url = checked_join(&url, location)?;
+            url.set_fragment(None);
+            // A signed CDN URL serves one file. Relative assets belong to the
+            // last manifest URL on the feed origin, typically a release tag.
+            if url.origin() == origin {
+                artifact_base = url.clone();
+            }
         }
         unreachable!("last redirect returns an error")
     }
 
     fn manifest(&self, url: &Url) -> Result<Manifest, RequestError> {
         let deadline = Instant::now() + self.timeout;
-        let (source, response) = self.get(url.clone(), deadline)?;
-        let (source, manifest) = if response.status() == StatusCode::NOT_FOUND {
+        let (source, artifact_base, response) = self.get(url.clone(), deadline)?;
+        let (source, artifact_base, manifest) = if response.status() == StatusCode::NOT_FOUND {
             let mut json_url = url
                 .join("release-channel.json")
                 .map_err(|_| invalid_url())?;
             json_url.set_query(url.query());
-            let (source, response) = self.get(json_url, deadline)?;
+            let (source, artifact_base, response) = self.get(json_url, deadline)?;
             let bytes = self.read_manifest(response, deadline)?;
             let manifest = serde_json::from_slice(&bytes).map_err(RequestError::manifest)?;
-            (source, manifest)
+            (source, artifact_base, manifest)
         } else {
             let bytes = self.read_manifest(response, deadline)?;
-            (source, parse_manifest(&bytes)?)
+            (source, artifact_base, parse_manifest(&bytes)?)
         };
-        resolve_artifacts(manifest, &source)
+        resolve_artifacts(manifest, &artifact_base, &source)
     }
 
     fn read_manifest(
         &self,
-        response: Response<Incoming>,
+        response: Response<HttpBody>,
         deadline: Instant,
     ) -> Result<Vec<u8>, RequestError> {
         if !response.status().is_success() {
             return Err(RequestError::status(response.status()));
         }
         let mut bytes = Vec::new();
-        self.body(response.into_body(), Some(deadline))
-            .take(MANIFEST_LIMIT + 1)
+        let mut body = response.into_body();
+        body.deadline = Some(deadline);
+        body.take(MANIFEST_LIMIT + 1)
             .read_to_end(&mut bytes)
             .map_err(|error| RequestError::transport(&error))?;
         if bytes.len() as u64 > MANIFEST_LIMIT {
@@ -326,13 +386,14 @@ impl HttpUpdateFetcher {
         Ok(bytes)
     }
 
-    fn body(&self, body: Incoming, deadline: Option<Instant>) -> HttpBody {
+    fn body(&self, body: Incoming, connection: Option<AbortOnDrop>) -> HttpBody {
         HttpBody {
             runtime: Arc::clone(&self.runtime),
             body,
             chunk: Bytes::new(),
             timeout: self.timeout,
-            deadline,
+            deadline: None,
+            _connection: connection,
         }
     }
 }
@@ -375,18 +436,29 @@ fn validate_url(url: &Url) -> Result<(), RequestError> {
 fn checked_join(base: &Url, reference: &str) -> Result<Url, RequestError> {
     let target = base.join(reference).map_err(|_| invalid_url())?;
     validate_url(&target)?;
+    validate_https(base, &target)?;
+    Ok(target)
+}
+
+fn validate_https(base: &Url, target: &Url) -> Result<(), RequestError> {
     if base.scheme() == "https" && target.scheme() == "http" {
         return Err(RequestError::redirect(
             "Update HTTPS URL cannot redirect or link to HTTP",
         ));
     }
-    Ok(target)
+    Ok(())
 }
 
-fn resolve_artifacts(mut manifest: Manifest, source: &Url) -> Result<Manifest, RequestError> {
+fn resolve_artifacts(
+    mut manifest: Manifest,
+    artifact_base: &Url,
+    source: &Url,
+) -> Result<Manifest, RequestError> {
     for file in &mut manifest.files {
         if let Some(url) = &mut file.url {
-            *url = checked_join(source, url)?.into();
+            let target = checked_join(artifact_base, url)?;
+            validate_https(source, &target)?;
+            *url = target.into();
         }
     }
     Ok(manifest)
@@ -526,18 +598,18 @@ impl UpdateFetcher for HttpUpdateFetcher {
                 "Update installer is missing a SHA-512 checksum",
             ));
         }
-        let (_, response) = self.get(request.url.clone(), Instant::now() + self.timeout)?;
+        let (_, _, response) = self.get(request.url.clone(), Instant::now() + self.timeout)?;
         let status = response.status();
         let content_length = response
             .headers()
             .get(CONTENT_LENGTH)
             .and_then(|value| value.to_str().ok()?.parse().ok())
-            .or_else(|| response.body().size_hint().exact());
+            .or_else(|| response.body().body.size_hint().exact());
         Ok(DownloadResponse {
             status: status.as_u16(),
             content_length,
             body: (status == StatusCode::OK)
-                .then(|| Box::new(self.body(response.into_body(), None)) as Box<dyn Read + Send>),
+                .then(|| Box::new(response.into_body()) as Box<dyn Read + Send>),
         })
     }
 
@@ -559,6 +631,7 @@ struct HttpBody {
     chunk: Bytes,
     timeout: Duration,
     deadline: Option<Instant>,
+    _connection: Option<AbortOnDrop>,
 }
 
 impl Read for HttpBody {

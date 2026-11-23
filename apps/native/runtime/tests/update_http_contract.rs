@@ -2,15 +2,18 @@ use std::collections::{BTreeMap, VecDeque};
 use std::convert::Infallible;
 use std::fs;
 use std::future::pending;
+use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::process::Command as ProcessCommand;
 use std::sync::{Arc, Mutex, mpsc};
 use std::task::{Context, Poll};
 use std::thread;
 use std::time::Duration;
 
 use anyhow::{Result, bail, ensure};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use hyper::body::{Body, Bytes, Frame};
 use hyper::header::LOCATION;
 use hyper::server::conn::http1;
@@ -61,6 +64,7 @@ impl Body for TestBody {
 enum Reply {
     Text(StatusCode, String),
     Redirect(&'static str),
+    Found(String),
     Artifact { tampered: bool, stall: bool },
     NoHeaders,
     Gated(Arc<Notify>, String),
@@ -78,6 +82,10 @@ impl Reply {
                 headers = headers
                     .status(StatusCode::TEMPORARY_REDIRECT)
                     .header(LOCATION, location);
+                (VecDeque::new(), false)
+            }
+            Self::Found(location) => {
+                headers = headers.status(StatusCode::FOUND).header(LOCATION, location);
                 (VecDeque::new(), false)
             }
             Self::Artifact { tampered, stall } => {
@@ -109,6 +117,13 @@ struct Server {
 
 impl Server {
     fn start(route: impl Fn(&str) -> Reply + Send + Sync + 'static) -> Result<Self> {
+        Self::start_with_socks(None, route)
+    }
+
+    fn start_with_socks(
+        socks_port: Option<u16>,
+        route: impl Fn(&str) -> Reply + Send + Sync + 'static,
+    ) -> Result<Self> {
         let listener = TcpListener::bind(("127.0.0.1", 0))?;
         listener.set_nonblocking(true)?;
         let addr = listener.local_addr()?;
@@ -125,6 +140,20 @@ impl Server {
                         let route = Arc::clone(&route);
                         let log = Arc::clone(&log);
                         tokio::spawn(async move {
+                            let tcp = if let Some(port) = socks_port {
+                                let result = tokio::task::spawn_blocking(move || {
+                                    let socket = tcp.into_std()?;
+                                    accept_fixture_socks5(&socket, port)?;
+                                    Ok::<_, io::Error>(socket)
+                                })
+                                .await;
+                                let Ok(Ok(socket)) = result else {
+                                    return;
+                                };
+                                tokio::net::TcpStream::from_std(socket).unwrap()
+                            } else {
+                                tcp
+                            };
                             let service = service_fn(move |request: hyper::Request<_>| {
                                 let uri = request.uri();
                                 log.lock().unwrap().push(uri.to_string());
@@ -161,6 +190,22 @@ impl Server {
             .map(|request| request.split('?').next().unwrap().to_owned())
             .collect()
     }
+}
+
+fn accept_fixture_socks5(mut socket: &std::net::TcpStream, target_port: u16) -> io::Result<()> {
+    socket.set_nonblocking(false)?;
+    socket.set_read_timeout(Some(WAIT))?;
+    socket.set_write_timeout(Some(WAIT))?;
+    let mut greeting = [0; 3];
+    socket.read_exact(&mut greeting)?;
+    assert_eq!(greeting, [5, 1, 0]);
+    socket.write_all(&[5, 0])?;
+    let mut connect = [0; 10];
+    socket.read_exact(&mut connect)?;
+    assert_eq!(connect[..8], [5, 1, 0, 1, 192, 0, 2, 1]);
+    assert_eq!(connect[8..], target_port.to_be_bytes());
+    socket.write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0])?;
+    socket.set_nonblocking(true)
 }
 
 impl Drop for Server {
@@ -282,10 +327,218 @@ fn checks_yaml_and_streams_verified_mac_installer_through_relative_redirects() -
     Ok(())
 }
 
+fn check_and_download_fixture(base: &str, expected_url: &str) -> Result<()> {
+    let update = manager(base, "stable", Platform::Darwin, "1.0.0");
+    let fetcher = HttpUpdateFetcher::new(Platform::Darwin)?.with_timeout(Duration::from_secs(3));
+    let result = update
+        .check(&fetcher, || 1, |_| {}, |_| {})
+        .unwrap()
+        .map_err(|error| anyhow::anyhow!("{error:?}"))?;
+    assert!(result.is_update_available);
+    let UpdatePhase::Available { release } = update.state().phase else {
+        bail!("expected available fixture release");
+    };
+    assert_eq!(release.version, "2.0.0");
+    assert_eq!(release.manual_download_url.as_deref(), Some(expected_url));
+    let root = tempfile::tempdir()?;
+    update.download(
+        &fetcher,
+        &LocalUpdateFiles::new(root.path().to_owned()),
+        || 1,
+        |_| {},
+    );
+    assert!(
+        matches!(update.state().phase, UpdatePhase::Downloaded { .. }),
+        "{:?}",
+        update.state().phase
+    );
+    assert_eq!(
+        fs::read(root.path().join("Matou.dmg"))?,
+        vec![b'x'; ARTIFACT_SIZE]
+    );
+    Ok(())
+}
+
+#[test]
+fn keeps_relative_assets_on_release_origin_through_two_found_redirects() -> Result<()> {
+    let cdn = Server::start(|path| match path {
+        "/signed/manifest" => Reply::Text(StatusCode::OK, yaml("2.0.0", "Matou.dmg", SHA512)),
+        "/signed/installer" => Reply::Artifact {
+            tampered: false,
+            stall: false,
+        },
+        _ => not_found(),
+    })?;
+    let manifest = cdn.url("/signed/manifest?signature=fixture");
+    let installer = cdn.url("/signed/installer?signature=fixture");
+    let github = Server::start(move |path| match path {
+        "/releases/latest/download/stable-mac.yml" => {
+            Reply::Found("/releases/download/v2.0.0/stable-mac.yml".into())
+        }
+        "/releases/download/v2.0.0/stable-mac.yml" => Reply::Found(manifest.clone()),
+        "/releases/download/v2.0.0/Matou.dmg" => Reply::Found(installer.clone()),
+        _ => not_found(),
+    })?;
+    check_and_download_fixture(
+        &github.url("/releases/latest/download"),
+        &github.url("/releases/download/v2.0.0/Matou.dmg"),
+    )?;
+    assert_eq!(
+        github.paths(),
+        [
+            "/releases/latest/download/stable-mac.yml",
+            "/releases/download/v2.0.0/stable-mac.yml",
+            "/releases/download/v2.0.0/Matou.dmg",
+        ]
+    );
+    assert_eq!(
+        *cdn.requests.lock().unwrap(),
+        [
+            "/signed/manifest?signature=fixture",
+            "/signed/installer?signature=fixture",
+        ]
+    );
+    Ok(())
+}
+
+fn proxy_fixture_response(path: &str) -> Reply {
+    match path {
+        "/stable/stable-mac.yml" => Reply::Text(StatusCode::OK, yaml("2.0.0", "Matou.dmg", SHA512)),
+        "/stable/Matou.dmg" => Reply::Artifact {
+            tampered: false,
+            stall: false,
+        },
+        _ => not_found(),
+    }
+}
+
+fn run_proxy_fixture(test: &str, base: &str, key: &str, proxy: &str) -> Result<()> {
+    // Give the fetcher real environment variables without racing parallel tests.
+    let mut child = ProcessCommand::new(std::env::current_exe()?);
+    for key in [
+        "http_proxy",
+        "HTTP_PROXY",
+        "https_proxy",
+        "HTTPS_PROXY",
+        "all_proxy",
+        "ALL_PROXY",
+        "no_proxy",
+        "NO_PROXY",
+    ] {
+        child.env_remove(key);
+    }
+    let output = child
+        .args(["--exact", test, "--nocapture"])
+        .env("MATOU_TEST_PROXY_FEED", base)
+        .env(key, proxy)
+        .output()?;
+    ensure!(
+        output.status.success(),
+        "proxy fixture failed: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
+#[test]
+fn checks_and_downloads_through_http_proxy_and_bypasses_it_for_loopback() -> Result<()> {
+    if let Ok(base) = std::env::var("MATOU_TEST_PROXY_FEED") {
+        return check_and_download_fixture(&base, &format!("{base}/Matou.dmg"));
+    }
+    let proxy = Server::start(proxy_fixture_response)?;
+    run_proxy_fixture(
+        "checks_and_downloads_through_http_proxy_and_bypasses_it_for_loopback",
+        "http://release-fixture.invalid/stable",
+        "HTTP_PROXY",
+        &proxy.url(""),
+    )?;
+    assert_eq!(
+        proxy.paths(),
+        [
+            "http://release-fixture.invalid/stable/stable-mac.yml",
+            "http://release-fixture.invalid/stable/Matou.dmg",
+        ]
+    );
+
+    let local = Server::start(proxy_fixture_response)?;
+    run_proxy_fixture(
+        "checks_and_downloads_through_http_proxy_and_bypasses_it_for_loopback",
+        &local.url("/stable"),
+        "HTTP_PROXY",
+        "unsupported://proxy-fixture.invalid",
+    )?;
+    assert_eq!(
+        local.paths(),
+        ["/stable/stable-mac.yml", "/stable/Matou.dmg"]
+    );
+    Ok(())
+}
+
+#[test]
+fn checks_and_downloads_through_socks5_proxy() -> Result<()> {
+    if let Ok(base) = std::env::var("MATOU_TEST_PROXY_FEED") {
+        return check_and_download_fixture(&base, &format!("{base}/Matou.dmg"));
+    }
+    let port = 12345;
+    let proxy = Server::start_with_socks(Some(port), proxy_fixture_response)?;
+    run_proxy_fixture(
+        "checks_and_downloads_through_socks5_proxy",
+        &format!("http://192.0.2.1:{port}/stable"),
+        "ALL_PROXY",
+        &format!("socks5://{}", proxy.addr),
+    )?;
+    assert_eq!(
+        proxy.paths(),
+        ["/stable/stable-mac.yml", "/stable/Matou.dmg"]
+    );
+    Ok(())
+}
+
+#[test]
+#[ignore = "live GitHub manifest only; run explicitly with --ignored --nocapture"]
+fn live_github_release_manifest() -> Result<()> {
+    let feed = FeedConfiguration::resolve(None, None, None);
+    let unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_millis() as u64;
+    let url = feed.manifest_url(Platform::Darwin, Architecture::Arm64, unix_ms)?;
+    let manifest = HttpUpdateFetcher::new(Platform::Darwin)?
+        .check(&url)
+        .map_err(|error| anyhow::anyhow!("{error:?}"))?;
+    let current = CurrentVersion::parse("0.2.25")?;
+    assert!(current.offers(&manifest.version)?);
+    let artifact = manifest
+        .files
+        .iter()
+        .find(|file| {
+            file.url
+                .as_deref()
+                .is_some_and(|url| url.ends_with("-mac-arm64.dmg"))
+        })
+        .ok_or_else(|| anyhow::anyhow!("missing arm64 DMG"))?;
+    let artifact_url = artifact.url.as_deref().unwrap();
+    let sha512 = artifact
+        .sha512
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("missing SHA-512"))?;
+    assert_eq!(STANDARD.decode(sha512)?.len(), 64);
+    println!(
+        "Manifest URL: {url}\nCurrent: 0.2.25\nVersion: {}\nArtifact URL: {artifact_url}\nSize: {:?}\nSHA-512: {sha512}",
+        manifest.version, artifact.size
+    );
+    assert_eq!(manifest.version, "0.2.26");
+    assert_eq!(
+        artifact_url,
+        "https://github.com/icesword0760/matou/releases/download/v0.2.26/Matou-0.2.26-mac-arm64.dmg"
+    );
+    Ok(())
+}
+
 #[test]
 fn windows_falls_back_to_json_on_404_and_keeps_the_exe_extension() -> Result<()> {
-    let server = Server::start(|path| match path {
-        "/stable/release-channel.json" => Reply::Text(
+    let cdn = Server::start(|path| match path {
+        "/signed/json" => Reply::Text(
             StatusCode::OK,
             json!({"version":"2.0.0", "files":[
                 {"url":"Matou.dmg", "sha512":SHA512},
@@ -293,7 +546,13 @@ fn windows_falls_back_to_json_on_404_and_keeps_the_exe_extension() -> Result<()>
             ]})
             .to_string(),
         ),
-        "/stable/Matou.exe" => Reply::Artifact {
+        _ => not_found(),
+    })?;
+    let json_location = cdn.url("/signed/json");
+    let server = Server::start(move |path| match path {
+        "/stable/release-channel.json" => Reply::Found("/versioned/release-channel.json".into()),
+        "/versioned/release-channel.json" => Reply::Found(json_location.clone()),
+        "/versioned/Matou.exe" => Reply::Artifact {
             tampered: false,
             stall: false,
         },
@@ -328,9 +587,11 @@ fn windows_falls_back_to_json_on_404_and_keeps_the_exe_extension() -> Result<()>
         [
             "/stable/stable.yml",
             "/stable/release-channel.json",
-            "/stable/Matou.exe"
+            "/versioned/release-channel.json",
+            "/versioned/Matou.exe"
         ]
     );
+    assert_eq!(cdn.paths(), ["/signed/json"]);
     Ok(())
 }
 

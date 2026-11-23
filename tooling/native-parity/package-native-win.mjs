@@ -14,7 +14,8 @@ const ghosttyVendor = fileURLToPath(new URL('../../apps/native/terminal/vendor/g
 const applicationExecutable = productName + '.exe'
 const frozenVersion = '0.2.24'
 const artifactNamePattern = 'Matou-${version}-${os}-${arch}.${ext}'
-const defaultUpdateBaseUrl = 'https://updates.baize-ailabs.com/stable'
+const defaultUpdateBaseUrl = 'https://github.com/icesword0760/matou/releases/latest/download'
+const frozenUpdateBaseUrl = 'https://updates.baize-ailabs.com/stable'
 const stableChannel = 'stable'
 const updateConfigFilename = 'app-update.yml'
 const resourcesDirectory = 'resources'
@@ -164,7 +165,7 @@ function feedProjection({ env = {}, packagedConfig = '', release, httpStatus, re
   const packagedUrl = /^provider:\s*generic\s*$/m.test(packagedConfig)
     ? packagedConfig.match(/^url:\s*(.+?)\s*$/m)?.[1]?.trim()
     : undefined
-  const url = overrideUrl?.trim() || packagedUrl || defaultUpdateBaseUrl
+  const url = overrideUrl?.trim() || packagedUrl || frozenUpdateBaseUrl
   const channel = env.MATOU_UPDATE_CHANNEL ?? stableChannel
   const result = {
     ...(overrideUrl && { overrideUrl }),
@@ -303,7 +304,7 @@ export function validateWindowsInstallContract(reference) {
   const scope = {
     platform: 'win32', configuredWindowsTarget: 'dir',
     buildPublish: [{ provider: 'generic', url: '${env.MATOU_UPDATE_BASE_URL}', channel: stableChannel }],
-    defaultUpdateBaseUrl
+    defaultUpdateBaseUrl: frozenUpdateBaseUrl
   }
   if (reference.schema !== 'matou.native-parity.windows-install-reference/v1'
       || !isDeepStrictEqual(reference.scope, scope) || !reference.cases?.length) {

@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
 use url::Url;
 
-pub const DEFAULT_UPDATE_BASE_URL: &str = "https://updates.baize-ailabs.com/stable";
+pub const DEFAULT_UPDATE_BASE_URL: &str =
+    "https://github.com/icesword0760/matou/releases/latest/download";
 
 #[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -582,6 +583,22 @@ impl DownloadChecksums {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_feed_targets_github_release_channel_assets() {
+        let feed = FeedConfiguration::resolve(None, None, None);
+        for (platform, arch, asset) in [
+            (Platform::Darwin, Architecture::Arm64, "stable-mac.yml"),
+            (Platform::Win32, Architecture::X64, "stable.yml"),
+        ] {
+            assert_eq!(
+                feed.manifest_url(platform, arch, 42).unwrap().as_str(),
+                format!(
+                    "https://github.com/icesword0760/matou/releases/latest/download/{asset}?noCache=1a"
+                )
+            );
+        }
+    }
 
     #[test]
     fn update_policy_semver_precedence() {
