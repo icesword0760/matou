@@ -1109,3 +1109,420 @@ index e765fa1a..ba58f950 100644
                      if let Some(path) = PathBuf::from_str(&file_name).log_err() {
                          paths.push(path);
                      }
+diff --git a/src/elements/text.rs b/src/elements/text.rs
+index 5d34ccfa..fa6678aa 100644
+--- a/src/elements/text.rs
++++ b/src/elements/text.rs
+@@ -46,10 +46,10 @@ impl Element for &'static str {
+         _inspector_id: Option<&InspectorElementId>,
+         bounds: Bounds<Pixels>,
+         text_layout: &mut Self::RequestLayoutState,
+-        _window: &mut Window,
+-        _cx: &mut App,
++        window: &mut Window,
++        cx: &mut App,
+     ) {
+-        text_layout.prepaint(bounds, self)
++        text_layout.prepaint(bounds, self, window, cx)
+     }
+
+     fn paint(
+@@ -112,10 +112,10 @@ impl Element for SharedString {
+         _inspector_id: Option<&InspectorElementId>,
+         bounds: Bounds<Pixels>,
+         text_layout: &mut Self::RequestLayoutState,
+-        _window: &mut Window,
+-        _cx: &mut App,
++        window: &mut Window,
++        cx: &mut App,
+     ) {
+-        text_layout.prepaint(bounds, self.as_ref())
++        text_layout.prepaint(bounds, self.as_ref(), window, cx)
+     }
+
+     fn paint(
+@@ -279,10 +279,10 @@ impl Element for StyledText {
+         _inspector_id: Option<&InspectorElementId>,
+         bounds: Bounds<Pixels>,
+         _: &mut Self::RequestLayoutState,
+-        _window: &mut Window,
+-        _cx: &mut App,
++        window: &mut Window,
++        cx: &mut App,
+     ) {
+-        self.layout.prepaint(bounds, &self.text)
++        self.layout.prepaint(bounds, &self.text, window, cx)
+     }
+
+     fn paint(
+@@ -314,12 +314,62 @@ pub struct TextLayout(Rc<RefCell<Option<TextLayoutInner>>>);
+ struct TextLayoutInner {
+     len: usize,
+     lines: SmallVec<[WrappedLine; 1]>,
++    font_size: Pixels,
+     line_height: Pixels,
+     wrap_width: Option<Pixels>,
++    truncate_width: Option<Pixels>,
++    runs: Vec<TextRun>,
+     size: Option<Size<Pixels>>,
+     bounds: Option<Bounds<Pixels>>,
+ }
+
++impl TextLayoutInner {
++    fn shape(
++        &mut self,
++        text: SharedString,
++        text_style: &TextStyle,
++        window: &Window,
++        cx: &App,
++    ) -> Size<Pixels> {
++        let mut shaped_runs;
++        let (text, runs) = if let (Some(width), Some(TextOverflow::Truncate(suffix))) =
++            (self.truncate_width, &text_style.text_overflow)
++        {
++            shaped_runs = self.runs.clone();
++            let mut wrapper = cx
++                .text_system()
++                .line_wrapper(text_style.font(), self.font_size);
++            let text = wrapper.truncate_line(text, width, suffix, &mut shaped_runs);
++            (text, shaped_runs.as_slice())
++        } else {
++            (text, self.runs.as_slice())
++        };
++
++        let len = text.len();
++        let lines = window
++            .text_system()
++            .shape_text(
++                text,
++                self.font_size,
++                runs,
++                self.wrap_width,
++                text_style.line_clamp,
++            )
++            .log_err();
++        self.len = if lines.is_some() { len } else { 0 };
++        self.lines = lines.unwrap_or_default();
++
++        let mut size: Size<Pixels> = Size::default();
++        for line in &self.lines {
++            let line_size = line.size(self.line_height);
++            size.height += line_size.height;
++            size.width = size.width.max(line_size.width).ceil();
++        }
++        self.size = Some(size);
++        size
++    }
++}
++
+ impl TextLayout {
+     fn layout(
+         &self,
+@@ -334,7 +384,7 @@ impl TextLayout {
+             .line_height
+             .to_pixels(font_size.into(), window.rem_size());
+
+-        let mut runs = if let Some(runs) = runs {
++        let runs = if let Some(runs) = runs {
+             runs
+         } else {
+             vec![text_style.to_run(text.len())]
+@@ -353,92 +403,63 @@ impl TextLayout {
+                     None
+                 };
+
+-                let (truncate_width, truncation_suffix) =
+-                    if let Some(text_overflow) = text_style.text_overflow.clone() {
+-                        let width = known_dimensions.width.or(match available_space.width {
+-                            crate::AvailableSpace::Definite(x) => match text_style.line_clamp {
+-                                Some(max_lines) => Some(x * max_lines),
+-                                None => Some(x),
+-                            },
+-                            _ => None,
+-                        });
+-
+-                        match text_overflow {
+-                            TextOverflow::Truncate(s) => (width, s),
++                let truncate_width = text_style.text_overflow.as_ref().and_then(|_| {
++                    known_dimensions.width.or(match available_space.width {
++                        crate::AvailableSpace::Definite(width) => {
++                            Some(width * text_style.line_clamp.unwrap_or(1))
+                         }
+-                    } else {
+-                        (None, "".into())
+-                    };
+-
+-                if let Some(text_layout) = element_state.0.borrow().as_ref()
+-                    && text_layout.size.is_some()
+-                    && (wrap_width.is_none() || wrap_width == text_layout.wrap_width)
+-                {
+-                    return text_layout.size.unwrap();
+-                }
+-
+-                let mut line_wrapper = cx.text_system().line_wrapper(text_style.font(), font_size);
+-                let text = if let Some(truncate_width) = truncate_width {
+-                    line_wrapper.truncate_line(
+-                        text.clone(),
+-                        truncate_width,
+-                        &truncation_suffix,
+-                        &mut runs,
+-                    )
+-                } else {
+-                    text.clone()
+-                };
+-                let len = text.len();
+-
+-                let Some(lines) = window
+-                    .text_system()
+-                    .shape_text(
+-                        text,
+-                        font_size,
+-                        &runs,
+-                        wrap_width,            // Wrap if we know the width.
+-                        text_style.line_clamp, // Limit the number of lines if line_clamp is set.
+-                    )
+-                    .log_err()
+-                else {
+-                    element_state.0.borrow_mut().replace(TextLayoutInner {
+-                        lines: Default::default(),
+-                        len: 0,
+-                        line_height,
+-                        wrap_width,
+-                        size: Some(Size::default()),
+-                        bounds: None,
+-                    });
+-                    return Size::default();
+-                };
+-
+-                let mut size: Size<Pixels> = Size::default();
+-                for line in &lines {
+-                    let line_size = line.size(line_height);
+-                    size.height += line_size.height;
+-                    size.width = size.width.max(line_size.width).ceil();
+-                }
++                        _ => None,
++                    })
++                });
+
+-                element_state.0.borrow_mut().replace(TextLayoutInner {
+-                    lines,
+-                    len,
++                let mut state = element_state.0.borrow_mut();
++                let state = state.get_or_insert_with(|| TextLayoutInner {
++                    lines: Default::default(),
++                    len: 0,
++                    font_size,
+                     line_height,
+-                    wrap_width,
+-                    size: Some(size),
++                    wrap_width: None,
++                    truncate_width: None,
++                    runs: runs.clone(),
++                    size: None,
+                     bounds: None,
+                 });
++                if let Some(size) = state.size
++                    && (wrap_width.is_none() || wrap_width == state.wrap_width)
++                    && truncate_width == state.truncate_width
++                {
++                    return size;
++                }
+
+-                size
++                state.wrap_width = wrap_width;
++                state.truncate_width = truncate_width;
++                state.bounds = None;
++                state.shape(text.clone(), &text_style, window, cx)
+             }
+         })
+     }
+
+-    fn prepaint(&self, bounds: Bounds<Pixels>, text: &str) {
++    fn prepaint(&self, bounds: Bounds<Pixels>, text: &str, window: &mut Window, cx: &mut App) {
+         let mut element_state = self.0.borrow_mut();
+         let element_state = element_state
+             .as_mut()
+             .with_context(|| format!("measurement has not been performed on {text}"))
+             .unwrap();
++        let text_style = window.text_style();
++        let width = bounds.size.width;
++        let truncate_width = width * text_style.line_clamp.unwrap_or(1);
++
++        // The final bounds can shrink without a second measurement from Taffy.
++        if matches!(text_style.text_overflow, Some(TextOverflow::Truncate(_)))
++            && width > crate::px(0.)
++            && element_state.truncate_width != Some(truncate_width)
++            && element_state.lines.iter().any(|line| line.width() > width)
++        {
++            element_state.truncate_width = Some(truncate_width);
++            element_state.wrap_width =
++                (text_style.white_space == WhiteSpace::Normal).then_some(width);
++            element_state.shape(text.to_owned().into(), &text_style, window, cx);
++        }
+         element_state.bounds = Some(bounds);
+     }
+
+@@ -912,3 +933,150 @@ impl IntoElement for InteractiveText {
+         self
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::{
++        AvailableSpace, Styled, TestAppContext, canvas, div, point, px, relative, rgb, size,
++    };
++
++    const TITLE: &str = "SECOND_CARD_DIRECT_OK";
++    const MAX_CONTENT: Size<AvailableSpace> =
++        size(AvailableSpace::MaxContent, AvailableSpace::MaxContent);
++
++    fn assert_ellipsized(layout: &TextLayout, width: Pixels) -> String {
++        let text = layout.text();
++        assert!(
++            text.ends_with('…'),
++            "expected an ellipsis at width {width:?}, got {text:?}"
++        );
++        let state = layout.0.borrow();
++        let state = state.as_ref().unwrap();
++        assert_eq!(state.lines.len(), 1);
++        assert!(state.lines[0].size(state.line_height).width <= width);
++        text
++    }
++
++    #[test]
++    fn nowrap_ellipsis_remeasures_at_new_widths() {
++        let mut cx = TestAppContext::single();
++        let cx = cx.add_empty_window();
++        cx.draw(point(px(0.), px(0.)), MAX_CONTENT, |_, _| {
++            canvas(
++                |_, window, cx| {
++                    let style = div()
++                        .whitespace_nowrap()
++                        .text_ellipsis()
++                        .text_style()
++                        .take();
++                    window.with_text_style(style, |window| {
++                        let style = window.text_style();
++                        let runs = vec![
++                            style.to_run(8),
++                            TextRun {
++                                color: rgb(0xff0000).into(),
++                                ..style.to_run(TITLE.len() - 8)
++                            },
++                        ];
++                        let layout = TextLayout::default();
++                        let node = layout.layout(TITLE.into(), Some(runs), window, cx);
++
++                        window.compute_layout(node, MAX_CONTENT, cx);
++                        assert_eq!(layout.text(), TITLE);
++
++                        let narrow = px(62.);
++                        let wider = px(118.);
++                        let definite = |width| {
++                            size(AvailableSpace::Definite(width), AvailableSpace::MaxContent)
++                        };
++                        window.compute_layout(node, definite(narrow), cx);
++                        let narrow_text = assert_ellipsized(&layout, narrow);
++                        window.compute_layout(node, definite(wider), cx);
++                        let wider_text = assert_ellipsized(&layout, wider);
++                        assert!(wider_text.len() > narrow_text.len());
++
++                        window.compute_layout(node, MAX_CONTENT, cx);
++                        assert_eq!(layout.text(), TITLE);
++                        window.compute_layout(node, definite(narrow), cx);
++                        assert_eq!(assert_ellipsized(&layout, narrow), narrow_text);
++                        window.compute_layout(node, definite(px(400.)), cx);
++                        assert_eq!(layout.text(), TITLE);
++                        let state = layout.0.borrow();
++                        let runs = &state.as_ref().unwrap().lines[0].decoration_runs;
++                        assert_eq!(runs.len(), 2);
++                        assert_eq!(runs[0].len, 8);
++                        assert_eq!(runs[1].len as usize, TITLE.len() - 8);
++                    });
++                },
++                |_, (), _, _| {},
++            )
++        });
++    }
++
++    fn assert_ellipsis_at_final_width(width: impl FnOnce(Pixels) -> Pixels + 'static) {
++        let mut cx = TestAppContext::single();
++        let cx = cx.add_empty_window();
++        cx.draw(point(px(0.), px(0.)), MAX_CONTENT, |_, _| {
++            canvas(
++                |_, window, cx| {
++                    let style = div()
++                        .whitespace_nowrap()
++                        .text_ellipsis()
++                        .text_style()
++                        .take();
++                    window.with_text_style(style, |window| {
++                        let mut text = StyledText::new(TITLE);
++                        let (node, mut state) = text.request_layout(None, None, window, cx);
++                        window.compute_layout(node, MAX_CONTENT, cx);
++                        assert_eq!(text.layout().text(), TITLE);
++
++                        let mut bounds = window.layout_bounds(node);
++                        let measured_width =
++                            text.layout().0.borrow().as_ref().unwrap().lines[0].width();
++                        bounds.size.width = width(measured_width);
++                        text.prepaint(None, None, bounds, &mut state, window, cx);
++                        assert_eq!(text.layout().bounds(), bounds);
++                        assert_ellipsized(text.layout(), bounds.size.width);
++                    });
++                },
++                |_, (), _, _| {},
++            )
++        });
++    }
++
++    #[test]
++    fn nowrap_ellipsis_prepaints_at_final_width() {
++        assert_ellipsis_at_final_width(|_| px(92.));
++    }
++
++    #[test]
++    fn nowrap_ellipsis_fits_fractional_width() {
++        assert_ellipsis_at_final_width(|measured| {
++            let floor = measured.floor();
++            assert!(measured > floor);
++            (measured + floor) / 2.
++        });
++    }
++
++    #[test]
++    fn nowrap_ellipsis_fits_relative_max_width() {
++        let mut cx = TestAppContext::single();
++        let cx = cx.add_empty_window();
++        let title = StyledText::new(TITLE);
++        let layout = title.layout().clone();
++        cx.draw(point(px(0.), px(0.)), MAX_CONTENT, |_, _| {
++            use crate::ParentElement as _;
++            div().w(px(200.)).flex().child(
++                div()
++                    .min_w_0()
++                    .max_w(relative(0.46))
++                    .overflow_hidden()
++                    .whitespace_nowrap()
++                    .text_ellipsis()
++                    .child(title),
++            )
++        });
++        assert_ellipsized(&layout, px(92.));
++    }
++}
+diff --git a/src/text_system/line_wrapper.rs b/src/text_system/line_wrapper.rs
+index 55599cc0..5410f768 100644
+--- a/src/text_system/line_wrapper.rs
++++ b/src/text_system/line_wrapper.rs
+@@ -151,7 +151,7 @@ impl LineWrapper {
+             let char_width = self.width_for_char(c);
+             width += char_width;
+
+-            if width.floor() > truncate_width {
++            if width > truncate_width {
+                 let result =
+                     SharedString::from(format!("{}{}", &line[..truncate_ix], truncation_suffix));
+                 update_runs_after_truncation(&result, truncation_suffix, runs);

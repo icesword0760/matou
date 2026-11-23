@@ -21,6 +21,8 @@ DESTINATION = ROOT / "vendor/gpui"
 FONT_SOURCE = Path("src/platform/mac/text_system.rs")
 ATLAS_SOURCE = Path("src/platform/mac/metal_atlas.rs")
 PATCHED_SHA256 = {
+    "src/text_system/line_wrapper.rs": "14dc21e1551608e7346ee408adc4ecf87f7de7503d01d5117fc71ffb0b9e7bac",
+    "src/elements/text.rs": "0b98368c20454743a9ffe821fac1d2de2b9e1740c062fe6ff24faef9a9dabfe2",
     FONT_SOURCE.as_posix(): "784e9e1fa80eac701935e1689a2d693dae186489614c2b0ad0c42d0878dcd261",
     ATLAS_SOURCE.as_posix(): "362ddf60c6550e344a354fb6b6a977f2ff068bd442f3256bf5c81e535796459b",
     "src/platform.rs": "a7a8075608b61796ba7871aa118f4c2c3efab97c3bc3ec0553ad4de32547b24c",
@@ -32,6 +34,8 @@ PATCHED_SHA256 = {
 }
 SOURCES = tuple(map(Path, PATCHED_SHA256))
 ORIGINAL_SHA256 = {
+    "src/text_system/line_wrapper.rs": "09d8a804c277a526034c5056a0dc2835f24e46c546bc5342436f58c147c58e91",
+    "src/elements/text.rs": "945be8b602d797491e8c14a259142bbb14cfd98acb7b76615798acaeda43c059",
     ATLAS_SOURCE.as_posix(): "243326441589a0f942f4e1ed83283c5829457007a0d58e9ee13cc04540195428",
     "src/platform.rs": "7106499142d5416edaf44168da5c7dcd778c527398cb86e487131ba6689b94ff",
     "src/window.rs": "40d58470971ccd658ead4d4f788219658fb68b9486aff73e143835c09237ab18",
@@ -85,8 +89,8 @@ def main():
     existing = DESTINATION.exists() and any(DESTINATION.iterdir())
     before = None
     if existing:
-        # Earlier markers covered only the macOS adaptations. Independently
-        # recognize every Windows source against the pinned original/patched bytes.
+        # Earlier markers may cover fewer files. Independently recognize all
+        # controlled sources against the pinned original/patched bytes.
         marker = DESTINATION / MARKER
         previous = None
         if marker.exists():
@@ -106,11 +110,11 @@ def main():
                 raise SystemExit("Unknown GPUI preparation marker format; preserve it before preparing it again.")
         before = current_sources()
         if previous is not None and previous.get("formatVersion") == 2:
-            old_sources = {source.as_posix(): before[source.as_posix()] for source in (FONT_SOURCE, ATLAS_SOURCE)}
             previous_sources = previous.get("sources")
-            if not isinstance(previous_sources, dict) or {
-                path.replace("\\", "/"): source_hash for path, source_hash in previous_sources.items()
-            } not in (old_sources, before):
+            if not isinstance(previous_sources, dict) or not previous_sources or not all(
+                source_hash is not None and before.get(path.replace("\\", "/")) == source_hash
+                for path, source_hash in previous_sources.items()
+            ):
                 raise SystemExit("The generated GPUI source differs from its marker; preserve it before preparing it again.")
         if previous == record:
             print(f"GPUI {VERSION}: pinned platform adaptations already prepared")
