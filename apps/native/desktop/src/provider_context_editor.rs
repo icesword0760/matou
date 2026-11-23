@@ -149,12 +149,16 @@ pub fn context_window_badge(tokens: Option<u64>, locale: InterfaceLocale) -> Str
     )
 }
 
-/// `formatCompactTokens` from `context-window-ui.tsx:53–57`.
+/// Compact token count for provider badges, abbreviating both decimal and binary M/K multiples.
 pub fn compact_tokens(tokens: u64) -> String {
-    if tokens.is_multiple_of(1_000_000) {
+    if tokens > 0 && tokens.is_multiple_of(1_000_000) {
         format!("{}M", tokens / 1_000_000)
-    } else if tokens.is_multiple_of(1_000) {
+    } else if tokens > 0 && tokens.is_multiple_of(1_048_576) {
+        format!("{}M", tokens / 1_048_576)
+    } else if tokens > 0 && tokens.is_multiple_of(1_000) {
         format!("{}K", tokens / 1_000)
+    } else if tokens > 0 && tokens.is_multiple_of(1_024) {
+        format!("{}K", tokens / 1_024)
     } else {
         format_tokens(tokens)
     }
@@ -946,7 +950,13 @@ mod tests {
             provider_window_badge_label(&provider, &native, Chinese),
             "默认窗口"
         );
-        assert_eq!(compact_tokens(1_048_576), "1,048,576");
+        assert_eq!(compact_tokens(1_000_000), "1M");
+        assert_eq!(compact_tokens(1_048_576), "1M");
+        assert_eq!(compact_tokens(2_097_152), "2M");
+        assert_eq!(compact_tokens(512_000), "512K");
+        assert_eq!(compact_tokens(131_072), "128K");
+        assert_eq!(compact_tokens(262_144), "256K");
+        assert_eq!(compact_tokens(272_500), "272,500");
     }
 
     #[test]
