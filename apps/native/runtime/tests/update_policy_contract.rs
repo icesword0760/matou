@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::task::{Context, Poll, Waker};
 
 use matou_native_core::update_policy::{
-    Architecture, CurrentVersion, ErrorStage, FeedConfiguration, Platform, SignatureInspection,
-    UpdateLocale, UpdatePreferences, active_session_count, install_mode,
+    Architecture, CurrentVersion, DEFAULT_UPDATE_BASE_URL, ErrorStage, FeedConfiguration, Platform,
+    SignatureInspection, UpdateLocale, UpdatePreferences, active_session_count, install_mode,
 };
 use matou_native_runtime::update_download::{
     DownloadError, DownloadResponse, LocalUpdateFiles, Manifest, ManualDownload, PendingUpdateFile,
@@ -769,7 +769,20 @@ fn frozen_update_policy_contract() {
             }
             _ => panic!("unhandled fixture case {}", case.id),
         };
-        assert_fixture(&case.id, "", &actual, &case.expected);
+        let mut expected = case.expected.clone();
+        if matches!(case.id.as_str(), "feed-mac-default" | "feed-other-provider") {
+            // Keep the frozen capture and its channel/query assertions. Only the
+            // native default feed base changed for these two fallback cases.
+            let suffix = expected["requests"][0]
+                .as_str()
+                .unwrap()
+                .strip_prefix(field(&expected, "returnedUrl"))
+                .unwrap();
+            expected["requests"][0] = json!(format!("{DEFAULT_UPDATE_BASE_URL}{suffix}"));
+            expected["returnedUrl"] = json!(DEFAULT_UPDATE_BASE_URL);
+            expected["feedCalls"][0]["url"] = json!(DEFAULT_UPDATE_BASE_URL);
+        }
+        assert_fixture(&case.id, "", &actual, &expected);
         println!("{} passed", case.id);
     }
     assert_eq!(

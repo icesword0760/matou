@@ -24,16 +24,11 @@ use http_body_util::{BodyExt, Full, LengthLimitError, Limited, combinators::Unsy
 use hyper::{
     HeaderMap, Method, Request, Response, StatusCode, Uri, Version,
     body::{Body, Bytes, Frame, Incoming, SizeHint},
-    client::conn::http1 as client,
     header::{self, HeaderValue},
     server::conn::http1 as server,
     service::service_fn,
 };
-use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
-use hyper_util::{
-    client::legacy::connect::HttpConnector,
-    rt::{TokioIo, TokioTimer},
-};
+use hyper_util::rt::{TokioIo, TokioTimer};
 use matou_native_core::{
     claude_role_budget::CLAUDE_ROLES,
     provider_launch::{
@@ -46,12 +41,12 @@ use serde_json::{Map, Value, json};
 use tokio::{
     net::TcpListener,
     sync::{Mutex as AsyncMutex, OnceCell, oneshot},
-    task::AbortHandle,
 };
 use tower_service::Service;
 
 use crate::{
     egress_probe::Family,
+    http_proxy::{AbortOnDrop, connect_http1, direct_https, http_connector},
     model_router::RouterConnection,
     subscription_launch::RouterRequest,
     subscription_service::{SessionSubscriptions, TargetBinding},
@@ -66,7 +61,7 @@ mod deepseek_token_usage;
 #[path = "claude_request_gateway/gemini_sse_keepalive.rs"]
 mod gemini_sse_keepalive;
 mod proxy;
-pub(crate) use proxy::ProxyEnvironment;
+pub(crate) use crate::http_proxy::ProxyEnvironment;
 
 const MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 const MAX_AUTH_ERROR_BYTES: usize = 256 * 1024;
@@ -1126,12 +1121,6 @@ fn request_headers<const N: usize>(
     }
 }
 
-fn http_connector() -> HttpConnector {
-    let mut connector = HttpConnector::new();
-    connector.set_connect_timeout(Some(Duration::from_secs(30)));
-    connector
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ObservableMedia {
     Sse,
@@ -1272,32 +1261,6 @@ async fn send_router(
     .await
 }
 
-async fn direct_https(
-    destination: Uri,
-) -> Result<hyper_rustls::MaybeHttpsStream<TokioIo<tokio::net::TcpStream>>, Fault> {
-    static CONNECTOR: OnceLock<Option<HttpsConnector<HttpConnector>>> = OnceLock::new();
-    let mut connector = CONNECTOR
-        .get_or_init(|| {
-            let mut http = http_connector();
-            http.enforce_http(false);
-            Some(
-                HttpsConnectorBuilder::new()
-                    .with_native_roots()
-                    .ok()?
-                    .https_only()
-                    .enable_http1()
-                    .wrap_connector(http),
-            )
-        })
-        .as_ref()
-        .ok_or_else(|| Fault::bad_gateway(CONNECTION_ERROR))?
-        .clone();
-    connector
-        .call(destination)
-        .await
-        .map_err(|error| Fault::transport(error.as_ref()))
-}
-
 async fn send_once(
     destination: Uri,
     mut request: Request<GatewayBody>,
@@ -1324,16 +1287,18 @@ async fn send_once(
             destination
         };
         if destination.scheme_str() == Some("https") {
-            connect(direct_https(destination).await?).await?
+            let socket = direct_https(destination)
+                .await
+                .map_err(|error| Fault::transport(error.as_ref()))?;
+            connect_http1(socket).await
         } else {
-            connect(
-                http_connector()
-                    .call(destination)
-                    .await
-                    .map_err(|error| Fault::transport(&error))?,
-            )
-            .await?
+            let socket = http_connector()
+                .call(destination)
+                .await
+                .map_err(|error| Fault::transport(&error))?;
+            connect_http1(socket).await
         }
+        .map_err(|error| Fault::transport(&error))?
     };
     let response = sender.send_request(request).await.map_err(|error| {
         if error.is_user()
@@ -1453,26 +1418,6 @@ impl Body for UpstreamBody {
             self.incoming.size_hint()
         }
     }
-}
-
-struct AbortOnDrop(AbortHandle);
-
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
-
-async fn connect<T: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static>(
-    socket: T,
-) -> Result<(client::SendRequest<GatewayBody>, AbortOnDrop), Fault> {
-    let (sender, connection) = client::handshake(socket)
-        .await
-        .map_err(|error| Fault::transport(&error))?;
-    let task = tokio::spawn(async move {
-        let _ = connection.await;
-    });
-    Ok((sender, AbortOnDrop(task.abort_handle())))
 }
 
 struct Fault(StatusCode, Cow<'static, str>, Option<io::ErrorKind>);

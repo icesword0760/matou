@@ -26,6 +26,7 @@ pub mod history;
 pub mod history_worker;
 pub mod host;
 mod host_control;
+mod http_proxy;
 mod model;
 #[doc(hidden)]
 pub mod model_router;
