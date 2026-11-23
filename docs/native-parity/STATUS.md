@@ -1,5 +1,19 @@
 # Native parity execution state
 
+## Current checkpoint — 2026-11-23, Windows v18 bare-metal Sogou IME first-popup closure (`4029d15a`)
+
+- Merged Windows IME first-candidate positioning fix (`4029d15a`) into `codex/native-parity`:
+  - Updated `apps/native/patches/gpui-windows-ime.patch` and `apps/native/scripts/prepare-gpui.py` (`events.rs` SHA-256 `ee294c71a1324eda335786e9448b061a0c86e7abf858535715ef8dc38f0d3c1b`, `window.rs` SHA-256 `b946befe60d271dc97dcad562da3bd70415bd4d138eaa5c0f1f53e516de25cfa`, supporting in-place upgrade from all prior markers): added deferred re-entrancy-safe `sync_ime_caret` from `set_input_handler` and `WM_SETFOCUS`, invisible Win32 caret (`CreateCaret` without `ShowCaret` + `SetCaretPos`, cleaned up on `WM_KILLFOCUS`), `WM_IME_SETCONTEXT` (`ISC_SHOWUICOMPOSITIONWINDOW` stripped and forwarded to `DefWindowProcW`), `WM_IME_NOTIFY` (`IMN_OPENCANDIDATE` / `IMN_CHANGECANDIDATE`), and physical-DPI `RECT` anchoring via `CFS_FORCE_POSITION` + `CFS_EXCLUDE` (with `CFS_CANDIDATEPOS` fallback).
+  - Automated checks: macOS desktop **211/211** pass (2 ignored), Windows x64 MSVC `--tests` **0 errors** (including 3 new `ime_tests` in `gpui`), `prepare-gpui.py` clean/upgrade/idempotent passes, `pnpm check:identifiers` & `git diff --check` clean.
+- Rebuilt Windows v18 Release ZIPs (`4029d15a`, native MSVC + ARM64 FXC 16 DXBC shaders, PE Subsystem `2` GUI, `verifyWindowsDirPackage` passed, `/tmp/matou-win-v18-release/build-report.md`) and synced to `artifacts/native-parity/release/`:
+  - **Windows x64 v18**: `Matou-Native-0.2.26-win-x64.zip` (`60,248,126 B`, SHA-256 `b9fad95cf1940d62e4cbcbd23d39a0d6159a62d8cf2ada426dd7e27df1322361`; also deployed to `192.168.68.162:D:\MatouTest\release\Matou-Native-0.2.26-win-x64.zip`).
+  - **Windows ARM64 v18**: `Matou-Native-0.2.26-win-arm64.zip` (`55,381,016 B`, SHA-256 `c59c97ad1abe4a75f291965c6494e487b9e71a91e1fee68ef5b2e9841ffbfd60`).
+  - **macOS ARM64 v18** (`37f210a0`, no macOS code changes in `4029d15a`): `Matou-Native-0.2.26-arm64-signed.zip` (`57,295,623 B`, SHA-256 `300f26b2ce8d2c3a622fdd0b05868de5f4226623a2787d47f7f9d7f3ede5a28f`).
+- Bare-metal x64 Windows 11 physical PC v18 cold-start Sogou IME acceptance (`192.168.68.162`, `matou-win-v18-ime-verify-01`, `/tmp/matou-pc-v18-evidence/report.md`, 5 visually inspected 2880×1800 @ 200% DPI PNGs, SceneCraft PID `8928` untouched, v18 `码头.exe` PID `15548` / Runtime PID `12128` left cleanly running in foreground):
+  - **Cold-start 1st Sogou `nihao` candidate popup (`01-sogou-first-popup.png`)**: **PASS** — cursor `(1231, 409)`, Sogou candidate Win32 top-left `(1224, 448)` (`-7, +39 px`), visible white content area `(1241, 465)` (`+10, +56 px`, down from `+1,118 px` in v17), single floating Sogou box with zero legacy Windows white box or duplicate pinyin box.
+  - **Partial commit, Backspace/Esc & newline tracking (`02..04`, `final-main.png`)**: **PASS** — `nihaoshijie` partial commit (`你好shi'jie` → `你好你好世界`), `ceshi` 2×Backspace + `Esc` cancel, 3 empty Enters moved cursor & candidate box down in lockstep by **78 px** keeping identical relative offset; **0** visible console windows, **0/3** window-response timeouts.
+  - **Physical PC footer 「出口异常」 investigated**: confirmed expected real-network detection (not a product bug) — machine has `ProxyEnable=0`, no TUN adapter (only `WLAN 2`), empty `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`, and `China Standard Time` direct mainland Wi-Fi.
+
 ## Current checkpoint — 2026-11-23, Windows v17 bare-metal fixes & 3-window frameless titlebar (`37f210a0`)
 
 - Merged four Windows & cross-platform fixes into `codex/native-parity` (`37f210a0`):
