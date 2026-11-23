@@ -474,6 +474,64 @@ fn spawn_is_configuration(error: &std::io::Error) -> bool {
             | std::io::ErrorKind::InvalidInput
     )
 }
+fn runtime_command(options: &LaunchOptions, binary: &Path) -> ProcessCommand {
+    let mut process = ProcessCommand::new(binary);
+    process
+        .arg("--data-root")
+        .arg(&options.data_root)
+        .arg("--workspace")
+        .arg(&options.workspace)
+        .arg("--shell-home")
+        .arg(&options.shell_home)
+        .arg("--shell")
+        .arg(&options.shell)
+        .env(
+            "MATOU_LOCALE",
+            current_interface_locale(read_locale_preference(&options.data_root)).value(),
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        process.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    #[cfg(all(windows, not(debug_assertions), not(test)))]
+    let stderr = if std::env::var_os("MATOU_DEBUG_RUNTIME_LOG").is_some() {
+        Stdio::inherit()
+    } else {
+        Stdio::null()
+    };
+    #[cfg(any(not(windows), debug_assertions, test))]
+    let stderr = Stdio::inherit();
+    process.stderr(stderr);
+    process
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn windows_runtime_command_preserves_private_protocol_arguments() {
+    let options = LaunchOptions {
+        data_root: "data".into(),
+        workspace: "workspace with spaces".into(),
+        shell_home: "shell home".into(),
+        shell: "cmd.exe".into(),
+    };
+    let binary = Path::new("matou-native-runtime.exe");
+    let command = runtime_command(&options, binary);
+    assert_eq!(command.get_program(), binary.as_os_str());
+    assert!(command.get_args().eq([
+        "--data-root",
+        "data",
+        "--workspace",
+        "workspace with spaces",
+        "--shell-home",
+        "shell home",
+        "--shell",
+        "cmd.exe",
+    ]));
+}
+
 fn run_child(
     options: &LaunchOptions,
     binary: &Path,
@@ -493,23 +551,7 @@ fn run_child(
             error: None,
         });
     }
-    let mut process = ProcessCommand::new(binary);
-    process
-        .arg("--data-root")
-        .arg(&options.data_root)
-        .arg("--workspace")
-        .arg(&options.workspace)
-        .arg("--shell-home")
-        .arg(&options.shell_home)
-        .arg("--shell")
-        .arg(&options.shell)
-        .env(
-            "MATOU_LOCALE",
-            current_interface_locale(read_locale_preference(&options.data_root)).value(),
-        )
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit());
+    let mut process = runtime_command(options, binary);
     #[cfg(test)]
     let spawn = match shared.hooks.spawn_error_once.lock().unwrap().take() {
         Some(kind) => Err(std::io::Error::from(kind)),
