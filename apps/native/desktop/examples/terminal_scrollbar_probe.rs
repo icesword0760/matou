@@ -726,8 +726,177 @@ mod probe {
         Ok(())
     }
 
+    fn verify_file_drop_async(
+        window: WindowHandle<TerminalSurface>,
+        cx: &mut gpui::AsyncApp,
+    ) -> anyhow::Result<()> {
+        use cocoa::{
+            appkit::NSFilenamesPboardType,
+            base::{BOOL, NO, YES, id, nil},
+            foundation::{NSArray, NSPoint, NSString},
+        };
+        use objc::{
+            class,
+            declare::ClassDecl,
+            msg_send,
+            runtime::{Class, Object, Sel},
+            sel, sel_impl,
+        };
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+        let drop_events = Rc::new(RefCell::new(Vec::<Vec<u8>>::new()));
+        let sink = drop_events.clone();
+        #[allow(deprecated, unexpected_cfgs)]
+        let native_window: id = cx.update(|cx| {
+            let entity = window.entity(cx).unwrap();
+            cx.subscribe(&entity, move |_, event: &SurfaceEvent, _| {
+                if let SurfaceEventKind::Input(bytes) = &event.kind {
+                    sink.borrow_mut().push(bytes.clone());
+                }
+            })
+            .detach();
+            draw(window, cx);
+            AnyWindowHandle::from(window)
+                .update(cx, |_, window, _| {
+                    let RawWindowHandle::AppKit(handle) =
+                        HasWindowHandle::window_handle(window).unwrap().as_raw()
+                    else {
+                        panic!("expected AppKit window");
+                    };
+                    unsafe {
+                        let view = handle.ns_view.as_ptr() as id;
+                        let ns_window: id = msg_send![view, window];
+                        ns_window
+                    }
+                })
+                .unwrap()
+        })?;
+
+        #[allow(deprecated, unexpected_cfgs)]
+        unsafe {
+            let pasteboard: id = msg_send![class!(NSPasteboard), pasteboardWithUniqueName];
+            let items = NSArray::arrayWithObjects(
+                nil,
+                &[
+                    NSString::alloc(nil).init_str("/tmp/matou-mac-drop-test/drop-test.txt"),
+                    NSString::alloc(nil).init_str("/tmp/matou-mac-drop-test/drop test.txt"),
+                ],
+            );
+            let types = NSArray::arrayWithObjects(nil, &[NSFilenamesPboardType]);
+            let _: isize = msg_send![pasteboard, declareTypes: types owner: nil];
+            let ok: BOOL =
+                msg_send![pasteboard, setPropertyList: items forType: NSFilenamesPboardType];
+            assert_eq!(ok, YES, "populate unique drag pasteboard");
+
+            let cls: *const Class = Class::get("MatouProbeDraggingInfo").unwrap_or_else(|| {
+                let mut decl = ClassDecl::new("MatouProbeDraggingInfo", class!(NSObject))
+                    .expect("declare MatouProbeDraggingInfo");
+                decl.add_ivar::<*mut std::ffi::c_void>("_pb");
+                extern "C" fn dragging_pasteboard(this: &Object, _: Sel) -> id {
+                    unsafe { *this.get_ivar::<*mut std::ffi::c_void>("_pb") as id }
+                }
+                extern "C" fn dragging_location(_: &Object, _: Sel) -> NSPoint {
+                    NSPoint::new(80.0, 160.0)
+                }
+                decl.add_method(
+                    sel!(draggingPasteboard),
+                    dragging_pasteboard as extern "C" fn(&Object, Sel) -> id,
+                );
+                decl.add_method(
+                    sel!(draggingLocation),
+                    dragging_location as extern "C" fn(&Object, Sel) -> NSPoint,
+                );
+                decl.register()
+            });
+            let info: id = msg_send![cls, new];
+            (*info).set_ivar::<*mut std::ffi::c_void>("_pb", pasteboard as *mut std::ffi::c_void);
+
+            // 1. draggingEntered -> active drag; draggingExited -> clears drag without input.
+            let op: usize = msg_send![native_window, draggingEntered: info];
+            assert_eq!(op, 1, "NSDragOperationCopy expected on draggingEntered");
+            cx.update(|cx| {
+                assert!(
+                    cx.has_active_drag(),
+                    "draggingEntered must set GPUI active ExternalPaths drag"
+                );
+                draw(window, cx);
+            })?;
+            let _: () = msg_send![native_window, draggingExited: info];
+            cx.update(|cx| {
+                assert!(
+                    !cx.has_active_drag(),
+                    "draggingExited must clear active drag via stop_active_drag"
+                );
+            })?;
+            assert!(
+                drop_events.borrow_mut().drain(..).next().is_none(),
+                "draggingExited must not emit terminal input"
+            );
+
+            // 2. draggingEntered + performDragOperation -> inserts POSIX plain & space paths and focuses terminal.
+            cx.update(|cx| {
+                AnyWindowHandle::from(window)
+                    .update(cx, |_, window, _| window.blur())
+                    .unwrap();
+            })?;
+            let op: usize = msg_send![native_window, draggingEntered: info];
+            assert_eq!(op, 1);
+            cx.update(|cx| draw(window, cx))?;
+            let performed: BOOL = msg_send![native_window, performDragOperation: info];
+            assert_eq!(performed, YES, "performDragOperation must succeed");
+            assert_eq!(
+                drop_events.borrow_mut().drain(..).collect::<Vec<_>>(),
+                vec![
+                    b" /tmp/matou-mac-drop-test/drop-test.txt \"/tmp/matou-mac-drop-test/drop test.txt\""
+                        .to_vec()
+                ]
+            );
+            let focused = cx.update(|cx| {
+                window
+                    .update(cx, |view, window, _| view.focus.is_focused(window))
+                    .unwrap()
+            })?;
+            assert!(focused, "terminal must receive focus after macOS file drop");
+
+            // 3. Disabled terminal ignores performDragOperation.
+            cx.update(|cx| {
+                window
+                    .update(cx, |view, _, cx| view.set_input_disabled(true, cx))
+                    .unwrap();
+                draw(window, cx);
+            })?;
+            let _: usize = msg_send![native_window, draggingEntered: info];
+            let _: BOOL = msg_send![native_window, performDragOperation: info];
+            assert!(
+                drop_events.borrow_mut().drain(..).next().is_none(),
+                "disabled terminal must ignore macOS file drops"
+            );
+            cx.update(|cx| {
+                window
+                    .update(cx, |view, _, cx| view.set_input_disabled(false, cx))
+                    .unwrap();
+            })?;
+
+            let _: () = msg_send![pasteboard, releaseGlobally];
+            let _: () = msg_send![info, release];
+            let _ = NO;
+        }
+        println!(
+            "Hidden macOS NSWindow NSDraggingDestination verified draggingEntered/Exited clear, POSIX plain+space path drop, focus, and disabled guard."
+        );
+        Ok(())
+    }
+
     pub fn run() {
         Application::new().with_assets(NativeAssets).run(|cx| {
+            #[allow(deprecated, unexpected_cfgs)]
+            unsafe {
+                use cocoa::appkit::NSApp;
+                use objc::{msg_send, sel, sel_impl};
+                let app = NSApp();
+                // NSApplicationActivationPolicyProhibited = 2: prevents background probe from taking focus.
+                let _: bool = msg_send![app, setActivationPolicy: 2isize];
+            }
             let window = cx
                 .open_window(
                     WindowOptions {
@@ -776,9 +945,10 @@ mod probe {
                         })
                         .expect("the deadline hides the bar without another manual draw");
                     println!("The one-shot hide deadline expires without a fade frame loop or another manual draw.");
-                    cx.quit();
                 })
                 .expect("finish the async scrollbar probe");
+                verify_file_drop_async(window, cx).expect("verify macOS NSDraggingDestination file drop");
+                cx.update(|cx| cx.quit()).expect("quit probe");
             })
             .detach();
         });
