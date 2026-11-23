@@ -1,0 +1,842 @@
+diff --git a/src/platform.rs b/src/platform.rs
+index 047a0055..b6a82685 100644
+--- a/src/platform.rs
++++ b/src/platform.rs
+@@ -488,6 +488,10 @@ pub(crate) trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
+     fn toggle_fullscreen(&self);
+     fn is_fullscreen(&self) -> bool;
+     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>);
++    #[cfg(target_os = "windows")]
++    fn frame_requested(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
++        Default::default()
++    }
+     fn on_input(&self, callback: Box<dyn FnMut(PlatformInput) -> DispatchEventResult>);
+     fn on_active_status_change(&self, callback: Box<dyn FnMut(bool)>);
+     fn on_hover_status_change(&self, callback: Box<dyn FnMut(bool)>);
+diff --git a/src/window.rs b/src/window.rs
+index 6d74a0e1..23bdaebd 100644
+--- a/src/window.rs
++++ b/src/window.rs
+@@ -32,6 +32,8 @@ use raw_window_handle::{HandleError, HasDisplayHandle, HasWindowHandle};
+ use refineable::Refineable;
+ use slotmap::SlotMap;
+ use smallvec::SmallVec;
++#[cfg(target_os = "windows")]
++use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+ use std::{
+     any::{Any, TypeId},
+     borrow::Cow,
+@@ -100,11 +102,15 @@ struct WindowInvalidatorInner {
+ #[derive(Clone)]
+ pub(crate) struct WindowInvalidator {
+     inner: Rc<RefCell<WindowInvalidatorInner>>,
++    #[cfg(target_os = "windows")]
++    frame_requested: Arc<AtomicBool>,
+ }
+
+ impl WindowInvalidator {
+-    pub fn new() -> Self {
++    pub fn new(#[cfg(target_os = "windows")] frame_requested: Arc<AtomicBool>) -> Self {
+         WindowInvalidator {
++            #[cfg(target_os = "windows")]
++            frame_requested,
+             inner: Rc::new(RefCell::new(WindowInvalidatorInner {
+                 dirty: true,
+                 draw_phase: DrawPhase::None,
+@@ -118,6 +124,8 @@ impl WindowInvalidator {
+         inner.dirty_views.insert(entity);
+         if inner.draw_phase == DrawPhase::None {
+             inner.dirty = true;
++            #[cfg(target_os = "windows")]
++            self.request_frame();
+             cx.push_effect(Effect::Notify { emitter: entity });
+             true
+         } else {
+@@ -130,7 +138,16 @@ impl WindowInvalidator {
+     }
+
+     pub fn set_dirty(&self, dirty: bool) {
+-        self.inner.borrow_mut().dirty = dirty
++        self.inner.borrow_mut().dirty = dirty;
++        #[cfg(target_os = "windows")]
++        if dirty {
++            self.request_frame();
++        }
++    }
++
++    #[cfg(target_os = "windows")]
++    fn request_frame(&self) {
++        self.frame_requested.store(true, Relaxed);
+     }
+
+     pub fn set_phase(&self, phase: DrawPhase) {
+@@ -986,7 +1003,10 @@ impl Window {
+         let scale_factor = platform_window.scale_factor();
+         let appearance = platform_window.appearance();
+         let text_system = Arc::new(WindowTextSystem::new(cx.text_system().clone()));
+-        let invalidator = WindowInvalidator::new();
++        let invalidator = WindowInvalidator::new(
++            #[cfg(target_os = "windows")]
++            platform_window.frame_requested(),
++        );
+         let active = Rc::new(Cell::new(platform_window.is_active()));
+         let hovered = Rc::new(Cell::new(platform_window.is_hovered()));
+         let needs_present = Rc::new(Cell::new(false));
+@@ -1018,9 +1038,11 @@ impl Window {
+         platform_window.on_request_frame(Box::new({
+             let mut cx = cx.to_async();
+             let invalidator = invalidator.clone();
++            #[cfg(not(target_os = "windows"))]
+             let active = active.clone();
+             let needs_present = needs_present.clone();
+             let next_frame_callbacks = next_frame_callbacks.clone();
++            #[cfg(not(target_os = "windows"))]
+             let last_input_timestamp = last_input_timestamp.clone();
+             move |request_frame_options| {
+                 let next_frame_callbacks = next_frame_callbacks.take();
+@@ -1034,10 +1056,12 @@ impl Window {
+                         .log_err();
+                 }
+
+-                // Keep presenting the current scene for 1 extra second since the
+-                // last input to prevent the display from underclocking the refresh rate.
+-                let needs_present = request_frame_options.require_presentation
+-                    || needs_present.get()
++                let needs_present =
++                    request_frame_options.require_presentation || needs_present.get();
++                // Keep the existing post-input refresh rate policy on platforms
++                // that continuously request frames. Windows presents on demand.
++                #[cfg(not(target_os = "windows"))]
++                let needs_present = needs_present
+                     || (active.get()
+                         && last_input_timestamp.get().elapsed() < Duration::from_secs(1));
+
+@@ -1643,6 +1667,8 @@ impl Window {
+     /// Schedule the given closure to be run directly after the current frame is rendered.
+     pub fn on_next_frame(&self, callback: impl FnOnce(&mut Window, &mut App) + 'static) {
+         RefCell::borrow_mut(&self.next_frame_callbacks).push(Box::new(callback));
++        #[cfg(target_os = "windows")]
++        self.invalidator.request_frame();
+     }
+
+     /// Schedule a frame to be drawn on the next animation frame.
+@@ -1976,6 +2002,8 @@ impl Window {
+         self.refreshing = false;
+         self.invalidator.set_phase(DrawPhase::None);
+         self.needs_present.set(true);
++        #[cfg(target_os = "windows")]
++        self.invalidator.request_frame();
+
+         ArenaClearNeeded
+     }
+@@ -2007,6 +2035,10 @@ impl Window {
+     fn present(&self) {
+         self.platform_window.draw(&self.rendered_frame.scene);
+         self.needs_present.set(false);
++        #[cfg(target_os = "windows")]
++        if !self.invalidator.is_dirty() && self.next_frame_callbacks.borrow().is_empty() {
++            self.invalidator.frame_requested.store(false, Relaxed);
++        }
+         profiling::finish_frame!();
+     }
+
+diff --git a/src/platform/windows/direct_write.rs b/src/platform/windows/direct_write.rs
+index e187fc4b..b667427f 100644
+--- a/src/platform/windows/direct_write.rs
++++ b/src/platform/windows/direct_write.rs
+@@ -22,6 +22,8 @@ use windows_numerics::Vector2;
+
+ use crate::*;
+
++const TEXT_FORMAT_CACHE_CAPACITY: usize = 256;
++
+ #[derive(Debug)]
+ struct FontInfo {
+     font_family: String,
+@@ -58,6 +60,7 @@ struct DirectWriteState {
+     system_font_collection: IDWriteFontCollection1,
+     custom_font_collection: IDWriteFontCollection1,
+     fonts: Vec<FontInfo>,
++    text_formats: HashMap<(FontId, u32), IDWriteTextFormat1>,
+     font_selections: HashMap<Font, FontId>,
+     font_id_by_identifier: HashMap<FontIdentifier, FontId>,
+ }
+@@ -206,6 +209,7 @@ impl DirectWriteTextSystem {
+             system_font_collection,
+             custom_font_collection,
+             fonts: Vec::new(),
++            text_formats: HashMap::default(),
+             font_selections: HashMap::default(),
+             font_id_by_identifier: HashMap::default(),
+         })))
+@@ -317,6 +321,7 @@ impl DirectWriteState {
+                 .CreateFontCollectionFromFontSet(&set)?
+         };
+         self.custom_font_collection = collection;
++        self.text_formats.clear();
+
+         Ok(())
+     }
+@@ -454,6 +459,7 @@ impl DirectWriteState {
+                 .is_some()
+         } {
+             self.system_font_collection = collection.unwrap();
++            self.text_formats.clear();
+         }
+     }
+
+@@ -543,6 +549,43 @@ impl DirectWriteState {
+         }
+     }
+
++    fn text_format(&mut self, font_id: FontId, font_size: Pixels) -> Result<IDWriteTextFormat1> {
++        let key = (font_id, font_size.0.to_bits());
++        if let Some(format) = self.text_formats.get(&key) {
++            return Ok(format.clone());
++        }
++        let font = &self.fonts[font_id.0];
++        let collection = if font.is_system_font {
++            &self.system_font_collection
++        } else {
++            &self.custom_font_collection
++        };
++        let format: IDWriteTextFormat1 = unsafe {
++            self.components
++                .factory
++                .CreateTextFormat(
++                    &HSTRING::from(&font.font_family),
++                    collection,
++                    font.font_face.GetWeight(),
++                    font.font_face.GetStyle(),
++                    DWRITE_FONT_STRETCH_NORMAL,
++                    font_size.0,
++                    &HSTRING::from(&self.components.locale),
++                )?
++                .cast()?
++        };
++        if let Some(ref fallbacks) = font.fallbacks {
++            unsafe { format.SetFontFallback(fallbacks)? };
++        }
++        // GPUI already caches shaped text. Reuse the format and fallback
++        // configuration when it encounters new text in the same face and size.
++        if self.text_formats.len() == TEXT_FORMAT_CACHE_CAPACITY {
++            self.text_formats.clear();
++        }
++        self.text_formats.insert(key, format.clone());
++        Ok(format)
++    }
++
+     fn layout_line(
+         &mut self,
+         text: &str,
+@@ -563,29 +606,8 @@ impl DirectWriteState {
+             let mut utf16_offset = 0u32;
+             let text_layout = {
+                 let first_run = &font_runs[0];
++                let format = self.text_format(first_run.font_id, font_size)?;
+                 let font_info = &self.fonts[first_run.font_id.0];
+-                let collection = if font_info.is_system_font {
+-                    &self.system_font_collection
+-                } else {
+-                    &self.custom_font_collection
+-                };
+-                let format: IDWriteTextFormat1 = self
+-                    .components
+-                    .factory
+-                    .CreateTextFormat(
+-                        &HSTRING::from(&font_info.font_family),
+-                        collection,
+-                        font_info.font_face.GetWeight(),
+-                        font_info.font_face.GetStyle(),
+-                        DWRITE_FONT_STRETCH_NORMAL,
+-                        font_size.0,
+-                        &HSTRING::from(&self.components.locale),
+-                    )?
+-                    .cast()?;
+-                if let Some(ref fallbacks) = font_info.fallbacks {
+-                    format.SetFontFallback(fallbacks)?;
+-                }
+-
+                 let layout = self.components.factory.CreateTextLayout(
+                     &text_wide,
+                     &format,
+diff --git a/src/platform/windows/events.rs b/src/platform/windows/events.rs
+index 9c10dcec..6bfc8675 100644
+--- a/src/platform/windows/events.rs
++++ b/src/platform/windows/events.rs
+@@ -1,4 +1,4 @@
+-use std::rc::Rc;
++use std::{rc::Rc, sync::atomic::Ordering::Relaxed};
+
+ use ::util::ResultExt;
+ use anyhow::Context as _;
+@@ -39,7 +39,13 @@ impl WindowsWindowInner {
+         lparam: LPARAM,
+     ) -> LRESULT {
+         let handled = match msg {
+-            WM_ACTIVATE => self.handle_activate_msg(wparam),
++            WM_ACTIVATE => self.handle_activate_msg(handle, wparam),
++            WM_KILLFOCUS => {
++                // Let Win32 finish the native focus transition without making
++                // a synchronous IMM call from inside the focus notification.
++                self.clear_ime_composition();
++                None
++            }
+             WM_CREATE => self.handle_create_msg(handle),
+             WM_MOVE => self.handle_move_msg(handle, lparam),
+             WM_SIZE => self.handle_size_msg(wparam, lparam),
+@@ -101,6 +107,7 @@ impl WindowsWindowInner {
+             WM_DEADCHAR => self.handle_dead_char_msg(wparam),
+             WM_IME_STARTCOMPOSITION => self.handle_ime_position(handle),
+             WM_IME_COMPOSITION => self.handle_ime_composition(handle, lparam),
++            WM_IME_ENDCOMPOSITION => self.handle_ime_end_composition(handle),
+             WM_SETCURSOR => self.handle_set_cursor(handle, lparam),
+             WM_SETTINGCHANGE => self.handle_system_settings_changed(handle, wparam, lparam),
+             WM_INPUTLANGCHANGE => self.handle_input_language_changed(),
+@@ -173,7 +180,9 @@ impl WindowsWindowInner {
+         // Don't resize the renderer when the window is minimized, but record that it was minimized so
+         // that on restore the swap chain can be recreated via `update_drawable_size_even_if_unchanged`.
+         if wparam.0 == SIZE_MINIMIZED as usize {
+-            lock.restore_from_minimized = lock.callbacks.request_frame.take();
++            if let Some(request_frame) = lock.callbacks.request_frame.take() {
++                lock.restore_from_minimized = Some(request_frame);
++            }
+             return Some(0);
+         }
+
+@@ -185,6 +194,7 @@ impl WindowsWindowInner {
+         let mut should_resize_renderer = false;
+         if lock.restore_from_minimized.is_some() {
+             lock.callbacks.request_frame = lock.restore_from_minimized.take();
++            self.frame_requested.store(true, Relaxed);
+         } else {
+             should_resize_renderer = true;
+         }
+@@ -370,6 +380,12 @@ impl WindowsWindowInner {
+     // It's a known bug that you can't trigger `ctrl-shift-0`. See:
+     // https://superuser.com/questions/1455762/ctrl-shift-number-key-combination-has-stopped-working-for-a-few-numbers
+     fn handle_keydown_msg(&self, handle: HWND, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
++        // IMM owns this key, even before the first marked string arrives.
++        if is_ime_process_key(wparam) {
++            translate_message(handle, wparam, lparam);
++            return Some(0);
++        }
++
+         let mut lock = self.state.borrow_mut();
+         let Some(input) = handle_key_event(handle, wparam, lparam, &mut lock, |keystroke| {
+             PlatformInput::KeyDown(KeyDownEvent {
+@@ -407,6 +423,10 @@ impl WindowsWindowInner {
+     }
+
+     fn handle_keyup_msg(&self, handle: HWND, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
++        if is_ime_process_key(wparam) {
++            return Some(0);
++        }
++
+         let mut lock = self.state.borrow_mut();
+         let Some(input) = handle_key_event(handle, wparam, lparam, &mut lock, |keystroke| {
+             PlatformInput::KeyUp(KeyUpEvent { keystroke })
+@@ -627,72 +647,97 @@ impl WindowsWindowInner {
+     }
+
+     fn handle_ime_position(&self, handle: HWND) -> Option<isize> {
+-        unsafe {
+-            let ctx = ImmGetContext(handle);
++        self.set_ime_position(handle, true)?;
++        Some(0)
++    }
+
+-            let Some(caret_position) = self.retrieve_caret_position() else {
+-                return Some(0);
+-            };
+-            {
+-                let config = COMPOSITIONFORM {
++    fn set_ime_position(&self, handle: HWND, start: bool) -> Option<()> {
++        let caret = self.retrieve_caret_position()?;
++        let context = ImeContext::acquire(handle)?;
++        unsafe {
++            if start {
++                let form = COMPOSITIONFORM {
+                     dwStyle: CFS_POINT,
+-                    ptCurrentPos: caret_position,
+-                    ..Default::default()
+-                };
+-                ImmSetCompositionWindow(ctx, &config as _).ok().log_err();
+-            }
+-            {
+-                let config = CANDIDATEFORM {
+-                    dwStyle: CFS_CANDIDATEPOS,
+-                    ptCurrentPos: caret_position,
++                    ptCurrentPos: caret,
+                     ..Default::default()
+                 };
+-                ImmSetCandidateWindow(ctx, &config as _).ok().log_err();
++                ImmSetCompositionWindow(context.raw, &form).ok().log_err();
+             }
+-            ImmReleaseContext(handle, ctx).ok().log_err();
+-            Some(0)
++            let form = CANDIDATEFORM {
++                dwStyle: CFS_CANDIDATEPOS,
++                ptCurrentPos: caret,
++                ..Default::default()
++            };
++            ImmSetCandidateWindow(context.raw, &form).ok().log_err();
+         }
++        Some(())
+     }
+
+     fn handle_ime_composition(&self, handle: HWND, lparam: LPARAM) -> Option<isize> {
+-        let ctx = unsafe { ImmGetContext(handle) };
+-        let result = self.handle_ime_composition_inner(ctx, lparam);
+-        unsafe { ImmReleaseContext(handle, ctx).ok().log_err() };
+-        result
++        let mut handled = None;
++        for update in ImeUpdate::from_flags(lparam) {
++            match update {
++                ImeUpdate::Clear => {
++                    self.clear_ime_composition();
++                }
++                ImeUpdate::Commit => {
++                    let text = {
++                        let context = ImeContext::acquire(handle)?;
++                        parse_ime_composition_string(context.raw, GCS_RESULTSTR)?
++                    };
++                    self.with_input_handler(|handler| {
++                        handler.replace_text_in_range(None, &text);
++                    })?;
++                }
++                ImeUpdate::Preedit => {
++                    if self.handle_ime_preedit(handle, lparam).is_none() {
++                        // A result already sent to GPUI must not also go through
++                        // default processing when the remaining preedit cannot be read.
++                        return handled;
++                    }
++                }
++            }
++            handled = Some(0);
++        }
++        handled
+     }
+
+-    fn handle_ime_composition_inner(&self, ctx: HIMC, lparam: LPARAM) -> Option<isize> {
+-        let lparam = lparam.0 as u32;
+-        if lparam == 0 {
+-            // Japanese IME may send this message with lparam = 0, which indicates that
+-            // there is no composition string.
+-            self.with_input_handler(|input_handler| {
+-                input_handler.replace_text_in_range(None, "");
+-            })?;
+-            Some(0)
++    fn handle_ime_preedit(&self, handle: HWND, lparam: LPARAM) -> Option<()> {
++        let (text, caret) = {
++            let context = ImeContext::acquire(handle)?;
++            let text = parse_ime_composition_string(context.raw, GCS_COMPSTR)?;
++            let caret = if !text.is_empty() && lparam.0 as u32 & GCS_CURSORPOS.0 != 0 {
++                retrieve_composition_cursor_position(context.raw)
++                    .map(|pos| pos.min(text.encode_utf16().count()))
++                    .map(|pos| pos..pos)
++            } else {
++                None
++            };
++            (text, caret)
++        };
++        if text.is_empty() {
++            self.clear_ime_composition();
+         } else {
+-            if lparam & GCS_COMPSTR.0 > 0 {
+-                let comp_string = parse_ime_composition_string(ctx, GCS_COMPSTR)?;
+-                let caret_pos =
+-                    (!comp_string.is_empty() && lparam & GCS_CURSORPOS.0 > 0).then(|| {
+-                        let pos = retrieve_composition_cursor_position(ctx);
+-                        pos..pos
+-                    });
+-                self.with_input_handler(|input_handler| {
+-                    input_handler.replace_and_mark_text_in_range(None, &comp_string, caret_pos);
+-                })?;
+-            }
+-            if lparam & GCS_RESULTSTR.0 > 0 {
+-                let comp_result = parse_ime_composition_string(ctx, GCS_RESULTSTR)?;
+-                self.with_input_handler(|input_handler| {
+-                    input_handler.replace_text_in_range(None, &comp_result);
+-                })?;
+-                return Some(0);
++            self.with_input_handler(|handler| {
++                handler.replace_and_mark_text_in_range(None, &text, caret);
++            })?;
++            self.set_ime_position(handle, false);
++        }
++        Some(())
++    }
++
++    fn clear_ime_composition(&self) -> Option<()> {
++        self.with_input_handler(|handler| {
++            if handler.marked_text_range().is_some() {
++                handler.unmark_text();
+             }
++        })
++    }
+
+-            // currently, we don't care other stuff
+-            None
+-        }
++    fn handle_ime_end_composition(&self, _handle: HWND) -> Option<isize> {
++        self.clear_ime_composition();
++        // Let the IME finish closing its candidate window.
++        None
+     }
+
+     /// SEE: https://learn.microsoft.com/en-us/windows/win32/winmsg/wm-nccalcsize
+@@ -746,11 +791,19 @@ impl WindowsWindowInner {
+         Some(0)
+     }
+
+-    fn handle_activate_msg(self: &Rc<Self>, wparam: WPARAM) -> Option<isize> {
+-        let activated = wparam.loword() > 0;
++    fn handle_activate_msg(self: &Rc<Self>, handle: HWND, wparam: WPARAM) -> Option<isize> {
++        let activated = wparam.loword() != WA_INACTIVE as u16;
++        if !activated {
++            self.clear_ime_composition();
++        }
+         let this = self.clone();
+         self.executor
+             .spawn(async move {
++                // Deactivation can be delivered while GPUI is already updating.
++                // Retry the local cleanup when the app is free and focus is still away.
++                if !activated && unsafe { GetFocus() } != handle {
++                    this.clear_ime_composition();
++                }
+                 let mut lock = this.state.borrow_mut();
+                 if let Some(mut func) = lock.callbacks.active_status_change.take() {
+                     drop(lock);
+@@ -1165,6 +1218,7 @@ impl WindowsWindowInner {
+     }
+
+     fn handle_input_language_changed(&self) -> Option<isize> {
++        self.clear_ime_composition();
+         unsafe {
+             PostMessageW(
+                 Some(self.platform_window_handle),
+@@ -1174,7 +1228,7 @@ impl WindowsWindowInner {
+             )
+             .log_err();
+         }
+-        Some(0)
++        None
+     }
+
+     fn handle_window_visibility_changed(&self, handle: HWND, wparam: WPARAM) -> Option<isize> {
+@@ -1195,12 +1249,13 @@ impl WindowsWindowInner {
+     #[inline]
+     fn draw_window(&self, handle: HWND, force_render: bool) -> Option<isize> {
+         let mut request_frame = self.state.borrow_mut().callbacks.request_frame.take()?;
++        // Validate first so a request posted while the frame is drawing stays pending.
++        unsafe { ValidateRect(Some(handle), None).ok().log_err() };
+         request_frame(RequestFrameOptions {
+             require_presentation: false,
+             force_render,
+         });
+         self.state.borrow_mut().callbacks.request_frame = Some(request_frame);
+-        unsafe { ValidateRect(Some(handle), None).ok().log_err() };
+         Some(0)
+     }
+
+@@ -1293,7 +1348,8 @@ fn translate_message(handle: HWND, wparam: WPARAM, lparam: LPARAM) {
+         time: 0,
+         pt: POINT::default(),
+     };
+-    unsafe { TranslateMessage(&msg).ok().log_err() };
++    // FALSE also means the key did not produce a character message.
++    let _ = unsafe { TranslateMessage(&msg) };
+ }
+
+ fn handle_key_event<F>(
+@@ -1341,12 +1397,8 @@ where
+                 capslock,
+             }))
+         }
++        VK_PROCESSKEY => None,
+         vkey => {
+-            let vkey = if vkey == VK_PROCESSKEY {
+-                VIRTUAL_KEY(unsafe { ImmGetVirtualKey(handle) } as u16)
+-            } else {
+-                vkey
+-            };
+             let keystroke = parse_normal_key(vkey, lparam, modifiers)?;
+             Some(f(keystroke))
+         }
+@@ -1428,31 +1480,119 @@ fn parse_normal_key(
+     })
+ }
+
+-fn parse_ime_composition_string(ctx: HIMC, comp_type: IME_COMPOSITION_STRING) -> Option<String> {
+-    unsafe {
+-        let string_len = ImmGetCompositionStringW(ctx, comp_type, None, 0);
+-        if string_len >= 0 {
+-            let mut buffer = vec![0u8; string_len as usize + 2];
+-            ImmGetCompositionStringW(
+-                ctx,
+-                comp_type,
+-                Some(buffer.as_mut_ptr() as _),
+-                string_len as _,
+-            );
+-            let wstring = std::slice::from_raw_parts::<u16>(
+-                buffer.as_mut_ptr().cast::<u16>(),
+-                string_len as usize / 2,
+-            );
+-            Some(String::from_utf16_lossy(wstring))
++fn is_ime_process_key(wparam: WPARAM) -> bool {
++    VIRTUAL_KEY(wparam.loword()) == VK_PROCESSKEY
++}
++
++#[derive(Debug, PartialEq, Eq)]
++enum ImeUpdate {
++    Clear,
++    Commit,
++    Preedit,
++}
++
++impl ImeUpdate {
++    fn from_flags(lparam: LPARAM) -> impl Iterator<Item = Self> {
++        let flags = lparam.0 as u32;
++        let commit = flags & GCS_RESULTSTR.0 != 0;
++        // An IME can commit part of the text and continue composing the rest.
++        let next = if flags & GCS_COMPSTR.0 != 0 {
++            Some(Self::Preedit)
++        } else if commit || flags == 0 {
++            Some(Self::Clear)
+         } else {
+             None
++        };
++        [commit.then_some(Self::Commit), next].into_iter().flatten()
++    }
++}
++
++struct ImeContext {
++    window: HWND,
++    raw: HIMC,
++}
++
++impl ImeContext {
++    fn acquire(window: HWND) -> Option<Self> {
++        let raw = unsafe { ImmGetContext(window) };
++        if raw.is_invalid() {
++            None
++        } else {
++            Some(Self { window, raw })
+         }
+     }
+ }
+
+-#[inline]
+-fn retrieve_composition_cursor_position(ctx: HIMC) -> usize {
+-    unsafe { ImmGetCompositionStringW(ctx, GCS_CURSORPOS, None, 0) as usize }
++impl Drop for ImeContext {
++    fn drop(&mut self) {
++        unsafe { ImmReleaseContext(self.window, self.raw).ok().log_err() };
++    }
++}
++
++fn parse_ime_composition_string(ctx: HIMC, comp_type: IME_COMPOSITION_STRING) -> Option<String> {
++    unsafe {
++        let byte_len = u32::try_from(ImmGetCompositionStringW(ctx, comp_type, None, 0)).ok()?;
++        if byte_len == 0 {
++            return Some(String::new());
++        }
++        let mut buffer = vec![0u16; byte_len.div_ceil(2) as usize];
++        let copied = usize::try_from(ImmGetCompositionStringW(
++            ctx,
++            comp_type,
++            Some(buffer.as_mut_ptr().cast()),
++            byte_len,
++        ))
++        .ok()?;
++        Some(String::from_utf16_lossy(buffer.get(..copied / 2)?))
++    }
++}
++
++fn retrieve_composition_cursor_position(ctx: HIMC) -> Option<usize> {
++    usize::try_from(unsafe { ImmGetCompositionStringW(ctx, GCS_CURSORPOS, None, 0) }).ok()
++}
++
++#[cfg(test)]
++mod ime_tests {
++    use super::*;
++
++    #[test]
++    fn process_key_is_reserved_for_ime() {
++        assert!(is_ime_process_key(WPARAM(VK_PROCESSKEY.0.into())));
++        for key in [VK_BACK, VK_RETURN, VK_SPACE, VK_LEFT, VK_A] {
++            assert!(!is_ime_process_key(WPARAM(key.0.into())));
++        }
++    }
++
++    #[test]
++    fn result_only_and_empty_messages_clear_marked_text() {
++        assert_eq!(
++            ImeUpdate::from_flags(LPARAM(GCS_RESULTSTR.0 as isize)).collect::<Vec<_>>(),
++            [ImeUpdate::Commit, ImeUpdate::Clear]
++        );
++        assert_eq!(
++            ImeUpdate::from_flags(LPARAM(GCS_COMPSTR.0 as isize)).collect::<Vec<_>>(),
++            [ImeUpdate::Preedit]
++        );
++        assert_eq!(
++            ImeUpdate::from_flags(LPARAM(0)).collect::<Vec<_>>(),
++            [ImeUpdate::Clear]
++        );
++        assert_eq!(
++            ImeUpdate::from_flags(LPARAM(GCS_COMPATTR.0 as isize)).next(),
++            None
++        );
++    }
++
++    #[test]
++    fn partial_commit_keeps_the_remaining_preedit() {
++        for cursor in [0, GCS_CURSORPOS.0] {
++            let flags = GCS_RESULTSTR.0 | GCS_COMPSTR.0 | cursor;
++            assert_eq!(
++                ImeUpdate::from_flags(LPARAM(flags as isize)).collect::<Vec<_>>(),
++                [ImeUpdate::Commit, ImeUpdate::Preedit]
++            );
++        }
++    }
+ }
+
+ #[inline]
+diff --git a/src/platform/windows/platform.rs b/src/platform/windows/platform.rs
+index 361d8e11..8186f377 100644
+--- a/src/platform/windows/platform.rs
++++ b/src/platform/windows/platform.rs
+@@ -4,7 +4,10 @@ use std::{
+     mem::ManuallyDrop,
+     path::{Path, PathBuf},
+     rc::{Rc, Weak},
+-    sync::Arc,
++    sync::{
++        Arc,
++        atomic::{AtomicBool, Ordering::Relaxed},
++    },
+ };
+
+ use ::util::{ResultExt, paths::SanitizedPath};
+@@ -28,9 +31,22 @@ use windows::{
+
+ use crate::*;
+
++type WindowFrameTargets = RwLock<SmallVec<[WindowFrameTarget; 4]>>;
++
++struct WindowFrameTarget {
++    hwnd: SafeHwnd,
++    requested: Arc<AtomicBool>,
++}
++
++impl WindowFrameTarget {
++    fn as_raw(&self) -> HWND {
++        self.hwnd.as_raw()
++    }
++}
++
+ pub(crate) struct WindowsPlatform {
+     inner: Rc<WindowsPlatformInner>,
+-    raw_window_handles: Arc<RwLock<SmallVec<[SafeHwnd; 4]>>>,
++    raw_window_handles: Arc<WindowFrameTargets>,
+     // The below members will never change throughout the entire lifecycle of the app.
+     icon: HICON,
+     background_executor: BackgroundExecutor,
+@@ -44,7 +60,7 @@ pub(crate) struct WindowsPlatform {
+
+ struct WindowsPlatformInner {
+     state: RefCell<WindowsPlatformState>,
+-    raw_window_handles: std::sync::Weak<RwLock<SmallVec<[SafeHwnd; 4]>>>,
++    raw_window_handles: std::sync::Weak<WindowFrameTargets>,
+     // The below members will never change throughout the entire lifecycle of the app.
+     validation_number: usize,
+     main_receiver: flume::Receiver<Runnable>,
+@@ -261,9 +277,13 @@ impl WindowsPlatform {
+                     let Some(all_windows) = all_windows.upgrade() else {
+                         break;
+                     };
+-                    for hwnd in all_windows.read().iter() {
+-                        unsafe {
+-                            let _ = RedrawWindow(Some(hwnd.as_raw()), None, None, RDW_INVALIDATE);
++                    for window in all_windows.read().iter() {
++                        if window.requested.swap(false, Relaxed) {
++                            // Queue a low-priority WM_PAINT without synchronously
++                            // asking the UI thread to run the frame.
++                            unsafe {
++                                let _ = InvalidateRect(Some(window.as_raw()), None, false);
++                            }
+                         }
+                     }
+                 }
+@@ -411,8 +431,10 @@ impl Platform for WindowsPlatform {
+         options: WindowParams,
+     ) -> Result<Box<dyn PlatformWindow>> {
+         let window = WindowsWindow::new(handle, options, self.generate_creation_info())?;
+-        let handle = window.get_raw_handle();
+-        self.raw_window_handles.write().push(handle.into());
++        self.raw_window_handles.write().push(WindowFrameTarget {
++            hwnd: window.get_raw_handle().into(),
++            requested: window.frame_requested(),
++        });
+
+         Ok(Box::new(window))
+     }
+@@ -830,7 +852,7 @@ pub(crate) struct WindowCreationInfo {
+
+ struct PlatformWindowCreateContext {
+     inner: Option<Result<Rc<WindowsPlatformInner>>>,
+-    raw_window_handles: std::sync::Weak<RwLock<SmallVec<[SafeHwnd; 4]>>>,
++    raw_window_handles: std::sync::Weak<WindowFrameTargets>,
+     validation_number: usize,
+     main_receiver: Option<flume::Receiver<Runnable>>,
+     directx_devices: Option<DirectXDevices>,
+@@ -1034,7 +1056,7 @@ fn handle_gpu_device_lost(
+     directx_devices: &mut DirectXDevices,
+     platform_window: HWND,
+     validation_number: usize,
+-    all_windows: &std::sync::Weak<RwLock<SmallVec<[SafeHwnd; 4]>>>,
++    all_windows: &std::sync::Weak<WindowFrameTargets>,
+     text_system: &std::sync::Weak<DirectWriteTextSystem>,
+ ) {
+     // Here we wait a bit to ensure the system has time to recover from the device lost state.
+diff --git a/src/platform/windows/window.rs b/src/platform/windows/window.rs
+index e765fa1a..53127343 100644
+--- a/src/platform/windows/window.rs
++++ b/src/platform/windows/window.rs
+@@ -6,7 +6,7 @@ use std::{
+     path::PathBuf,
+     rc::{Rc, Weak},
+     str::FromStr,
+-    sync::{Arc, Once},
++    sync::{Arc, Once, atomic::AtomicBool},
+     time::{Duration, Instant},
+ };
+
+@@ -74,6 +74,7 @@ pub(crate) struct WindowsWindowInner {
+     pub(crate) validation_number: usize,
+     pub(crate) main_receiver: flume::Receiver<Runnable>,
+     pub(crate) platform_window_handle: HWND,
++    pub(super) frame_requested: Arc<AtomicBool>,
+ }
+
+ impl WindowsWindowState {
+@@ -231,6 +232,7 @@ impl WindowsWindowInner {
+             validation_number: context.validation_number,
+             main_receiver: context.main_receiver.clone(),
+             platform_window_handle: context.platform_window_handle,
++            frame_requested: Arc::new(AtomicBool::new(true)),
+             system_settings: RefCell::new(WindowsSystemSettings::new(context.display)),
+         }))
+     }
+@@ -801,6 +803,10 @@ impl PlatformWindow for WindowsWindow {
+         self.0.state.borrow().is_fullscreen()
+     }
+
++    fn frame_requested(&self) -> Arc<AtomicBool> {
++        self.0.frame_requested.clone()
++    }
++
+     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {
+         self.0.state.borrow_mut().callbacks.request_frame = Some(callback);
+     }

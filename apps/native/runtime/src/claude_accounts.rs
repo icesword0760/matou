@@ -210,6 +210,11 @@ impl Engine {
             return Err("engine-missing");
         }
         let mut command = Command::new(&self.executable);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        }
         // Login is the bridge's only action that starts Claude Code. Roster
         // reads and local credential transactions need no shell startup.
         if self.resolve_login_path && interactive {

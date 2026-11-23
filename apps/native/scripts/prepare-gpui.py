@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare pinned GPUI with Matou's macOS font and atlas adaptations."""
+"""Prepare pinned GPUI with Matou's platform adaptations."""
 import hashlib
 import json
 import os
@@ -15,16 +15,32 @@ VERSION = "0.2.2"
 ARCHIVE_SHA256 = "979b45cfa6ec723b6f42330915a1b3769b930d02b2d505f9697f8ca602bee707"
 FONT_PATCH = Path("patches/gpui-macos-synthetic-italic.patch")
 ATLAS_PATCH = Path("patches/gpui-macos-atlas-retirement.patch")
-PATCHES = (FONT_PATCH, ATLAS_PATCH)
+WINDOWS_PATCH = Path("patches/gpui-windows-ime.patch")
+PATCHES = (FONT_PATCH, ATLAS_PATCH, WINDOWS_PATCH)
 DESTINATION = ROOT / "vendor/gpui"
 FONT_SOURCE = Path("src/platform/mac/text_system.rs")
 ATLAS_SOURCE = Path("src/platform/mac/metal_atlas.rs")
-SOURCES = (FONT_SOURCE, ATLAS_SOURCE)
 PATCHED_SHA256 = {
-    str(FONT_SOURCE): "784e9e1fa80eac701935e1689a2d693dae186489614c2b0ad0c42d0878dcd261",
-    str(ATLAS_SOURCE): "362ddf60c6550e344a354fb6b6a977f2ff068bd442f3256bf5c81e535796459b",
+    FONT_SOURCE.as_posix(): "784e9e1fa80eac701935e1689a2d693dae186489614c2b0ad0c42d0878dcd261",
+    ATLAS_SOURCE.as_posix(): "362ddf60c6550e344a354fb6b6a977f2ff068bd442f3256bf5c81e535796459b",
+    "src/platform.rs": "a7a8075608b61796ba7871aa118f4c2c3efab97c3bc3ec0553ad4de32547b24c",
+    "src/window.rs": "8560e49d65f7fcec992d2309d1fbff1d32cecac9fe4f39aab77f20d51e0fc639",
+    "src/platform/windows/direct_write.rs": "e345de60957683a982c560a00f7d685b17d23b91e1c9b45c52f930a4e4c0f609",
+    "src/platform/windows/events.rs": "13d2d19bc906335c7cf25e420be76577f536f5bf6e77f600cd1ca96013d1c7ca",
+    "src/platform/windows/platform.rs": "f56046900c173914859233aad5af10717ec115a701e545c905fe022f8de340a3",
+    "src/platform/windows/window.rs": "30e3c2ceb3dad569157874d99852d6a44b0b2cb3880a5a7d7abc11fdcdc7c736",
 }
-ORIGINAL_ATLAS_SHA256 = "243326441589a0f942f4e1ed83283c5829457007a0d58e9ee13cc04540195428"
+SOURCES = tuple(map(Path, PATCHED_SHA256))
+ORIGINAL_SHA256 = {
+    ATLAS_SOURCE.as_posix(): "243326441589a0f942f4e1ed83283c5829457007a0d58e9ee13cc04540195428",
+    "src/platform.rs": "7106499142d5416edaf44168da5c7dcd778c527398cb86e487131ba6689b94ff",
+    "src/window.rs": "40d58470971ccd658ead4d4f788219658fb68b9486aff73e143835c09237ab18",
+    "src/platform/windows/direct_write.rs": "8047a0130272466935edd5c8a57aa309d3a3efbffdfe7c175cc5b3082566820c",
+    "src/platform/windows/events.rs": "ad86330b2c3d26342ce8c45759a07c8ac57007fecedc7dd7bf861dfdfa2727c7",
+    "src/platform/windows/platform.rs": "81ca3093537e9320e2e8a28bc15d9883080546b96a685c0662158d853e090334",
+    "src/platform/windows/window.rs": "e8d8ce5c589e72ed3d6b86d8008b8e1cc0d4c471c272fd8e6c6f38351a714493",
+}
+PREVIOUS_WINDOWS_EVENTS_SHA256 = "01f741c6822215d75d76d46d3066bc0386d5d6f5667ee4fb8a6d877d27d223a5"
 MARKER = ".matou-patch.json"
 
 
@@ -33,22 +49,21 @@ def digest(path):
 
 
 def current_sources():
-    """Recognize both affected files before writing any part of an existing tree."""
+    """Recognize all affected files before writing any part of an existing tree."""
     try:
-        hashes = {str(source): digest(DESTINATION / source) for source in SOURCES}
+        hashes = {source.as_posix(): digest(DESTINATION / source) for source in SOURCES}
     except OSError as error:
         raise SystemExit(f"Unrecognized GPUI source tree; preserve it before preparing: {error}")
-    if hashes[str(FONT_SOURCE)] != PATCHED_SHA256[str(FONT_SOURCE)]:
-        raise SystemExit("The generated GPUI font source has local changes; preserve them before preparing it again.")
-    if hashes[str(ATLAS_SOURCE)] not in (
-        ORIGINAL_ATLAS_SHA256, PATCHED_SHA256[str(ATLAS_SOURCE)]
-    ):
-        raise SystemExit("The generated GPUI atlas source has local changes; preserve them before preparing it again.")
+    for name, source_hash in hashes.items():
+        if source_hash == PREVIOUS_WINDOWS_EVENTS_SHA256 and name == "src/platform/windows/events.rs":
+            continue
+        if source_hash not in (PATCHED_SHA256[name], ORIGINAL_SHA256.get(name)):
+            raise SystemExit(f"The generated GPUI source {name} has local changes; preserve it before preparing again.")
     return hashes
 
 
 def main():
-    patches = {str(patch): digest(ROOT / patch) for patch in PATCHES}
+    patches = {patch.as_posix(): digest(ROOT / patch) for patch in PATCHES}
     record = {
         "formatVersion": 2,
         "version": VERSION,
@@ -59,8 +74,8 @@ def main():
     existing = DESTINATION.exists() and any(DESTINATION.iterdir())
     before = None
     if existing:
-        # The old marker protects the font only. Validate that file first, then
-        # independently recognize the atlas against pinned original/patched bytes.
+        # Earlier markers covered only the macOS adaptations. Independently
+        # recognize every Windows source against the pinned original/patched bytes.
         marker = DESTINATION / MARKER
         previous = None
         if marker.exists():
@@ -72,18 +87,22 @@ def main():
                     previous.get("archiveSha256") != ARCHIVE_SHA256):
                 raise SystemExit("Unrecognized GPUI preparation marker; preserve this tree before preparing it again.")
             if "formatVersion" not in previous:
-                if (previous.get("patchSha256") != patches[str(FONT_PATCH)] or
-                        previous.get("sourceSha256") != PATCHED_SHA256[str(FONT_SOURCE)] or
+                if (previous.get("patchSha256") != patches[FONT_PATCH.as_posix()] or
+                        previous.get("sourceSha256") != PATCHED_SHA256[FONT_SOURCE.as_posix()] or
                         digest(DESTINATION / FONT_SOURCE) != previous["sourceSha256"]):
                     raise SystemExit("The legacy GPUI font adaptation has local changes; preserve them before preparing it again.")
             elif previous.get("formatVersion") != 2:
                 raise SystemExit("Unknown GPUI preparation marker format; preserve it before preparing it again.")
         before = current_sources()
         if previous is not None and previous.get("formatVersion") == 2:
-            if previous.get("sources") != before:
+            old_sources = {source.as_posix(): before[source.as_posix()] for source in (FONT_SOURCE, ATLAS_SOURCE)}
+            previous_sources = previous.get("sources")
+            if not isinstance(previous_sources, dict) or {
+                path.replace("\\", "/"): source_hash for path, source_hash in previous_sources.items()
+            } not in (old_sources, before):
                 raise SystemExit("The generated GPUI source differs from its marker; preserve it before preparing it again.")
         if previous == record:
-            print(f"GPUI {VERSION}: pinned font and atlas adaptations already prepared")
+            print(f"GPUI {VERSION}: pinned platform adaptations already prepared")
             return
 
     cargo_root = Path(os.environ.get("CARGO_HOME", str(Path.home() / ".cargo")))
@@ -92,6 +111,8 @@ def main():
         temporary = Path(directory)
         archive = cached or temporary / f"gpui-{VERSION}.crate"
         if cached is None:
+            if os.environ.get("CARGO_NET_OFFLINE", "").lower() == "true":
+                raise SystemExit(f"GPUI {VERSION} archive missing from the offline Cargo cache")
             url = f"https://static.crates.io/crates/gpui/gpui-{VERSION}.crate"
             with urllib.request.urlopen(url, timeout=60) as response:
                 archive.write_bytes(response.read())
@@ -100,10 +121,13 @@ def main():
         with tarfile.open(archive) as package:
             package.extractall(temporary, filter="data")
         prepared = temporary / f"gpui-{VERSION}"
+        # Apply from the extracted archive even when TMPDIR is inside a worktree.
+        # Otherwise git apply can discover that worktree and skip patch paths.
+        patch_env = {**os.environ, "GIT_CEILING_DIRECTORIES": str(temporary.resolve())}
         for patch in PATCHES:
-            subprocess.run(["git", "apply", "--check", str(ROOT / patch)], cwd=prepared, check=True)
-            subprocess.run(["git", "apply", str(ROOT / patch)], cwd=prepared, check=True)
-        actual = {str(source): digest(prepared / source) for source in SOURCES}
+            subprocess.run(["git", "apply", "--check", str(ROOT / patch)], cwd=prepared, env=patch_env, check=True)
+            subprocess.run(["git", "apply", str(ROOT / patch)], cwd=prepared, env=patch_env, check=True)
+        actual = {source.as_posix(): digest(prepared / source) for source in SOURCES}
         if actual != PATCHED_SHA256:
             raise SystemExit("GPUI patch results differ from the known adaptations")
         if existing:
@@ -111,13 +135,13 @@ def main():
             if current_sources() != before:
                 raise SystemExit("GPUI sources changed during preparation; no source files were replaced")
             for source in SOURCES:
-                if before[str(source)] != actual[str(source)]:
+                if before[source.as_posix()] != actual[source.as_posix()]:
                     shutil.copyfile(prepared / source, DESTINATION / source)
         else:
             DESTINATION.parent.mkdir(parents=True, exist_ok=True)
             shutil.copytree(prepared, DESTINATION, dirs_exist_ok=True)
         (DESTINATION / MARKER).write_text(json.dumps(record, indent=2) + "\n")
-        print(f"GPUI {VERSION}: prepared verified font and atlas adaptations")
+        print(f"GPUI {VERSION}: prepared verified platform adaptations")
 
 
 if __name__ == "__main__":
