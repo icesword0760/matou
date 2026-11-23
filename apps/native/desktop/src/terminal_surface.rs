@@ -1,5 +1,6 @@
 use std::{
     ops::Range,
+    path::PathBuf,
     time::{Duration, Instant},
 };
 
@@ -10,10 +11,11 @@ use core_graphics::{
 };
 use gpui::{
     App, Bounds, ContentMask, Context, CursorStyle as PointerStyle, DispatchPhase,
-    ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Font, FontStyle,
-    FontWeight, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Pixels,
-    Point, Render, ScrollWheelEvent, ShapedLine, SharedString, StatefulInteractiveElement, Styled,
-    Task, TextRun, UTF16Selection, Window, canvas, div, fill, font, point, px, rgb, rgba, size,
+    ElementInputHandler, Entity, EntityInputHandler, EventEmitter, ExternalPaths, FocusHandle,
+    Font, FontStyle, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, MouseButton,
+    ParentElement, Pixels, Point, Render, ScrollWheelEvent, ShapedLine, SharedString,
+    StatefulInteractiveElement, Styled, Task, TextRun, UTF16Selection, Window, canvas, div, fill,
+    font, point, prelude::FluentBuilder, px, rgb, rgba, size,
 };
 use matou_native_terminal::{
     Cell, Color, CursorStyle, GridSelection, InputModes, MouseEncoding, MouseEvent, MouseProtocol,
@@ -57,6 +59,40 @@ const DEFAULT_VERTICAL_INSET: Pixels = px(14.);
 const CANVAS_VERTICAL_INSET: Pixels = px(12.);
 const BLINK_INTERVAL: Duration = Duration::from_millis(500);
 const FAMILIES: &[&str] = &["SF Mono", "Monaco", "Menlo", "Consolas", "Courier New"];
+
+fn quote_dropped_path(path: &str, windows: bool) -> String {
+    if path.is_empty() || path.contains('\0') {
+        return String::new();
+    }
+
+    let ordinary = |byte: u8| {
+        byte.is_ascii_alphanumeric() || b"_./:@%+=,-".contains(&byte) || (windows && byte == b'\\')
+    };
+    if !path.starts_with('=') {
+        if path.bytes().all(ordinary) {
+            return path.to_owned();
+        }
+        if !path.starts_with(' ')
+            && !path.ends_with(' ')
+            && path.bytes().all(|byte| byte == b' ' || ordinary(byte))
+        {
+            return format!("\"{path}\"");
+        }
+    }
+
+    let escaped_quote = if windows { "''" } else { "'\\''" };
+    format!("'{}'", path.replace('\'', escaped_quote))
+}
+
+fn format_dropped_paths(paths: &[PathBuf], windows: bool) -> String {
+    paths
+        .iter()
+        .filter_map(|path| path.to_str())
+        .map(|path| quote_dropped_path(path, windows))
+        .filter(|path| !path.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 
 #[cfg(all(target_os = "macos", debug_assertions))]
 thread_local! {
@@ -1634,6 +1670,8 @@ impl Render for TerminalSurface {
         );
         let surface = cx.entity();
         let generation = self.transport_generation;
+        let can_drop_files = !self.input_disabled && !self.transport_suspended;
+        let drop_tint = rgba(0x436ff61f);
         div()
             .id("terminal-surface")
             .size_full()
@@ -1647,6 +1685,25 @@ impl Render for TerminalSurface {
                 PointerStyle::Arrow
             })
             .track_focus(&self.focus)
+            .when(can_drop_files, |element| {
+                element.drag_over::<ExternalPaths>(move |style, _, _, _| {
+                    style.rounded(px(4.)).border_1().border_color(drop_tint)
+                })
+            })
+            .on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
+                if this.transport_generation != generation
+                    || this.transport_suspended
+                    || this.input_disabled
+                {
+                    return;
+                }
+                let text = format_dropped_paths(paths.paths(), cfg!(target_os = "windows"));
+                if !text.is_empty() {
+                    this.send(format!(" {text}").into_bytes(), cx);
+                }
+                this.focus.focus(window);
+                cx.notify();
+            }))
             .on_hover(cx.listener(move |this, hovered, _, cx| {
                 if this.transport_generation != generation || this.transport_suspended {
                     return;
@@ -1892,6 +1949,19 @@ impl Render for TerminalSurface {
                         * self.screen.as_ref().map_or(0, |screen| screen.rows) as f32)
                     .cursor(PointerStyle::Arrow),
             )
+            .when(can_drop_files, |element| {
+                // Paint the tint above the opaque terminal canvas.
+                element.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        // Give the overlay a hitbox without blocking input underneath.
+                        .group("terminal-drop-overlay")
+                        .drag_over::<ExternalPaths>(move |style, _, _, _| {
+                            style.rounded(px(4.)).bg(drop_tint)
+                        }),
+                )
+            })
     }
 }
 
@@ -2168,6 +2238,100 @@ fn paint_cursor(window: &mut Window, bounds: Bounds<Pixels>, color: u32, style: 
             vertical(window, bounds.right() - px(1.), px(1.));
         }
         CursorStyle::Block => {}
+    }
+}
+
+#[cfg(test)]
+mod file_drop_tests {
+    use super::*;
+
+    #[test]
+    fn posix_keeps_ordinary_paths_and_double_quotes_interior_spaces() {
+        assert_eq!(quote_dropped_path("/tmp/a.txt", false), "/tmp/a.txt");
+        assert_eq!(
+            quote_dropped_path("/tmp/a  b/c.txt", false),
+            "\"/tmp/a  b/c.txt\""
+        );
+    }
+
+    #[test]
+    fn posix_single_quotes_shell_specials_and_edge_spaces() {
+        for path in [
+            "/tmp/a$(id);&`x`.txt",
+            "/tmp/a\"b.txt",
+            "/tmp/a\\b.txt",
+            "/tmp/a\nb.txt",
+            "/tmp/文件.txt",
+            " /tmp/leading.txt",
+            "/tmp/trailing.txt ",
+        ] {
+            assert_eq!(quote_dropped_path(path, false), format!("'{path}'"));
+        }
+        assert_eq!(
+            quote_dropped_path("/tmp/a'b.txt", false),
+            "'/tmp/a'\\''b.txt'"
+        );
+    }
+
+    #[test]
+    fn windows_keeps_drive_and_unc_paths_and_double_quotes_interior_spaces() {
+        for path in [
+            r"D:\MatouTest\v18-matrix\drop-test.txt",
+            r"\\server\share\file.txt",
+        ] {
+            assert_eq!(quote_dropped_path(path, true), path);
+        }
+        let with_spaces = r"D:\MatouTest\v18-matrix\drop test.txt";
+        assert_eq!(
+            quote_dropped_path(with_spaces, true),
+            format!("\"{with_spaces}\"")
+        );
+    }
+
+    #[test]
+    fn windows_single_quotes_specials_and_doubles_embedded_single_quotes() {
+        for path in [
+            r"D:\MatouTest\a$(x);&`b.txt",
+            r"D:\MatouTest\(archive).txt",
+            r"D:\MatouTest\文件.txt",
+        ] {
+            assert_eq!(quote_dropped_path(path, true), format!("'{path}'"));
+        }
+        assert_eq!(
+            quote_dropped_path(r"D:\MatouTest\a'b.txt", true),
+            r"'D:\MatouTest\a''b.txt'"
+        );
+    }
+
+    #[test]
+    fn leading_equals_is_single_quoted_on_both_platforms() {
+        for windows in [false, true] {
+            assert_eq!(quote_dropped_path("=name.txt", windows), "'=name.txt'");
+            assert_eq!(quote_dropped_path("=a b.txt", windows), "'=a b.txt'");
+        }
+    }
+
+    #[test]
+    fn formats_multiple_paths_in_order_and_ignores_empty_and_nul_paths() {
+        for (windows, plain, spaced) in [
+            (false, "/tmp/a.txt", "/tmp/b c.txt"),
+            (true, r"D:\tmp\a.txt", r"D:\tmp\b c.txt"),
+        ] {
+            assert_eq!(quote_dropped_path("", windows), "");
+            assert_eq!(quote_dropped_path("bad\0path", windows), "");
+            assert_eq!(format_dropped_paths(&[], windows), "");
+            assert_eq!(
+                format_dropped_paths(&["", "bad\0path"].map(PathBuf::from), windows),
+                ""
+            );
+            assert_eq!(
+                format_dropped_paths(
+                    &[plain, "bad\0path", "", spaced].map(PathBuf::from),
+                    windows
+                ),
+                format!("{plain} \"{spaced}\"")
+            );
+        }
     }
 }
 

@@ -14,7 +14,7 @@ index 047a0055..b6a82685 100644
      fn on_active_status_change(&self, callback: Box<dyn FnMut(bool)>);
      fn on_hover_status_change(&self, callback: Box<dyn FnMut(bool)>);
 diff --git a/src/window.rs b/src/window.rs
-index 6d74a0e1..23bdaebd 100644
+index 6d74a0e1..f84f9b9e 100644
 --- a/src/window.rs
 +++ b/src/window.rs
 @@ -32,6 +32,8 @@ use raw_window_handle::{HandleError, HasDisplayHandle, HasWindowHandle};
@@ -140,6 +140,15 @@ index 6d74a0e1..23bdaebd 100644
          profiling::finish_frame!();
      }
 
+@@ -3655,7 +3687,7 @@ impl Window {
+                     })
+                 }
+                 FileDropEvent::Exited => {
+-                    cx.active_drag.take();
++                    cx.stop_active_drag(self);
+                     PlatformInput::FileDrop(FileDropEvent::Exited)
+                 }
+             },
 diff --git a/src/platform/windows/direct_write.rs b/src/platform/windows/direct_write.rs
 index e187fc4b..b667427f 100644
 --- a/src/platform/windows/direct_write.rs
@@ -999,7 +1008,7 @@ index 361d8e11..8186f377 100644
  ) {
      // Here we wait a bit to ensure the system has time to recover from the device lost state.
 diff --git a/src/platform/windows/window.rs b/src/platform/windows/window.rs
-index e765fa1a..ffaec8dd 100644
+index e765fa1a..ba58f950 100644
 --- a/src/platform/windows/window.rs
 +++ b/src/platform/windows/window.rs
 @@ -1,12 +1,12 @@
@@ -1088,3 +1097,15 @@ index e765fa1a..ffaec8dd 100644
      fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {
          self.0.state.borrow_mut().callbacks.request_frame = Some(callback);
      }
+@@ -903,9 +932,9 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
+                 if idata.u.hGlobal.is_invalid() {
+                     return Ok(());
+                 }
+-                let hdrop = idata.u.hGlobal.0 as *mut HDROP;
++                let hdrop = HDROP(idata.u.hGlobal.0);
+                 let mut paths = SmallVec::<[PathBuf; 2]>::new();
+-                with_file_names(*hdrop, |file_name| {
++                with_file_names(hdrop, |file_name| {
+                     if let Some(path) = PathBuf::from_str(&file_name).log_err() {
+                         paths.push(path);
+                     }

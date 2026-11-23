@@ -24,11 +24,11 @@ PATCHED_SHA256 = {
     FONT_SOURCE.as_posix(): "784e9e1fa80eac701935e1689a2d693dae186489614c2b0ad0c42d0878dcd261",
     ATLAS_SOURCE.as_posix(): "362ddf60c6550e344a354fb6b6a977f2ff068bd442f3256bf5c81e535796459b",
     "src/platform.rs": "a7a8075608b61796ba7871aa118f4c2c3efab97c3bc3ec0553ad4de32547b24c",
-    "src/window.rs": "8560e49d65f7fcec992d2309d1fbff1d32cecac9fe4f39aab77f20d51e0fc639",
+    "src/window.rs": "d28f4524f3a3c269b98ab0fcb98ed28d0ec8f20b837692e7de9b8efc9c1c2c50",
     "src/platform/windows/direct_write.rs": "e345de60957683a982c560a00f7d685b17d23b91e1c9b45c52f930a4e4c0f609",
     "src/platform/windows/events.rs": "ee294c71a1324eda335786e9448b061a0c86e7abf858535715ef8dc38f0d3c1b",
     "src/platform/windows/platform.rs": "f56046900c173914859233aad5af10717ec115a701e545c905fe022f8de340a3",
-    "src/platform/windows/window.rs": "b946befe60d271dc97dcad562da3bd70415bd4d138eaa5c0f1f53e516de25cfa",
+    "src/platform/windows/window.rs": "eb47662f55c3bd920c161c19bac52032b98bfb3ff6af9ebed9ad2127dbe83a03",
 }
 SOURCES = tuple(map(Path, PATCHED_SHA256))
 ORIGINAL_SHA256 = {
@@ -41,11 +41,15 @@ ORIGINAL_SHA256 = {
     "src/platform/windows/window.rs": "e8d8ce5c589e72ed3d6b86d8008b8e1cc0d4c471c272fd8e6c6f38351a714493",
 }
 PREVIOUS_SHA256 = {
+    "src/window.rs": (
+        "8560e49d65f7fcec992d2309d1fbff1d32cecac9fe4f39aab77f20d51e0fc639",
+    ),
     "src/platform/windows/events.rs": (
         "01f741c6822215d75d76d46d3066bc0386d5d6f5667ee4fb8a6d877d27d223a5",
         "13d2d19bc906335c7cf25e420be76577f536f5bf6e77f600cd1ca96013d1c7ca",
     ),
     "src/platform/windows/window.rs": (
+        "b946befe60d271dc97dcad562da3bd70415bd4d138eaa5c0f1f53e516de25cfa",
         "30e3c2ceb3dad569157874d99852d6a44b0b2cb3880a5a7d7abc11fdcdc7c736",
     ),
 }
