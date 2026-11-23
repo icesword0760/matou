@@ -7,6 +7,10 @@ use matou_native_core::link_routing::{
     BROWSER_RELEASES_URL, ConfirmationAction, ControlledBrowserFailure, LinkSource, OpenFailure,
     route_link, system_browser_confirmation,
 };
+#[cfg(not(target_os = "windows"))]
+use matou_native_desktop::detach_window::detached_window_header;
+#[cfg(target_os = "windows")]
+use matou_native_desktop::detach_window::detached_window_header_with_caption as detached_window_header;
 use matou_native_desktop::{
     card_context_menu::{
         CardMenu, CardMenuAction, CardMenuContext, CardMenuEvent, CardMenuItem, CardPresentation,
@@ -14,7 +18,7 @@ use matou_native_desktop::{
     },
     detach_window::{
         DetachOutcome, DetachedHeaderStatus, DetachedMount, DetachedWindowAction, DetachedWindows,
-        detached_placeholder, detached_window_header,
+        detached_placeholder,
     },
     egress_panel::{
         EgressAction, EgressBannerState, EgressCheck, EgressCheckKind, EgressCheckResult,
@@ -35,6 +39,7 @@ use matou_native_desktop::{
         UpdateProgress, UpdateRelease, UpdateState, UpdateStatus, UpdateView,
         render_update_popover, render_update_trigger,
     },
+    windows_titlebar,
     workspace_board::{
         BOARD_FEEDBACK_DURATION, BoardFeedback, BoardMoveRequest, BoardView, WorkspaceBoard,
         render_workspace_board_with_sessions,
@@ -1756,7 +1761,7 @@ impl Workspace {
                 focus: visible,
                 titlebar: Some(TitlebarOptions {
                     title: Some(title.clone().into()),
-                    appears_transparent: cfg!(target_os = "macos"),
+                    appears_transparent: windows_titlebar::appears_transparent(),
                     traffic_light_position: cfg!(target_os = "macos")
                         .then_some(point(px(12.), px(13.))),
                 }),
@@ -3401,6 +3406,8 @@ impl Render for DetachedCardView {
                 presentation.locale,
                 presentation.status,
                 presentation.light,
+                #[cfg(target_os = "windows")]
+                window.is_maximized(),
                 move |action, _, cx| {
                     if action == DetachedWindowAction::ReturnToMain {
                         let owner = owner.clone();

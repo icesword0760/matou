@@ -17,6 +17,7 @@ use matou_native_desktop::{
     instance_open::{self, DesktopOptions, Instance, InstanceOwner, OpenRequest},
     runtime_bridge::{Command, ConnectionPhase, RuntimeBridge},
     window_registry::WindowRegistry,
+    windows_titlebar,
     workspace::Workspace,
 };
 #[cfg(target_os = "macos")]
@@ -386,7 +387,7 @@ impl Desktop {
                 } else {
                     "码头".into()
                 }),
-                appears_transparent: cfg!(target_os = "macos"),
+                appears_transparent: windows_titlebar::appears_transparent(),
                 traffic_light_position: cfg!(target_os = "macos")
                     .then_some(point(px(14.), px(16.))),
             }),

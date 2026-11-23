@@ -264,9 +264,42 @@ mod view {
         light: bool,
         on_action: impl Fn(DetachedWindowAction, &mut Window, &mut App) + 'static,
     ) -> gpui::AnyElement {
+        detached_window_header_impl(title, locale, status, light, None, on_action)
+    }
+
+    /// Append the native caption controls at the right edge on Windows.
+    #[cfg(target_os = "windows")]
+    pub fn detached_window_header_with_caption(
+        title: impl Into<SharedString>,
+        locale: InterfaceLocale,
+        status: DetachedHeaderStatus,
+        light: bool,
+        maximized: bool,
+        on_action: impl Fn(DetachedWindowAction, &mut Window, &mut App) + 'static,
+    ) -> gpui::AnyElement {
+        detached_window_header_impl(title, locale, status, light, Some(maximized), on_action)
+    }
+
+    fn detached_window_header_impl(
+        title: impl Into<SharedString>,
+        locale: InterfaceLocale,
+        status: DetachedHeaderStatus,
+        light: bool,
+        maximized: Option<bool>,
+        on_action: impl Fn(DetachedWindowAction, &mut Window, &mut App) + 'static,
+    ) -> gpui::AnyElement {
         let title: SharedString = title.into();
         let copy = detached_placeholder_copy(locale);
         let status = detached_header_status(locale, status);
+        // Caption controls only replace the right inset on Windows. Keeping the
+        // old function signature means its existing callers and probes still
+        // measure the original 12pt edge.
+        let captioned = maximized.is_some() && cfg!(target_os = "windows");
+        let right_inset = if captioned {
+            0.
+        } else {
+            DETACHED_HEADER_RIGHT_INSET
+        };
         let border = if light { rgb(0xe8e8e8) } else { rgb(0x252a33) };
         let background = if light { rgb(0xffffff) } else { rgb(0x11151c) };
         let foreground = if light { rgb(0x2f3547) } else { rgb(0xdce3ef) };
@@ -285,7 +318,7 @@ mod view {
                 ));
             })
         });
-        header
+        let header = header
             .id("detached-window-header")
             .flex()
             .flex_none()
@@ -293,7 +326,7 @@ mod view {
             .w_full()
             .h(px(42.))
             .pl(px(detached_header_left_inset()))
-            .pr(px(DETACHED_HEADER_RIGHT_INSET))
+            .pr(px(right_inset))
             .gap(px(8.))
             .border_b_1()
             .border_color(border)
@@ -339,6 +372,7 @@ mod view {
                     .justify_center()
                     .h(px(24.))
                     .px(px(10.))
+                    .when(captioned, |button| button.mr(px(4.)))
                     .border_1()
                     .border_color(button_border)
                     .rounded(px(6.))
@@ -355,11 +389,26 @@ mod view {
                         on_action(DetachedWindowAction::ReturnToMain, window, cx);
                     })
                     .child(ui_text(copy.return_to_tab)),
-            )
-            .into_any_element()
+            );
+        #[cfg(target_os = "windows")]
+        let header = if let Some(maximized) = maximized {
+            header.child(crate::windows_titlebar::windows_caption_controls(
+                42., !light, maximized,
+            ))
+        } else {
+            header
+        };
+        #[cfg(not(target_os = "windows"))]
+        let header = {
+            let _ = maximized;
+            header
+        };
+        header.into_any_element()
     }
 }
 
+#[cfg(target_os = "windows")]
+pub use view::detached_window_header_with_caption;
 pub use view::{detached_placeholder, detached_window_header};
 
 #[cfg(debug_assertions)]
