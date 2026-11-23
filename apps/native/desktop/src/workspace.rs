@@ -48,6 +48,10 @@ mod deferred_recovery_card {
 #[path = "database_recovery_page.rs"]
 pub mod database_recovery_page;
 
+#[cfg(target_os = "windows")]
+#[path = "quit_confirmation_dialog.rs"]
+mod quit_confirmation_dialog;
+
 #[path = "dag_window.rs"]
 mod dag_window;
 use dag_window::DagWindow;
@@ -1272,6 +1276,210 @@ struct EmptyDatabaseConfirmation {
     confirm: FocusHandle,
 }
 
+#[cfg(any(target_os = "windows", test))]
+#[derive(Default)]
+enum QuitConfirmation<F> {
+    #[default]
+    Closed,
+    Open(F),
+    Confirmed,
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl<F> QuitConfirmation<F> {
+    fn open(&mut self, focus: impl FnOnce() -> F) -> Option<&F> {
+        if !matches!(self, Self::Closed) {
+            return None;
+        }
+        *self = Self::Open(focus());
+        self.focus()
+    }
+
+    fn focus(&self) -> Option<&F> {
+        match self {
+            Self::Open(focus) => Some(focus),
+            _ => None,
+        }
+    }
+
+    fn cancel(&mut self) -> Option<F> {
+        if matches!(self, Self::Open(_))
+            && let Self::Open(focus) = std::mem::take(self)
+        {
+            return Some(focus);
+        }
+        None
+    }
+
+    fn confirm(&mut self) -> bool {
+        if !matches!(self, Self::Open(_)) {
+            return false;
+        }
+        *self = Self::Confirmed;
+        true
+    }
+
+    fn is_confirmed(&self) -> bool {
+        matches!(self, Self::Confirmed)
+    }
+}
+
+#[cfg(target_os = "windows")]
+struct QuitConfirmationFocus {
+    previous: Option<FocusHandle>,
+    keyboard_focus: bool,
+    cancel: FocusHandle,
+    quit: FocusHandle,
+}
+
+#[cfg(target_os = "windows")]
+pub struct QuitConfirmed;
+
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, PartialEq, Eq)]
+enum QuitDialogKey {
+    Cancel,
+    FocusCancel,
+    FocusQuit,
+    Confirm,
+    Ignore,
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn quit_dialog_key(stroke: &Keystroke, cancel_focused: bool, quit_focused: bool) -> QuitDialogKey {
+    let mods = stroke.modifiers;
+    if stroke.key == "escape" {
+        return QuitDialogKey::Cancel;
+    }
+    if stroke.key == "tab" && !mods.alt && !mods.control && !mods.platform && !mods.function {
+        return if !quit_focused && (cancel_focused || mods.shift) {
+            QuitDialogKey::FocusQuit
+        } else {
+            QuitDialogKey::FocusCancel
+        };
+    }
+    if matches!(stroke.key.as_str(), "enter" | "space") && !mods.modified() {
+        if quit_focused {
+            return QuitDialogKey::Confirm;
+        }
+        if cancel_focused {
+            return QuitDialogKey::Cancel;
+        }
+    }
+    QuitDialogKey::Ignore
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn quit_dialog_text(locale: InterfaceLocale) -> [&'static str; 4] {
+    [
+        locale.text("退出码头", "Quit Matou"),
+        locale.text(
+            "确定要退出码头吗？退出后将关闭当前窗口并结束所有运行中的终端会话。",
+            "Are you sure you want to quit Matou? This will close the window and end all running terminal sessions.",
+        ),
+        locale.text("取消", "Cancel"),
+        locale.text("退出", "Quit"),
+    ]
+}
+
+#[cfg(test)]
+mod quit_confirmation_tests {
+    use super::{QuitConfirmation, QuitDialogKey, quit_dialog_key, quit_dialog_text};
+    use gpui::Keystroke;
+    use matou_native_core::sessions::InterfaceLocale;
+
+    #[test]
+    fn repeated_close_keeps_one_dialog_until_confirmed() {
+        let mut state = QuitConfirmation::default();
+        assert!(!state.confirm());
+        assert_eq!(state.open(|| "original focus"), Some(&"original focus"));
+        assert_eq!(state.open(|| "new focus"), None);
+        assert_eq!(state.focus(), Some(&"original focus"));
+        assert!(!state.is_confirmed());
+        assert!(state.confirm());
+        assert!(state.is_confirmed());
+        assert!(!state.confirm());
+        assert_eq!(state.open(|| "new focus"), None);
+        assert_eq!(state.cancel(), None);
+    }
+
+    #[test]
+    fn escape_and_cancel_dismiss_and_return_the_previous_focus() {
+        let escape = Keystroke::parse("escape").unwrap();
+        assert_eq!(quit_dialog_key(&escape, false, true), QuitDialogKey::Cancel);
+
+        let mut state = QuitConfirmation::default();
+        state.open(|| "terminal focus");
+        assert_eq!(state.cancel(), Some("terminal focus"));
+        assert!(state.focus().is_none());
+        assert!(!state.is_confirmed());
+        assert_eq!(
+            state.open(|| "recovery page focus"),
+            Some(&"recovery page focus")
+        );
+    }
+
+    #[test]
+    fn tab_and_shift_tab_cycle_only_over_cancel_and_quit() {
+        for key in ["tab", "shift-tab"] {
+            let stroke = Keystroke::parse(key).unwrap();
+            assert_eq!(
+                quit_dialog_key(&stroke, true, false),
+                QuitDialogKey::FocusQuit
+            );
+            assert_eq!(
+                quit_dialog_key(&stroke, false, true),
+                QuitDialogKey::FocusCancel
+            );
+        }
+        let ctrl_tab = Keystroke::parse("ctrl-tab").unwrap();
+        assert_eq!(
+            quit_dialog_key(&ctrl_tab, false, true),
+            QuitDialogKey::Ignore
+        );
+    }
+
+    #[test]
+    fn enter_and_space_activate_only_the_focused_button() {
+        for key in ["enter", "space"] {
+            let stroke = Keystroke::parse(key).unwrap();
+            assert_eq!(quit_dialog_key(&stroke, true, false), QuitDialogKey::Cancel);
+            assert_eq!(
+                quit_dialog_key(&stroke, false, true),
+                QuitDialogKey::Confirm
+            );
+            assert_eq!(
+                quit_dialog_key(&stroke, false, false),
+                QuitDialogKey::Ignore
+            );
+        }
+        let alt_f4 = Keystroke::parse("alt-f4").unwrap();
+        assert_eq!(quit_dialog_key(&alt_f4, false, true), QuitDialogKey::Ignore);
+    }
+
+    #[test]
+    fn quit_dialog_text_matches_both_locales() {
+        assert_eq!(
+            quit_dialog_text(InterfaceLocale::Chinese),
+            [
+                "退出码头",
+                "确定要退出码头吗？退出后将关闭当前窗口并结束所有运行中的终端会话。",
+                "取消",
+                "退出",
+            ]
+        );
+        assert_eq!(
+            quit_dialog_text(InterfaceLocale::English),
+            [
+                "Quit Matou",
+                "Are you sure you want to quit Matou? This will close the window and end all running terminal sessions.",
+                "Cancel",
+                "Quit",
+            ]
+        );
+    }
+}
+
 impl DatabaseRecoveryPageState {
     fn update_details(&mut self, details: Arc<DatabaseRecoveryDetails>) {
         let backups = database_recovery_page::visible_backups(&details.backups);
@@ -1376,6 +1584,8 @@ fn read_only_navigation(active: ReadOnlyNavigation) -> Event {
 }
 
 pub struct Workspace {
+    #[cfg(target_os = "windows")]
+    quit_confirmation: QuitConfirmation<QuitConfirmationFocus>,
     #[cfg(target_os = "windows")]
     main_theme_window: AnyWindowHandle,
     locale: InterfaceLocale,
@@ -2471,6 +2681,8 @@ impl Workspace {
             settings: None,
             runtime_generation: 0,
             database_recovery: None,
+            #[cfg(target_os = "windows")]
+            quit_confirmation: QuitConfirmation::default(),
             invalid_recovery_marker: false,
             read_only: None,
             transport_connected: false,
@@ -4972,6 +5184,45 @@ impl Workspace {
 
     pub fn is_read_only(&self) -> bool {
         self.read_only.is_some()
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn open_quit_confirmation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(focus) = self.quit_confirmation.open(|| QuitConfirmationFocus {
+            previous: window.focused(cx),
+            keyboard_focus: self.keyboard_focus,
+            cancel: cx.focus_handle(),
+            quit: cx.focus_handle(),
+        }) {
+            self.keyboard_focus = true;
+            window.focus(&focus.cancel);
+            cx.notify();
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn is_quit_confirmed(&self) -> bool {
+        self.quit_confirmation.is_confirmed()
+    }
+
+    #[cfg(target_os = "windows")]
+    fn cancel_quit_confirmation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(focus) = self.quit_confirmation.cancel() {
+            self.keyboard_focus = focus.keyboard_focus;
+            if let Some(previous) = focus.previous {
+                window.focus(&previous);
+            } else {
+                window.blur();
+            }
+            cx.notify();
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn confirm_quit(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        if self.quit_confirmation.confirm() {
+            cx.emit(QuitConfirmed);
+        }
     }
 
     pub fn flush_geometry(&mut self, cx: &mut Context<Self>) {
@@ -10351,6 +10602,12 @@ impl Workspace {
     }
 
     fn standalone_alt(&mut self, mods: Modifiers, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(target_os = "windows")]
+        if self.quit_confirmation.focus().is_some() {
+            self.shortcut_alt_down = mods.alt;
+            self.last_shortcut_alt = None;
+            return;
+        }
         let down = mods.alt && !mods.shift && !mods.control && !mods.platform && !mods.function;
         let pressed = down && !self.shortcut_alt_down;
         self.shortcut_alt_down = down;
@@ -10443,6 +10700,22 @@ impl Workspace {
         };
         if self.shortcut_alt_down {
             self.last_shortcut_alt = None;
+        }
+        #[cfg(target_os = "windows")]
+        if let Some(focus) = self.quit_confirmation.focus() {
+            match quit_dialog_key(
+                stroke,
+                focus.cancel.is_focused(window),
+                focus.quit.is_focused(window),
+            ) {
+                QuitDialogKey::Cancel => self.cancel_quit_confirmation(window, cx),
+                QuitDialogKey::FocusCancel => window.focus(&focus.cancel),
+                QuitDialogKey::FocusQuit => window.focus(&focus.quit),
+                QuitDialogKey::Confirm => self.confirm_quit(window, cx),
+                QuitDialogKey::Ignore => {}
+            }
+            cx.stop_propagation();
+            return;
         }
         if self.invalid_recovery_marker {
             return;
@@ -14934,26 +15207,90 @@ impl Workspace {
     }
 }
 
-fn workspace_frame(root: Stateful<Div>) -> AnyElement {
-    #[cfg(debug_assertions)]
-    database_recovery_page::probe_root(&root);
-    root.into_any_element()
+impl Workspace {
+    fn workspace_frame(
+        &self,
+        root: Stateful<Div>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> AnyElement {
+        #[cfg(debug_assertions)]
+        database_recovery_page::probe_root(&root);
+        #[cfg(target_os = "windows")]
+        let root = root.children(self.render_quit_confirmation(_window, _cx));
+        root.into_any_element()
+    }
+
+    #[cfg(target_os = "windows")]
+    fn render_quit_confirmation(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Deferred> {
+        let focus = self.quit_confirmation.focus()?;
+        if !focus.cancel.is_focused(window) && !focus.quit.is_focused(window) {
+            window.focus(&focus.cancel);
+        }
+        let [title, body, cancel_label, quit_label] = quit_dialog_text(self.locale);
+        let dark = self.uses_dark_theme();
+        let cancel = self.button(
+            quit_confirmation_dialog::button("quit-cancel", cancel_label, false, dark),
+            &focus.cancel,
+            Self::cancel_quit_confirmation,
+            cx,
+        );
+        let quit = self.button(
+            quit_confirmation_dialog::button("quit-confirm", quit_label, true, dark),
+            &focus.quit,
+            Self::confirm_quit,
+            cx,
+        );
+        let panel = quit_confirmation_dialog::panel(
+            f32::from(window.viewport_size().width),
+            dark,
+            title,
+            body,
+            cancel,
+            quit,
+        )
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+        let overlay = quit_confirmation_dialog::backdrop()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    this.cancel_quit_confirmation(window, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+            .child(panel);
+        // Settings and nested confirmations also paint through deferred layers.
+        Some(deferred(overlay).with_priority(usize::MAX))
+    }
 }
 
 impl EventEmitter<InterfaceLocale> for Workspace {}
+
+#[cfg(target_os = "windows")]
+impl EventEmitter<QuitConfirmed> for Workspace {}
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = self.theme_palette();
         if self.invalid_recovery_marker {
-            return workspace_frame(database_recovery_page::render_invalid_marker(
-                window.viewport_size().height,
-                self.locale,
-            ));
+            return self.workspace_frame(
+                database_recovery_page::render_invalid_marker(
+                    window.viewport_size().height,
+                    self.locale,
+                ),
+                window,
+                cx,
+            );
         }
         if let Some(state) = &self.database_recovery {
             let recovery_id = state.details.recovery_id.clone();
-            return workspace_frame(database_recovery_page::render(
+            let page = database_recovery_page::render(
                 Some(&state.details),
                 PagePresentation {
                     locale: self.locale,
@@ -14974,7 +15311,8 @@ impl Render for Workspace {
                 cx.listener(move |this, action: &PageAction, window, cx| {
                     this.database_recovery_action(&recovery_id, action, window, cx);
                 }),
-            ));
+            );
+            return self.workspace_frame(page, window, cx);
         }
         if self.hierarchy.is_none()
             && self.read_only.is_none()
@@ -14984,11 +15322,13 @@ impl Render for Workspace {
             )
         {
             // The bridge can publish Ready before the workspace projection arrives.
-            return workspace_frame(
+            return self.workspace_frame(
                 div()
                     .id("startup-neutral")
                     .size_full()
                     .bg(rgba(palette.workspace.canvas)),
+                window,
+                cx,
             );
         }
         self.finish_terminal_return(window, cx);
@@ -16028,6 +16368,10 @@ impl Render for Workspace {
                 }),
             )
             .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                #[cfg(target_os = "windows")]
+                if this.quit_confirmation.focus().is_some() {
+                    return;
+                }
                 this.cancel_hover_restore();
                 if event.button == MouseButton::Left {
                     this.workspace_drag_gesture = false;
@@ -16126,7 +16470,7 @@ impl Render for Workspace {
             .children(self.project_instructions_overlay(window, cx))
             .children(self.render_wiring_overlay(window, cx))
             .children(permission_toast);
-        workspace_frame(root)
+        self.workspace_frame(root, window, cx)
     }
 }
 
