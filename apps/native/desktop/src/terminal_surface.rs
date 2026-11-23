@@ -1701,6 +1701,8 @@ impl Render for TerminalSurface {
                 if !text.is_empty() {
                     this.send(format!(" {text}").into_bytes(), cx);
                 }
+                cx.activate(true);
+                window.activate_window();
                 this.focus.focus(window);
                 cx.notify();
             }))
