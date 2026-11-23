@@ -342,6 +342,11 @@ impl WorktreeBinding {
 fn git_output(cwd: &Path, args: &[&str]) -> Result<Output> {
     let hooks = if cfg!(windows) { "NUL" } else { "/dev/null" };
     let mut command = Command::new("git");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
     command
         .current_dir(fs::canonicalize(cwd)?)
         .args([

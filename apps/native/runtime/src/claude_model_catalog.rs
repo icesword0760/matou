@@ -71,7 +71,13 @@ fn query_cli(
             .iter()
             .any(|prefix| name.starts_with(prefix))
     });
-    let mut child = Command::new(executable)
+    let mut command = Command::new(executable);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    let mut child = command
         .args([
             "-p",
             "--input-format",
