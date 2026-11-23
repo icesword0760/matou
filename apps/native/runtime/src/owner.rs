@@ -1067,6 +1067,24 @@ impl ShellOwner {
     pub fn workspace_path_target(&self, workspace_id: &str) -> Result<String> {
         matou_native_core::workspace_paths::target(&self.connection, workspace_id)
     }
+    pub(crate) fn last_workspace_validation_generation(&self, workspace_id: &str) -> Result<i64> {
+        // Relinking deletes the current row. Receipts still include any generations
+        // written by older runtimes between path change events.
+        Ok(self.connection.query_row(
+            "SELECT CASE WHEN EXISTS (
+                SELECT 1 FROM domain_events
+                WHERE aggregate_type = 'workspace' AND aggregate_id = ?1
+                  AND event_type = 'workspace.path-status-changed'
+             ) THEN (
+                SELECT COALESCE(MAX(json_extract(response_json, '$.validationGeneration')), 0)
+                FROM command_deduplication
+                WHERE command_type = 'workspace.validate-path'
+                  AND substr(request_hash, 1, length(?1) + 1) = ?1 || ':'
+             ) ELSE 0 END",
+            [workspace_id],
+            |row| row.get(0),
+        )?)
+    }
     pub fn workspace_path_poll_targets(&self) -> Result<Vec<String>> {
         matou_native_core::workspace_paths::poll_targets(&self.connection)
     }

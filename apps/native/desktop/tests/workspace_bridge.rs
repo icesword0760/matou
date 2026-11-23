@@ -95,13 +95,13 @@ fn verify_workspace_retry(root: &Path) -> Result<()> {
     probe.wait("retry recovery diagnostic", |event| {
         Ok(matches!(event, Event::Diagnostic(message) if message == reason).then_some(()))
     })?;
-    probe.path_state(&workspace_id, "invalid")?;
+    assert_eq!(probe.path_state(&workspace_id, "invalid")?, initial_path);
     assert!(!probe.frames.contains(&session_id));
     assert_eq!(list_runs(&db, &session_id)?.len(), 1);
     probe.input(&session_id, "touch .input-while-invalid")?;
 
     fs::rename(&missing, &project)?;
-    probe.path_state(&workspace_id, "valid")?;
+    let restored_path = probe.path_state(&workspace_id, "valid")?;
     probe.input(&session_id, "touch .input-before-retry")?;
     probe.navigate(Command::SelectWorkspace {
         workspace_id: default,
@@ -113,7 +113,7 @@ fn verify_workspace_retry(root: &Path) -> Result<()> {
         selected.session.context("same failed Shell")?.id,
         session_id
     );
-    probe.path_state(&workspace_id, "valid")?;
+    assert_eq!(probe.path_state(&workspace_id, "valid")?, restored_path);
     assert!(
         !probe.frames.contains(&session_id),
         "restoring the path must not start the failed Shell"
@@ -132,6 +132,24 @@ fn verify_workspace_retry(root: &Path) -> Result<()> {
     assert_eq!(after[1].status, "running");
     assert!(!project.join(".input-while-invalid").exists());
     assert!(!project.join(".input-before-retry").exists());
+
+    let relinked = root.join("relinked");
+    fs::create_dir(&relinked)?;
+    probe.navigate(Command::RelinkWorkspace {
+        workspace_id: workspace_id.clone(),
+        root_directory: relinked.to_string_lossy().into_owned(),
+    })?;
+    let relinked_path = probe.wait("relinked workspace path", |event| match event {
+        Event::WorkspacePaths(paths) => Ok(paths
+            .into_iter()
+            .find(|state| state.workspace_id == workspace_id)),
+        _ => Ok(None),
+    })?;
+    assert_eq!(relinked_path.status, "valid");
+    assert_eq!(
+        relinked_path.validation_generation,
+        restored_path.validation_generation + 1
+    );
     drop(db);
     bridge.shutdown()?;
     Ok(())
@@ -466,6 +484,7 @@ struct Probe<'a> {
     disposed: Vec<String>,
     last_action: Option<ActionResult>,
     frames: BTreeSet<String>,
+    paths: Vec<WorkspacePathState>,
 }
 
 impl<'a> Probe<'a> {
@@ -477,6 +496,7 @@ impl<'a> Probe<'a> {
             disposed: Vec::new(),
             last_action: None,
             frames: BTreeSet::new(),
+            paths: Vec::new(),
         }
     }
 
@@ -516,6 +536,13 @@ impl<'a> Probe<'a> {
     }
 
     fn path_state(&mut self, workspace_id: &str, status: &str) -> Result<WorkspacePathState> {
+        if let Some(state) = self
+            .paths
+            .iter()
+            .find(|state| state.workspace_id == workspace_id && state.status == status)
+        {
+            return Ok(state.clone());
+        }
         self.wait(status, |event| match event {
             Event::WorkspacePaths(paths) => Ok(paths
                 .into_iter()
@@ -577,6 +604,7 @@ impl<'a> Probe<'a> {
                     match &event {
                         Event::Workspaces(workspaces) => self.workspaces = workspaces.clone(),
                         Event::Tasks(tasks) => self.tasks = tasks.clone(),
+                        Event::WorkspacePaths(paths) => self.paths = paths.clone(),
                         Event::ScenesDisposed(ids) => self.disposed.extend(ids.clone()),
                         Event::WorkspaceActionResult {
                             action,

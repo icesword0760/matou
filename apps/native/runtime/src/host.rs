@@ -3243,9 +3243,16 @@ struct PendingShellSubmission {
 }
 
 const WORKSPACE_PATH_INVALID: &str = "工作区目录不可用，请先在本地恢复原路径，或移出该工作区";
-const ACTIVE_PATH_INTERVAL: Duration = Duration::from_millis(400);
 const WORKSPACE_POLL_INTERVAL: Duration = Duration::from_secs(30);
 type WorkerOperation = (String, Receiver<Result<()>>, bool);
+
+fn active_path_interval(invalid: bool) -> Duration {
+    if invalid {
+        Duration::from_millis(500)
+    } else {
+        Duration::from_secs(2)
+    }
+}
 
 pub fn database_recovery_request_id() -> String {
     id()
@@ -4116,7 +4123,6 @@ fn run_writable(
     let mut shell_promotions = HashMap::<String, ShellPromotion>::new();
     let mut retry_pending_input = false;
     let mut terminal_layouts = HashMap::new();
-    let mut next_active_check = Instant::now() + ACTIVE_PATH_INTERVAL;
     let mut next_workspace_poll = Instant::now() + WORKSPACE_POLL_INTERVAL;
     if let Some(workspace_id) = &active_workspace {
         checks.request(&owner, workspace_id)?;
@@ -4144,6 +4150,7 @@ fn run_writable(
         .collect::<BTreeMap<_, _>>();
     let mut active_path_invalid =
         workspace_is_invalid(&projected_paths, active_workspace.as_deref());
+    let mut next_active_check = Instant::now() + active_path_interval(active_path_invalid);
     send.send_blocking(Event::WorkspacePaths(
         projected_paths.values().cloned().collect(),
     ))?;
@@ -4366,7 +4373,7 @@ fn run_writable(
             if let Some(workspace_id) = &active_workspace {
                 checks.request(&owner, workspace_id)?;
             }
-            next_active_check = now + ACTIVE_PATH_INTERVAL;
+            next_active_check = now + active_path_interval(active_path_invalid);
         }
         if now >= next_workspace_poll {
             for workspace_id in owner.workspace_path_poll_targets()? {
@@ -4378,6 +4385,7 @@ fn run_writable(
         }
         let completed_checks = checks.poll(&mut owner);
         let path_checked = !completed_checks.is_empty();
+        let mut paths_changed = false;
         for completion in completed_checks {
             let state = match completion {
                 Ok(state) => state,
@@ -4386,7 +4394,10 @@ fn run_writable(
                     continue;
                 }
             };
-            projected_paths.insert(state.workspace_id.clone(), state.clone());
+            if projected_paths.get(&state.workspace_id) != Some(&state) {
+                projected_paths.insert(state.workspace_id.clone(), state.clone());
+                paths_changed = true;
+            }
             let invalid = state.status == "invalid";
             if invalid {
                 let before = pending_input.len();
@@ -4478,10 +4489,13 @@ fn run_writable(
                     recovering.insert(id, state.workspace_id.clone());
                 }
             }
-            active_path_invalid = invalid;
+            if active_path_invalid != invalid {
+                active_path_invalid = invalid;
+                next_active_check = Instant::now() + active_path_interval(invalid);
+            }
             launch_validated = !invalid;
         }
-        if path_checked {
+        if paths_changed {
             send.send_blocking(Event::WorkspacePaths(
                 projected_paths.values().cloned().collect(),
             ))?;
@@ -5246,7 +5260,8 @@ fn run_writable(
                         {
                             checks.request(&owner, workspace_id)?;
                             launch_validated = false;
-                            next_active_check = Instant::now() + ACTIVE_PATH_INTERVAL;
+                            next_active_check =
+                                Instant::now() + active_path_interval(active_path_invalid);
                         }
                         if let Some(result) = fork_result {
                             let child = result["sessionId"]
@@ -7150,11 +7165,11 @@ fn run_writable(
                         pending_input.retain(|input| &input.session_id != id);
                         finished_promotions.push(id.clone());
                     } else {
-                        if promotion.launch.profile == LaunchProfile::Codex {
-                            send.send_blocking(Event::Diagnostic(codex_launch::failure_message(
-                                &error,
-                            )))?;
-                        }
+                        let message = match promotion.launch.profile {
+                            LaunchProfile::Codex => codex_launch::failure_message(&error),
+                            _ => error.to_string(),
+                        };
+                        send.send_blocking(Event::Diagnostic(message))?;
                         owner.retire_sessions(std::slice::from_ref(id));
                         promotion.phase = ShellPromotionPhase::RollingBack;
                     }
@@ -7594,7 +7609,7 @@ fn run_writable(
                 {
                     checks.request(&owner, workspace_id)?;
                     launch_validated = false;
-                    next_active_check = Instant::now() + ACTIVE_PATH_INTERVAL;
+                    next_active_check = Instant::now() + active_path_interval(active_path_invalid);
                 }
                 let scenes = active_task
                     .as_deref()
