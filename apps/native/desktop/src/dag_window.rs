@@ -5,6 +5,7 @@ use matou_native_core::sessions::InterfaceLocale;
 use matou_native_desktop::dag_canvas::{
     DagCanvas, DagCanvasEvent, DagCanvasView, DagGraph, DagLayout, DagSelection,
 };
+use matou_native_desktop::windows_titlebar;
 use serde_json::Value;
 
 use super::{Command, Workspace, is_child_window_close_shortcut, shadow};
@@ -13,7 +14,9 @@ use crate::ui_text::ui_text;
 const DAG_FAILURE_TEXT: u32 = 0x9b342f;
 const DAG_FAILURE_BORDER: u32 = 0xefcaca;
 const DAG_FAILURE_BACKGROUND: u32 = 0xfff2f1;
+#[cfg(not(target_os = "windows"))]
 const CLOSE_WIDTH: f32 = 28.;
+#[cfg(not(target_os = "windows"))]
 const CLOSE_INSET: f32 = 16.;
 
 pub(super) struct DagWindow {
@@ -26,6 +29,7 @@ pub(super) struct DagWindow {
     locale: InterfaceLocale,
     dark: bool,
     content_focus: FocusHandle,
+    #[cfg(not(target_os = "windows"))]
     close_focus: FocusHandle,
 }
 
@@ -76,7 +80,7 @@ impl DagWindow {
                 focus: visible,
                 titlebar: Some(TitlebarOptions {
                     title: Some(Self::title(locale).into()),
-                    appears_transparent: cfg!(target_os = "macos"),
+                    appears_transparent: windows_titlebar::appears_transparent(),
                     traffic_light_position: cfg!(target_os = "macos")
                         .then_some(point(px(14.), px(16.))),
                 }),
@@ -101,6 +105,7 @@ impl DagWindow {
                         locale,
                         dark,
                         content_focus,
+                        #[cfg(not(target_os = "windows"))]
                         close_focus: cx.focus_handle().tab_stop(true),
                     }
                 })
@@ -119,7 +124,7 @@ impl DagWindow {
         cx: &mut Context<DagCanvasView>,
     ) -> DagCanvasView {
         DagCanvasView::new_with_dark(state, locale, dark, cx)
-            .with_toolbar_right_inset(px(CLOSE_INSET + CLOSE_WIDTH + 12.))
+            .with_toolbar_right_inset(px(dag_toolbar_right_inset()))
     }
 
     pub(super) fn set_dark(&mut self, dark: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -278,15 +283,11 @@ impl DagWindow {
 }
 
 impl Render for DagWindow {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let close = close_button(self.locale, !self.dark)
-            .track_focus(&self.close_focus)
-            .on_click(|_, window, cx| {
-                cx.stop_propagation();
-                window.remove_window();
-            });
+    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let owner = self.owner;
-        div()
+        #[cfg(not(target_os = "windows"))]
+        let _ = window;
+        let root = div()
             .size_full()
             .relative()
             .track_focus(&self.content_focus)
@@ -328,9 +329,51 @@ impl Render for DagWindow {
                     _ => {}
                 }
             })
-            .child(self.canvas.clone())
-            .child(close)
+            .child(self.canvas.clone());
+        #[cfg(target_os = "windows")]
+        let root = root
+            .child(
+                div()
+                    .id("dag-window-drag-band")
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right(px(windows_titlebar::WINDOWS_CAPTION_CONTROLS_WIDTH))
+                    .h(px(14.))
+                    .window_control_area(WindowControlArea::Drag)
+                    .occlude(),
+            )
+            .child(
+                windows_titlebar::windows_caption_controls(40., self.dark, window.is_maximized())
+                    .absolute()
+                    .top_0()
+                    .right_0(),
+            );
+        #[cfg(not(target_os = "windows"))]
+        let root = root.child(
+            close_button(self.locale, !self.dark)
+                .track_focus(&self.close_focus)
+                .on_click(|_, window, cx| {
+                    cx.stop_propagation();
+                    window.remove_window();
+                }),
+        );
+        root
     }
+}
+
+/// Right edge reserved for the DAG window's own top-right control.
+///
+/// Windows reserves the full 138px caption cluster plus 12px; macOS keeps the
+/// floating close button's 16 + 28 + 12pt inset.
+#[cfg(target_os = "windows")]
+fn dag_toolbar_right_inset() -> f32 {
+    crate::dag_canvas::DAG_WINDOWS_TOOLBAR_RIGHT_INSET
+}
+
+#[cfg(not(target_os = "windows"))]
+fn dag_toolbar_right_inset() -> f32 {
+    CLOSE_INSET + CLOSE_WIDTH + 12.
 }
 
 #[cfg(target_os = "macos")]
@@ -378,6 +421,7 @@ fn macos_work_area(owner: &Window) -> Option<Bounds<Pixels>> {
 /// It is already absolutely positioned in the content corner. If the parent
 /// uses a helper that sets `relative` for a focus ring, attach focus directly
 /// instead, otherwise that helper would replace this placement.
+#[cfg(not(target_os = "windows"))]
 pub(super) fn close_button(locale: InterfaceLocale, light: bool) -> Stateful<Div> {
     let tooltip = locale.text("关闭会话 DAG", "Close session DAG");
     div()
