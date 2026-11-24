@@ -2778,6 +2778,31 @@ impl Workspace {
         }
     }
 
+    pub(super) fn request_session_handoff(
+        &mut self,
+        session_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        let request_id = self.next_wiring_request();
+        if self
+            .commands
+            .send_at(
+                self.runtime_generation,
+                Command::GetSessionHandoffBrief {
+                    request_id,
+                    session_id,
+                },
+            )
+            .is_err()
+        {
+            self.show_error_toast(
+                self.locale
+                    .text("无法生成交接摘要：运行时未就绪", "Runtime unavailable for handoff brief"),
+                cx,
+            );
+        }
+    }
+
     pub(super) fn live_agent_hud(&self, id: &str) -> Option<&Value> {
         self.wiring
             .hud
@@ -2872,6 +2897,30 @@ impl Workspace {
             self.receive_claude_accounts(request_id, reply, cx);
         }
         self.receive_footer_diagnostics(kind, request_id, reply, cx);
+        if kind == "sessionHandoffBriefResult" {
+            if let Some(markdown) = reply["result"]["markdown"]
+                .as_str()
+                .filter(|s| !s.trim().is_empty())
+            {
+                cx.write_to_clipboard(ClipboardItem::new_string(markdown.to_owned()));
+                self.show_toast(
+                    self.locale.text(
+                        "已复制交接摘要，可直接粘贴到新会话继续",
+                        "Handoff brief copied — paste into a new session to continue",
+                    ),
+                    cx,
+                );
+            } else {
+                self.show_toast(
+                    self.locale.text(
+                        "当前会话暂无可交接进度",
+                        "No handoff progress recorded for this session yet",
+                    ),
+                    cx,
+                );
+            }
+            return;
+        }
         if kind == "agentHudResult"
             && let Some((id, state)) = self
                 .wiring

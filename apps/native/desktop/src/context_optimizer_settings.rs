@@ -11,6 +11,7 @@ use matou_native_core::{
     },
     sessions::InterfaceLocale,
 };
+use serde_json::Value;
 
 use crate::theme_tokens::{AppTheme, ThemePalette};
 
@@ -190,6 +191,119 @@ pub fn format_saved_noise_bytes(bytes: u64, locale: InterfaceLocale) -> String {
     match locale {
         InterfaceLocale::Chinese => format!("已省 {amount}"),
         InterfaceLocale::English => format!("Saved {amount}"),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HudPillTone {
+    Neutral,
+    Accent,
+    Warning,
+    Danger,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HudPill {
+    pub label: String,
+    pub tone: HudPillTone,
+}
+
+/// Pure presentation model parsed from `live["contextGuard"]` for rendering
+/// cache countdown, saved noise, stall badge, and one-click rescue handoff in
+/// the workspace HUD bar.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContextGuardHudView {
+    pub cache_pill: Option<HudPill>,
+    pub saved_pill: Option<HudPill>,
+    pub stall_pill: Option<HudPill>,
+    pub show_handoff_button: bool,
+    pub handoff_urgent: bool,
+}
+
+impl ContextGuardHudView {
+    pub fn from_live_hud(live: &Value, locale: InterfaceLocale) -> Option<Self> {
+        let guard = live.get("contextGuard")?.as_object()?;
+        let cache_pill = guard.get("cache").and_then(Value::as_object).map(|cache| {
+            let remaining = cache
+                .get("remainingSec")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let warm = cache.get("warm").and_then(Value::as_bool).unwrap_or(false);
+            let expiring_soon = cache
+                .get("expiringSoon")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let tone = if !warm || remaining == 0 {
+                HudPillTone::Neutral
+            } else if expiring_soon {
+                HudPillTone::Warning
+            } else {
+                HudPillTone::Accent
+            };
+            HudPill {
+                label: format_cache_countdown(remaining, warm, locale),
+                tone,
+            }
+        });
+
+        let saved_bytes = guard
+            .get("savedNoiseBytes")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let saved_pill = (saved_bytes > 0).then(|| HudPill {
+            label: format_saved_noise_bytes(saved_bytes, locale),
+            tone: HudPillTone::Neutral,
+        });
+
+        let stall_obj = guard.get("stall").and_then(Value::as_object);
+        let stall_severity = stall_obj
+            .and_then(|s| s.get("severity"))
+            .and_then(Value::as_str)
+            .unwrap_or("normal");
+        let silent_sec = stall_obj
+            .and_then(|s| s.get("silentSec"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let stall_pill = match stall_severity {
+            "stalled" => Some(HudPill {
+                label: locale.text("疑似卡死", "Stalled").to_owned(),
+                tone: HudPillTone::Danger,
+            }),
+            "warning" => Some(HudPill {
+                label: match locale {
+                    InterfaceLocale::Chinese => format!("静默 {}m", (silent_sec / 60).max(1)),
+                    InterfaceLocale::English => format!("Silent {}m", (silent_sec / 60).max(1)),
+                },
+                tone: HudPillTone::Warning,
+            }),
+            _ => None,
+        };
+
+        let pressure = guard
+            .get("contextPressure")
+            .and_then(Value::as_str)
+            .unwrap_or("normal");
+        let handoff_ready = guard
+            .get("handoffReady")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let handoff_urgent = stall_severity == "stalled" || pressure == "critical";
+        let show_handoff_button = handoff_ready || handoff_urgent || pressure == "warning";
+
+        if cache_pill.is_none()
+            && saved_pill.is_none()
+            && stall_pill.is_none()
+            && !show_handoff_button
+        {
+            return None;
+        }
+        Some(Self {
+            cache_pill,
+            saved_pill,
+            stall_pill,
+            show_handoff_button,
+            handoff_urgent,
+        })
     }
 }
 
@@ -527,8 +641,8 @@ impl Render for ContextOptimizerSettingsPanel {
 #[cfg(test)]
 mod tests {
     use super::{
-        ContextOptimizerConfig, ContextOptimizerPanelState, InterfaceLocale, OptimizerToggle,
-        format_cache_countdown, format_saved_noise_bytes,
+        ContextGuardHudView, ContextOptimizerConfig, ContextOptimizerPanelState, HudPillTone,
+        InterfaceLocale, OptimizerToggle, format_cache_countdown, format_saved_noise_bytes,
     };
     use std::rc::Rc;
 
@@ -583,5 +697,37 @@ mod tests {
             format_saved_noise_bytes(2_097_152, InterfaceLocale::English),
             "Saved 2.0 MB"
         );
+    }
+
+    #[test]
+    fn hud_view_parses_cache_saved_noise_stall_and_handoff_readiness() {
+        let live = serde_json::json!({
+            "contextGuard": {
+                "contextPressure": "critical",
+                "savedNoiseBytes": 98304,
+                "handoffReady": true,
+                "cache": {
+                    "ttlSec": 300,
+                    "remainingSec": 45,
+                    "warm": true,
+                    "expiringSoon": true
+                },
+                "stall": {
+                    "severity": "stalled",
+                    "silentSec": 210
+                }
+            }
+        });
+        let view = ContextGuardHudView::from_live_hud(&live, InterfaceLocale::Chinese).unwrap();
+        assert_eq!(view.cache_pill.as_ref().unwrap().label, "缓存 45s");
+        assert_eq!(view.cache_pill.as_ref().unwrap().tone, HudPillTone::Warning);
+        assert_eq!(view.saved_pill.as_ref().unwrap().label, "已省 96 KB");
+        assert_eq!(view.stall_pill.as_ref().unwrap().label, "疑似卡死");
+        assert_eq!(view.stall_pill.as_ref().unwrap().tone, HudPillTone::Danger);
+        assert!(view.show_handoff_button);
+        assert!(view.handoff_urgent);
+
+        // Missing contextGuard returns None cleanly.
+        assert!(ContextGuardHudView::from_live_hud(&serde_json::json!({}), InterfaceLocale::Chinese).is_none());
     }
 }

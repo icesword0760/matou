@@ -976,6 +976,10 @@ pub enum Command {
         request_id: u64,
         session_id: String,
     },
+    GetSessionHandoffBrief {
+        request_id: u64,
+        session_id: String,
+    },
     ForkSession {
         scene_id: String,
         source_session_id: String,
@@ -1186,7 +1190,8 @@ impl StoragePhase {
                 | Command::EvaluateExternalLink { .. }
                 | Command::GetUpdateStatus { .. }
                 | Command::GetAccountSummary { .. }
-                | Command::GetAgentHud { .. },
+                | Command::GetAgentHud { .. }
+                | Command::GetSessionHandoffBrief { .. },
             ) => true,
             (
                 Self::ReadOnly,
@@ -2408,6 +2413,24 @@ impl RuntimeWiring {
                     || Ok(Value::Null),
                     |owner| owner.agent_hud(session_id, data_root),
                 ),
+            ),
+            Command::GetSessionHandoffBrief {
+                request_id,
+                session_id,
+            } => (
+                "sessionHandoffBriefResult",
+                *request_id,
+                Ok(owner
+                    .and_then(|owner| owner.session_handoff_brief(session_id, data_root))
+                    .map_or(Value::Null, |brief| {
+                        json!({
+                            "sessionId": session_id,
+                            "markdown": brief.markdown,
+                            "stalledTool": brief.stalled_tool,
+                            "modifiedFiles": brief.modified_files,
+                            "contextPercent": brief.context_percent,
+                        })
+                    })),
             ),
             _ => return None,
         };
@@ -6818,7 +6841,8 @@ fn run_writable(
                 | Command::GetAccountSummary { .. }
                 | Command::GetClaudeAccounts { .. }
                 | Command::ClaudeAccountCommand { .. }
-                | Command::GetAgentHud { .. } => {
+                | Command::GetAgentHud { .. }
+                | Command::GetSessionHandoffBrief { .. } => {
                     unreachable!("Runtime wiring command handled above")
                 }
                 #[cfg(all(test, target_os = "macos"))]
