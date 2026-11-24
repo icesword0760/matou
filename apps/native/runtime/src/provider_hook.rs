@@ -20,6 +20,7 @@ use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
 use crate::codex_events;
+use crate::context_guard::interceptor::HookInterceptor;
 
 pub(crate) const IDENTITY_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const HOOK_QUEUE_CAPACITY: usize = 128;
@@ -343,6 +344,7 @@ type Registry = Arc<Mutex<HashMap<String, Record>>>;
 
 struct Record {
     scope: Scope,
+    data_root: PathBuf,
     _files: HookFiles,
     retired: Option<Instant>,
     reported_retirement: bool,
@@ -519,6 +521,7 @@ impl Drop for Registration {
 pub(crate) struct ProviderHookServer {
     port: u16,
     registry: Registry,
+    interceptor: Arc<HookInterceptor>,
     messages: Receiver<HookMessage>,
     stop: Arc<AtomicBool>,
     listener: Option<JoinHandle<()>>,
@@ -533,23 +536,30 @@ impl ProviderHookServer {
             .context("configure provider hook listener")?;
         let port = listener.local_addr()?.port();
         let registry = Registry::default();
+        let interceptor = Arc::new(HookInterceptor::new());
         let stop = Arc::new(AtomicBool::new(false));
         let (send, messages) = mpsc::sync_channel(HOOK_QUEUE_CAPACITY);
         let handle = {
             let registry = Arc::clone(&registry);
+            let interceptor = Arc::clone(&interceptor);
             let stop = Arc::clone(&stop);
             thread::Builder::new()
                 .name("provider-hook".into())
-                .spawn(move || listen(listener, &registry, &send, &stop))
+                .spawn(move || listen(listener, &registry, &interceptor, &send, &stop))
                 .context("start provider hook listener")?
         };
         Ok(Self {
             port,
             registry,
+            interceptor,
             messages,
             stop,
             listener: Some(handle),
         })
+    }
+
+    pub fn saved_noise_bytes(&self, session_id: &str) -> u64 {
+        self.interceptor.saved_noise_bytes(session_id)
     }
 
     pub fn register(&self, data_root: &Path, scope: Scope) -> Result<Registration> {
@@ -619,6 +629,7 @@ impl ProviderHookServer {
             token.clone(),
             Record {
                 scope,
+                data_root: data_root.to_path_buf(),
                 _files: files,
                 retired: None,
                 reported_retirement: false,
@@ -937,6 +948,7 @@ fn new_token() -> String {
 fn listen(
     listener: TcpListener,
     registry: &Registry,
+    interceptor: &Arc<HookInterceptor>,
     send: &SyncSender<HookMessage>,
     stop: &AtomicBool,
 ) {
@@ -966,10 +978,13 @@ fn listen(
             match listener.accept() {
                 Ok((socket, _)) => {
                     let registry = Arc::clone(registry);
+                    let interceptor = Arc::clone(interceptor);
                     let send = send.clone();
                     if let Ok(worker) = thread::Builder::new()
                         .name("provider-hook-request".into())
-                        .spawn(move || handle_request(socket, &registry, &send, drain_deadline))
+                        .spawn(move || {
+                            handle_request(socket, &registry, &interceptor, &send, drain_deadline)
+                        })
                     {
                         workers.push(worker);
                     }
@@ -993,9 +1008,42 @@ fn listen(
     }
 }
 
+const HOOK_DECISION_BUDGET: Duration = Duration::from_millis(150);
+
+fn evaluate_hook_fail_open(
+    interceptor: &Arc<HookInterceptor>,
+    data_root: &Path,
+    profile: LaunchProfile,
+    session_id: &str,
+    payload: &Value,
+) -> String {
+    let (tx, rx) = mpsc::sync_channel(1);
+    let interceptor = Arc::clone(interceptor);
+    let data_root = data_root.to_path_buf();
+    let session_id = session_id.to_owned();
+    let payload = payload.clone();
+    let spawned = thread::Builder::new()
+        .name("context-guard-eval".into())
+        .spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                interceptor
+                    .evaluate_hook(&data_root, profile, &session_id, &payload)
+                    .response_json
+            }))
+            .unwrap_or_else(|_| "{}".to_owned());
+            let _ = tx.try_send(result);
+        });
+    if spawned.is_err() {
+        return "{}".to_owned();
+    }
+    rx.recv_timeout(HOOK_DECISION_BUDGET)
+        .unwrap_or_else(|_| "{}".to_owned())
+}
+
 fn handle_request(
     mut socket: TcpStream,
     registry: &Registry,
+    interceptor: &Arc<HookInterceptor>,
     send: &SyncSender<HookMessage>,
     drain_deadline: Option<Instant>,
 ) {
@@ -1004,10 +1052,10 @@ fn handle_request(
         return;
     }
     let deadline = drain_deadline.unwrap_or_else(|| Instant::now() + REQUEST_TIMEOUT);
-    let result = read_request(&mut socket, registry, send, deadline);
+    let result = read_request(&mut socket, registry, interceptor, send, deadline);
     let (status, body) = match result {
-        Ok(()) => ("200 OK", "{}"),
-        Err(status) => (status, ""),
+        Ok(decision_json) => ("200 OK", decision_json),
+        Err(status) => (status, String::new()),
     };
     let _ = socket.set_write_timeout(Some(Duration::from_millis(100)));
     let _ = write!(
@@ -1025,9 +1073,10 @@ const NOT_FOUND: &str = "404 Not Found";
 fn read_request(
     socket: &mut TcpStream,
     registry: &Registry,
+    interceptor: &Arc<HookInterceptor>,
     send: &SyncSender<HookMessage>,
     deadline: Instant,
-) -> HttpResult<()> {
+) -> HttpResult<String> {
     let mut reader = BufReader::new(DeadlineRead { socket, deadline });
     let mut header_budget = MAX_HEADERS;
     let first = read_line(&mut reader, &mut header_budget)?;
@@ -1109,12 +1158,20 @@ fn read_request(
         {
             record.reported_retirement = true;
         }
-        return Ok(());
+        return Ok("{}".to_owned());
     }
     let received_at = Instant::now();
     if pre_tool_use && record.scope.profile != LaunchProfile::Antigravity {
         return Err(NOT_FOUND);
     }
+    let eval_scope = (!statusline).then(|| {
+        (
+            record.data_root.clone(),
+            record.scope.profile,
+            record.scope.session_id.clone(),
+            Value::Object(payload.clone()),
+        )
+    });
     let message = if record.scope.profile == LaunchProfile::Antigravity {
         use crate::antigravity_events::Source;
         let source = if statusline {
@@ -1144,8 +1201,21 @@ fn read_request(
         observation.hud_payload = Some(Value::Object(payload));
         HookMessage::Observed(record.scope.clone(), observation, received_at)
     };
+    drop(registry);
     match send.try_send(message) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            let decision_json = match eval_scope {
+                Some((data_root, profile, session_id, payload_val)) => evaluate_hook_fail_open(
+                    interceptor,
+                    &data_root,
+                    profile,
+                    &session_id,
+                    &payload_val,
+                ),
+                None => "{}".to_owned(),
+            };
+            Ok(decision_json)
+        }
         Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
             Err("503 Service Unavailable")
         }
@@ -1241,6 +1311,7 @@ mod tests {
         let mut server = ProviderHookServer {
             port: listener.local_addr()?.port(),
             registry: Registry::default(),
+            interceptor: Arc::new(HookInterceptor::new()),
             messages,
             stop: Arc::new(AtomicBool::new(false)),
             listener: None,
@@ -1259,9 +1330,10 @@ mod tests {
         // Start at the stop boundary so the connection is still in the TCP backlog.
         server.stop.store(true, Ordering::Relaxed);
         let registry = Arc::clone(&server.registry);
+        let interceptor = Arc::clone(&server.interceptor);
         let stop = Arc::clone(&server.stop);
         server.listener = Some(thread::spawn(move || {
-            listen(listener, &registry, &send, &stop)
+            listen(listener, &registry, &interceptor, &send, &stop)
         }));
         socket.write_all(body)?;
         server.finish_requests();

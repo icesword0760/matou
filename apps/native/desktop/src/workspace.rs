@@ -15178,6 +15178,77 @@ impl Workspace {
                         .map(|slot| slot.slot(locale, dark)),
                 );
             }
+            if let Some(guard_view) =
+                matou_native_desktop::context_optimizer_settings::ContextGuardHudView::from_live_hud(
+                    live, locale,
+                )
+            {
+                use matou_native_desktop::context_optimizer_settings::HudPillTone;
+                let pill_colors = |tone: HudPillTone| match tone {
+                    HudPillTone::Danger => (0xb34d47, 0xb34d4722),
+                    HudPillTone::Warning => (0xb45309, 0xd9770622),
+                    HudPillTone::Accent => (0x2679d8, 0x2679d81a),
+                    HudPillTone::Neutral => (
+                        if dark { 0x9ca3af } else { 0x5a6778 },
+                        if dark { 0xffffff12 } else { 0x5a677812 },
+                    ),
+                };
+                for pill in [
+                    guard_view.stall_pill.as_ref(),
+                    guard_view.cache_pill.as_ref(),
+                    guard_view.saved_pill.as_ref(),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    let (fg, bg) = pill_colors(pill.tone);
+                    primary = primary.child(
+                        div()
+                            .flex_none()
+                            .px(px(6.))
+                            .py(px(1.5))
+                            .rounded(px(5.))
+                            .bg(rgba(bg))
+                            .text_size(px(10.))
+                            .font_weight(FontWeight(600.))
+                            .text_color(rgb(fg))
+                            .whitespace_nowrap()
+                            .child(pill.label.clone()),
+                    );
+                }
+                if guard_view.show_handoff_button
+                    && let Some(target_session) = session.map(str::to_owned)
+                {
+                    let (fg, bg) = if guard_view.handoff_urgent {
+                        (0xffffff, 0xb34d47ff)
+                    } else {
+                        (0x2679d8, 0x2679d81f)
+                    };
+                    let btn_label = if guard_view.handoff_urgent {
+                        locale.text("一键交接续聊", "Rescue handoff")
+                    } else {
+                        locale.text("交接摘要", "Handoff")
+                    };
+                    primary = primary.child(
+                        div()
+                            .id("footer-context-guard-handoff")
+                            .flex_none()
+                            .px(px(7.))
+                            .py(px(1.5))
+                            .rounded(px(5.))
+                            .cursor_pointer()
+                            .bg(rgba(bg))
+                            .text_size(px(10.))
+                            .font_weight(FontWeight(650.))
+                            .text_color(rgb(fg))
+                            .whitespace_nowrap()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.request_session_handoff(target_session.clone(), cx);
+                            }))
+                            .child(btn_label),
+                    );
+                }
+            }
             status = status.child(primary).child(optional).child(fixed);
         } else {
             status = status.child(

@@ -27,12 +27,14 @@ use gpui::{prelude::*, *};
 use matou_native_core::claude_role_budget::{
     CLAUDE_ROLE_LABELS as ROLE_LABELS, CLAUDE_ROLES as ROLES,
 };
+use matou_native_core::context_optimizer_config::ContextOptimizerConfig;
 use matou_native_core::dispatch_config::{
     DispatchConfig,
     form::{DispatchForm, LOAD_FAILED, RETRY_LABEL},
 };
 use matou_native_core::dispatch_roles::DispatchRolesStore;
 use matou_native_core::sessions::{InterfaceLocale, LocalePreference};
+use matou_native_desktop::context_optimizer_settings::ContextOptimizerSettingsPanel;
 use matou_native_desktop::dispatch_roles_panel::DispatchRolesPanel;
 use matou_native_desktop::dispatch_settings::DispatchSettingsPanel;
 use matou_native_desktop::provider_context_editor::{
@@ -1048,6 +1050,7 @@ pub(crate) enum SettingsPage {
     Language,
     Dispatch,
     Diagnostics,
+    ContextOptimizer,
 }
 
 impl SettingsPage {
@@ -1057,6 +1060,7 @@ impl SettingsPage {
             Self::Language => locale.text("语言与时区", "Language & time zone"),
             Self::Dispatch => locale.text("派活", "Dispatch"),
             Self::Diagnostics => locale.text("诊断", "Diagnostics"),
+            Self::ContextOptimizer => locale.text("上下文优化", "Context optimizer"),
         }
     }
 
@@ -1074,6 +1078,10 @@ impl SettingsPage {
                 "只读查看账号订阅、运行环境与受控浏览器状态，并手动运行保留清理。",
                 "Read-only account subscription, runtime environment and controlled browser status, with a manual retention cleanup.",
             ),
+            Self::ContextOptimizer => locale.text(
+                "按 Agent 独立开关上下文噪音剪裁、防重复读、KV-Cache 倒计时与卡死救援（零 MCP 内置服务）。",
+                "Configure per-agent noise trimming, read dedup, KV-cache monitoring, and stall rescue (zero-MCP built-in service).",
+            ),
         }
     }
 
@@ -1083,6 +1091,7 @@ impl SettingsPage {
             Self::Language => 1,
             Self::Dispatch => 2,
             Self::Diagnostics => 3,
+            Self::ContextOptimizer => 4,
         }
     }
 }
@@ -1911,11 +1920,13 @@ pub struct SettingsShell {
     dispatch_panel: Option<Result<Entity<DispatchSettingsPanel>, String>>,
     dispatch_roles_store: Option<Rc<DispatchRolesStore>>,
     dispatch_roles_panel: Option<Entity<DispatchRolesPanel>>,
+    context_optimizer_config: Option<Rc<ContextOptimizerConfig>>,
+    context_optimizer_panel: Option<Result<Entity<ContextOptimizerSettingsPanel>, String>>,
     theme: ThemeState,
     theme_error: Option<String>,
     keyboard_focus: bool,
     scroll: ScrollHandle,
-    nav_focus: [FocusHandle; 4],
+    nav_focus: [FocusHandle; 5],
     diagnostics_cleanup_focus: FocusHandle,
     diagnostics_cwd: Option<std::path::PathBuf>,
     diagnostics_generation: Option<u64>,
@@ -1969,6 +1980,10 @@ impl SettingsShell {
             dispatch_panel: None,
             dispatch_roles_store: None,
             dispatch_roles_panel: None,
+            context_optimizer_config: std::env::var_os("MATOU_DATA_ROOT")
+                .map(std::path::PathBuf::from)
+                .map(|root| Rc::new(ContextOptimizerConfig::for_data_root(root))),
+            context_optimizer_panel: None,
             theme: ThemeState::new(ThemePreference::Light, window.appearance()),
             theme_error: None,
             keyboard_focus: false,
@@ -3517,8 +3532,47 @@ impl SettingsShell {
     }
 
     pub(crate) fn configure_data_root(&mut self, data_root: Option<std::path::PathBuf>) {
-        self.dispatch_roles_store =
-            data_root.map(|root| Rc::new(DispatchRolesStore::for_data_root(root)));
+        self.dispatch_roles_store = data_root
+            .as_ref()
+            .map(|root| Rc::new(DispatchRolesStore::for_data_root(root)));
+        self.context_optimizer_config =
+            data_root.map(|root| Rc::new(ContextOptimizerConfig::for_data_root(root)));
+        self.context_optimizer_panel = None;
+    }
+
+    fn load_context_optimizer(&mut self, cx: &mut Context<Self>) {
+        let locale = self.locale;
+        let theme = self.theme.effective();
+        self.context_optimizer_panel = Some(
+            self.context_optimizer_config
+                .clone()
+                .ok_or_else(|| {
+                    locale
+                        .text("未能定位数据目录", "Data root unavailable")
+                        .to_owned()
+                })
+                .and_then(|config| {
+                    let panel = ContextOptimizerSettingsPanel::new(config, locale, theme)?;
+                    Ok(cx.new(|_| panel))
+                }),
+        );
+        cx.notify();
+    }
+
+    fn context_optimizer_content(&mut self, cx: &mut Context<Self>) -> Div {
+        if self.context_optimizer_panel.is_none() {
+            self.load_context_optimizer(cx);
+        }
+        match self.context_optimizer_panel.as_ref() {
+            Some(Ok(panel)) => div().w_full().child(panel.clone()),
+            Some(Err(err)) => div()
+                .w_full()
+                .py(px(12.))
+                .text_size(px(11.5))
+                .text_color(rgb(0xb34d47))
+                .child(err.clone()),
+            None => div(),
+        }
     }
 
     pub(crate) fn configure_theme(&mut self, theme: ThemeState) {
@@ -4488,6 +4542,9 @@ impl SettingsShell {
                 // account, environment and browser projections.
                 self.refresh_runtime_diagnostics(cx);
             }
+            SettingsPage::ContextOptimizer => {
+                self.load_context_optimizer(cx);
+            }
         }
         let focus = self.nav_focus[page.index()].clone();
         window.focus(&focus);
@@ -5000,7 +5057,11 @@ impl SettingsShell {
             self.locale.text("AI 服务", "AI services"),
             palette.workspace.muted,
         ));
-        for page in [SettingsPage::ClaudeCode, SettingsPage::Language] {
+        for page in [
+            SettingsPage::ClaudeCode,
+            SettingsPage::ContextOptimizer,
+            SettingsPage::Language,
+        ] {
             let active = self.page == page;
             let focus = self.nav_focus[page.index()].clone();
             let icon_color = if active {
@@ -5049,6 +5110,9 @@ impl SettingsShell {
                 SettingsPage::ClaudeCode => row
                     .child(icon("settings-2", 15., icon_color))
                     .child("Claude Code"),
+                SettingsPage::ContextOptimizer => row
+                    .child(icon("settings-2", 15., icon_color))
+                    .child(page.title(self.locale)),
                 SettingsPage::Language => row.child(globe_icon(15., icon_color)).child(
                     // At 720 the frozen English label wraps onto two lines
                     // inside the same 33pt row; the Chinese label stays on
@@ -5064,7 +5128,7 @@ impl SettingsShell {
                 _ => unreachable!(),
             };
             nav = nav.child(row);
-            if page == SettingsPage::ClaudeCode {
+            if page == SettingsPage::ContextOptimizer {
                 nav = nav.child(nav_section_label(
                     self.locale.text("通用", "General"),
                     palette.workspace.muted,
@@ -5189,6 +5253,10 @@ impl SettingsShell {
             }
             SettingsPage::Diagnostics => {
                 let content = self.diagnostics_content(cx);
+                body = body.child(content);
+            }
+            SettingsPage::ContextOptimizer => {
+                let content = self.context_optimizer_content(cx);
                 body = body.child(content);
             }
         }
