@@ -8,18 +8,12 @@ const DANGER_TOP_GAP: f32 = 4.;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CardMenuAction {
     Rename,
-    RestoreAutoTitle,
     Fork,
     ForkWorktree,
-    RetryFork,
-    SplitHorizontal,
-    SplitVertical,
-    ClosePane,
     OpenDetached,
     ReturnToMain,
-    ViewHistory,
+    ClosePane,
     RemoveNode,
-    CloseSession,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -50,16 +44,12 @@ pub struct CardMenuContext<'a> {
     pub kind: &'a str,
     pub presentation: CardPresentation,
     pub can_rename: bool,
-    /// A manually named session with the restore-auto-title action available.
-    pub can_restore_auto_title: bool,
     /// Readiness is present when the caller supplies the peer Fork action.
     pub fork: Option<ForkReadiness>,
     pub git_available: bool,
     pub can_detach: bool,
-    pub can_view_history: bool,
     /// The hierarchy has approved removal for this node and its descendants.
     pub can_remove_node: bool,
-    pub can_close_session: bool,
     pub read_only: bool,
     pub storage_fault: bool,
     pub environment_unavailable: bool,
@@ -129,7 +119,7 @@ pub fn resolve_card_menu(context: CardMenuContext<'_>, locale: InterfaceLocale) 
             label,
             disabled_reason: blocked.map(str::to_owned).or(reason),
             show_readiness_hint: blocked.is_none() && show_readiness_hint,
-            danger: matches!(action, RemoveNode | CloseSession),
+            danger: action == RemoveNode,
         });
     };
     match context.presentation {
@@ -152,6 +142,23 @@ pub fn resolve_card_menu(context: CardMenuContext<'_>, locale: InterfaceLocale) 
             }
         }
         CardPresentation::Attached => {
+            let fork = context.fork.and_then(|readiness| {
+                let agent = match context.kind {
+                    "claude-code" => "Claude Code",
+                    "codex" => "Codex",
+                    "antigravity" => "Antigravity",
+                    _ => return None,
+                };
+                Some(fork_disabled_reason(readiness, agent, locale))
+            });
+            if let Some(reason) = &fork {
+                add(
+                    Fork,
+                    locale.text("⑂ Fork 会话", "⑂ Fork session").into(),
+                    reason.clone(),
+                    reason.is_some(),
+                );
+            }
             if context.can_rename {
                 add(
                     Rename,
@@ -159,49 +166,6 @@ pub fn resolve_card_menu(context: CardMenuContext<'_>, locale: InterfaceLocale) 
                     None,
                     false,
                 );
-            }
-            let agent = match context.kind {
-                "claude-code" => Some(("Claude Code", "Claude")),
-                "codex" => Some(("Codex", "Codex")),
-                "dsh" => Some(("DSH", "DSH")),
-                "antigravity" => Some(("Antigravity", "Antigravity")),
-                _ => None,
-            };
-            if let Some((display_name, short_name)) = agent {
-                if context.can_restore_auto_title {
-                    let label = match locale {
-                        InterfaceLocale::Chinese => format!("恢复 {short_name} 自动标题"),
-                        InterfaceLocale::English => format!("Restore the {short_name} auto title"),
-                    };
-                    add(RestoreAutoTitle, label, None, false);
-                }
-                if context.kind != "dsh"
-                    && let Some(readiness) = context.fork
-                {
-                    let reason = fork_disabled_reason(readiness, display_name, locale);
-                    let hint = reason.is_some();
-                    add(
-                        Fork,
-                        locale.text("⑂ Fork 会话", "⑂ Fork session").into(),
-                        reason.clone(),
-                        hint,
-                    );
-                    let worktree_reason = reason.or_else(|| {
-                        (!context.git_available).then(|| {
-                            locale
-                                .text("需要 Git 仓库", "Requires a Git repository")
-                                .into()
-                        })
-                    });
-                    add(
-                        ForkWorktree,
-                        locale
-                            .text("从新工作树创建", "Create from a new worktree")
-                            .into(),
-                        worktree_reason,
-                        hint,
-                    );
-                }
             }
             if context.can_detach {
                 add(
@@ -211,31 +175,22 @@ pub fn resolve_card_menu(context: CardMenuContext<'_>, locale: InterfaceLocale) 
                     false,
                 );
             }
-            if !context.read_only
-                && context.can_view_history
-                && matches!(context.kind, "claude-code" | "antigravity")
-            {
+            if let Some(reason) = fork {
+                let hint = reason.is_some();
+                let worktree_reason = reason.or_else(|| {
+                    (!context.git_available).then(|| {
+                        locale
+                            .text("需要 Git 仓库", "Requires a Git repository")
+                            .into()
+                    })
+                });
                 add(
-                    ViewHistory,
-                    locale.text("会话历史", "Session history").into(),
-                    None,
-                    false,
-                );
-            }
-            if context.can_close_session {
-                add(
-                    CloseSession,
-                    locale.text("关闭会话…", "Close session…").into(),
-                    None,
-                    false,
-                );
-            }
-            if context.can_remove_node {
-                add(
-                    RemoveNode,
-                    locale.text("移除节点…", "Remove node…").into(),
-                    None,
-                    false,
+                    ForkWorktree,
+                    locale
+                        .text("从新工作树创建", "Create from a new worktree")
+                        .into(),
+                    worktree_reason,
+                    hint,
                 );
             }
         }
@@ -299,6 +254,7 @@ mod view {
 
     use super::*;
     use crate::ui_text::ui_text;
+    use crate::workspace::{PopoverColors, card_tooltip_box, popover_colors};
 
     const MENU_WIDTH: f32 = 190.;
 
@@ -343,35 +299,9 @@ mod view {
             (viewport_width, viewport_height),
         );
 
-        let (
-            menu_background,
-            menu_border,
-            item_text,
-            danger_text,
-            hover_background,
-            danger_border,
-            menu_shadow,
-        ) = if light {
-            (
-                rgb(0xffffff),
-                rgb(0xdde1e7),
-                rgb(0x303744),
-                rgb(0xc5443e),
-                rgb(0xf0f2f5),
-                rgb(0xeceef2),
-                shadow(0x1f2837, 0.16, 10., 30.),
-            )
-        } else {
-            (
-                rgb(0x25282d),
-                rgba(0xffffff1a),
-                rgb(0xe4e7eb),
-                rgb(0xef7770),
-                rgba(0xffffff14),
-                rgba(0xffffff14),
-                shadow(0x000000, 0.38, 12., 34.),
-            )
-        };
+        let dark = !light;
+        let colors = popover_colors(dark);
+        let menu_shadow = colors.card_menu_shadow();
 
         let escape_handler = handler.clone();
         let mut menu_panel = div()
@@ -385,9 +315,9 @@ mod view {
             .p(px(MENU_PADDING))
             .rounded(px(10.))
             .border_1()
-            .border_color(menu_border)
-            .bg(menu_background)
-            .text_color(item_text)
+            .border_color(colors.card_menu_border)
+            .bg(colors.card_menu_panel)
+            .text_color(colors.card_menu_text)
             .shadow(vec![menu_shadow])
             .track_focus(focus)
             .on_key_down(move |event: &KeyDownEvent, window, cx| {
@@ -402,16 +332,10 @@ mod view {
             menu_panel = menu_panel.h(px(rendered_height)).overflow_y_scroll();
         }
         let menu_panel = menu_panel.children(menu.items.iter().enumerate().map(|(index, item)| {
-            menu_row(
-                index,
-                item,
-                item_text,
-                danger_text,
-                hover_background,
-                danger_border,
-                handler.clone(),
-            )
-            .when(selected == Some(index), |row| row.bg(hover_background))
+            menu_row(index, item, colors, dark, handler.clone())
+                .when(selected == Some(index), |row| {
+                    row.bg(colors.card_menu_hover)
+                })
         }));
 
         Some(
@@ -432,15 +356,17 @@ mod view {
     fn menu_row(
         index: usize,
         item: &CardMenuItem,
-        item_text: Rgba,
-        danger_text: Rgba,
-        hover_background: Rgba,
-        danger_border: Rgba,
+        colors: PopoverColors,
+        dark: bool,
         handler: CardMenuHandler,
     ) -> Stateful<Div> {
         let readiness_hint = item.show_readiness_hint && item.disabled_reason.is_some();
         let permanently_disabled = item.disabled_reason.is_some() && !readiness_hint;
-        let text_color = if item.danger { danger_text } else { item_text };
+        let text_color = if item.danger {
+            colors.card_menu_danger_text
+        } else {
+            colors.card_menu_text
+        };
 
         let mut row = div()
             .id(SharedString::from(format!("card-menu-item-{index}")))
@@ -469,14 +395,16 @@ mod view {
                 .h(px(MENU_ITEM_HEIGHT + MENU_BORDER))
                 .mt(px(DANGER_TOP_GAP))
                 .border_t_1()
-                .border_color(danger_border)
+                .border_color(colors.card_menu_danger_border)
                 .rounded(px(6.))
                 .rounded_t(px(0.));
         }
         if let Some(reason) = &item.disabled_reason {
             let reason = reason.clone();
-            row =
-                row.tooltip(move |_, cx| cx.new(|_| CardMenuTooltip(reason.clone().into())).into());
+            row = row.tooltip(move |_, cx| {
+                cx.new(|_| CardMenuTooltip(reason.clone().into(), dark))
+                    .into()
+            });
         }
 
         if permanently_disabled {
@@ -488,7 +416,7 @@ mod view {
             let activate_hint = handler;
             row.opacity(0.38)
                 .cursor_pointer()
-                .hover(move |style| style.bg(hover_background))
+                .hover(move |style| style.bg(colors.card_menu_hover))
                 .on_click(move |_, window, cx| {
                     cx.stop_propagation();
                     activate_hint(CardMenuEvent::ReadinessHint(reason.clone()), window, cx);
@@ -497,7 +425,7 @@ mod view {
             let action = item.action;
             let activate = handler;
             row.cursor_pointer()
-                .hover(move |style| style.bg(hover_background))
+                .hover(move |style| style.bg(colors.card_menu_hover))
                 .on_click(move |_, window, cx| {
                     cx.stop_propagation();
                     activate(CardMenuEvent::Activate(action), window, cx);
@@ -505,34 +433,13 @@ mod view {
         }
     }
 
-    fn shadow(color: u32, alpha: f32, y: f32, blur: f32) -> BoxShadow {
-        let mut color: Hsla = rgb(color).into();
-        color.a = alpha;
-        BoxShadow {
-            color,
-            offset: point(px(0.), px(y)),
-            blur_radius: px(blur),
-            spread_radius: px(0.),
-        }
-    }
-
-    struct CardMenuTooltip(SharedString);
+    struct CardMenuTooltip(SharedString, bool);
 
     impl Render for CardMenuTooltip {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            div()
+            card_tooltip_box(self.1)
                 .max_w(px(360.))
-                .px(px(9.))
-                .py(px(7.))
-                .border_1()
-                .border_color(rgb(0xd6dae1))
-                .rounded(px(7.))
-                .bg(rgb(0xffffff))
-                .text_color(rgb(0x333b47))
-                .text_size(px(10.))
-                .line_height(px(15.))
                 .whitespace_normal()
-                .shadow(vec![shadow(0x1f2837, 0.16, 8., 24.)])
                 .child(ui_text(self.0.clone()))
         }
     }
@@ -549,11 +456,9 @@ mod tests {
         CardMenuContext {
             kind,
             can_rename: true,
-            can_restore_auto_title: true,
             fork: Some(ForkReadiness::Ready),
             git_available: true,
             can_detach: true,
-            can_view_history: true,
             can_remove_node: true,
             ..Default::default()
         }
@@ -567,34 +472,24 @@ mod tests {
     fn shell_menu_has_no_provider_actions() {
         let menu = resolve_card_menu(context("shell"), InterfaceLocale::Chinese);
         assert!(menu.can_open());
-        assert_eq!(actions(&menu), [Rename, OpenDetached, RemoveNode]);
+        assert_eq!(actions(&menu), [Rename, OpenDetached]);
         assert!(menu.items.iter().all(|item| item.disabled_reason.is_none()));
     }
 
     #[test]
-    fn claude_menu_has_both_forks_history_and_a_separate_danger_item() {
-        let menu = resolve_card_menu(context("claude-code"), InterfaceLocale::Chinese);
-        assert_eq!(
-            actions(&menu),
-            [
-                Rename,
-                RestoreAutoTitle,
-                Fork,
-                ForkWorktree,
-                OpenDetached,
-                ViewHistory,
-                RemoveNode
-            ],
-        );
-        assert!(menu.items[..6].iter().all(|item| !item.danger));
-        assert!(menu.items[6].danger);
-        assert_eq!(card_menu_height(&menu.items), 215.);
-        assert_eq!(menu.items[1].label, "恢复 Claude 自动标题");
-        assert_eq!(menu.items[5].label, "会话历史");
+    fn attached_agent_menu_has_four_items_in_order() {
+        for kind in ["claude-code", "codex", "antigravity"] {
+            let menu = resolve_card_menu(context(kind), InterfaceLocale::Chinese);
+            assert_eq!(actions(&menu), [Fork, Rename, OpenDetached, ForkWorktree]);
+            assert!(menu.items.iter().all(|item| !item.danger));
+            assert_eq!(card_menu_height(&menu.items), 126.);
+            assert_eq!(menu.items[1].label, "重命名…");
+            assert_eq!(menu.items[3].label, "从新工作树创建");
+        }
     }
 
     #[test]
-    fn codex_menu_uses_its_own_readiness_and_no_history_action() {
+    fn codex_forks_use_provider_readiness() {
         let menu = resolve_card_menu(
             CardMenuContext {
                 fork: Some(ForkReadiness::NeedsFirstReply),
@@ -602,18 +497,8 @@ mod tests {
             },
             InterfaceLocale::English,
         );
-        assert_eq!(
-            actions(&menu),
-            [
-                Rename,
-                RestoreAutoTitle,
-                Fork,
-                ForkWorktree,
-                OpenDetached,
-                RemoveNode
-            ],
-        );
-        for item in &menu.items[2..4] {
+        assert_eq!(actions(&menu), [Fork, Rename, OpenDetached, ForkWorktree]);
+        for item in [&menu.items[0], &menu.items[3]] {
             assert!(item.show_readiness_hint);
             assert_eq!(
                 item.disabled_reason.as_deref(),
@@ -625,13 +510,16 @@ mod tests {
     }
 
     #[test]
-    fn dsh_offers_auto_title_but_does_not_fork() {
+    fn dsh_does_not_offer_forks() {
         let menu = resolve_card_menu(context("dsh"), InterfaceLocale::English);
-        assert_eq!(
-            actions(&menu),
-            [Rename, RestoreAutoTitle, OpenDetached, RemoveNode]
-        );
-        assert_eq!(menu.items[1].label, "Restore the DSH auto title");
+        assert_eq!(actions(&menu), [Rename, OpenDetached]);
+    }
+
+    #[test]
+    fn an_attached_card_without_supported_actions_has_no_menu() {
+        let menu = resolve_card_menu(CardMenuContext::default(), InterfaceLocale::English);
+        assert!(!menu.can_open());
+        assert!(menu.items.is_empty());
     }
 
     #[test]
@@ -656,7 +544,7 @@ mod tests {
     }
 
     #[test]
-    fn read_only_hides_history_and_prevents_the_attached_menu_from_opening() {
+    fn read_only_prevents_the_attached_menu_from_opening() {
         let menu = resolve_card_menu(
             CardMenuContext {
                 read_only: true,
@@ -666,17 +554,7 @@ mod tests {
             InterfaceLocale::English,
         );
         assert!(!menu.can_open());
-        assert_eq!(
-            actions(&menu),
-            [
-                Rename,
-                RestoreAutoTitle,
-                Fork,
-                ForkWorktree,
-                OpenDetached,
-                RemoveNode
-            ]
-        );
+        assert_eq!(actions(&menu), [Fork, Rename, OpenDetached, ForkWorktree]);
         for item in menu.items {
             assert_eq!(
                 item.disabled_reason.as_deref(),
@@ -697,18 +575,7 @@ mod tests {
             InterfaceLocale::Chinese,
         );
         assert!(!menu.can_open());
-        assert_eq!(
-            actions(&menu),
-            [
-                Rename,
-                RestoreAutoTitle,
-                Fork,
-                ForkWorktree,
-                OpenDetached,
-                ViewHistory,
-                RemoveNode
-            ],
-        );
+        assert_eq!(actions(&menu), [Fork, Rename, OpenDetached, ForkWorktree]);
         for item in menu.items {
             assert_eq!(item.disabled_reason.as_deref(), Some("当前终端仍在恢复"));
             assert!(!item.show_readiness_hint);
@@ -741,7 +608,7 @@ mod tests {
             ..context("codex")
         };
         let menu = resolve_card_menu(no_git, InterfaceLocale::English);
-        assert_eq!(menu.items[2].disabled_reason, None);
+        assert_eq!(menu.items[0].disabled_reason, None);
         assert_eq!(
             menu.items[3].disabled_reason.as_deref(),
             Some("Requires a Git repository")
@@ -777,7 +644,6 @@ mod tests {
         let menu = resolve_card_menu(context("shell"), InterfaceLocale::Chinese);
         assert_eq!(menu.items[0].label, "重命名…");
         assert_eq!(menu.items[1].label, "↗ 独立窗口");
-        assert_eq!(menu.items[2].label, "移除节点…");
     }
 
     #[test]

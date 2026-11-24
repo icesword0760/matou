@@ -943,6 +943,167 @@ struct PendingProviderRestore {
     _watchdog: gpui::Task<()>,
 }
 
+/// Shared popover/tooltip surfaces. Every call resolves the value from
+/// `AppTheme`; the host window appearance never drives these colors.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PopoverColors {
+    pub(crate) panel: Rgba,
+    pub(crate) border: Rgba,
+    pub(crate) text: Rgba,
+    pub(crate) muted: Rgba,
+    pub(crate) hover: Rgba,
+    pub(crate) active_text: Rgba,
+    pub(crate) active_bg: Rgba,
+    pub(crate) hover_wash: Rgba,
+    /// `.session-card-menu` keeps its own surface, distinct from `.perm-menu`.
+    pub(crate) card_menu_panel: Rgba,
+    pub(crate) card_menu_border: Rgba,
+    pub(crate) card_menu_text: Rgba,
+    pub(crate) card_menu_hover: Rgba,
+    pub(crate) card_menu_danger_text: Rgba,
+    pub(crate) card_menu_danger_border: Rgba,
+    pub(crate) tooltip_panel: Rgba,
+    pub(crate) tooltip_border: Rgba,
+    pub(crate) tooltip_text: Rgba,
+    /// `.hud-detail-tooltip strong` for tooltips that carry a heading.
+    pub(crate) tooltip_strong: Rgba,
+    menu_shadow_color: u32,
+    menu_shadow_alpha: f32,
+    menu_shadow_y: f32,
+    menu_shadow_blur: f32,
+    card_menu_shadow_color: u32,
+    card_menu_shadow_alpha: f32,
+    card_menu_shadow_y: f32,
+    card_menu_shadow_blur: f32,
+    notification: NotificationUiPalette,
+    tooltip_shadow_color: u32,
+    tooltip_shadow_alpha: f32,
+    tooltip_shadow_y: f32,
+    tooltip_shadow_blur: f32,
+}
+
+impl PopoverColors {
+    /// `.perm-menu` / `.workbench-action-popover` shadow.
+    pub(crate) fn menu_shadow(self) -> BoxShadow {
+        shadow(
+            self.menu_shadow_color,
+            self.menu_shadow_alpha,
+            self.menu_shadow_y,
+            self.menu_shadow_blur,
+        )
+    }
+
+    /// `.session-card-menu` shadow.
+    pub(crate) fn card_menu_shadow(self) -> BoxShadow {
+        shadow(
+            self.card_menu_shadow_color,
+            self.card_menu_shadow_alpha,
+            self.card_menu_shadow_y,
+            self.card_menu_shadow_blur,
+        )
+    }
+
+    /// `.hud-detail-tooltip` shadow.
+    pub(crate) fn tooltip_shadow(self) -> BoxShadow {
+        shadow(
+            self.tooltip_shadow_color,
+            self.tooltip_shadow_alpha,
+            self.tooltip_shadow_y,
+            self.tooltip_shadow_blur,
+        )
+    }
+}
+
+/// Dark/light values copied from the frozen Electron `hierarchy.css` menu
+/// and tooltip rules.
+pub(crate) fn popover_colors(dark: bool) -> PopoverColors {
+    if dark {
+        PopoverColors {
+            panel: rgb(0x1c2128),
+            border: rgb(0x30363d),
+            text: rgb(0xc9d1d9),
+            muted: rgb(0x6e7681),
+            hover: rgb(0x21262d),
+            active_text: rgb(0x58a6ff),
+            active_bg: rgba(0x58a6ff1a),
+            hover_wash: rgba(0xffffff14),
+            card_menu_panel: rgb(0x25282d),
+            card_menu_border: rgba(0xffffff1a),
+            card_menu_text: rgb(0xe4e7eb),
+            card_menu_hover: rgba(0xffffff14),
+            card_menu_danger_text: rgb(0xef7770),
+            card_menu_danger_border: rgba(0xffffff14),
+            tooltip_panel: rgb(0x1c2128),
+            tooltip_border: rgb(0x30363d),
+            tooltip_text: rgb(0xc9d1d9),
+            tooltip_strong: rgb(0xf0f3f6),
+            menu_shadow_color: 0x000000,
+            menu_shadow_alpha: 0.5,
+            menu_shadow_y: 8.,
+            menu_shadow_blur: 24.,
+            card_menu_shadow_color: 0x000000,
+            card_menu_shadow_alpha: 0.38,
+            card_menu_shadow_y: 12.,
+            card_menu_shadow_blur: 34.,
+            notification: NotificationUiPalette::for_dark(true),
+            tooltip_shadow_color: 0x000000,
+            tooltip_shadow_alpha: 0.45,
+            tooltip_shadow_y: 8.,
+            tooltip_shadow_blur: 24.,
+        }
+    } else {
+        PopoverColors {
+            panel: rgb(0xffffff),
+            // `.light-theme .perm-menu` drops the border.
+            border: rgba(0x00000000),
+            text: rgb(0x2f3547),
+            muted: rgb(0x57606a),
+            hover: rgb(0xeceef3),
+            active_text: rgb(0x58a6ff),
+            active_bg: rgba(0x58a6ff1a),
+            hover_wash: rgba(0x00000014),
+            card_menu_panel: rgb(0xffffff),
+            card_menu_border: rgb(0xdde1e7),
+            card_menu_text: rgb(0x303744),
+            card_menu_hover: rgb(0xf0f2f5),
+            card_menu_danger_text: rgb(0xc5443e),
+            card_menu_danger_border: rgb(0xeceef2),
+            tooltip_panel: rgba(0xfffffffa),
+            tooltip_border: rgb(0xd0d7de),
+            tooltip_text: rgb(0x57606a),
+            tooltip_strong: rgb(0x24292f),
+            menu_shadow_color: 0x000000,
+            menu_shadow_alpha: 0.1,
+            menu_shadow_y: 4.,
+            menu_shadow_blur: 20.,
+            card_menu_shadow_color: 0x1f2837,
+            card_menu_shadow_alpha: 0.16,
+            card_menu_shadow_y: 10.,
+            card_menu_shadow_blur: 30.,
+            notification: NotificationUiPalette::for_dark(false),
+            tooltip_shadow_color: 0x1f2328,
+            tooltip_shadow_alpha: 0.18,
+            tooltip_shadow_y: 8.,
+            tooltip_shadow_blur: 24.,
+        }
+    }
+}
+
+/// Effective application theme shared with leaf tooltip views. `Workspace`
+/// refreshes it from `AppTheme` on construction and whenever the preference
+/// changes; it is never derived from the window appearance.
+#[derive(Clone, Copy)]
+struct WorkspaceThemeGlobal {
+    dark: bool,
+}
+
+impl Global for WorkspaceThemeGlobal {}
+
+fn workspace_theme_dark(cx: &App) -> bool {
+    cx.try_global::<WorkspaceThemeGlobal>()
+        .is_some_and(|theme| theme.dark)
+}
+
 struct CardTooltip(SharedString);
 
 #[derive(Clone, Copy)]
@@ -957,29 +1118,30 @@ impl RemoveNodeTooltip {
     }
 }
 
-fn card_tooltip_box() -> Div {
+pub(crate) fn card_tooltip_box(dark: bool) -> Div {
+    let colors = popover_colors(dark);
     div()
         .px(px(9.))
         .py(px(7.))
         .border_1()
-        .border_color(rgb(0xd6dae1))
+        .border_color(colors.tooltip_border)
         .rounded(px(7.))
-        .bg(rgb(0xffffff))
-        .text_color(rgb(0x333b47))
+        .bg(colors.tooltip_panel)
+        .text_color(colors.tooltip_text)
         .text_size(px(10.))
         .line_height(px(15.))
-        .shadow(vec![shadow(0x1f2837, 0.16, 8., 24.)])
+        .shadow(vec![colors.tooltip_shadow()])
 }
 
 impl Render for RemoveNodeTooltip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        card_tooltip_box().child(self.text())
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        card_tooltip_box(workspace_theme_dark(cx)).child(self.text())
     }
 }
 
 impl Render for CardTooltip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        card_tooltip_box()
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        card_tooltip_box(workspace_theme_dark(cx))
             .max_w(px(460.))
             .whitespace_normal()
             .child(ui_text(self.0.clone()).pre_line())
@@ -2736,6 +2898,9 @@ impl Workspace {
                 ThemePreference::System
             })
         });
+        cx.set_global(WorkspaceThemeGlobal {
+            dark: ThemeState::new(theme, window.appearance()).effective() == AppTheme::Dark,
+        });
         let appearance = cx.observe_window_appearance(window, |this, window, cx| {
             if this.theme.set_system_appearance(window.appearance()) {
                 this.apply_theme_palette(cx);
@@ -3069,6 +3234,9 @@ impl Workspace {
     }
 
     fn apply_theme_palette(&self, cx: &mut Context<Self>) {
+        cx.set_global(WorkspaceThemeGlobal {
+            dark: self.theme.effective() == AppTheme::Dark,
+        });
         #[cfg(target_os = "windows")]
         {
             let handle = self.main_theme_window;
@@ -14625,24 +14793,6 @@ impl Workspace {
         let background = rgba(palette.background);
         #[cfg(debug_assertions)]
         crate::settings_shell::probe_workspace_surfaces(|probe| probe.footer = Some(background));
-        struct ReturnParentTooltip;
-        impl Render for ReturnParentTooltip {
-            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                div()
-                    .px(px(9.))
-                    .py(px(7.))
-                    .border_1()
-                    .border_color(rgb(0xd6dae1))
-                    .rounded(px(7.))
-                    .bg(rgb(0xffffff))
-                    .text_color(rgb(0x333b47))
-                    .text_size(px(10.))
-                    .line_height(px(15.))
-                    .whitespace_nowrap()
-                    .shadow(vec![shadow(0x1f2837, 0.16, 8., 24.)])
-                    .child("返回父会话")
-            }
-        }
 
         let (label, count) = if detached {
             (String::new(), String::new())
@@ -14652,37 +14802,19 @@ impl Workspace {
         let label = SharedString::from(label.replace(['\r', '\n', '\t'], " "));
         let count = SharedString::from(count);
         let viewport_width = window.viewport_size().width;
-        let width = f32::from(viewport_width);
         let child_level = !detached && self.level_parent().is_some();
-        let breadcrumb_max = (width * 0.44).min(520.);
-        let footer_room = width
-            - 2. * PERMISSION_FOOTER_PADDING_X
-            - if detached {
-                0.
-            } else {
-                FOOTER_SIDEBAR_WIDTH + FOOTER_GAP
-            };
-        // Keep enough room for the count, the first title glyph plus ellipsis,
-        // and the back arrow on child levels.
-        let breadcrumb_chrome = if child_level { 39. } else { 20. };
-        let count_width = footer_text_estimate(&count);
-        // The root breadcrumb keeps its whole item and the status bar shrinks
-        // into the real remainder. Child titles still ellipsize inside their
-        // own capped slot; the count and back arrow stay reserved there.
-        let breadcrumb_width = if detached {
-            0.
-        } else {
-            (footer_text_estimate(&label) + count_width + breadcrumb_chrome).min(breadcrumb_max)
-        };
-        let status_estimate = (footer_room - breadcrumb_width).max(0.);
-        // Child levels keep the old status budget so the HUD's fixed fields
-        // survive a long child title; the title itself still shrinks and
-        // ellipsizes inside its own capped breadcrumb slot.
-        let status_max = if child_level {
-            (footer_room - count_width - breadcrumb_chrome - 34.).max(0.)
-        } else {
-            0.
-        };
+        let FooterWidths {
+            breadcrumb_max,
+            breadcrumb_width,
+            status_estimate,
+            status_max,
+        } = footer_widths(
+            f32::from(viewport_width),
+            detached,
+            child_level,
+            footer_text_estimate(&label),
+            footer_text_estimate(&count),
+        );
         let locale = self.locale;
         let fields = session.and_then(|id| self.footer_fields_for(id));
         let chip = session.and_then(|id| self.permission_chip_for(id));
@@ -14749,6 +14881,7 @@ impl Workspace {
                 div()
                     .children(footer_bounds_probe("label"))
                     .id("footer-breadcrumb-label")
+                    .flex_1()
                     .min_w_0()
                     .overflow_hidden()
                     .whitespace_nowrap()
@@ -14768,9 +14901,14 @@ impl Workspace {
             );
         let breadcrumb = div()
             .h_full()
-            .when(!child_level, |breadcrumb| breadcrumb.flex_none())
+            .flex_none()
             .min_w_0()
-            .max_w(px(breadcrumb_max))
+            .when(child_level, |breadcrumb| breadcrumb.w(px(breadcrumb_width)))
+            .max_w(px(if child_level {
+                breadcrumb_width
+            } else {
+                breadcrumb_max
+            }))
             .flex()
             .items_center()
             .text_size(px(11.))
@@ -14781,6 +14919,7 @@ impl Workspace {
                     div()
                         .children(footer_bounds_probe("return"))
                         .id("session-return-parent")
+                        .w_full()
                         .h(px(26.))
                         .min_w_0()
                         .flex()
@@ -14805,7 +14944,16 @@ impl Workspace {
                         this.return_to_parent(window, cx);
                     }
                 }))
-                .tooltip(|_, cx| cx.new(|_| ReturnParentTooltip).into()),
+                .tooltip(move |_, cx| {
+                    cx.new(|_| {
+                        CardTooltip(
+                            locale
+                                .text("返回父会话", "Back to the parent session")
+                                .into(),
+                        )
+                    })
+                    .into()
+                }),
             )
         } else {
             breadcrumb.child(
@@ -15005,11 +15153,7 @@ impl Workspace {
             .relative()
             .flex_1()
             .when(child_level, |status| {
-                status
-                    .flex_auto()
-                    .flex_shrink_0()
-                    .max_w(px(status_max))
-                    .ml_auto()
+                status.flex_auto().max_w(px(status_max)).ml_auto()
             })
             .min_w_0()
             .h_full()
@@ -15271,6 +15415,8 @@ impl Workspace {
     /// `.status-perm-badge` + `.is-clickable` + `.status-field:disabled`.
     /// Use the frozen abbreviations in the row and the full title in the tooltip.
     fn permission_chip_view(&self, chip: &PermissionChip, cx: &mut Context<Self>) -> Stateful<Div> {
+        let dark = self.theme.effective() == AppTheme::Dark;
+        let colors = popover_colors(dark);
         let tooltip: SharedString = chip.title.clone().into();
         let cell = div()
             .id("permission-chip")
@@ -15291,12 +15437,7 @@ impl Workspace {
                 },
             ))
             .whitespace_nowrap()
-            .hover(|style| {
-                style.bg(Rgba {
-                    a: 0.08,
-                    ..rgb(0xffffff)
-                })
-            })
+            .hover(move |style| style.bg(colors.hover_wash))
             .tooltip(move |_, cx| cx.new(|_| CardTooltip(tooltip.clone())).into())
             .child(permission_tracked_text(
                 if chip.mode == PermissionMode::Auto && chip.modes == PermissionMode::ANTIGRAVITY {
@@ -15373,9 +15514,10 @@ impl Workspace {
             )
             .read(cx)
             .clone();
+        let colors = popover_colors(self.theme.effective() == AppTheme::Dark);
         let items = chip.modes.iter().copied().enumerate().map(|(index, mode)| {
-            let item =
-                permission_menu_item(mode, chip.mode).children(footer_bounds_probe(mode.value()));
+            let item = permission_menu_item(mode, chip.mode, colors)
+                .children(footer_bounds_probe(mode.value()));
             self.button(
                 item,
                 &focuses[index],
@@ -15390,14 +15532,14 @@ impl Workspace {
             .min_w(px(PERMISSION_MENU_MIN_WIDTH))
             .p(px(PERMISSION_MENU_PADDING))
             .border_1()
-            .border_color(rgb(0x30363d))
+            .border_color(colors.border)
             .rounded(px(8.))
             .occlude()
-            .bg(rgb(0x1c2128))
-            .text_color(rgb(0xc9d1d9))
+            .bg(colors.panel)
+            .text_color(colors.text)
             .text_size(px(12.))
-            .shadow(vec![shadow(0x000000, 0.5, 8., 24.)])
-            .child(permission_menu_title())
+            .shadow(vec![colors.menu_shadow()])
+            .child(permission_menu_title(colors))
             .children(items);
         deferred(
             anchored()
@@ -16131,6 +16273,33 @@ impl Render for Workspace {
                 && let Some(RecoveryState::Failed(error)) = self.recovery.get(id)
             {
                 let retry_id = id.clone();
+                // `.session-recovery-overlay.state-failed`: the frozen dark
+                // overlay/content/p colors and the light overrides from
+                // hierarchy.css. Electron has no light override for the retry
+                // button, so it keeps the single `#516b8d/#e0ebfa/#2a3b51`
+                // rule in both themes.
+                let overlay = if dark {
+                    rgba(0x190e0fe6)
+                } else {
+                    rgba(0xfff6f5f0)
+                };
+                let panel_border = if dark {
+                    Hsla::from(rgb(0xe45d55)).alpha(0.38)
+                } else {
+                    Hsla::from(rgb(0xc8d4e3))
+                };
+                let panel_background = if dark {
+                    rgba(0x181f29f5)
+                } else {
+                    rgba(0xfffffffa)
+                };
+                let panel_shadow = if dark {
+                    shadow(0x000000, 0.34, 16., 44.)
+                } else {
+                    shadow(0x1f2d3d, 0.14, 16., 44.)
+                };
+                let panel_text = if dark { rgb(0xdbe6f5) } else { rgb(0x29364a) };
+                let reason_text = if dark { rgb(0xd59692) } else { rgb(0x617086) };
                 card.child(
                     div()
                         .size_full()
@@ -16139,7 +16308,7 @@ impl Render for Workspace {
                         .justify_center()
                         .p(px(24.))
                         .rounded(px(12.))
-                        .bg(rgb(0xfff7f6))
+                        .bg(overlay)
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .child(
                             div()
@@ -16150,23 +16319,18 @@ impl Render for Workspace {
                                 .gap(px(9.))
                                 .p(px(22.))
                                 .border_1()
-                                .border_color(rgb(0xc8d4e3))
+                                .border_color(panel_border)
                                 .rounded(px(12.))
-                                .bg(rgb(0xffffff))
-                                .shadow(vec![shadow(0x1f2d3d, 0.14, 16., 44.)])
+                                .bg(panel_background)
+                                .shadow(vec![panel_shadow])
                                 .text_center()
-                                .text_color(rgb(0x29364a))
+                                .text_color(panel_text)
                                 .text_size(px(11.))
                                 .line_height(px(16.5))
                                 .child(div().font_weight(FontWeight::BOLD).child(
                                     self.locale.text("终端恢复失败", "Terminal recovery failed"),
                                 ))
-                                .child(
-                                    div()
-                                        .w_full()
-                                        .text_color(rgb(0x617086))
-                                        .child(error.clone()),
-                                )
+                                .child(div().w_full().text_color(reason_text).child(error.clone()))
                                 .child(
                                     self.button(
                                         measure_card_action(
@@ -16716,7 +16880,7 @@ impl Render for Workspace {
                 self.fork_readiness
                     .as_deref()
                     .filter(|_| self.dialog.is_none())
-                    .map(fork_readiness_toast),
+                    .map(|message| fork_readiness_toast(message, dark)),
             )
             .children(window_overlay)
             .children(self.project_instructions_overlay(window, cx))
@@ -16770,7 +16934,7 @@ const NOTIFICATION_UI_DISMISS_SIZE: f32 = 20.;
 const NOTIFICATION_UI_ANIMATION_MS: u64 = 220;
 const NOTIFICATION_UI_ANIMATION_OFFSET: f32 = 8.;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct NotificationUiPalette {
     panel_bg: u32,
     text: u32,
@@ -16792,14 +16956,12 @@ struct NotificationUiPalette {
 }
 
 impl NotificationUiPalette {
-    /// The panel is the only themed surface in this file. The workspace
-    /// around it keeps its existing light treatment.
-    fn for_appearance(appearance: WindowAppearance) -> Self {
-        let light = matches!(
-            appearance,
-            WindowAppearance::Light | WindowAppearance::VibrantLight
-        );
-        let dark = Self {
+    /// The panel follows the application theme resolved by `ThemeState`.
+    /// Electron has no light overrides for the muted/count/action/close/
+    /// dismiss/empty-state colors, the scrollbar thumb or the switch track,
+    /// so those keep the dark values in both themes.
+    fn for_dark(dark: bool) -> Self {
+        let dark_palette = Self {
             panel_bg: 0x212121,
             text: 0xdfdfdf,
             muted: 0x7b7b7b,
@@ -16818,7 +16980,9 @@ impl NotificationUiPalette {
             shadow_y: 8.,
             shadow_blur: 24.,
         };
-        if light {
+        if dark {
+            dark_palette
+        } else {
             Self {
                 panel_bg: 0xffffff,
                 text: 0x2f3547,
@@ -16827,10 +16991,8 @@ impl NotificationUiPalette {
                 shadow_alpha: 0.1,
                 shadow_y: 4.,
                 shadow_blur: 20.,
-                ..dark
+                ..dark_palette
             }
-        } else {
-            dark
         }
     }
 }
@@ -17023,7 +17185,8 @@ impl Workspace {
             return None;
         }
 
-        let palette = NotificationUiPalette::for_appearance(window.appearance());
+        let dark = self.theme.effective() == AppTheme::Dark;
+        let palette = popover_colors(dark).notification;
         let viewport = window.viewport_size();
         let viewport_height = f32::from(viewport.height);
         let panel_height =
@@ -17858,7 +18021,7 @@ fn permission_tracked_text(text: impl Into<SharedString>, tracking: f32) -> Div 
 }
 
 /// `.perm-menu__title`.
-fn permission_menu_title() -> Stateful<Div> {
+fn permission_menu_title(colors: PopoverColors) -> Stateful<Div> {
     div()
         .id("permission-menu-title")
         .mb(px(4.))
@@ -17866,8 +18029,8 @@ fn permission_menu_title() -> Stateful<Div> {
         .pt(px(6.))
         .pb(px(8.))
         .border_b_1()
-        .border_color(rgb(0x30363d))
-        .text_color(rgb(0x6e7681))
+        .border_color(colors.tooltip_border)
+        .text_color(colors.muted)
         .text_size(px(11.))
         .line_height(px(PERMISSION_MENU_TITLE_LINE_HEIGHT))
         .child(permission_tracked_text(
@@ -17877,7 +18040,11 @@ fn permission_menu_title() -> Stateful<Div> {
 }
 
 /// `.perm-menu button.perm-menu__item` (+ `.is-active` / `:hover`).
-fn permission_menu_item(mode: PermissionMode, active: PermissionMode) -> Stateful<Div> {
+fn permission_menu_item(
+    mode: PermissionMode,
+    active: PermissionMode,
+    colors: PopoverColors,
+) -> Stateful<Div> {
     let is_active = mode == active;
     let item = div()
         .id(permission_menu_item_id(mode))
@@ -17890,12 +18057,13 @@ fn permission_menu_item(mode: PermissionMode, active: PermissionMode) -> Statefu
         .rounded(px(4.))
         .text_size(px(12.))
         .line_height(px(14.))
-        .text_color(rgb(if is_active { 0x58a6ff } else { 0xc9d1d9 }))
+        .text_color(if is_active {
+            colors.active_text
+        } else {
+            colors.text
+        })
         .bg(if is_active {
-            Rgba {
-                a: 0.1,
-                ..rgb(0x58a6ff)
-            }
+            colors.active_bg
         } else {
             rgba(0x00000000)
         })
@@ -17924,7 +18092,7 @@ fn permission_menu_item(mode: PermissionMode, active: PermissionMode) -> Statefu
                     .id(permission_menu_check_id(mode))
                     .flex_none()
                     .font_weight(FontWeight::BOLD)
-                    .text_color(rgb(0x58a6ff))
+                    .text_color(colors.active_text)
                     .child(ui_text(PERMISSION_MENU_CHECK)),
             )
         });
@@ -17933,7 +18101,115 @@ fn permission_menu_item(mode: PermissionMode, active: PermissionMode) -> Statefu
         // keeps its blue tint instead of switching to the neutral hover gray.
         item
     } else {
-        item.hover(|style| style.bg(rgb(0x21262d)))
+        item.hover(move |style| style.bg(colors.hover))
+    }
+}
+
+struct FooterWidths {
+    breadcrumb_max: f32,
+    breadcrumb_width: f32,
+    status_estimate: f32,
+    status_max: f32,
+}
+
+fn footer_widths(
+    window_width: f32,
+    detached: bool,
+    child_level: bool,
+    label_width: f32,
+    count_width: f32,
+) -> FooterWidths {
+    let child_level = !detached && child_level;
+    let sidebar = if detached { 0. } else { FOOTER_SIDEBAR_WIDTH };
+    let available = (window_width - sidebar).max(0.);
+    let footer_room = (available - 2. * PERMISSION_FOOTER_PADDING_X - FOOTER_GAP).max(0.);
+    let breadcrumb_max = (available * 0.44).min(520.);
+    let chrome = if child_level { 39. } else { 20. };
+    let count_and_chrome = count_width + chrome;
+    // The back arrow and count can claim more than 44% when the title's space runs out.
+    let breadcrumb_limit = if child_level {
+        breadcrumb_max.max(count_and_chrome)
+    } else {
+        breadcrumb_max
+    };
+    let breadcrumb_width = if detached {
+        0.
+    } else {
+        (label_width + count_and_chrome)
+            .min(breadcrumb_limit)
+            .min(footer_room)
+    };
+    FooterWidths {
+        breadcrumb_max,
+        breadcrumb_width,
+        status_estimate: (footer_room - breadcrumb_width).max(0.),
+        status_max: if child_level {
+            (footer_room - count_and_chrome - 34.).max(0.)
+        } else {
+            0.
+        },
+    }
+}
+
+#[cfg(test)]
+mod hud_theme_and_footer_tests {
+    use super::*;
+
+    #[::core::prelude::v1::test]
+    fn popovers_use_the_electron_light_and_dark_palettes() {
+        let light = popover_colors(false);
+        assert_eq!(light.panel, rgb(0xffffff));
+        assert_eq!(light.border, rgba(0x00000000));
+        assert_eq!(light.text, rgb(0x2f3547));
+        assert_eq!(light.hover, rgb(0xeceef3));
+        assert_eq!(light.hover_wash, rgba(0x00000014));
+        assert_eq!(light.tooltip_border, rgb(0xd0d7de));
+        assert_eq!(light.tooltip_strong, rgb(0x24292f));
+        assert_eq!(light.card_menu_border, rgb(0xdde1e7));
+
+        let dark = popover_colors(true);
+        assert_eq!(dark.panel, rgb(0x1c2128));
+        assert_eq!(dark.border, rgb(0x30363d));
+        assert_eq!(dark.text, rgb(0xc9d1d9));
+        assert_eq!(dark.hover, rgb(0x21262d));
+        assert_eq!(dark.hover_wash, rgba(0xffffff14));
+        assert_eq!(dark.tooltip_strong, rgb(0xf0f3f6));
+        assert_eq!(dark.card_menu_panel, rgb(0x25282d));
+        assert_eq!(light.active_text, dark.active_text);
+        assert_eq!(light.active_bg, dark.active_bg);
+        assert_eq!(light.notification.panel_bg, 0xffffff);
+        assert_eq!(light.notification.item_hover_bg, rgb(0xeceef3));
+        assert_eq!(dark.notification.panel_bg, 0x212121);
+    }
+
+    #[::core::prelude::v1::test]
+    fn child_footer_uses_stage_width_and_reserves_the_return_controls() {
+        let count_width = footer_text_estimate("· 12 会话");
+        let wide = footer_widths(1440., false, true, 1000., count_width);
+        assert_eq!(wide.breadcrumb_max, (1440. - FOOTER_SIDEBAR_WIDTH) * 0.44);
+        assert_eq!(wide.breadcrumb_width, wide.breadcrumb_max);
+        assert!(wide.status_max > 0.);
+
+        let narrow = footer_widths(780., false, true, 1000., count_width);
+        assert!(narrow.breadcrumb_width >= count_width + 39.);
+        assert!(narrow.breadcrumb_width <= (780. - FOOTER_SIDEBAR_WIDTH) * 0.44);
+        assert!(narrow.status_max >= 0.);
+        assert!(narrow.status_estimate < wide.status_estimate);
+
+        let tight = footer_widths(398., false, true, 1000., count_width);
+        assert_eq!(tight.breadcrumb_width, count_width + 39.);
+        assert!(tight.status_estimate >= 0.);
+    }
+
+    #[::core::prelude::v1::test]
+    fn detached_footer_keeps_the_full_window_width_for_status() {
+        let detached = footer_widths(780., true, false, 1000., 40.);
+        assert_eq!(detached.breadcrumb_width, 0.);
+        assert_eq!(detached.breadcrumb_max, 780. * 0.44);
+        assert_eq!(
+            detached.status_estimate,
+            780. - 2. * PERMISSION_FOOTER_PADDING_X - FOOTER_GAP,
+        );
     }
 }
 
@@ -19458,9 +19734,25 @@ mod fork_surface_tests {
     }
 }
 
-/// `.fork-readiness-toast` (frozen light-surface variant): fixed below the card
-/// head, horizontally centered, max 420px. The host owns the 2.8s dismissal.
-fn fork_readiness_toast(message: &str) -> Div {
+/// `.fork-readiness-toast`: the frozen dark base rule and its light override.
+fn fork_readiness_toast(message: &str, dark: bool) -> Div {
+    let (border, text, background, shadow_color, shadow_alpha) = if dark {
+        (
+            rgba(0x6faaf061),
+            rgb(0xc7daf2),
+            rgb(0x202b38),
+            0x000000,
+            0.32,
+        )
+    } else {
+        (
+            rgba(0xbdd7f6ff),
+            rgb(0x365a83),
+            rgb(0xf3f8ff),
+            0x314660,
+            0.18,
+        )
+    };
     div()
         .absolute()
         .top(px(72.))
@@ -19475,11 +19767,11 @@ fn fork_readiness_toast(message: &str) -> Div {
                 .px(px(14.))
                 .py(px(9.))
                 .border_1()
-                .border_color(rgb(0xbdd7f6))
+                .border_color(border)
                 .rounded(px(8.))
-                .text_color(rgb(0x365a83))
-                .bg(rgb(0xf3f8ff))
-                .shadow(vec![shadow(0x314660, 0.18, 10., 28.)])
+                .text_color(text)
+                .bg(background)
+                .shadow(vec![shadow(shadow_color, shadow_alpha, 10., 28.)])
                 .text_size(px(12.))
                 .line_height(relative(1.45))
                 .child(ui_text(message.to_owned())),

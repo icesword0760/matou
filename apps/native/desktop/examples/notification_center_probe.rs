@@ -114,8 +114,8 @@ mod workspace {
             assert!(time[3..].parse::<u8>().unwrap() < 60);
             assert!(self.graph.get("agentNotifications").is_none());
 
-            let dark = NotificationUiPalette::for_appearance(WindowAppearance::Dark);
-            let light = NotificationUiPalette::for_appearance(WindowAppearance::Light);
+            let dark = popover_colors(true).notification;
+            let light = popover_colors(false).notification;
             assert_eq!(dark.panel_bg, 0x212121);
             assert_eq!(light.panel_bg, 0xffffff);
             assert_eq!(dark.item_bg, rgba(0xffffff0a));

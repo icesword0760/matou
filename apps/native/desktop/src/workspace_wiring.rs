@@ -1367,11 +1367,6 @@ impl Workspace {
         let kind = node["currentMode"].as_str().unwrap_or_default();
         let archived = !node["archivedAt"].is_null();
         let can_mutate = self.card_action_available(id);
-        let retry_fork = kind == "antigravity"
-            && !archived
-            && !self.wiring.is_detached(id)
-            && fork_failure_copy(node).is_some()
-            && self.fork_repair_blocked_reason(id, node).is_none();
         let fork = self
             .fork_access(id, ForkPlacement::Peer)
             .filter(|access| access.blocked.is_none())
@@ -1387,57 +1382,32 @@ impl Workspace {
                     ForkReadiness::NeedsFirstReply
                 }
             });
+        let presentation = if self.wiring.is_detached(id) {
+            CardPresentation::Detached
+        } else if archived {
+            CardPresentation::Archived
+        } else {
+            CardPresentation::Attached
+        };
         let mut menu = resolve_card_menu(
             CardMenuContext {
                 kind,
-                presentation: if self.wiring.is_detached(id) {
-                    CardPresentation::Detached
-                } else if archived {
-                    CardPresentation::Archived
-                } else {
-                    CardPresentation::Attached
-                },
+                presentation,
                 can_rename: can_mutate,
-                can_restore_auto_title: can_mutate
-                    && kind == "codex"
-                    && node["titleSource"] == "manual"
-                    && trimmed_graph_text(&node["providerTitle"]).is_some(),
                 fork,
                 // For Codex, Runtime validates both the repository and the
                 // trusted isolation root when the New worktree action is sent.
                 git_available: kind == "codex" || !node["git"].is_null(),
                 can_detach: can_mutate && self.terminals.contains_key(id),
-                can_view_history: can_mutate
-                    && kind == "claude-code"
-                    && trimmed_graph_text(&node["cwd"]).is_some(),
-                can_close_session: can_mutate,
                 can_remove_node: self.remove_session_available(id),
                 read_only: self.read_only.is_some(),
                 storage_fault: self.storage_fault_sessions.contains(id),
                 environment_unavailable: !self.active_path_valid()
                     || self.environment_unavailable(id),
-                recovering: !retry_fork && self.recovery_blocked(id),
+                recovering: self.recovery_blocked(id),
             },
             self.locale,
         );
-        if retry_fork {
-            let pending = matches!(self.fork_retries.get(id), Some(ForkRetry::Pending));
-            let label = if pending {
-                self.locale.text("正在重试分叉…", "Retrying fork…")
-            } else {
-                self.locale.text("重试创建分支", "Retry fork")
-            };
-            menu.items.insert(
-                0,
-                CardMenuItem {
-                    action: CardMenuAction::RetryFork,
-                    label: label.into(),
-                    disabled_reason: pending.then(|| label.into()),
-                    show_readiness_hint: false,
-                    danger: false,
-                },
-            );
-        }
         if kind != "codex"
             && let Some(item) = menu
                 .items
@@ -1454,48 +1424,18 @@ impl Workspace {
                     .into(),
             );
         }
-        if self.can_split_pane(id)
-            || self
+        if presentation == CardPresentation::Detached
+            && self
                 .active_split_tree()
                 .is_some_and(|tree| tree.ordered_sessions().contains(&id))
         {
-            let mut actions = Vec::new();
-            if self.can_split_pane(id) {
-                actions.extend([
-                    (
-                        CardMenuAction::SplitHorizontal,
-                        self.locale.text("左右分屏", "Split left and right"),
-                    ),
-                    (
-                        CardMenuAction::SplitVertical,
-                        self.locale.text("上下分屏", "Split top and bottom"),
-                    ),
-                ]);
-            }
-            if self
-                .active_split_tree()
-                .is_some_and(|tree| tree.ordered_sessions().contains(&id))
-            {
-                actions.push((
-                    CardMenuAction::ClosePane,
-                    self.locale.text("关闭分屏", "Close pane"),
-                ));
-            }
-            let index = menu
-                .items
-                .iter()
-                .position(|item| item.danger)
-                .unwrap_or(menu.items.len());
-            menu.items.splice(
-                index..index,
-                actions.into_iter().map(|(action, label)| CardMenuItem {
-                    action,
-                    label: label.into(),
-                    disabled_reason: None,
-                    show_readiness_hint: false,
-                    danger: false,
-                }),
-            );
+            menu.items.push(CardMenuItem {
+                action: CardMenuAction::ClosePane,
+                label: self.locale.text("关闭分屏", "Close pane").into(),
+                disabled_reason: None,
+                show_readiness_hint: false,
+                danger: false,
+            });
         }
         menu
     }
@@ -1562,13 +1502,6 @@ impl Workspace {
                 }
                 match action {
                     CardMenuAction::Rename => self.open_session_rename(id.into(), window, cx),
-                    CardMenuAction::RestoreAutoTitle => self.send(
-                        Command::SetSessionTitle {
-                            session_id: id.into(),
-                            title: None,
-                        },
-                        cx,
-                    ),
                     CardMenuAction::Fork => self.open_fork(id, ForkPlacement::Peer, window, cx),
                     CardMenuAction::ForkWorktree => self.open_fork_with_worktree(
                         id,
@@ -1577,23 +1510,10 @@ impl Workspace {
                         window,
                         cx,
                     ),
-                    CardMenuAction::RetryFork => self.retry_fork(id, cx),
-                    CardMenuAction::SplitHorizontal => {
-                        self.split_pane(id, SplitDirection::Horizontal, cx)
-                    }
-                    CardMenuAction::SplitVertical => {
-                        self.split_pane(id, SplitDirection::Vertical, cx)
-                    }
-                    CardMenuAction::ClosePane => self.close_split_pane(id, window, cx),
                     CardMenuAction::OpenDetached => self.detach_card(id, window, cx),
                     CardMenuAction::ReturnToMain => self.return_detached_card(id, window, cx),
-                    CardMenuAction::ViewHistory => {
-                        self.open_session_loader_mode(id, true, window, cx)
-                    }
+                    CardMenuAction::ClosePane => self.close_split_pane(id, window, cx),
                     CardMenuAction::RemoveNode => self.open_remove_session(id, window, cx),
-                    CardMenuAction::CloseSession => {
-                        self.request_close_session_by_id(id, window, cx)
-                    }
                 }
             }
         }

@@ -887,6 +887,20 @@ pub(super) async fn verify(cx: &mut AsyncApp, root: PathBuf) {
         "live update: idle, checking and download pending; no-feed check and download errors returned by Runtime"
     );
 
+    fixture.update(cx, |view, _, _| {
+        let menu = view.wiring_card_menu(&source);
+        assert!(menu.can_open());
+        let actions: Vec<_> = menu.items.iter().map(|item| item.action).collect();
+        assert_eq!(
+            actions,
+            [
+                CardMenuAction::Fork,
+                CardMenuAction::Rename,
+                CardMenuAction::OpenDetached,
+                CardMenuAction::ForkWorktree,
+            ]
+        );
+    });
     submit_fork(
         &fixture,
         cx,
@@ -1407,16 +1421,18 @@ async fn verify_antigravity(
         .await;
     fixture.input(&forked, b"/exit\r");
     fixture
-        .state(cx, "Antigravity fork failure menu", |view, _| {
-            let menu = view.wiring_card_menu(&forked);
-            (menu.can_open()
-                && menu.items.iter().any(|item| {
-                    item.action == CardMenuAction::RetryFork && item.disabled_reason.is_none()
-                }))
-            .then_some(())
-        })
+        .state(
+            cx,
+            "Antigravity fork failure with retry available",
+            |view, _| {
+                let node = view.graph_node(&forked)?;
+                (fork_failure_copy(node).is_some()
+                    && view.fork_repair_blocked_reason(&forked, node).is_none())
+                .then_some(())
+            },
+        )
         .await;
-    card_action(fixture.window, cx, &forked, CardMenuAction::RetryFork);
+    fixture.update(cx, |view, _, cx| view.retry_fork(&forked, cx));
     let retry = fixture.agy_run(cx, 4).await;
     assert_ne!(retry.url, run.url);
     assert_eq!(retry.resume_arg(), Some(SOURCE));

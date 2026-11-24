@@ -1066,14 +1066,7 @@ mod workspace {
                     .collect::<Vec<_>>();
                 assert_eq!(
                     actions,
-                    [
-                        CardMenuAction::Rename,
-                        CardMenuAction::OpenDetached,
-                        CardMenuAction::SplitHorizontal,
-                        CardMenuAction::SplitVertical,
-                        CardMenuAction::CloseSession,
-                        CardMenuAction::RemoveNode
-                    ]
+                    [CardMenuAction::Rename, CardMenuAction::OpenDetached]
                 );
             })
             .unwrap();
@@ -1102,14 +1095,18 @@ mod workspace {
             assert!(matches!(&view.dialog, Some(TabDialog::RenameSession {session_id, ..}) if session_id == A));
             view.close_dialog(window, cx);
         }).unwrap();
-        card_action(window, cx, B, CardMenuAction::CloseSession);
+        window
+            .update(cx, |view, window, cx| {
+                view.request_close_session_by_id(B, window, cx)
+            })
+            .unwrap();
         assert!(std::iter::from_fn(|| sink.try_recv().ok()).any(|command|
             matches!(command, Command::CloseSessionCard { session_id, .. } if session_id == B)));
         window
             .update(cx, |view, _, _| view.pending_card_action = None)
             .unwrap();
         println!(
-            "card menu: right-click, Shell actions, Escape and outside dismissal, focus, rename and close"
+            "card menu: right-click, Shell actions, Escape and outside dismissal, focus and rename; close remains available separately"
         );
 
         card_action(window, cx, A, CardMenuAction::OpenDetached);
@@ -1534,7 +1531,15 @@ mod workspace {
         const RIGHT_PANE: &str = "split-pane-drag-right";
         const RELEASE_COUNT: u32 = 42;
         let (window, sink) = open_probe_at(cx, 1200.);
-        card_action(window, cx, A, CardMenuAction::SplitHorizontal);
+        window
+            .update(cx, |view, _, cx| {
+                view.split_pane(
+                    A,
+                    matou_native_desktop::split_tree::SplitDirection::Horizontal,
+                    cx,
+                )
+            })
+            .unwrap();
         publish_shell(window, cx, RIGHT);
         draw(window.into(), cx);
         window
@@ -2173,7 +2178,15 @@ mod workspace {
         const RIGHT: &str = "new-right";
         const BOTTOM: &str = "new-bottom";
         assert!(!draw(window.into(), cx).contains_key("split-canvas"));
-        card_action(window, cx, A, CardMenuAction::SplitHorizontal);
+        window
+            .update(cx, |view, _, cx| {
+                view.split_pane(
+                    A,
+                    matou_native_desktop::split_tree::SplitDirection::Horizontal,
+                    cx,
+                )
+            })
+            .unwrap();
         assert!(std::iter::from_fn(|| sink.try_recv().ok()).any(|command|
             matches!(command, Command::CreateShellSibling { scene_id, source_session_id, parent_session_id: None }
                 if scene_id == "main" && source_session_id == A)));
@@ -2183,16 +2196,15 @@ mod workspace {
             bounds["split-pane-shell-a"].right(),
             bounds["split-pane-new-right"].left()
         );
-        let header = bounds["split-pane-new-right"].origin + point(px(32.), px(20.));
-        click(window.into(), cx, MouseButton::Right, header);
-        overlay(window, cx, Some("card menu"));
         window
             .update(cx, |view, _, cx| {
-                view.select_card_menu_action_for_probe(CardMenuAction::SplitVertical, cx);
+                view.split_pane(
+                    RIGHT,
+                    matou_native_desktop::split_tree::SplitDirection::Vertical,
+                    cx,
+                )
             })
             .unwrap();
-        draw(window.into(), cx);
-        press(window, cx, "enter");
         assert!(std::iter::from_fn(|| sink.try_recv().ok()).any(|command|
             matches!(command, Command::CreateShellSibling { source_session_id, .. } if source_session_id == RIGHT)));
         publish_shell(window, cx, BOTTOM);
@@ -2207,25 +2219,24 @@ mod workspace {
         );
         assert!(!bounds.contains_key("split-pane-shell-b"));
 
-        for (theme, locale, label) in [
-            (ThemePreference::Dark, InterfaceLocale::Chinese, "关闭分屏"),
-            (
-                ThemePreference::Light,
-                InterfaceLocale::English,
-                "Close pane",
-            ),
+        for (theme, locale) in [
+            (ThemePreference::Dark, InterfaceLocale::Chinese),
+            (ThemePreference::Light, InterfaceLocale::English),
         ] {
             window
                 .update(cx, |view, _, cx| {
                     view.locale = locale;
                     view.theme.set_preference(theme);
                     view.apply_theme_palette(cx);
-                    assert!(
-                        view.wiring_card_menu(RIGHT)
-                            .items
-                            .iter()
-                            .any(|item| item.action == CardMenuAction::ClosePane
-                                && item.label == label)
+                    let actions: Vec<_> = view
+                        .wiring_card_menu(RIGHT)
+                        .items
+                        .iter()
+                        .map(|item| item.action)
+                        .collect();
+                    assert_eq!(
+                        actions,
+                        [CardMenuAction::Rename, CardMenuAction::OpenDetached]
                     );
                 })
                 .unwrap();
@@ -2255,6 +2266,20 @@ mod workspace {
             .unwrap();
         draw(child, cx);
         assert!(draw(window.into(), cx).contains_key("detached-mount-shell-a"));
+        window
+            .update(cx, |view, _, _| {
+                let actions: Vec<_> = view
+                    .wiring_card_menu(A)
+                    .items
+                    .iter()
+                    .map(|item| item.action)
+                    .collect();
+                assert_eq!(
+                    actions,
+                    [CardMenuAction::ReturnToMain, CardMenuAction::ClosePane]
+                );
+            })
+            .unwrap();
         child
             .update(cx, |_, window, _| window.remove_window())
             .unwrap();
