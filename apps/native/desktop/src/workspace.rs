@@ -3738,10 +3738,12 @@ impl Workspace {
                 continue;
             };
             let prefix = format!("session-group:{}:", scene.id);
-            if !update
-                .owner_key
-                .strip_prefix(&prefix)
-                .is_some_and(|owner| owner == "root" || self.graph_node(owner).is_some())
+            let dag_viewport = update.owner_key == dag_window::viewport_owner_key(&scene.id);
+            if !dag_viewport
+                && !update
+                    .owner_key
+                    .strip_prefix(&prefix)
+                    .is_some_and(|owner| owner == "root" || self.graph_node(owner).is_some())
             {
                 self.geometry_dirty.remove(&update.owner_key);
                 self.reconnect_geometry.remove(&update.owner_key);
@@ -3755,7 +3757,7 @@ impl Workspace {
                 self.reconnect_geometry.remove(&update.owner_key);
                 continue;
             }
-            update.layout_revision = if self
+            let revision = if self
                 .hierarchy
                 .as_ref()
                 .and_then(|h| h.scene.as_ref())
@@ -3766,6 +3768,16 @@ impl Workspace {
                     .unwrap_or(scene.layout_revision as f64)
             } else {
                 scene.layout_revision as f64
+            };
+            update.layout_revision = if dag_viewport {
+                authority
+                    .iter()
+                    .find(|saved| saved.owner_key == update.owner_key)
+                    .map_or(update.layout_revision, |saved| saved.layout_revision)
+                    .max(update.layout_revision)
+                    .max(revision)
+            } else {
+                revision
             };
             update.now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -4638,9 +4650,15 @@ impl Workspace {
                                     .and_then(|h| h.scene.as_ref())
                                     .is_some_and(|s| s.id == retry.scene_id)
                                 {
-                                    retry.layout_revision = this.graph["layoutRevision"]
-                                        .as_f64()
-                                        .unwrap_or(retry.layout_revision);
+                                    if let Some(revision) = this.graph["layoutRevision"].as_f64() {
+                                        retry.layout_revision = if retry.owner_key
+                                            == dag_window::viewport_owner_key(&retry.scene_id)
+                                        {
+                                            revision.max(retry.layout_revision)
+                                        } else {
+                                            revision
+                                        };
+                                    }
                                 }
                                 this.write_geometry(retry, attempt + 1, cx);
                             }
@@ -5361,6 +5379,22 @@ impl Workspace {
             );
             self.write_geometry(update, 0, cx);
         }
+        let read_only = self.is_read_only();
+        if let Some(child) = self.dag_window
+            && let Ok(Some(update)) =
+                child.update(cx, |view, _, cx| view.take_viewport_update(read_only, cx))
+        {
+            self.save_dag_viewport(update, cx);
+        }
+    }
+
+    fn save_dag_viewport(&mut self, update: GeometryUpdate, cx: &mut Context<Self>) {
+        if self.is_read_only() {
+            return;
+        }
+        self.geometry_dirty.insert(update.owner_key.clone());
+        self.geometry.insert(update.owner_key.clone(), update.clone());
+        self.write_geometry(update, 0, cx);
     }
 
     fn write_geometry(&mut self, update: GeometryUpdate, attempt: u8, cx: &mut Context<Self>) {
@@ -7706,16 +7740,28 @@ impl Workspace {
         let visible = self.dag_probe.is_none();
         #[cfg(not(all(target_os = "macos", debug_assertions)))]
         let visible = true;
+        let read_only = self.is_read_only();
         let opened = if let Some(child) = self.dag_window
-            && child
-                .update(cx, |view, window, cx| {
-                    view.retarget(&self.graph, &target, self.locale, window, cx);
-                    if visible {
-                        window.activate_window();
-                    }
-                })
-                .is_ok()
+            && let Ok(previous_viewport) = child.update(cx, |view, window, cx| {
+                let saved_viewport = self.geometry.get(&dag_window::viewport_owner_key(scene));
+                let previous_viewport = view.retarget(
+                    &self.graph,
+                    &target,
+                    saved_viewport,
+                    read_only,
+                    self.locale,
+                    window,
+                    cx,
+                );
+                if visible {
+                    window.activate_window();
+                }
+                previous_viewport
+            })
         {
+            if let Some(update) = previous_viewport {
+                self.save_dag_viewport(update, cx);
+            }
             Ok(child)
         } else {
             self.create_dag_window(&target, visible, window, cx)
@@ -7750,6 +7796,9 @@ impl Workspace {
         DagWindow::open(
             &self.graph,
             target,
+            self.graph["sceneId"]
+                .as_str()
+                .and_then(|scene_id| self.geometry.get(&dag_window::viewport_owner_key(scene_id))),
             self.locale,
             self.theme.effective() == AppTheme::Dark,
             visible,

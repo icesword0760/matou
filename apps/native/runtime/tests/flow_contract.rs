@@ -117,6 +117,10 @@ use matou_native_runtime::flow;
 #[cfg(target_os = "macos")]
 use probe_model::{SessionEvent, SessionOptions, StorageFaultCode};
 #[cfg(target_os = "macos")]
+#[path = "../src/checkpoint_sync.rs"]
+#[allow(dead_code)]
+mod checkpoint_sync;
+#[cfg(target_os = "macos")]
 #[path = "../src/model.rs"]
 #[allow(dead_code)]
 mod probe_model;
@@ -688,6 +692,141 @@ mod gate {
             matches!(events.first(), Some(SessionEvent::Started { sequence, .. }) if *sequence == started_at)
         );
         Ok(events)
+    }
+
+    #[test]
+    fn provider_exit_writes_a_checkpoint_that_restores_before_new_journal_frames() -> Result<()> {
+        use matou_native_core::{
+            hierarchy::{BootstrapWindowInput, HierarchyIds, bootstrap_window},
+            journal::checkpoint::protected_terminal_sequences,
+            storage::{CommandMetadata, configure_connection, migrate},
+        };
+        use rusqlite::Connection;
+
+        let root = tempfile::tempdir()?;
+        let root = root.path();
+        let mut db = Connection::open(root.join("matou.sqlite"))?;
+        configure_connection(&db)?;
+        migrate(&mut db, 1)?;
+        bootstrap_window(
+            &mut db,
+            &CommandMetadata {
+                command_id: "bootstrap".into(),
+                command_type: "bootstrap".into(),
+                request_hash: "bootstrap".into(),
+                causation_id: None,
+                correlation_id: None,
+            },
+            &BootstrapWindowInput {
+                window_id: "main".into(),
+                default_root_directory: root.display().to_string(),
+                default_name: "Workspace".into(),
+                now: 1,
+            },
+            &HierarchyIds {
+                workspace_id: "workspace".into(),
+                execution_context_id: "context".into(),
+                task_id: "task".into(),
+                scene_id: "scene".into(),
+                root_node_id: "root".into(),
+                session_id: RESTART_ID.into(),
+                mount_id: "mount".into(),
+            },
+            "Task",
+            1,
+        )?;
+        seed_journal(
+            &json!({"frames": [
+                {"kind": "reset", "sequence": 1, "screenEpoch": 3},
+                {"kind": "domain-cursor", "sequence": 2, "domainEventSequence": 8},
+            ]}),
+            root,
+            RESTART_ID,
+        )?;
+        let mut options = restart_options(root, LaunchProfile::Codex, "printf 'CAPTURED\\n'");
+        options.screen_recovery = Some(ScreenRecoveryOptions::default());
+        let mut session = RuntimeSession::launch(options)?;
+        let events = live_output(&mut session, 2)?;
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                matou_native_runtime::SessionEvent::Diagnostic { .. }
+            )),
+            "{events:?}"
+        );
+        let through = session.last_sequence();
+        assert_eq!(
+            protected_terminal_sequences(&db, RESTART_ID)?,
+            vec![through]
+        );
+        let candidate = db.query_row(
+            "SELECT id, generation, terminal_sequence, domain_event_sequence, screen_epoch,
+                    file_path, checksum FROM journal_checkpoints WHERE session_id = ? AND valid = 1",
+            [RESTART_ID],
+            |row| Ok(CheckpointCandidate {
+                id: row.get(0)?,
+                session_id: RESTART_ID.into(),
+                generation: row.get::<_, i64>(1)? as u64,
+                terminal_sequence: row.get::<_, i64>(2)? as u64,
+                domain_event_sequence: row.get::<_, i64>(3)? as u64,
+                screen_epoch: row.get::<_, i64>(4)? as u64,
+                file_path: row.get::<_, String>(5)?.into(),
+                checksum: row.get(6)?,
+            })
+        )?;
+        assert_eq!(
+            (
+                candidate.terminal_sequence,
+                candidate.domain_event_sequence,
+                candidate.screen_epoch
+            ),
+            (through, 8, 3)
+        );
+        assert_eq!(
+            candidate.read()?.grid,
+            Some((RESTART_GRID.cols, RESTART_GRID.rows))
+        );
+        drop(session);
+
+        // Take away the pre-checkpoint journal so a full replay cannot produce
+        // the first line. Retain a domain watermark and output after the snapshot.
+        fs::rename(
+            root.join("journal").join(RESTART_ID),
+            root.join("journal-prefix"),
+        )?;
+        let mut journal = SegmentJournal::open(root, RESTART_ID, journal_options())?;
+        journal.append(&Record {
+            timestamp: 1,
+            frame: Frame::DomainCursor {
+                sequence: through + 1,
+                domain_event_sequence: 8,
+            },
+        })?;
+        journal.append(&Record {
+            timestamp: 2,
+            frame: Frame::Output {
+                sequence: through + 2,
+                data: b"AFTER".to_vec(),
+            },
+        })?;
+        journal.close()?;
+        let mut options = restart_options(root, LaunchProfile::Codex, "exec /bin/sleep 30");
+        options.journal.checkpoint_protected_sequences = vec![through];
+        options.screen_recovery = Some(ScreenRecoveryOptions {
+            initial_grid: Some((RESTART_GRID.cols, RESTART_GRID.rows)),
+            checkpoints: vec![candidate],
+        });
+        let mut session = RuntimeSession::launch(options)?;
+        assert_eq!(
+            scroll_to_previous_viewport(&mut session)?,
+            "CAPTURED\nAFTER"
+        );
+        session.shutdown()?;
+        assert_eq!(
+            protected_terminal_sequences(&db, RESTART_ID)?,
+            vec![through]
+        );
+        Ok(())
     }
 
     #[test]

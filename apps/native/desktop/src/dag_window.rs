@@ -1,9 +1,11 @@
 // Independent session graph window over the workspace's Runtime projection.
 
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
 use gpui::{prelude::*, *};
-use matou_native_core::sessions::InterfaceLocale;
+use matou_native_core::{geometry::GeometryUpdate, sessions::InterfaceLocale};
 use matou_native_desktop::dag_canvas::{
-    DagCanvas, DagCanvasEvent, DagCanvasView, DagGraph, DagLayout, DagSelection,
+    DagCanvas, DagCanvasEvent, DagCanvasView, DagGraph, DagLayout, DagSelection, DagTransform,
 };
 use matou_native_desktop::windows_titlebar;
 use serde_json::Value;
@@ -14,6 +16,7 @@ use crate::ui_text::ui_text;
 const DAG_FAILURE_TEXT: u32 = 0x9b342f;
 const DAG_FAILURE_BORDER: u32 = 0xefcaca;
 const DAG_FAILURE_BACKGROUND: u32 = 0xfff2f1;
+const VIEWPORT_SAVE_DELAY: Duration = Duration::from_millis(250);
 #[cfg(not(target_os = "windows"))]
 const CLOSE_WIDTH: f32 = 28.;
 #[cfg(not(target_os = "windows"))]
@@ -25,6 +28,8 @@ pub(super) struct DagWindow {
     visible: bool,
     canvas: Entity<DagCanvasView>,
     canvas_events: Subscription,
+    viewport: DagViewport,
+    viewport_save: Option<Task<()>>,
     target: String,
     locale: InterfaceLocale,
     dark: bool,
@@ -34,9 +39,11 @@ pub(super) struct DagWindow {
 }
 
 impl DagWindow {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn open(
         graph: &Value,
         target: &str,
+        saved_viewport: Option<&GeometryUpdate>,
         locale: InterfaceLocale,
         dark: bool,
         visible: bool,
@@ -47,10 +54,10 @@ impl DagWindow {
             .window_handle()
             .downcast::<Workspace>()
             .ok_or_else(|| anyhow::anyhow!("The session graph requires a workspace window"))?;
-        let state = DagCanvas::new(
+        let (state, viewport) = DagViewport::canvas(
             DagLayout::new(DagGraph::from_snapshot(graph)?)?,
             target,
-            None,
+            saved_viewport,
         );
         let display = owner.display(cx).or_else(|| cx.primary_display());
         let area = display.as_ref().map_or_else(
@@ -92,6 +99,11 @@ impl DagWindow {
                 matou_native_desktop::windows_theme::set_dark(window, dark);
                 cx.new(|cx| {
                     let content_focus = cx.focus_handle();
+                    let child = cx.weak_entity();
+                    window.on_window_should_close(cx, move |_, cx| {
+                        let _ = child.update(cx, |view: &mut Self, cx| view.flush_viewport(cx));
+                        true
+                    });
                     let canvas = cx.new(|cx| Self::canvas_view(state, locale, dark, cx));
                     window.focus(&canvas.read(cx).canvas_focus());
                     let canvas_events = cx.subscribe_in(&canvas, window, Self::canvas_event);
@@ -101,6 +113,8 @@ impl DagWindow {
                         visible,
                         canvas,
                         canvas_events,
+                        viewport,
+                        viewport_save: None,
                         target: target.to_owned(),
                         locale,
                         dark,
@@ -147,24 +161,29 @@ impl DagWindow {
         &mut self,
         graph: &Value,
         target: &str,
+        saved_viewport: Option<&GeometryUpdate>,
+        read_only: bool,
         locale: InterfaceLocale,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> Option<GeometryUpdate> {
+        let mut previous_viewport = None;
         if graph["sceneId"] != self.graph["sceneId"] {
             let layout = DagGraph::from_snapshot(graph).and_then(DagLayout::new);
             match layout {
                 Ok(layout) => {
-                    let state = DagCanvas::new(layout, target, None);
+                    previous_viewport = self.take_viewport_update(read_only, cx);
+                    let (state, viewport) = DagViewport::canvas(layout, target, saved_viewport);
                     let canvas = cx.new(|cx| Self::canvas_view(state, locale, self.dark, cx));
                     window.focus(&canvas.read(cx).canvas_focus());
                     self.canvas_events = cx.subscribe_in(&canvas, window, Self::canvas_event);
                     self.canvas = canvas;
+                    self.viewport = viewport;
                     self.graph = graph.clone();
                 }
                 Err(error) => {
                     eprintln!("Retarget native session graph: {error}");
-                    return;
+                    return None;
                 }
             }
         } else {
@@ -182,6 +201,7 @@ impl DagWindow {
                 .update(cx, |canvas, cx| canvas.set_locale(locale, cx));
         }
         cx.notify();
+        previous_viewport
     }
 
     pub(super) fn refresh(&mut self, graph: &Value, cx: &mut Context<Self>) {
@@ -224,7 +244,7 @@ impl DagWindow {
         cx: &mut Context<Self>,
     ) {
         match event {
-            DagCanvasEvent::CloseRequested => window.remove_window(),
+            DagCanvasEvent::CloseRequested => self.close(window, cx),
             DagCanvasEvent::Select(DagSelection { session_id, .. }) => {
                 let layout = &canvas.read(cx).canvas().layout;
                 let Some(node) = layout.node(session_id).map(|node| &node.node) else {
@@ -236,7 +256,7 @@ impl DagWindow {
                 let session_id = session_id.clone();
                 let owner = self.owner;
                 let visible = self.visible;
-                window.remove_window();
+                self.close(window, cx);
                 // Restore the destination after the child has been removed.
                 cx.defer(move |cx| {
                     let _ = owner.update(cx, |workspace, window, cx| {
@@ -272,8 +292,49 @@ impl DagWindow {
                     });
                 });
             }
-            DagCanvasEvent::TransformChanged(_) => {}
+            DagCanvasEvent::TransformChanged(transform) => {
+                if !self.owner.read(cx).is_ok_and(|owner| !owner.is_read_only())
+                    || *transform == self.viewport.last_transform
+                {
+                    self.viewport_save.take();
+                    return;
+                }
+                let timer = cx.background_executor().timer(VIEWPORT_SAVE_DELAY);
+                self.viewport_save = Some(cx.spawn(async move |this, cx| {
+                    timer.await;
+                    let _ = this.update(cx, |view, cx| view.flush_viewport(cx));
+                }));
+            }
         }
+    }
+
+    pub(super) fn take_viewport_update(
+        &mut self,
+        read_only: bool,
+        cx: &App,
+    ) -> Option<GeometryUpdate> {
+        self.viewport_save.take();
+        let canvas = self.canvas.read(cx).canvas();
+        self.viewport.update(
+            canvas.layout.scene_id(),
+            canvas.layout.layout_revision,
+            canvas.transform,
+            read_only,
+        )
+    }
+
+    fn flush_viewport(&mut self, cx: &mut Context<Self>) {
+        let read_only = self.owner.read(cx).is_ok_and(Workspace::is_read_only);
+        if let Some(update) = self.take_viewport_update(read_only, cx) {
+            let _ = self.owner.update(cx, |workspace, _, cx| {
+                workspace.save_dag_viewport(update, cx);
+            });
+        }
+    }
+
+    fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.flush_viewport(cx);
+        window.remove_window();
     }
 
     #[cfg(all(target_os = "macos", debug_assertions))]
@@ -283,7 +344,7 @@ impl DagWindow {
 }
 
 impl Render for DagWindow {
-    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let owner = self.owner;
         #[cfg(not(target_os = "windows"))]
         let _ = window;
@@ -291,10 +352,10 @@ impl Render for DagWindow {
             .size_full()
             .relative()
             .track_focus(&self.content_focus)
-            .capture_key_down(move |event, window, cx| {
+            .capture_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                 if is_child_window_close_shortcut(&event.keystroke) {
                     cx.stop_propagation();
-                    window.remove_window();
+                    this.close(window, cx);
                     #[cfg(target_os = "windows")]
                     cx.defer(move |cx| {
                         let _ = owner.update(cx, |workspace, window, cx| {
@@ -310,13 +371,13 @@ impl Render for DagWindow {
                         });
                     });
                 }
-            })
-            .on_key_down(|event: &KeyDownEvent, window, cx| {
+            }))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let modifiers = event.keystroke.modifiers;
                 match event.keystroke.key.as_str() {
                     "escape" => {
                         cx.stop_propagation();
-                        window.remove_window();
+                        this.close(window, cx);
                     }
                     "tab" if !(modifiers.control || modifiers.alt || modifiers.platform) => {
                         cx.stop_propagation();
@@ -328,7 +389,7 @@ impl Render for DagWindow {
                     }
                     _ => {}
                 }
-            })
+            }))
             .child(self.canvas.clone());
         #[cfg(target_os = "windows")]
         let root = root
@@ -353,12 +414,129 @@ impl Render for DagWindow {
         let root = root.child(
             close_button(self.locale, !self.dark)
                 .track_focus(&self.close_focus)
-                .on_click(|_, window, cx| {
+                .on_click(cx.listener(|this, _, window, cx| {
                     cx.stop_propagation();
-                    window.remove_window();
-                }),
+                    this.close(window, cx);
+                })),
         );
         root
+    }
+}
+
+pub(super) fn viewport_owner_key(scene_id: &str) -> String {
+    format!("dag-viewport:{scene_id}")
+}
+
+struct DagViewport {
+    last_transform: DagTransform,
+    saved_revision: f64,
+}
+
+impl DagViewport {
+    fn canvas(
+        layout: DagLayout,
+        target: &str,
+        saved: Option<&GeometryUpdate>,
+    ) -> (DagCanvas, Self) {
+        let saved = saved.filter(|saved| {
+            saved.scene_id == layout.scene_id()
+                && saved.owner_key == viewport_owner_key(layout.scene_id())
+        });
+        let initial_transform = saved.and_then(|saved| {
+            Some(DagTransform {
+                x: saved.geometry["panX"].as_f64()?,
+                y: saved.geometry["panY"].as_f64()?,
+                scale: saved.geometry["zoom"].as_f64()?,
+            })
+        });
+        let canvas = DagCanvas::new(layout, target, initial_transform);
+        let viewport = Self {
+            last_transform: canvas.transform,
+            saved_revision: saved.map_or(0., |value| value.layout_revision),
+        };
+        (canvas, viewport)
+    }
+
+    fn update(
+        &mut self,
+        scene_id: &str,
+        layout_revision: Option<u64>,
+        transform: DagTransform,
+        read_only: bool,
+    ) -> Option<GeometryUpdate> {
+        if self.last_transform == transform
+            || !transform.x.is_finite()
+            || !transform.y.is_finite()
+            || !transform.scale.is_finite()
+            || transform.scale <= 0.
+        {
+            return None;
+        }
+        self.last_transform = transform;
+        if read_only {
+            return None;
+        }
+        self.saved_revision = self
+            .saved_revision
+            .max(layout_revision.unwrap_or_default() as f64);
+        Some(GeometryUpdate {
+            scene_id: scene_id.to_owned(),
+            owner_key: viewport_owner_key(scene_id),
+            layout_revision: self.saved_revision,
+            geometry: serde_json::json!({
+                "panX": transform.x, "panY": transform.y, "zoom": transform.scale,
+            }),
+            now: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64,
+        })
+    }
+}
+
+#[cfg(test)]
+mod viewport_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[::core::prelude::v1::test]
+    fn scene_viewport_loads_and_coalesces_writeback_with_read_only_guard() -> anyhow::Result<()> {
+        let graph = json!({"sceneId": "scene", "nodes": [], "edges": [], "layoutRevision": 5});
+        let layout = DagLayout::new(DagGraph::from_snapshot(&graph)?)?;
+        let saved = GeometryUpdate {
+            scene_id: "scene".into(),
+            owner_key: viewport_owner_key("scene"),
+            layout_revision: 7.,
+            geometry: json!({"panX": 25.0, "panY": -42.0, "zoom": 1.25}),
+            now: 1,
+        };
+        let (mut canvas, mut viewport) = DagViewport::canvas(layout, "", Some(&saved));
+        assert_eq!(
+            canvas.transform,
+            DagTransform {
+                x: 25.,
+                y: -42.,
+                scale: 1.25
+            }
+        );
+        assert!(!canvas.focus_initial());
+        let changed = DagTransform {
+            x: -15.,
+            y: 10.,
+            scale: 0.75,
+        };
+        assert!(viewport.update("scene", Some(5), changed, true).is_none());
+        assert!(viewport.update("scene", Some(5), changed, false).is_none());
+        let latest = DagTransform { x: 71., ..changed };
+        let update = viewport.update("scene", Some(6), latest, false).unwrap();
+        assert_eq!(update.owner_key, "dag-viewport:scene");
+        assert_eq!(update.layout_revision, 7.);
+        assert_eq!(
+            update.geometry,
+            json!({"panX": 71.0, "panY": 10.0, "zoom": 0.75})
+        );
+        assert!(viewport.update("scene", Some(6), latest, false).is_none());
+        Ok(())
     }
 }
 
