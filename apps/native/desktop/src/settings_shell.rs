@@ -2,7 +2,7 @@
 //!
 //! Scope of this level:
 //! - the bottom-bar entry button and the full right-workspace page shell;
-//! - the two frozen navigation entries under static section headings
+//! - the settings navigation entries under static section headings
 //!   (Claude Code selected by default);
 //! - the Claude Code provider cards (display, switch, add, edit);
 //! - the API provider picker and add/edit dialog.
@@ -1144,7 +1144,7 @@ fn preset_by_endpoint(endpoint: &str) -> Option<&'static ProviderPreset> {
 // Navigation and editor state
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SettingsPage {
     ClaudeCode,
     Language,
@@ -1193,6 +1193,39 @@ impl SettingsPage {
             Self::Diagnostics => 3,
             Self::ContextOptimizer => 4,
         }
+    }
+}
+
+fn visible_settings_pages() -> [SettingsPage; 5] {
+    [
+        SettingsPage::ClaudeCode,
+        SettingsPage::Dispatch,
+        SettingsPage::ContextOptimizer,
+        SettingsPage::Language,
+        SettingsPage::Diagnostics,
+    ]
+}
+
+#[cfg(test)]
+mod navigation_tests {
+    use super::{SettingsPage, visible_settings_pages};
+
+    #[test]
+    fn visible_settings_pages_have_expected_order_and_unique_focus_indices() {
+        let pages = visible_settings_pages();
+        assert_eq!(
+            pages,
+            [
+                SettingsPage::ClaudeCode,
+                SettingsPage::Dispatch,
+                SettingsPage::ContextOptimizer,
+                SettingsPage::Language,
+                SettingsPage::Diagnostics,
+            ]
+        );
+        let mut indices = pages.map(SettingsPage::index);
+        indices.sort_unstable();
+        assert_eq!(indices, [0, 1, 2, 3, 4]);
     }
 }
 
@@ -4624,9 +4657,9 @@ impl SettingsShell {
                 .update(cx, |view, cx| view.close_menu(window, cx));
         }
         if self.page == SettingsPage::Dispatch {
-            // The panel owns an unsaved draft; leaving the page drops it so a
-            // return reads the persisted defaults again.
+            // Drop both drafts so returning reads the persisted settings again.
             self.dispatch_panel = None;
+            self.dispatch_roles_panel = None;
         }
         self.page = page;
         self.scroll.set_offset(point(px(0.), px(0.)));
@@ -4644,7 +4677,7 @@ impl SettingsShell {
                 }
             }
             SettingsPage::Dispatch => {
-                if self.dispatch_panel.is_none() {
+                if self.dispatch_panel.is_none() || self.dispatch_roles_panel.is_none() {
                     self.load_dispatch(cx);
                 }
             }
@@ -5168,11 +5201,7 @@ impl SettingsShell {
             self.locale.text("AI 服务", "AI services"),
             palette.workspace.muted,
         ));
-        for page in [
-            SettingsPage::ClaudeCode,
-            SettingsPage::ContextOptimizer,
-            SettingsPage::Language,
-        ] {
+        for page in visible_settings_pages() {
             let active = self.page == page;
             let focus = self.nav_focus[page.index()].clone();
             let icon_color = if active {
@@ -5221,8 +5250,11 @@ impl SettingsShell {
                 SettingsPage::ClaudeCode => row
                     .child(icon("settings-2", 15., icon_color))
                     .child("Claude Code"),
+                SettingsPage::Dispatch => row
+                    .child(icon("task", 15., icon_color))
+                    .child(page.title(self.locale)),
                 SettingsPage::ContextOptimizer => row
-                    .child(icon("settings-2", 15., icon_color))
+                    .child(icon("layers", 15., icon_color))
                     .child(page.title(self.locale)),
                 SettingsPage::Language => row.child(globe_icon(15., icon_color)).child(
                     // At 720 the frozen English label wraps onto two lines
@@ -5236,7 +5268,9 @@ impl SettingsShell {
                         .whitespace_normal()
                         .child(language_zone_label(page.title(self.locale))),
                 ),
-                _ => unreachable!(),
+                SettingsPage::Diagnostics => row
+                    .child(icon("network", 15., icon_color))
+                    .child(page.title(self.locale)),
             };
             nav = nav.child(row);
             if page == SettingsPage::ContextOptimizer {
@@ -5360,7 +5394,7 @@ impl SettingsShell {
             }
             SettingsPage::Dispatch => {
                 let content = self.dispatch_content(cx);
-                body = body.child(self.legacy_surface(content));
+                body = body.child(content);
             }
             SettingsPage::Diagnostics => {
                 let content = self.diagnostics_content(cx);
@@ -5808,7 +5842,9 @@ impl SettingsShell {
             Some(Ok(panel)) => content
                 .child(panel)
                 .children(self.dispatch_roles_panel.clone()),
-            Some(Err(_)) => content.child(self.dispatch_error_block(cx)),
+            Some(Err(_)) => content
+                .child(self.dispatch_error_block(cx))
+                .children(self.dispatch_roles_panel.clone()),
         }
     }
 

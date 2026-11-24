@@ -1695,8 +1695,8 @@ mod probe {
         window
             .update(cx, |view, window, _| view.arm_settings_entry(window))
             .unwrap();
-        // The visible navigation tabs are Claude Code and Language.
-        // Group labels never enter the tab order.
+        // Tab order: Claude Code, Dispatch, Context optimizer, Language,
+        // Diagnostics. Group labels never enter the tab order.
         press(window, "tab", cx);
         press(window, "enter", cx);
         check_shell(window, cx, |shell, _| {
@@ -1706,7 +1706,9 @@ mod probe {
             business(&sink),
             Err(std::sync::mpsc::TryRecvError::Empty)
         ));
-        press(window, "tab", cx);
+        for _ in 0..3 {
+            press(window, "tab", cx);
+        }
         press(window, "enter", cx);
         draw(window, cx);
         check_shell(window, cx, |shell, _| {
@@ -1716,7 +1718,9 @@ mod probe {
             business(&sink),
             Ok(Command::GetTimeZoneSettings { .. })
         ));
-        press(window, "shift-tab", cx);
+        for _ in 0..3 {
+            press(window, "shift-tab", cx);
+        }
         press(window, "enter", cx);
         let reentry = request_id(&sink);
         assignment_request_id(&sink);
@@ -1732,12 +1736,12 @@ mod probe {
             .unwrap();
         draw(window, cx);
 
-        // From the sidebar button, tab through category buttons, close and add.
-        // The next button is the first card's Edit.
+        // From the sidebar button, tab through all five navigation entries,
+        // Close and Add. The next button is the first card's Edit.
         window
             .update(cx, |view, window, _| view.arm_settings_entry(window))
             .unwrap();
-        for _ in 0..5 {
+        for _ in 0..8 {
             press(window, "tab", cx);
         }
         press(window, "enter", cx);
