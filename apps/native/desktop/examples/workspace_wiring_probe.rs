@@ -494,7 +494,7 @@ mod workspace {
                 for node in graph["nodes"].as_array_mut().unwrap() {
                     node["cwd"] = json!(".");
                 }
-                let dag = DagWindow::open(&graph, A, view.locale, false, false, window, cx)
+                let dag = DagWindow::open(&graph, A, None, view.locale, false, false, window, cx)
                     .expect("open hidden DAG");
                 view.dag_window = Some(dag);
                 (

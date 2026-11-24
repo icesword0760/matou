@@ -14,6 +14,8 @@ use crate::{
 };
 
 const SYNC_TIMEOUT: Duration = Duration::from_millis(150);
+const MAX_VT_SNAPSHOT_BYTES: usize = 16 * 1024 * 1024;
+const GHOSTTY_LIMIT_EXCEEDED: c_int = -6;
 
 // Only local C shim layouts cross the FFI boundary.
 #[repr(C)]
@@ -67,6 +69,14 @@ unsafe extern "C" {
         palette: *const u32,
     ) -> c_int;
     fn matou_vt_feed(terminal: *mut c_void, data: *const u8, len: usize);
+    fn matou_vt_snapshot_ready(terminal: *mut c_void, ready: *mut bool) -> c_int;
+    fn matou_vt_format_vt(
+        terminal: *mut c_void,
+        out: *mut *mut u8,
+        len: *mut usize,
+        limit: usize,
+    ) -> c_int;
+    fn matou_vt_free_formatted(bytes: *mut u8);
     fn matou_vt_input_modes(
         terminal: *mut c_void,
         cursor_keys: *mut bool,
@@ -646,6 +656,44 @@ impl Terminal {
 
     pub fn drain_responses(&mut self) -> Vec<u8> {
         std::mem::take(&mut unsafe { self.effects.as_mut() }.responses)
+    }
+
+    /// Serialize the primary screen and scrollback for replay into a fresh terminal.
+    pub fn format_vt_snapshot(&mut self) -> Result<Vec<u8>> {
+        ensure!(
+            self.can_format_vt_snapshot()?,
+            "VT snapshot requires the primary screen and a complete, unheld VT stream"
+        );
+        let mut bytes = ptr::null_mut();
+        let mut len = 0;
+        let status = unsafe {
+            matou_vt_format_vt(
+                self.handle.as_ptr(),
+                &mut bytes,
+                &mut len,
+                MAX_VT_SNAPSHOT_BYTES,
+            )
+        };
+        ensure!(
+            status != GHOSTTY_LIMIT_EXCEEDED,
+            "VT snapshot exceeds 16 MiB"
+        );
+        check(status, "format a VT snapshot")?;
+        let snapshot = unsafe { slice::from_raw_parts(bytes, len) }.to_vec();
+        unsafe { matou_vt_free_formatted(bytes) };
+        Ok(snapshot)
+    }
+
+    pub fn can_format_vt_snapshot(&self) -> Result<bool> {
+        if self.render_held() || self.pending_utf8_len != 0 {
+            return Ok(false);
+        }
+        let mut ready = false;
+        check(
+            unsafe { matou_vt_snapshot_ready(self.handle.as_ptr(), &mut ready) },
+            "check VT snapshot readiness",
+        )?;
+        Ok(ready)
     }
 
     pub fn render_held(&self) -> bool {

@@ -203,6 +203,95 @@ void matou_vt_feed(MatouVt *vt, const uint8_t *data, size_t len) {
     ghostty_terminal_vt_write(vt->terminal, data, len);
 }
 
+int matou_vt_snapshot_ready(MatouVt *vt, bool *ready) {
+    GhosttyTerminalScreen active;
+    bool ground;
+    TRY(ghostty_terminal_get(vt->terminal, GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN, &active));
+    TRY(ghostty_terminal_get(vt->terminal, GHOSTTY_TERMINAL_DATA_VT_GROUND, &ground));
+    *ready = active == GHOSTTY_TERMINAL_SCREEN_PRIMARY && ground;
+    return GHOSTTY_SUCCESS;
+}
+
+static GhosttyResult snapshot_cursor(MatouVt *vt, char suffix[32], size_t *len) {
+    GhosttyRenderStateCursor cursor = GHOSTTY_INIT_SIZED(GhosttyRenderStateCursor);
+    TRY(ghostty_render_state_update(vt->render, vt->terminal));
+    TRY(ghostty_render_state_get(vt->render, GHOSTTY_RENDER_STATE_DATA_CURSOR, &cursor));
+
+    int style;
+    switch (cursor.visual_style) {
+        case GHOSTTY_CURSOR_STYLE_BAR: style = 5; break;
+        case GHOSTTY_CURSOR_STYLE_UNDERLINE: style = 3; break;
+        default: style = 1; break;
+    }
+    if (!cursor.blinking) style++;
+    static const char decscusr[] = "\x1b[1 q";
+    memcpy(suffix, decscusr, sizeof(decscusr) - 1);
+    suffix[2] = (char)('0' + style);
+    *len = sizeof(decscusr) - 1;
+
+    GhosttyColorRgb current, default_color;
+    GhosttyResult status = ghostty_terminal_get(vt->terminal, GHOSTTY_TERMINAL_DATA_COLOR_CURSOR, &current);
+    if (status == GHOSTTY_NO_VALUE) return GHOSTTY_SUCCESS;
+    if (status != GHOSTTY_SUCCESS) return status;
+    status = ghostty_terminal_get(vt->terminal, GHOSTTY_TERMINAL_DATA_COLOR_CURSOR_DEFAULT, &default_color);
+    if (status != GHOSTTY_SUCCESS && status != GHOSTTY_NO_VALUE) return status;
+    if (status == GHOSTTY_SUCCESS && current.r == default_color.r &&
+        current.g == default_color.g && current.b == default_color.b) return GHOSTTY_SUCCESS;
+    int written = snprintf(suffix + *len, 32 - *len, "\x1b]12;#%02x%02x%02x\x1b\\",
+                           (unsigned)current.r, (unsigned)current.g, (unsigned)current.b);
+    if (written < 0 || (size_t)written >= 32 - *len) return GHOSTTY_OUT_OF_SPACE;
+    *len += (size_t)written;
+    return GHOSTTY_SUCCESS;
+}
+
+int matou_vt_format_vt(MatouVt *vt, uint8_t **out, size_t *len, size_t limit) {
+    char suffix[32];
+    size_t suffix_len;
+    TRY(snapshot_cursor(vt, suffix, &suffix_len));
+    GhosttyFormatter formatter;
+    TRY(ghostty_formatter_terminal_new(NULL, &formatter, vt->terminal));
+    const GhosttyFormatterFormat emit = GHOSTTY_FORMATTER_FORMAT_VT;
+    const GhosttyFormatterExtras extras = GHOSTTY_FORMATTER_EXTRAS_ALL;
+    const bool trim = false;
+    const bool unwrap = true;
+    GhosttyResult status = ghostty_formatter_set(formatter, GHOSTTY_FORMATTER_OPT_EMIT, &emit);
+    if (status == GHOSTTY_SUCCESS)
+        status = ghostty_formatter_set(formatter, GHOSTTY_FORMATTER_OPT_EXTRAS, &extras);
+    if (status == GHOSTTY_SUCCESS)
+        status = ghostty_formatter_set(formatter, GHOSTTY_FORMATTER_OPT_TRIM, &trim);
+    if (status == GHOSTTY_SUCCESS)
+        status = ghostty_formatter_set(formatter, GHOSTTY_FORMATTER_OPT_UNWRAP, &unwrap);
+    if (status == GHOSTTY_SUCCESS) {
+        size_t needed = 0;
+        status = ghostty_formatter_format_buf(formatter, NULL, 0, &needed);
+        if (status == GHOSTTY_SUCCESS || status == GHOSTTY_OUT_OF_SPACE) {
+            if (suffix_len > limit || needed > limit - suffix_len) {
+                status = GHOSTTY_LIMIT_EXCEEDED;
+            } else {
+                uint8_t *bytes = malloc(needed + suffix_len);
+                if (bytes == NULL) {
+                    status = GHOSTTY_OUT_OF_MEMORY;
+                } else {
+                    status = ghostty_formatter_format_buf(formatter, bytes, needed, len);
+                    if (status == GHOSTTY_SUCCESS) {
+                        memcpy(bytes + *len, suffix, suffix_len);
+                        *len += suffix_len;
+                        *out = bytes;
+                    } else {
+                        free(bytes);
+                    }
+                }
+            }
+        }
+    }
+    ghostty_formatter_free(formatter);
+    return status;
+}
+
+void matou_vt_free_formatted(uint8_t *bytes) {
+    free(bytes);
+}
+
 int matou_vt_input_modes(MatouVt *vt, bool *cursor_keys, bool *bracketed_paste, size_t *mouse_modes, size_t *input_epoch) {
     GhosttyTerminalModeConfig cursor = { .mode = GHOSTTY_MODE_CURSOR_KEYS };
     GhosttyTerminalModeConfig paste = { .mode = GHOSTTY_MODE_BRACKETED_PASTE };
