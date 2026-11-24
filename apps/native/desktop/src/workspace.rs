@@ -2959,7 +2959,7 @@ impl Workspace {
                 this.apply_theme_palette(cx);
                 if let Some((settings, _)) = &this.settings {
                     settings.update(cx, |settings, cx| {
-                        settings.configure_theme(this.theme);
+                        settings.configure_theme(this.theme, cx);
                         cx.notify();
                     });
                 }
@@ -3217,7 +3217,7 @@ impl Workspace {
                 self.locale,
                 self.locale_save_pending,
             );
-            settings.configure_theme(self.theme);
+            settings.configure_theme(self.theme, cx);
             settings.configure_diagnostics_cwd(diagnostics_cwd);
             settings.configure_data_root(self.data_root.clone());
             settings

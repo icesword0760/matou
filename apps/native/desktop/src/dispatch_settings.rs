@@ -51,6 +51,111 @@ const MENU_SELECTED_TEXT: u32 = 0x2679d8ff;
 const MENU_SELECTED_BG: u32 = 0xe4efffff;
 const MENU_ACTIVE_BG: u32 = 0xeef5ffff;
 
+/// Converts a frozen RGB constant to the packed `0xRRGGBBAA` form used by the
+/// theme-aware color structs below.
+const fn solid(rgb: u32) -> u32 {
+    rgb << 8 | 0xff
+}
+
+/// Card, control, and status colors for the dispatch block. Field values are
+/// packed as `0xRRGGBBAA`. The light branch reproduces the frozen
+/// `dispatch-settings.css` RGB/alpha values exactly; dark swaps surfaces and
+/// lines to the theme's settings/workspace tokens and keeps text readable.
+struct PanelColors {
+    /// Card surface: `--workspace-panel-muted`, or `settings.providers` in dark.
+    card: u32,
+    line: u32,
+    text: u32,
+    muted: u32,
+    /// Choice trigger and number field surface.
+    control: u32,
+    control_line: u32,
+    /// Read-only trigger and path chip surface.
+    readonly: u32,
+    chip: u32,
+    accent: u32,
+    /// Primary save button, matching `settings.language_primary`.
+    primary: u32,
+    primary_hover: u32,
+    /// Secondary button hover wash, matching `settings.language_button_hover`.
+    secondary_hover: u32,
+    input_text: u32,
+    input_placeholder: u32,
+    error: u32,
+    success: u32,
+    success_bg: u32,
+}
+
+impl PanelColors {
+    fn for_dark(dark: bool) -> Self {
+        if dark {
+            let palette = AppTheme::Dark.palette();
+            let workspace = palette.workspace;
+            let settings = palette.settings;
+            Self {
+                card: settings.providers,
+                line: workspace.line,
+                text: workspace.text,
+                muted: workspace.muted,
+                // `.model-provider__actions button` / `.provider-setup input`.
+                control: settings.provider_action_background,
+                control_line: workspace.line_strong,
+                readonly: workspace.panel_muted,
+                chip: workspace.panel_muted,
+                accent: workspace.accent,
+                primary: settings.language_primary,
+                primary_hover: settings.language_primary_hover,
+                secondary_hover: settings.language_button_hover,
+                input_text: workspace.text,
+                input_placeholder: workspace.muted,
+                error: 0xff9b94ff,
+                success: 0x57ab5aff,
+                success_bg: SUCCESS_BG,
+            }
+        } else {
+            Self {
+                card: solid(PANEL_MUTED),
+                line: LINE,
+                text: solid(TEXT),
+                muted: solid(MUTED),
+                control: solid(PANEL),
+                control_line: LINE_STRONG,
+                readonly: solid(PANEL_MUTED),
+                chip: solid(PANEL_MUTED),
+                accent: solid(ACCENT),
+                primary: solid(ACCENT),
+                primary_hover: solid(0x2f79df),
+                secondary_hover: solid(0xf7faff),
+                // `RenameInput::search_style` defaults; kept identical so the
+                // frozen number fields do not change color in light mode.
+                input_text: solid(0x2f3547),
+                input_placeholder: solid(0x747474),
+                error: solid(ERROR_TEXT),
+                success: solid(SUCCESS_TEXT),
+                success_bg: SUCCESS_BG,
+            }
+        }
+    }
+}
+
+/// Writes the theme colors into a child editor only when they differ, so a
+/// re-render in the same theme never emits a redundant child notification.
+fn sync_input_colors(input: &Entity<RenameInput>, text: u32, placeholder: u32, cx: &mut App) {
+    let text = rgba(text);
+    let placeholder = rgba(placeholder);
+    let changed = {
+        let current = input.read(cx);
+        current.text_color != Some(text) || current.placeholder_color != Some(placeholder)
+    };
+    if changed {
+        input.update(cx, |input, cx| {
+            input.text_color = Some(text);
+            input.placeholder_color = Some(placeholder);
+            cx.notify();
+        });
+    }
+}
+
 /// The choice menu follows the workspace palette (`dispatch-settings.css`),
 /// while the light selected/hover values stay the frozen local blues.
 struct MenuColors {
@@ -278,6 +383,14 @@ impl DispatchSettingsPanel {
         }
     }
 
+    /// Applies the panel's current text/placeholder colors to all number
+    /// editors. Only a real color change notifies the child.
+    fn sync_number_colors(&self, colors: &PanelColors, cx: &mut Context<Self>) {
+        for input in &self.number_inputs {
+            sync_input_colors(input, colors.input_text, colors.input_placeholder, cx);
+        }
+    }
+
     fn restore_defaults(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_menu = None;
         self.form.restore_defaults();
@@ -477,6 +590,7 @@ impl DispatchSettingsPanel {
         &mut self,
         field: ChoiceField,
         view: &ChoiceView,
+        colors: &PanelColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let focus = self.choice_focus[field as usize].clone();
@@ -485,9 +599,9 @@ impl DispatchSettingsPanel {
             .as_ref()
             .is_some_and(|menu| menu.field == field);
         let border = if open_here {
-            rgb(ACCENT)
+            rgba(colors.accent)
         } else {
-            rgba(LINE_STRONG)
+            rgba(colors.control_line)
         };
 
         if view.read_only {
@@ -502,9 +616,9 @@ impl DispatchSettingsPanel {
                 .rounded(px(7.))
                 .border_1()
                 .border_color(border)
-                .bg(rgb(PANEL_MUTED))
+                .bg(rgba(colors.readonly))
                 .text_size(px(12.))
-                .text_color(rgb(MUTED))
+                .text_color(rgba(colors.muted))
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_ellipsis()
@@ -534,9 +648,9 @@ impl DispatchSettingsPanel {
             .rounded(px(7.))
             .border_1()
             .border_color(border)
-            .bg(rgb(PANEL))
+            .bg(rgba(colors.control))
             .text_size(px(12.))
-            .text_color(rgb(TEXT))
+            .text_color(rgba(colors.text))
             .child(
                 div()
                     .flex_1()
@@ -546,7 +660,7 @@ impl DispatchSettingsPanel {
                     .text_ellipsis()
                     .child(view.shown_label.clone()),
             )
-            .child(icon("chevron-down", 12., MUTED))
+            .child(icon("chevron-down", 12., colors.muted >> 8))
             .child(
                 canvas(|_, _, _| (), {
                     let bounds_cell = self.trigger_bounds.clone();
@@ -592,11 +706,12 @@ impl DispatchSettingsPanel {
         &mut self,
         field: ChoiceField,
         narrow: bool,
+        colors: &PanelColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let view = self.form.choice(field);
         let label_focus = (!view.disabled).then(|| self.choice_focus[field as usize].clone());
-        let control = self.choice_control(field, &view, cx);
+        let control = self.choice_control(field, &view, colors, cx);
         let mut body = div().flex().flex_col().gap(px(5.)).min_w_0();
         body = if narrow {
             body.w_full()
@@ -609,18 +724,25 @@ impl DispatchSettingsPanel {
                 div()
                     .text_size(px(10.))
                     .line_height(relative(1.55))
-                    .text_color(rgb(MUTED))
+                    .text_color(rgba(colors.muted))
                     .whitespace_normal()
                     .child(hint),
             );
         }
-        setting_row(field.label(), body.into_any_element(), narrow, label_focus)
+        setting_row(
+            field.label(),
+            body.into_any_element(),
+            narrow,
+            label_focus,
+            colors,
+        )
     }
 
     fn number_row(
         &mut self,
         field: NumberField,
         narrow: bool,
+        colors: &PanelColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let index = field as usize;
@@ -642,11 +764,11 @@ impl DispatchSettingsPanel {
                 .rounded(px(7.))
                 .border_1()
                 .border_color(if error.is_some() {
-                    rgb(ERROR_TEXT)
+                    rgba(colors.error)
                 } else {
-                    rgba(LINE_STRONG)
+                    rgba(colors.control_line)
                 })
-                .bg(rgb(PANEL))
+                .bg(rgba(colors.control))
                 .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                     window.focus(&click_focus);
                     cx.stop_propagation();
@@ -658,7 +780,7 @@ impl DispatchSettingsPanel {
             number = number.child(
                 div()
                     .text_size(px(11.))
-                    .text_color(rgb(MUTED))
+                    .text_color(rgba(colors.muted))
                     .whitespace_nowrap()
                     .child(unit),
             );
@@ -676,15 +798,21 @@ impl DispatchSettingsPanel {
                 div()
                     .text_size(px(11.))
                     .line_height(relative(1.55))
-                    .text_color(rgb(ERROR_TEXT))
+                    .text_color(rgba(colors.error))
                     .whitespace_normal()
                     .child(error),
             );
         }
-        setting_row(field.label(), body.into_any_element(), narrow, label_focus)
+        setting_row(
+            field.label(),
+            body.into_any_element(),
+            narrow,
+            label_focus,
+            colors,
+        )
     }
 
-    fn actions(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn actions(&mut self, colors: &PanelColors, cx: &mut Context<Self>) -> AnyElement {
         let can_save = self.form.can_save();
         // The frozen save button is disabled only while nothing is dirty and
         // nothing was just saved. Invalid edits still make it clickable so the
@@ -703,6 +831,7 @@ impl DispatchSettingsPanel {
                 true,
                 true,
                 self.restore_focus.clone(),
+                colors,
                 cx,
                 |this, window, cx| this.restore_defaults(window, cx),
             ))
@@ -713,6 +842,7 @@ impl DispatchSettingsPanel {
                 can_save,
                 save_focusable,
                 self.save_focus.clone(),
+                colors,
                 cx,
                 |this, window, cx| this.save(window, cx),
             ));
@@ -724,11 +854,11 @@ impl DispatchSettingsPanel {
                     .px(px(9.))
                     .py(px(3.))
                     .rounded_full()
-                    .bg(rgba(SUCCESS_BG))
+                    .bg(rgba(colors.success_bg))
                     .text_size(px(11.))
                     .font_weight(FontWeight(600.))
                     .line_height(relative(1.5))
-                    .text_color(rgb(SUCCESS_TEXT))
+                    .text_color(rgba(colors.success))
                     .child(SAVED_MESSAGE),
             );
         }
@@ -739,7 +869,7 @@ impl DispatchSettingsPanel {
                     .max_w(px(420.))
                     .text_size(px(11.))
                     .line_height(relative(1.55))
-                    .text_color(rgb(ERROR_TEXT))
+                    .text_color(rgba(colors.error))
                     .whitespace_normal()
                     .child(error.to_owned()),
             );
@@ -755,6 +885,7 @@ impl DispatchSettingsPanel {
         active: bool,
         focusable: bool,
         focus: FocusHandle,
+        colors: &PanelColors,
         cx: &mut Context<Self>,
         activate: F,
     ) -> AnyElement
@@ -777,13 +908,13 @@ impl DispatchSettingsPanel {
             .child(label);
 
         let styled = if primary {
-            base.border_color(rgb(ACCENT))
+            base.border_color(rgba(colors.primary))
                 .text_color(rgb(0xffffff))
-                .bg(rgb(ACCENT))
+                .bg(rgba(colors.primary))
         } else {
-            base.border_color(rgba(LINE_STRONG))
-                .text_color(rgb(TEXT))
-                .bg(rgb(PANEL))
+            base.border_color(rgba(colors.control_line))
+                .text_color(rgba(colors.text))
+                .bg(rgba(colors.control))
         };
 
         let styled = if !focusable {
@@ -794,15 +925,15 @@ impl DispatchSettingsPanel {
         } else if active {
             if primary {
                 styled
-                    .hover(|style| style.bg(rgb(0x2f79df)))
+                    .hover(|style| style.bg(rgba(colors.primary_hover)))
                     .cursor_pointer()
             } else {
                 styled
                     .hover(|style| {
                         style
-                            .border_color(rgb(ACCENT))
-                            .text_color(rgb(ACCENT))
-                            .bg(rgb(0xf7faff))
+                            .border_color(rgba(colors.accent))
+                            .text_color(rgba(colors.accent))
+                            .bg(rgba(colors.secondary_hover))
                     })
                     .cursor_pointer()
             }
@@ -958,6 +1089,8 @@ impl Render for DispatchSettingsPanel {
         }
 
         let narrow = f32::from(window.viewport_size().width) <= NARROW_BREAKPOINT;
+        let colors = PanelColors::for_dark(workspace_theme_dark(cx));
+        self.sync_number_colors(&colors, cx);
 
         let header = div()
             .flex()
@@ -967,14 +1100,14 @@ impl Render for DispatchSettingsPanel {
                 div()
                     .text_size(px(13.))
                     .font_weight(FontWeight(680.))
-                    .text_color(rgb(TEXT))
+                    .text_color(rgba(colors.text))
                     .child(TITLE),
             )
             .child(
                 div()
                     .text_size(px(11.))
                     .line_height(relative(1.65))
-                    .text_color(rgb(MUTED))
+                    .text_color(rgba(colors.muted))
                     .whitespace_normal()
                     .child(HEADING),
             );
@@ -986,15 +1119,15 @@ impl Render for DispatchSettingsPanel {
             .px(px(14.))
             .rounded(px(10.))
             .border_1()
-            .border_color(rgba(LINE))
-            .bg(rgb(PANEL_MUTED));
+            .border_color(rgba(colors.line))
+            .bg(rgba(colors.card));
         for field in ChoiceField::ALL {
-            card = card.child(self.choice_row(field, narrow, cx));
+            card = card.child(self.choice_row(field, narrow, &colors, cx));
         }
         for field in NumberField::ALL {
-            card = card.child(self.number_row(field, narrow, cx));
+            card = card.child(self.number_row(field, narrow, &colors, cx));
         }
-        card = card.child(self.actions(cx));
+        card = card.child(self.actions(&colors, cx));
 
         let section = div()
             .flex()
@@ -1007,11 +1140,11 @@ impl Render for DispatchSettingsPanel {
                     .mt(px(2.))
                     .text_size(px(11.))
                     .line_height(relative(1.65))
-                    .text_color(rgb(MUTED))
+                    .text_color(rgba(colors.muted))
                     .whitespace_normal()
                     .child(SCOPE_NOTE),
             )
-            .child(self.path_line());
+            .child(self.path_line(&colors));
 
         let mut root = div()
             .flex()
@@ -1021,7 +1154,7 @@ impl Render for DispatchSettingsPanel {
             .mt(px(22.))
             .pt(px(20.))
             .border_t_1()
-            .border_color(rgba(LINE))
+            .border_color(rgba(colors.line))
             .child(section);
 
         if let Some(menu) = self.open_menu.clone() {
@@ -1037,7 +1170,7 @@ impl Render for DispatchSettingsPanel {
 }
 
 impl DispatchSettingsPanel {
-    fn path_line(&self) -> AnyElement {
+    fn path_line(&self, colors: &PanelColors) -> AnyElement {
         let path = self.form.config_path();
         let mut line = div()
             .flex()
@@ -1046,7 +1179,7 @@ impl DispatchSettingsPanel {
             .gap(px(6.))
             .text_size(px(11.))
             .line_height(relative(1.65))
-            .text_color(rgb(MUTED))
+            .text_color(rgba(colors.muted))
             .child(PATH_LABEL)
             .child(
                 div()
@@ -1054,11 +1187,11 @@ impl DispatchSettingsPanel {
                     .py(px(1.))
                     .rounded(px(4.))
                     .border_1()
-                    .border_color(rgba(LINE))
-                    .bg(rgb(PANEL_MUTED))
+                    .border_color(rgba(colors.line))
+                    .bg(rgba(colors.chip))
                     .font_family(monospace_family())
                     .text_size(px(10.))
-                    .text_color(rgb(TEXT))
+                    .text_color(rgba(colors.text))
                     .child(path),
             );
         if !self.form.exists() {
@@ -1073,12 +1206,13 @@ fn setting_row(
     body: AnyElement,
     narrow: bool,
     focus: Option<FocusHandle>,
+    colors: &PanelColors,
 ) -> AnyElement {
     let mut label_element = div()
         .text_size(px(11.))
         .font_weight(FontWeight(650.))
         .line_height(relative(1.4))
-        .text_color(rgb(TEXT))
+        .text_color(rgba(colors.text))
         .child(label);
     if let Some(focus) = focus {
         label_element = label_element
@@ -1091,7 +1225,7 @@ fn setting_row(
         .gap(px(16.))
         .py(px(10.))
         .border_b_1()
-        .border_color(rgba(LINE));
+        .border_color(rgba(colors.line));
     if narrow {
         row.flex_col()
             .gap(px(5.))
@@ -1125,8 +1259,9 @@ fn monospace_family() -> &'static str {
 mod tests {
     use super::{
         ChoiceField, DispatchConfigSnapshot, DispatchDefaults, DispatchForm, MenuColors,
-        NumberField,
+        NumberField, PanelColors,
     };
+    use crate::theme_tokens::AppTheme;
     use gpui::rgba;
 
     #[test]
@@ -1152,6 +1287,90 @@ mod tests {
         assert_eq!(dark.item_background(true, true), rgba(0x4a91e224));
         assert_eq!(dark.item_hover(true), rgba(0x4a91e224));
         assert_eq!(dark.shadow.color.a, 0.5);
+    }
+
+    /// WCAG relative luminance of a packed `0xRRGGBBAA` color.
+    fn luminance(color: u32) -> f32 {
+        fn channel(color: u32, shift: u32) -> f32 {
+            let value = ((color >> shift) & 0xff) as f32 / 255.;
+            if value <= 0.03928 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        }
+        0.2126 * channel(color, 24) + 0.7152 * channel(color, 16) + 0.0722 * channel(color, 8)
+    }
+
+    /// Composites a translucent `fg` over an opaque `bg`.
+    fn over(fg: u32, bg: u32) -> u32 {
+        let alpha = (fg & 0xff) as f32 / 255.;
+        let mix = |shift: u32| {
+            (((fg >> shift & 0xff) as f32 * alpha + (bg >> shift & 0xff) as f32 * (1. - alpha))
+                .round()) as u32
+        };
+        mix(24) << 24 | mix(16) << 16 | mix(8) << 8 | 0xff
+    }
+
+    fn contrast(a: u32, b: u32) -> f32 {
+        let (a, b) = (luminance(a), luminance(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    #[test]
+    fn dispatch_panel_colors_keep_light_values_and_readable_dark_surfaces() {
+        let light = PanelColors::for_dark(false);
+        assert_eq!(light.card, 0xfbfcfdff);
+        assert_eq!(light.line, 0x424b581a);
+        assert_eq!(light.text, 0x303744ff);
+        assert_eq!(light.muted, 0x7e8794ff);
+        assert_eq!(light.control, 0xffffffff);
+        assert_eq!(light.control_line, 0x424b5829);
+        assert_eq!(light.readonly, 0xfbfcfdff);
+        assert_eq!(light.chip, 0xfbfcfdff);
+        assert_eq!(light.accent, 0x347fd6ff);
+        assert_eq!(light.primary, 0x347fd6ff);
+        assert_eq!(light.primary_hover, 0x2f79dfff);
+        assert_eq!(light.secondary_hover, 0xf7faffff);
+        assert_eq!(light.input_text, 0x2f3547ff);
+        assert_eq!(light.input_placeholder, 0x747474ff);
+        assert_eq!(light.error, 0xb34d47ff);
+        assert_eq!(light.success, 0x16794bff);
+        assert_eq!(light.success_bg, 0x22965a1f);
+
+        let dark = PanelColors::for_dark(true);
+        // The main card and controls must leave the white light surfaces.
+        assert_eq!(dark.card, 0x25282dc7);
+        assert_eq!(dark.control, 0xffffff0b);
+        assert_eq!(dark.readonly, 0x23262be0);
+        assert_eq!(dark.chip, 0x23262be0);
+        assert_ne!(dark.card, 0xffffffff);
+        assert_ne!(dark.control, 0xffffffff);
+        assert_eq!(dark.line, 0xffffff16);
+        assert_eq!(dark.control_line, 0xffffff26);
+        assert_eq!(dark.text, 0xe1e5ebff);
+        assert_eq!(dark.muted, 0x8d96a2ff);
+        assert_eq!(dark.accent, 0x67a6efff);
+        assert_eq!(dark.primary, 0x2f79dfff);
+        assert_eq!(dark.primary_hover, 0x2274dfff);
+        assert_eq!(dark.secondary_hover, 0x4a91e224);
+        assert_eq!(dark.input_text, 0xe1e5ebff);
+        assert_eq!(dark.input_placeholder, 0x8d96a2ff);
+        assert_eq!(dark.error, 0xff9b94ff);
+        assert_eq!(dark.success, 0x57ab5aff);
+
+        // Compose the card and control over the dark workspace canvas before
+        // measuring text contrast, as the settings shell does.
+        let canvas = AppTheme::Dark.palette().workspace.canvas;
+        let card = over(dark.card, canvas);
+        let control = over(dark.control, card);
+        assert_ne!(card, 0xffffffff);
+        assert_ne!(control, 0xffffffff);
+        assert!(contrast(dark.text, card) >= 4.5);
+        assert!(contrast(dark.input_text, control) >= 4.5);
+        assert!(contrast(dark.input_placeholder, control) >= 4.0);
+        assert!(contrast(dark.success, control) >= 4.0);
+        assert!(contrast(dark.error, card) >= 4.5);
     }
 
     fn snapshot(defaults: DispatchDefaults) -> DispatchConfigSnapshot {

@@ -1255,7 +1255,11 @@ fn assert_permission_argv(home: &Path, expected: &[&str]) -> Result<()> {
         .position(|arg| arg.starts_with("hooks={ "))
         .context("Codex run hooks")?;
     assert_eq!(&argv[..2], ["-c", "check_for_update_on_startup=false"]);
-    assert_eq!(&argv[2..hook - 1], expected);
+    assert_eq!(argv[hook - 3], "-c");
+    assert!(argv[hook - 2].starts_with("developer_instructions="));
+    assert!(argv[hook - 2].contains("mt identify --json"));
+    assert_eq!(argv[hook - 1], "-c");
+    assert_eq!(&argv[2..hook - 3], expected);
     assert_eq!(
         &argv[hook + 1..],
         ["--dangerously-bypass-hook-trust", "resume", UUID]
