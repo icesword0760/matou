@@ -176,24 +176,41 @@ impl LaunchOptions {
             let home = home.or_else(|| env_path("USERPROFILE"));
             home.context("Cannot resolve native launcher defaults: HOME is unset or empty")
         };
-        let data_override = || {
-            let value = env("MATOU_DATA_DIR")?;
+        let data_override = env("MATOU_DATA_DIR");
+        #[cfg(any(target_os = "macos", windows))]
+        let use_default_compatibility = data_root.is_none() && data_override.is_none();
+        #[cfg(target_os = "macos")]
+        let mut legacy_user_data = None;
+        let data_override = data_override.and_then(|value| {
             if let Some(text) = value.to_str() {
                 let trimmed = text.trim();
                 return (!trimmed.is_empty()).then(|| PathBuf::from(trimmed));
             }
             Some(PathBuf::from(value))
-        };
-        let data_root = match data_root.or_else(data_override) {
+        });
+        let data_root = match data_root.or(data_override) {
             Some(path) => path,
             None => {
                 let beta = executable().as_deref().is_some_and(is_beta_executable);
                 #[cfg(windows)]
-                let path = env_path("APPDATA")
-                    .context("Cannot resolve native data directory: APPDATA is unset or empty")?
-                    .join(if beta { "MatouBeta" } else { "Matou" });
+                let path = {
+                    let appdata = env_path("APPDATA").context(
+                        "Cannot resolve native data directory: APPDATA is unset or empty",
+                    )?;
+                    let legacy_home = use_default_compatibility
+                        .then(|| env_path("USERPROFILE"))
+                        .flatten();
+                    resolve_windows_default_data_root(&appdata, legacy_home.as_deref(), beta)
+                };
                 #[cfg(not(windows))]
-                let path = home()?.join(if beta { ".matou-beta" } else { ".matou" });
+                let path = {
+                    let home = home()?;
+                    #[cfg(target_os = "macos")]
+                    if use_default_compatibility && !beta {
+                        legacy_user_data = Some(home.join("Library/Application Support/Matou"));
+                    }
+                    home.join(if beta { ".matou-beta" } else { ".matou" })
+                };
                 path
             }
         };
@@ -225,8 +242,31 @@ impl LaunchOptions {
                 bail!("Native launcher paths must be absolute: {}", path.display());
             }
         }
+        // The desktop wrapper hands off the resolved root as an explicit flag.
+        #[cfg(target_os = "macos")]
+        if let Some(legacy_user_data) = legacy_user_data {
+            crate::safe_browser::migrate_legacy_electron_preferences(
+                &legacy_user_data,
+                &options.data_root,
+            );
+        }
         Ok(options)
     }
+}
+
+#[cfg(any(windows, test))]
+fn resolve_windows_default_data_root(appdata: &Path, home: Option<&Path>, beta: bool) -> PathBuf {
+    if beta {
+        return appdata.join("MatouBeta");
+    }
+    let native_root = appdata.join("Matou");
+    if !native_root.join("matou.sqlite").exists()
+        && let Some(legacy_root) = home.map(|home| home.join(".matou"))
+        && legacy_root.join("matou.sqlite").exists()
+    {
+        return legacy_root;
+    }
+    native_root
 }
 
 #[cfg(target_os = "macos")]
@@ -315,6 +355,83 @@ mod launch_options_tests {
             assert_eq!(options.shell, Path::new("/bin/zsh"));
             assert!(!options.data_root.exists());
         }
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_migration_runs_only_for_the_stable_default_root() -> Result<()> {
+        for case in [
+            "default",
+            "explicit",
+            "environment",
+            "blank environment",
+            "beta",
+        ] {
+            let home = tempfile::tempdir()?;
+            let legacy = home.path().join("Library/Application Support/Matou");
+            std::fs::create_dir_all(&legacy)?;
+            let locale = br#"{"preference":"zh-CN"}"#;
+            std::fs::write(legacy.join(LOCALE_FILE), locale)?;
+            let data_root = home.path().join(".matou");
+            let contents = home.path().join("fixture.app/Contents");
+            if case == "beta" {
+                std::fs::create_dir_all(contents.join("MacOS"))?;
+                std::fs::write(
+                    contents.join("Info.plist"),
+                    "<plist version=\"1.0\"><dict><key>CFBundleIdentifier</key><string>com.matou.desktop.beta</string></dict></plist>",
+                )?;
+            }
+            let env = |key: &str| match (key, case) {
+                ("HOME", _) => Some(home.path().into()),
+                ("MATOU_DATA_DIR", "environment") => Some(data_root.clone().into()),
+                ("MATOU_DATA_DIR", "blank environment") => Some("  ".into()),
+                _ => None,
+            };
+            let args = if case == "explicit" {
+                vec!["--data-root".into(), data_root.clone().into()]
+            } else {
+                Vec::new()
+            };
+            let options = LaunchOptions::from_args_with_env(args, env, || {
+                Some(contents.join("MacOS/fixture"))
+            })?;
+            let expected = if case == "default" {
+                LocalePreference::Chinese
+            } else {
+                LocalePreference::System
+            };
+            assert_eq!(
+                read_locale_preference(&options.data_root),
+                expected,
+                "{case}"
+            );
+            assert_eq!(std::fs::read(legacy.join(LOCALE_FILE))?, locale);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn windows_defaults_keep_using_the_legacy_database_until_a_native_one_exists() -> Result<()> {
+        let home = tempfile::tempdir()?;
+        let appdata = home.path().join("AppData/Roaming");
+        let legacy_root = home.path().join(".matou");
+        let native_root = appdata.join("Matou");
+        let resolve = |beta| resolve_windows_default_data_root(&appdata, Some(home.path()), beta);
+        assert_eq!(resolve(false), native_root);
+
+        std::fs::create_dir(&legacy_root)?;
+        std::fs::write(legacy_root.join("matou.sqlite"), "")?;
+        assert_eq!(resolve(false), legacy_root);
+        assert_eq!(resolve(true), appdata.join("MatouBeta"));
+        assert_eq!(
+            resolve_windows_default_data_root(&appdata, None, false),
+            native_root
+        );
+
+        std::fs::create_dir_all(&native_root)?;
+        std::fs::write(native_root.join("matou.sqlite"), "")?;
+        assert_eq!(resolve(false), native_root);
         Ok(())
     }
 
@@ -1610,14 +1727,17 @@ impl LiveEgress {
         true
     }
 
-    fn poll(&mut self, owner: &mut ShellOwner) -> Result<Option<Result<Value>>> {
+    fn poll(
+        &mut self,
+        owner: &mut ShellOwner,
+        accounts: Option<&crate::claude_accounts::AccountWorker>,
+    ) -> Result<Option<Result<Value>>> {
         match self.sampler.samples.try_recv() {
             Ok(sample) => {
                 self.in_flight = false;
                 self.first_sample = false;
                 return Ok(Some(
-                    owner
-                        .apply_egress_sample(sample)
+                    apply_egress_sample(owner, sample, accounts)
                         .map(|()| egress_projection(owner.egress().status())),
                 ));
             }
@@ -1963,7 +2083,7 @@ impl RuntimeWiring {
             && let Some(sampler) = &mut self.fixtures.egress_sample
         {
             self.next_egress_attempt = time.saturating_add(egress_probe::RECOVERY_CONFIRM_MS);
-            owner.apply_egress_sample(sampler()?)?;
+            apply_egress_sample(owner, sampler()?, self.claude_accounts.as_ref())?;
         }
         Ok(())
     }
@@ -2168,7 +2288,7 @@ impl RuntimeWiring {
                         .as_mut()
                         .context("Offline egress sample unavailable")?(
                     )?;
-                    owner.apply_egress_sample(sample)?;
+                    apply_egress_sample(owner, sample, self.claude_accounts.as_ref())?;
                     Ok(egress_projection(owner.egress().status()))
                 })();
                 ("egressRecheckResult", *request_id, result)
@@ -2384,6 +2504,20 @@ fn account_summary(data_root: &Path) -> Result<Value> {
         },
         "subscriptionSupported": subscription_launch::subscription_supported(cfg!(target_os = "macos"), macos_major),
     }))
+}
+
+fn apply_egress_sample(
+    owner: &mut ShellOwner,
+    sample: EgressSample,
+    accounts: Option<&crate::claude_accounts::AccountWorker>,
+) -> Result<()> {
+    owner.apply_egress_sample(sample)?;
+    if let Some(accounts) = accounts
+        && let Some(country) = owner.egress().exit_country(Family::Anthropic)
+    {
+        accounts.report_exit_country(country);
+    }
+    Ok(())
 }
 
 fn egress_projection(status: egress_probe::Status) -> Value {
@@ -4955,7 +5089,7 @@ fn run_writable(
             if time_zone_changed {
                 live.next_check = Instant::now();
             }
-            let (replies, stopped) = match live.poll(&mut owner) {
+            let (replies, stopped) = match live.poll(&mut owner, wiring.claude_accounts.as_ref()) {
                 Ok(Some(result)) => (live.replies(result), false),
                 Ok(None) => (Vec::new(), false),
                 Err(error) => (live.replies(Err(error)), true),
