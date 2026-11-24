@@ -51,6 +51,71 @@ unsafe fn macos_pasteboard_text(pasteboard: cocoa::base::id) -> Option<String> {
     }
 }
 
+pub(crate) fn read_terminal_paste(cx: &gpui::App, modes: InputModes) -> Option<Vec<u8>> {
+    terminal_paste_bytes(read_clipboard_text(cx).as_deref(), modes, || {
+        clipboard_has_content(cx)
+    })
+}
+
+fn terminal_paste_bytes(
+    text: Option<&str>,
+    modes: InputModes,
+    has_content: impl FnOnce() -> bool,
+) -> Option<Vec<u8>> {
+    let text = match text {
+        Some(text) => text,
+        // A bracketed paste with no text lets the CLI read the clipboard itself.
+        None if modes.bracketed_paste && has_content() => "",
+        None => return None,
+    };
+    let bytes = encode_paste(text, modes);
+    (!bytes.is_empty()).then_some(bytes)
+}
+
+fn clipboard_has_content(cx: &gpui::App) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use cocoa::{appkit::NSPasteboard, base::nil};
+
+        if unsafe { macos_pasteboard_has_items(NSPasteboard::generalPasteboard(nil)) } {
+            return true;
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn CountClipboardFormats() -> i32;
+        }
+
+        if unsafe { CountClipboardFormats() } > 0 {
+            return true;
+        }
+    }
+
+    cx.read_from_clipboard().is_some()
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unexpected_cfgs)] // objc 0.2 probes its historical cargo-clippy feature.
+unsafe fn macos_pasteboard_has_items(pasteboard: cocoa::base::id) -> bool {
+    use cocoa::{appkit::NSPasteboard, base::nil};
+    use objc::{msg_send, sel, sel_impl};
+
+    if pasteboard == nil {
+        return false;
+    }
+    unsafe {
+        let types = pasteboard.types();
+        if types == nil {
+            return false;
+        }
+        let count: usize = msg_send![types, count];
+        count > 0
+    }
+}
+
 pub(crate) fn encode_paste(text: &str, modes: InputModes) -> Vec<u8> {
     let text = text.replace("\r\n", "\r").replace('\n', "\r");
     if !modes.bracketed_paste {
@@ -168,15 +233,18 @@ impl Composition {
 mod tests {
     use super::*;
 
-    #[test]
-    fn paste_matches_reference_in_both_modes() {
-        let mut modes = InputModes {
+    fn paste_modes(bracketed_paste: bool) -> InputModes {
+        InputModes {
             application_cursor_keys: false,
-            bracketed_paste: false,
+            bracketed_paste,
             mouse_protocol: matou_native_terminal::MouseProtocol::None,
             mouse_encoding: matou_native_terminal::MouseEncoding::Default,
             input_epoch: 0,
-        };
+        }
+    }
+
+    #[test]
+    fn paste_matches_reference_in_both_modes() {
         for (text, unbracketed, bracketed) in [
             ("ABC123", "ABC123", "\x1b[200~ABC123\x1b[201~"),
             (
@@ -199,11 +267,84 @@ mod tests {
                 "\x1b[200~中文粘贴-👩‍💻-END\r第二行\rline 3\r\x1b[201~",
             ),
         ] {
-            modes.bracketed_paste = false;
-            assert_eq!(encode_paste(text, modes), unbracketed.as_bytes());
-            modes.bracketed_paste = true;
-            assert_eq!(encode_paste(text, modes), bracketed.as_bytes());
+            assert_eq!(
+                encode_paste(text, paste_modes(false)),
+                unbracketed.as_bytes()
+            );
+            assert_eq!(encode_paste(text, paste_modes(true)), bracketed.as_bytes());
         }
+    }
+
+    #[test]
+    fn terminal_paste_distinguishes_text_non_text_and_empty_clipboards() {
+        for (bracketed, expected_text, expected_empty_text) in [
+            (false, "line\rnext", None),
+            (
+                true,
+                "\x1b[200~line\rnext\x1b[201~",
+                Some("\x1b[200~\x1b[201~"),
+            ),
+        ] {
+            let modes = paste_modes(bracketed);
+            let unexpected_probe = || panic!("text paste should not probe other formats");
+            assert_eq!(
+                terminal_paste_bytes(Some("line\nnext"), modes, unexpected_probe).as_deref(),
+                Some(expected_text.as_bytes())
+            );
+            assert_eq!(
+                terminal_paste_bytes(Some(""), modes, unexpected_probe).as_deref(),
+                expected_empty_text.map(str::as_bytes)
+            );
+        }
+        assert_eq!(
+            terminal_paste_bytes(None, paste_modes(true), || true).as_deref(),
+            Some(b"\x1b[200~\x1b[201~".as_slice())
+        );
+        assert_eq!(
+            terminal_paste_bytes(None, paste_modes(false), || true),
+            None
+        );
+        assert_eq!(
+            terminal_paste_bytes(None, paste_modes(true), || false),
+            None
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn appkit_image_without_text_triggers_bracketed_paste() {
+        use cocoa::{
+            appkit::NSPasteboard,
+            base::{NO, id, nil},
+            foundation::{NSAutoreleasePool, NSData, NSString},
+        };
+
+        let (was_empty, wrote_image, text, has_items, paste) = unsafe {
+            let pool = NSAutoreleasePool::new(nil);
+            let pasteboard = NSPasteboard::pasteboardWithUniqueName(nil);
+            assert_ne!(pasteboard, nil);
+            let was_empty = !macos_pasteboard_has_items(pasteboard);
+
+            let png_type: id = NSString::alloc(nil).init_str("public.png").autorelease();
+            let png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x04\x00\x00\x00\xb5\x1c\x0c\x02\
+                        \x00\x00\x00\x0bIDAT\x78\xda\x63\x64\xf8\x0f\x00\x01\x05\x01\x01\x27\x18\xe3\x66\
+                        \x00\x00\x00\x00IEND\xae\x42\x60\x82";
+            let data = NSData::dataWithBytes_length_(nil, png.as_ptr().cast(), png.len() as u64);
+            pasteboard.clearContents();
+            let wrote_image = pasteboard.setData_forType(data, png_type) != NO;
+            let text = macos_pasteboard_text(pasteboard);
+            let has_items = macos_pasteboard_has_items(pasteboard);
+            let paste = terminal_paste_bytes(text.as_deref(), paste_modes(true), || has_items);
+
+            pasteboard.releaseGlobally();
+            pool.drain();
+            (was_empty, wrote_image, text, has_items, paste)
+        };
+        assert!(was_empty);
+        assert!(wrote_image);
+        assert_eq!(text, None);
+        assert!(has_items);
+        assert_eq!(paste.as_deref(), Some(b"\x1b[200~\x1b[201~".as_slice()));
     }
 
     #[cfg(target_os = "macos")]
