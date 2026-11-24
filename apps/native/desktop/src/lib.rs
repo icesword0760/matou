@@ -6,6 +6,7 @@ pub mod card_context_menu;
 pub mod carousel_motion;
 pub mod dag_canvas;
 pub mod detach_window;
+pub mod dispatch_roles_panel;
 pub mod dispatch_settings;
 pub mod instance_open;
 #[cfg(target_os = "macos")]

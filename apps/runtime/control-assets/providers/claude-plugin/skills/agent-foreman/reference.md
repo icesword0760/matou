@@ -1,21 +1,23 @@
 # 派活监工参考
 
-脚本：`<本技能目录>/scripts/foreman.mjs`（下文简写 `foreman`）。运行记录默认在 `~/.claude/agent-foreman/runs/<task>/`，可用环境变量 `FOREMAN_RUN_DIR` 改。
+命令：Matou 托管终端中直接运行 `mt-foreman`（与 `node <本技能目录>/scripts/foreman.mjs` 等价，下文简写 `foreman`）。运行记录默认在 `~/.claude/agent-foreman/runs/<task>/`，可用环境变量 `FOREMAN_RUN_DIR` 改。
 
 ## 命令
 
 | 命令 | 谁用 | 作用 |
 |---|---|---|
-| `start <task> --cd <dir> [--brief f]` | Claude | 新任务；不带 `--brief` 时从 stdin 读交代书 |
-| `send <task> [--message f]` | Claude | 在同一会话里继续（返工、下一关、转达用户决定）；`resume` 是别名 |
-| `watch <task>` | Claude | 重新接上事件流（Monitor 到期后用） |
-| `status <task>` | Claude | 打印状态 JSON 和最后一条回复 |
-| `stop <task>` | Claude | 停止任务并清理整棵进程树 |
-| `answer <task> [n]` | Claude | 回答第 n 个提问（省略为最早未答的），内容从 stdin 读 |
-| `note <task>` | Claude | 给工作中的执行者留言，不打断它 |
+| `guide [brief\|parallel\|reference]` | 监工 | 打印本技能指南或配套模板/参考（自动合并 Matou 自定义生态位） |
+| `roles` | 监工 | 打印用户在 Matou 派活设置中自定义的最新 Agent 生态位与转包策略 |
+| `start <task> --cd <dir> [--brief f]` | 监工 | 新任务；不带 `--brief` 时从 stdin 读交代书 |
+| `send <task> [--message f]` | 监工 | 在同一会话里继续（返工、下一关、转达用户决定）；`resume` 是别名 |
+| `watch <task>` | 监工 | 重新接上事件流（跟踪到期或回答提问后用） |
+| `status <task>` | 监工 | 打印状态 JSON 和最后一条回复 |
+| `stop <task>` | 监工 | 停止任务并清理整棵进程树 |
+| `answer <task> [n]` | 监工 | 回答第 n 个提问（省略为最早未答的），内容从 stdin 读 |
+| `note <task>` | 监工 | 给工作中的执行者留言，不打断它 |
 | `ask <task> [--no-wait]` | 执行者 | 提问（运行约定里已教给执行者） |
 | `inbox <task>` | 执行者 | 读取新回答和留言 |
-| `models [--effort E]` | Claude | 列出候选模型和 `best` 的解析结果 |
+| `models [--effort E]` | 监工 | 列出候选模型和 `best` 的解析结果 |
 
 ## 常用选项
 
@@ -36,7 +38,7 @@
 | `--no-watch` | 关 | 启动后不跟踪事件流 |
 | `--watch-min` | 29 | 跟踪多久后自动交回（退出码 8，任务继续运行），留在 Monitor 30 分钟上限以内 |
 
-环境变量：`CODEX_BIN`（Codex 可执行文件，默认 PATH 里的 `codex`）、`DSH_BIN`（默认 PATH 里的 `dsh`；找不到时运行约定里不出现 DSH 那一段）、`AGY_BIN`（默认 PATH 里的 `agy`）、`CODEX_SERVICE_TIER`（默认 `default`，普通速度档）、`FOREMAN_RUN_DIR`。
+环境变量：`CODEX_BIN`（Codex 可执行文件，默认 PATH 里的 `codex`）、`DSH_BIN`（默认 PATH 里的 `dsh`；找不到时运行约定里不出现 DSH 那一段）、`AGY_BIN`（默认 PATH 里的 `agy`）、`CODEX_SERVICE_TIER`（默认 `default`，普通速度档；非默认档会以中文名显示在 Matou 子 Agent 卡片标题里，如「· 超快」，未知值原样显示）、`FOREMAN_RUN_DIR`。
 
 ## 事件符号
 

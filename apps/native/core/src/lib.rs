@@ -3,6 +3,7 @@ pub mod backup;
 pub mod claude_role_budget;
 pub mod database_recovery;
 pub mod dispatch_config;
+pub mod dispatch_roles;
 pub mod durability;
 pub mod geometry;
 pub mod git_repo;

@@ -445,7 +445,7 @@ impl AgentHudProjection {
                 hud.running_tools = Some(running.into_iter().map(|(_, tool)| tool).collect());
             }
         }
-        if hud.agents.is_some() {
+        if hud.agents.is_some() || (!self.session_ended && !self.external_agents.is_empty()) {
             let mut agents = Vec::new();
             if !self.session_ended {
                 for (agent, failed_at) in &self.transcript_agents {

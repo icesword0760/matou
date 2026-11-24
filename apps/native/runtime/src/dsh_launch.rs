@@ -107,6 +107,7 @@ pub fn prepare(input: DshLaunchInput<'_>) -> Result<DshLaunchPlan> {
                 &"MATOU_CONTROL_CALLER_RUN",
                 &"MATOU_CONTROL_ASSET_ROOT",
                 &"MATOU_AGENT_STATUS_DIR",
+                &"MATOU_FOREMAN_ROLES_FILE",
                 &"MATOU_PROVIDER_HOOK_URL",
                 &"MATOU_PROVIDER_HOOK_TOKEN",
                 &"MATOU_ANTIGRAVITY_SYSTEM_MESSAGE_FILE",

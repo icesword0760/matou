@@ -59,7 +59,7 @@ impl Fixture {
             &fixture.executable,
             r#"#!/bin/sh
 set -eu
-[ -z "${CLAUDECODE:-}" ] && [ -z "${MATOU_ANTIGRAVITY_SYSTEM_MESSAGE_FILE:-}" ]
+[ -z "${CLAUDECODE:-}" ] && [ "${MATOU_ANTIGRAVITY_SYSTEM_MESSAGE_FILE:-}" != "stale-file" ] && [ -f "${MATOU_ANTIGRAVITY_SYSTEM_MESSAGE_FILE:-}" ]
 [ -f "$HOME/.gemini/settings.json" ]
 trace="$AGY_TEST_TRACES/$MATOU_PROVIDER_HOOK_TOKEN"
 mkdir "$trace"

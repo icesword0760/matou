@@ -45,15 +45,72 @@ function readDefaultsConfig() {
   return result;
 }
 
-function configuredDefaults(defaults, agent, ignored = []) {
+function readMatouRolesConfig() {
+  const file = process.env.MATOU_FOREMAN_ROLES_FILE;
+  if (!file || !fs.existsSync(file)) return null;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (!parsed || parsed.version !== 1 || !Array.isArray(parsed.agents)) return null;
+    return {
+      path: file,
+      allowSubDispatch: parsed.allowSubDispatch !== false,
+      agents: parsed.agents.filter((item) => item && typeof item.id === 'string' && item.id.trim()),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function formatMatouRolesMarkdown(roles, defaultAgent = 'codex') {
+  if (!roles) return '';
+  const names = { codex: 'Codex', dsh: 'DSH', agy: 'Antigravity（反重力）' };
+  const modes = { auto: '按职责自动派', explicit: '仅点名时派' };
+  const efforts = { off: '关闭', low: '低', medium: '中', high: '高', xhigh: '超高', max: '最高' };
+  const speeds = { default: '普通', fast: '快速', ultrafast: '超快', priority: '优先', flex: '弹性' };
+  const enabled = roles.agents.filter((a) => a.enabled !== false);
+  const disabled = roles.agents.filter((a) => a.enabled === false);
+  const lines = ['## 用户自定义 Agent 生态位与默认配置（以本节为准）', ''];
+  for (const a of enabled) {
+    const label = names[a.id] || a.id;
+    const tag = a.id === defaultAgent ? '默认兜底主力' : (modes[a.mode] || '按职责自动派');
+    const effortFixed = a.id === 'agy' && a.model === 'gemini-pro-orchestrator';
+    const specs = [
+      a.model ? `模型: ${a.model}` : null,
+      effortFixed ? '无推理档位' : (a.effort ? `推理: ${efforts[a.effort] || a.effort}` : null),
+      a.speed ? `速度: ${speeds[a.speed] || a.speed}` : null,
+    ].filter(Boolean).join(' · ');
+    lines.push(`- **${label}**（${tag}${specs ? ` | ${specs}` : ''}）：${a.role || '按默认职责执行。'}`);
+  }
+  if (disabled.length) {
+    lines.push(`- **已停用（禁止派活）**：${disabled.map((a) => names[a.id] || a.id).join('、')}`);
+  }
+  lines.push(`- **二次转包策略**：${roles.allowSubDispatch ? '允许执行者按其他「启用 + 按职责自动派」Agent 的职责转派 1 层子任务' : '已关闭（所有执行者禁止二次转包，只允许顶层监工派活）'}`);
+  return lines.join('\n');
+}
+
+function configuredDefaults(defaults, agent, ignored = [], roles = null) {
   const { agent: _agent, model, ...rest } = defaults;
+  const agentRole = roles?.agents?.find((a) => a.id === agent);
   if (agent === 'dsh' && ['medium', 'xhigh'].includes(rest.effort)) {
     ignored.push(`已忽略：effort=${JSON.stringify(rest.effort)}（DSH 不支持，使用内置 high）`);
     delete rest.effort;
   }
-  return { ...DEFAULTS,
+  const resolved = { ...DEFAULTS,
     ...(agent === 'dsh' ? { model: 'deepseek-flash' } : agent === 'agy' ? { model: 'gemini-pro-orchestrator' } : {}),
     ...rest, ...(model != null && agent !== 'dsh' ? { model } : {}) };
+  if (agentRole) {
+    if (typeof agentRole.model === 'string' && agentRole.model.trim()) resolved.model = agentRole.model.trim();
+    if (typeof agentRole.effort === 'string' && agentRole.effort.trim()) {
+      const ok = agent === 'dsh'
+        ? ['off', 'low', 'high', 'max'].includes(agentRole.effort)
+        : ['low', 'medium', 'high', 'xhigh'].includes(agentRole.effort);
+      if (ok) resolved.effort = agentRole.effort;
+    }
+    if (agent === 'codex' && typeof agentRole.speed === 'string' && agentRole.speed.trim()) {
+      resolved.serviceTier = agentRole.speed.trim();
+    }
+  }
+  return resolved;
 }
 
 const POLL_MS = Number(process.env.FOREMAN_POLL_MS) || 15_000;
@@ -61,17 +118,20 @@ const FATAL = /\b40[13]\b|unauthori[sz]ed|not logged in|please (log|sign) in|inv
 const RETRYABLE = /capacity|\b429\b|\b5\d\d\b|overloaded|rate.?limit|reconnect|stream disconnected|timed? ?out|AI 专线|ECONN|ETIMEDOUT|network|connection/i;
 
 const usage = `Usage:
-  node scripts/foreman.mjs config
-  node scripts/foreman.mjs models [--model M] [--effort E] [--refresh-models]
-  node scripts/foreman.mjs start  商城-购物车-01 --cd <dir> [--brief <file>] [options]
-  node scripts/foreman.mjs send   商城-购物车-01 [--message <file>] [options] (resume is an alias)
-  node scripts/foreman.mjs watch  商城-购物车-01
-  node scripts/foreman.mjs status 商城-购物车-01
-  node scripts/foreman.mjs stop   商城-购物车-01
-  node scripts/foreman.mjs ask    商城-购物车-01 [--no-wait] [--wait-min N] (Codex; question from stdin)
-  node scripts/foreman.mjs inbox  商城-购物车-01 (Codex)
-  node scripts/foreman.mjs answer 商城-购物车-01 [n] (Claude; answer from stdin)
-  node scripts/foreman.mjs note   商城-购物车-01 (Claude; note from stdin)
+  mt-foreman guide [brief|parallel|reference]
+  mt-foreman roles
+  mt-foreman config
+  mt-foreman models [--model M] [--effort E] [--refresh-models]
+  mt-foreman start  商城-购物车-01 --cd <dir> [--brief <file>] [options]
+  mt-foreman send   商城-购物车-01 [--message <file>] [options] (resume is an alias)
+  mt-foreman watch  商城-购物车-01
+  mt-foreman status 商城-购物车-01
+  mt-foreman stop   商城-购物车-01
+  mt-foreman ask    商城-购物车-01 [--no-wait] [--wait-min N] (执行者; question from stdin)
+  mt-foreman inbox  商城-购物车-01 (执行者)
+  mt-foreman answer 商城-购物车-01 [n] (监工; answer from stdin)
+  mt-foreman note   商城-购物车-01 (监工; note from stdin)
+(在 Matou 托管终端中可直接使用 mt-foreman，与 node scripts/foreman.mjs 等价)
 Omit --brief / --message to read the prompt from stdin.
 会加载用户的 Codex 配置（MCP、插件、记忆等），速度档固定为普通。
 配置里有自定义指令文件时拒绝派活。
@@ -93,6 +153,17 @@ Options:
 
 function parseArgs(argv) {
   const [cmd] = argv;
+  if (cmd === 'guide') {
+    const topic = argv[1];
+    if (argv.length > 2 || (topic != null && !['brief', 'parallel', 'reference'].includes(topic))) {
+      throw new Error(usage);
+    }
+    return { cmd, task: topic, opts: { addDirs: [] } };
+  }
+  if (cmd === 'roles') {
+    if (argv.length > 1) throw new Error(usage);
+    return { cmd, task: undefined, opts: { addDirs: [] } };
+  }
   const task = ['models', 'config'].includes(cmd) ? undefined : argv[1];
   const rest = argv.slice(['models', 'config'].includes(cmd) ? 1 : 2);
   const opts = { addDirs: [] };
@@ -191,7 +262,11 @@ function writeAgentStatus(state) {
     const effort = displayEffort(state);
     const effortName = new Map([['off', '关闭'], ['minimal', '最低档'], ['low', '低档'], ['medium', '中档'], ['high', '高档'], ['xhigh', '超高档'], ['max', '最高档']]).get(effort) ?? effort;
     const model = state.options.model;
-    const label = `${agentName(state)}：${state.task}（${model && model !== 'best' ? `${model}${effort ? ' · ' : ''}` : ''}${effort ? `${effortName}推理` : ''}）`;
+    const agent = agentName(state);
+    // Codex service tier (speed) is read from the same env the runner forwards; default stays implicit.
+    const tier = agent === 'Codex' ? (state.options.serviceTier || process.env?.CODEX_SERVICE_TIER || 'default') : null;
+    const tierName = new Map([['fast', '快速'], ['ultrafast', '超快'], ['priority', '优先'], ['flex', '弹性']]).get(tier) ?? (tier && tier !== 'default' ? tier : null);
+    const label = `${agent}：${state.task}（${[model && model !== 'best' ? model : '', effort ? `${effortName}推理` : '', tierName].filter(Boolean).join(' · ')}）`;
     const file = path.join(dir, `${id}.json`);
     if (lastAgentStatus?.file === file && lastAgentStatus.status === status &&
         lastAgentStatus.label === label && lastAgentStatus.detail === detail && time - lastAgentStatus.time < 1000) return;
@@ -524,7 +599,7 @@ function protocolFooter(state) {
 - 长命令（安装、渲染、录屏等超过 1 分钟的命令）把输出 tee 到 ${path.join(dir, 'logs')}/ 下的日志文件，例如 \`cmd 2>&1 | tee ${path.join(dir, 'logs')}/render.log\`。
 - 自己做的取舍随时追加到 ${path.join(dir, 'decisions.md')}，每条写清决定和理由。
 - 到达交代中写明的关卡时停下。最终回复依次写：完成了什么、产物路径、自检结果、「我自己做的决定」（逐条列出，没有就写「无」）、未解决的问题。不要越过关卡继续做。${['dsh', 'agy'].includes(state.agent) ? '' : `
-- 派任何子代理（DSH 子任务、spawn_agent 子代理）时，防止意图在转述中丢失：交代开头写明「先读完原始交代 ${dir}/run-*.prompt.md（按序号全部读完），其中的用户意图、已定的决定和范围同样约束你」，再写这次交给它的具体部分：写清原因、方案（改哪些地方、用什么做法）和已定的决定，具体怎么写由它定，只有你已确切知道做法时才写到步骤；方案要先调研才定得下来的，先让它只交调研结果和方案建议，你定了再让它做；要求它交回自己做的决定。它交回后，你先对照原始交代里的用户意图检查有没有偏，再整合；它做的决定要并入你最终回复的「我自己做的决定」，注明来自哪个子代理。`}${['dsh', 'agy'].includes(state.agent) || !dshAvailable(state.options.cd) ? '' : `
+- 派任何子代理（DSH 子任务、spawn_agent 子代理）时，防止意图在转述中丢失：交代开头写明「先读完原始交代 ${dir}/run-*.prompt.md（按序号全部读完），其中的用户意图、已定的决定和范围同样约束你」，再写这次交给它的具体部分：写清原因、方案（改哪些地方、用什么做法）和已定的决定，具体怎么写由它定，只有你已确切知道做法时才写到步骤；方案要先调研才定得下来的，先让它只交调研结果和方案建议，你定了再让它做；要求它交回自己做的决定。它交回后，你先对照原始交代里的用户意图检查有没有偏，再整合；它做的决定要并入你最终回复的「我自己做的决定」，注明来自哪个子代理。`}${['dsh', 'agy'].includes(state.agent) || state.options.allowDshSubDispatch === false || !dshAvailable(state.options.cd) ? '' : `
 前端 UI 设计的部分（页面和组件的视觉设计、布局、样式、交互外观，以及把它们实现成前端界面代码）交给 DSH 子代理：运行下面的命令派活（命令超时设为 10 分钟；它跟踪满 29 分钟会以退出码 8 交回，按最后一行的命令继续跟踪；退出码 7 表示它在提问，按提示回答后继续跟踪）：
   FOREMAN_RUN_DIR="${RUNS}" node "${SCRIPT}" start ${shellTask(state.task)}-界面-01 --agent dsh --cd <工作目录> <<'EOF'
   交代：用户要什么、已定的设计决定（配色、字号、间距、文案原文等）、要改哪些文件、不能碰什么、做完交回什么（截图或样稿路径）
@@ -699,7 +774,7 @@ function buildArgs(state, lastFile, resume) {
   const args = [
     'exec', '--skip-git-repo-check', '--disable', 'unbounded_connection_retries', '--json',
     '-s', o.fullAccess ? 'danger-full-access' : 'workspace-write', '-C', o.cd, '-m', o.model, '-c', `model_reasoning_effort="${o.effort}"`,
-    '-c', `service_tier="${process.env.CODEX_SERVICE_TIER || 'default'}"`,
+    '-c', `service_tier="${o.serviceTier || process.env.CODEX_SERVICE_TIER || 'default'}"`,
     // Codex auto-approves MCP permission prompts with full access + never (including per-tool prompt mode).
     '-c', 'approval_policy="never"',
     '--add-dir', physicalPath(runDir(state.task)), '-o', physicalPath(lastFile),
@@ -877,8 +952,14 @@ function runTurn(state, prompt) {
   const gitBefore = state.options.fullAccess && state.options.gitRoot ? gitChanges(state.options.gitRoot) : null;
   return new Promise((resolve) => {
     const stderrFd = fs.openSync(files.stderr, 'a');
+    const workerDepth = (Number(process.env.MATOU_FOREMAN_DEPTH) || 0) + 1;
     const child = spawn(isAgy ? AGY_BIN : isDsh ? DSH_BIN : CODEX_BIN, isAgy ? buildAgyArgs(state, fullPrompt, resume) : isDsh ? buildDshArgs(state, resume) : buildArgs(state, files.last, resume), {
       cwd: state.options.cd, detached: true, stdio: ['pipe', 'pipe', stderrFd],
+      env: {
+        ...process.env,
+        MATOU_FOREMAN_DEPTH: String(workerDepth),
+        MATOU_FOREMAN_PARENT_AGENT: state.agent || 'codex',
+      },
     });
     fs.closeSync(stderrFd);
     state.pid = child.pid;
@@ -1390,6 +1471,35 @@ async function main() {
     }
     return 0;
   }
+  if (cmd === 'roles') {
+    const roles = readMatouRolesConfig();
+    const defaultAgent = readDefaultsConfig().defaults.agent || 'codex';
+    if (!roles) {
+      console.log('当前未配置 Matou 自定义 Agent 生态位，按内置 SKILL.md 默认分工执行。');
+      return 0;
+    }
+    console.log(formatMatouRolesMarkdown(roles, defaultAgent));
+    return 0;
+  }
+  if (cmd === 'guide') {
+    const skillDir = path.resolve(path.dirname(SCRIPT), '..');
+    const files = {
+      brief: 'brief-template.md',
+      parallel: 'parallel.md',
+      reference: 'reference.md',
+    };
+    const file = task ? files[task] : 'SKILL.md';
+    let content = fs.readFileSync(path.join(skillDir, file), 'utf8');
+    if (!task) {
+      const roles = readMatouRolesConfig();
+      if (roles) {
+        const defaultAgent = readDefaultsConfig().defaults.agent || 'codex';
+        content = `${content.trimEnd()}\n\n${formatMatouRolesMarkdown(roles, defaultAgent)}\n`;
+      }
+    }
+    process.stdout.write(content);
+    return 0;
+  }
   if (!['start', 'send', 'resume', 'watch', 'status', 'stop', 'ask', 'answer', 'note', 'inbox', '_supervise', '_detach'].includes(cmd) || task == null) throw new Error(usage);
   if (!task || task.startsWith('.') || /[\s\p{White_Space}'"`/\\\0]/u.test(task) || Array.from(task).length > 40) {
     throw new Error('任务名不能包含空格、引号或斜杠，最长 40 个字');
@@ -1448,7 +1558,23 @@ async function main() {
   const previousState = cmd === 'start' ? null : loadState(task);
   if (previousState) heal(previousState);
   const configDefaults = cmd === 'start' ? readDefaultsConfig().defaults : {};
+  const roles = cmd === 'start' ? readMatouRolesConfig() : null;
   const agent = cmd === 'start' ? opts.agent ?? configDefaults.agent ?? 'codex' : previousState.agent || 'codex';
+  if (cmd === 'start') {
+    const targetRole = roles?.agents?.find((a) => a.id === agent);
+    if (targetRole && targetRole.enabled === false) {
+      throw new Error(`Agent ${agentName({ agent })} 已在 Matou 派活设置中停用，禁止派活。`);
+    }
+    const depth = Number(process.env.MATOU_FOREMAN_DEPTH) || 0;
+    const parentAgent = process.env.MATOU_FOREMAN_PARENT_AGENT || '';
+    const dshRole = roles?.agents?.find((a) => a.id === 'dsh');
+    const subDispatchEnabled = roles?.allowSubDispatch !== false;
+    const dshAutoAllowed = !dshRole || (dshRole.enabled !== false && dshRole.mode === 'auto');
+    const allowedDshSubtask = subDispatchEnabled && depth === 1 && parentAgent === 'codex' && agent === 'dsh' && dshAutoAllowed;
+    if (depth >= 1 && !allowedDshSubtask) {
+      throw new Error('当前会话是 foreman 派出的执行者，禁止再次派活（防止递归套娃或已关闭二次转包）。');
+    }
+  }
   if (opts.agent && opts.agent !== agent) throw new Error(`Task ${task} uses --agent ${agent}; cannot switch agents on resume.`);
   if (agent === 'codex') checkUserConfig(task);
   let state;
@@ -1458,7 +1584,9 @@ async function main() {
     if (!fs.existsSync(opts.cd) || !fs.statSync(opts.cd).isDirectory()) throw new Error(`Work dir does not exist: ${opts.cd}`);
     if (fs.existsSync(statePath(task))) throw new Error(`Task ${task} already exists; use resume or pick a new name.`);
     const { brief, message, agent: _agent, ...rest } = opts;
-    state = { task, agent, createdAt: now(), status: 'new', threadId: null, pid: null, turns: [], options: { ...configuredDefaults(configDefaults, agent), fullAccess: true, ...rest } };
+    const dshRole = roles?.agents?.find((a) => a.id === 'dsh');
+    const allowDshSubDispatch = roles?.allowSubDispatch !== false && (!dshRole || (dshRole.enabled !== false && dshRole.mode === 'auto'));
+    state = { task, agent, createdAt: now(), status: 'new', threadId: null, pid: null, turns: [], options: { ...configuredDefaults(configDefaults, agent, [], roles), fullAccess: true, allowDshSubDispatch, ...rest } };
     try { state.options.gitRoot = execFileSync('git', ['-C', opts.cd, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { state.options.gitRoot = null; }
     prompt = await readPrompt(brief);
   } else if (cmd === 'resume' || cmd === 'send') {

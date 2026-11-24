@@ -79,10 +79,13 @@ fn graph_for(child: &mut RuntimeChild, profile: &str) -> Result<Value> {
 }
 
 fn assert_hook_argv(actual: &[String], expected: &[&str]) {
-    assert_eq!(&actual[..actual.len() - 3], expected);
-    let [flag, hooks, trust] = &actual[actual.len() - 3..] else {
+    assert_eq!(&actual[..actual.len() - 5], expected);
+    let [dev_flag, dev_instructions, flag, hooks, trust] = &actual[actual.len() - 5..] else {
         unreachable!()
     };
+    assert_eq!(dev_flag, "-c");
+    assert!(dev_instructions.starts_with("developer_instructions="));
+    assert!(dev_instructions.contains("mt identify --json"));
     assert_eq!(flag, "-c");
     assert_eq!(trust, "--dangerously-bypass-hook-trust");
     assert!(hooks.starts_with("hooks={ "));
