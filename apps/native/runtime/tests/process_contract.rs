@@ -5770,3 +5770,97 @@ while IFS= read -r line; do :; done
     ensure!(exit.success(), "{stderr}");
     Ok(())
 }
+
+#[test]
+fn direct_claude_cli_receives_context_window_in_private_settings_and_environment() -> Result<()> {
+    use serde_json::{Value, json};
+
+    let root = tempfile::tempdir()?;
+    let no_shell = root.path().join("no-shell");
+    let mut seed = RuntimeChild::spawn_configured(root.path(), "", &no_shell, None)?;
+    seed.ready()?;
+    seed.send(Command::Shutdown)?;
+    seed.closed()?;
+    assert!(seed.wait()?.0.success());
+    Connection::open(seed.data.join("matou.sqlite"))?.execute(
+        "UPDATE sessions SET kind='claude-code' WHERE id=?",
+        [&seed.session],
+    )?;
+    fs::write(
+        seed.data.join("provider-config.json"),
+        json!({
+            "version": 1,
+            "activeProviderIds": {"claude-code": "source"},
+            "providers": {"claude-code": [{
+                "id": "source", "model": "deepseek-flash", "endpoint": "http://127.0.0.1:1",
+                "apiKey": "fixture-key",
+                "modelMetadata": [{"id": "deepseek-flash", "contextWindow": 1_048_576}]
+            }]}
+        })
+        .to_string(),
+    )?;
+
+    let stub = root.path().join("direct-context-cli");
+    fs::write(
+        &stub,
+        r#"#!/bin/sh
+set -eu
+test "$ANTHROPIC_BASE_URL" = http://127.0.0.1:1
+test "$1" = --settings
+printf '%s\n' "$2" "${CLAUDE_CODE_MAX_CONTEXT_TOKENS-}" \
+    "${CLAUDE_AUTOCOMPACT_PCT_OVERRIDE-}" "${CLAUDE_CODE_DISABLE_1M_CONTEXT-}" > "$0.launch"
+printf 'DIRECT_CONTEXT_READY\n'
+exec /bin/sleep 60
+"#,
+    )?;
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o700))?;
+    let keys = [
+        "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+        "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE",
+        "CLAUDE_CODE_DISABLE_1M_CONTEXT",
+    ];
+    let mut runtime =
+        RuntimeChild::spawn_configured_with(root.path(), "", &no_shell, Some(&stub), |command| {
+            for key in keys {
+                command.env_remove(key);
+            }
+        })?;
+    runtime.connect()?;
+    runtime.frame(|_, screen, _| screen_has_line(screen, "DIRECT_CONTEXT_READY"))?;
+    let recorded = fs::read_to_string(stub.with_extension("launch"))?;
+    let mut lines = recorded.lines();
+    let settings: Value = serde_json::from_slice(&fs::read(
+        lines.next().context("private Claude settings argument")?,
+    )?)?;
+    let process_env: serde_json::Map<String, Value> = keys
+        .into_iter()
+        .zip(lines)
+        .filter(|(_, value)| !value.is_empty())
+        .map(|(key, value)| (key.to_owned(), json!(value)))
+        .collect();
+    let settings_env: serde_json::Map<String, Value> = keys
+        .into_iter()
+        .filter_map(|key| Some((key.to_owned(), settings["env"].get(key)?.clone())))
+        .collect();
+    let window = &settings["autoCompactWindow"];
+    // Capture only the portable settings fields, without per-run hook credentials.
+    println!(
+        "CLI context projection: {}",
+        json!({
+            "processEnv": process_env, "settings": {"autoCompactWindow": window, "env": settings_env}
+        })
+    );
+    runtime.send(Command::Shutdown)?;
+    runtime.closed()?;
+    assert!(runtime.wait()?.0.success());
+
+    assert_eq!(*window, json!(1_048_576));
+    let expected = json!({
+        "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1048576",
+        "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "90",
+        "CLAUDE_CODE_DISABLE_1M_CONTEXT": "0"
+    });
+    assert_eq!(Value::Object(settings_env), expected);
+    assert_eq!(Value::Object(process_env), expected);
+    Ok(())
+}

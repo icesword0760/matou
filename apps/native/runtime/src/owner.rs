@@ -3257,36 +3257,67 @@ impl ShellOwner {
                 Some(SpecialLaunch::CodexFork { key, authority }) => fork = Some((key, authority)),
                 None => {}
             }
-            if let Some((env, model_picker, subscription_settings)) = gateway_settings {
+            let context_window = get_var(&options.launch.env, "CLAUDE_CODE_MAX_CONTEXT_TOKENS")
+                .and_then(|value| value.to_str())
+                .and_then(|value| value.parse::<u64>().ok());
+            if profile == LaunchProfile::ClaudeCode
+                && (gateway_settings.is_some() || context_window.is_some())
+            {
                 let path = &registration.settings_path;
                 let mut settings: Value = serde_json::from_slice(&std::fs::read(path)?)
-                    .map_err(|_| anyhow::anyhow!("Read Claude gateway launch settings"))?;
-                if let Some(subscription) =
-                    subscription_settings.as_ref().and_then(Value::as_object)
-                {
-                    settings
+                    .map_err(|_| anyhow::anyhow!("Read Claude launch settings"))?;
+                if let Some((env, model_picker, subscription_settings)) = gateway_settings {
+                    if let Some(subscription) =
+                        subscription_settings.as_ref().and_then(Value::as_object)
+                    {
+                        settings
+                            .as_object_mut()
+                            .expect("Claude run settings object")
+                            .extend(subscription.clone());
+                    }
+                    if let Some(fable_alias) = env["ANTHROPIC_DEFAULT_FABLE_MODEL"].as_str() {
+                        settings["modelOverrides"] = json!({
+                            "claude-fable-5": fable_alias,
+                            "claude-fable-5-2": fable_alias,
+                            "claude-fable-5-5": fable_alias,
+                        });
+                    }
+                    let settings_env = settings["env"].as_object_mut();
+                    if let (Some(settings_env), Some(env)) = (settings_env, env.as_object()) {
+                        settings_env.extend(env.clone());
+                    } else {
+                        settings["env"] = env;
+                    }
+                    if let Some(model_picker) = model_picker {
+                        settings["modelPicker"] = model_picker;
+                    }
+                }
+                if let Some(window) = context_window {
+                    if settings["autoCompactWindow"].is_null() {
+                        settings["autoCompactWindow"] = json!(window);
+                    }
+                    if !settings["env"].is_object() {
+                        settings["env"] = json!({});
+                    }
+                    let settings_env = settings["env"]
                         .as_object_mut()
-                        .expect("Claude run settings object")
-                        .extend(subscription.clone());
-                }
-                if let Some(fable_alias) = env["ANTHROPIC_DEFAULT_FABLE_MODEL"].as_str() {
-                    settings["modelOverrides"] = json!({
-                        "claude-fable-5": fable_alias,
-                        "claude-fable-5-2": fable_alias,
-                        "claude-fable-5-5": fable_alias,
-                    });
-                }
-                let settings_env = settings["env"].as_object_mut();
-                if let (Some(settings_env), Some(env)) = (settings_env, env.as_object()) {
-                    settings_env.extend(env.clone());
-                } else {
-                    settings["env"] = env;
-                }
-                if let Some(model_picker) = model_picker {
-                    settings["modelPicker"] = model_picker;
+                        .expect("Claude settings env");
+                    for key in [
+                        "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+                        "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE",
+                        "CLAUDE_CODE_DISABLE_1M_CONTEXT",
+                    ] {
+                        if let Some(value) =
+                            get_var(&options.launch.env, key).and_then(|value| value.to_str())
+                        {
+                            settings_env
+                                .entry(key.to_owned())
+                                .or_insert_with(|| json!(value));
+                        }
+                    }
                 }
                 std::fs::write(path, serde_json::to_vec(&settings)?)
-                    .context("Write Claude gateway launch settings")?;
+                    .context("Write Claude launch settings")?;
             }
             if let Some(resume) = &codex_resume {
                 options

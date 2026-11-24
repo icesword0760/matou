@@ -1695,3 +1695,246 @@ fn direct_deepseek_resume_retains_real_context_window() -> Result<()> {
     );
     Ok(())
 }
+
+fn single_provider_preferences(
+    id: &str,
+    mode: Value,
+) -> Result<matou_native_core::sessions::ClaudeRoleLaunchPreferences> {
+    let mut db = Connection::open_in_memory()?;
+    migrate(&mut db, 1)?;
+    db.execute(
+        "INSERT INTO preferences VALUES ('agent.modelPreferences', ?, 1)",
+        [json!({
+            "compaction": {"mode": "follow"},
+            "contextWindows": {id: mode},
+        })
+        .to_string()],
+    )?;
+    Ok(read_claude_role_launch_preferences(&db))
+}
+
+fn assert_single_provider_window(launch: &ShellLaunch, window: u64) {
+    assert_env(
+        launch,
+        "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+        &window.to_string(),
+    );
+    assert_env(launch, "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "90");
+    assert_env(
+        launch,
+        "CLAUDE_CODE_DISABLE_1M_CONTEXT",
+        if window < 1_000_000 { "1" } else { "0" },
+    );
+}
+
+#[test]
+fn single_custom_model_uses_known_default_window_on_each_launch_path() -> Result<()> {
+    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR"))?;
+    let root = root.path();
+    let path = root.join("provider-config.json");
+    let mut provider = config(
+        json!([{
+            "id": "source", "model": "deepseek-flash", "endpoint": "http://127.0.0.1:1",
+            "apiKey": "fixture-key",
+            "modelMetadata": [{"id": "deepseek-flash", "contextWindow": 1_048_576,
+                               "maxContextWindow": 2_000_000}]
+        }]),
+        "source",
+    );
+    fs::write(&path, provider.to_string())?;
+    let environment = BTreeMap::from([(
+        "MATOU_CLAUDE_COMMAND".into(),
+        std::env::current_exe()?.into_os_string(),
+    )]);
+    let binding = json!({"providerConfigId": "source", "model": "deepseek-flash[1M]"});
+    let preferences = single_provider_preferences("source", json!("default"))?;
+    let launch = prepare_new_claude_launch_with_budget(
+        root,
+        root,
+        &Value::Null,
+        (&preferences, &Vec::new),
+        environment.clone(),
+        80,
+        24,
+    )?;
+    assert_single_provider_window(&launch.launch, 1_048_576);
+    assert_single_provider_window(&prepare(root, Value::Null, &[])?, 1_048_576);
+
+    let mut launches = [
+        prepare_claude_launch(
+            root,
+            root,
+            &binding,
+            Some("source-id"),
+            environment.clone(),
+            80,
+            24,
+        )?,
+        prepare_claude_permission_restart(root, root, &binding, true, environment.clone(), 80, 24)?,
+        prepare_claude_fork(
+            root,
+            root,
+            &binding,
+            "source-id",
+            environment.clone(),
+            80,
+            24,
+        )?,
+        prepare_claude_fork_rebuild(
+            root,
+            root,
+            &binding,
+            ("source-id", "child-id"),
+            environment.clone(),
+            80,
+            24,
+        )?,
+    ];
+    for launch in &mut launches {
+        assert_single_provider_window(&launch.launch, 1_048_576);
+        launch.capture_restart_gateway(&preferences, &Vec::new, &environment)?;
+        assert_single_provider_window(&launch.launch, 1_048_576);
+    }
+
+    provider["providers"]["claude-code"][0]["contextWindow"] = json!(700_000);
+    fs::write(&path, provider.to_string())?;
+    assert_single_provider_window(&prepare(root, Value::Null, &[])?, 700_000);
+    let launch = prepare_new_claude_launch_with_budget(
+        root,
+        root,
+        &Value::Null,
+        (
+            &single_provider_preferences("source", json!("maximum"))?,
+            &Vec::new,
+        ),
+        environment,
+        80,
+        24,
+    )?;
+    assert_single_provider_window(&launch.launch, 700_000);
+    Ok(())
+}
+
+#[test]
+fn single_api_window_preferences_apply_to_fresh_and_restored_launches() -> Result<()> {
+    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR"))?;
+    let root = root.path();
+    let path = root.join("provider-config.json");
+    let environment = BTreeMap::from([(
+        "MATOU_CLAUDE_COMMAND".into(),
+        std::env::current_exe()?.into_os_string(),
+    )]);
+    for (mode, mapping, expected) in [
+        ("512k", "role-model", 512_000),
+        ("maximum", "role-model", 1_100_000),
+        ("maximum", "unknown-model", 2_000_000),
+    ] {
+        fs::write(&path, config(json!([{
+            "id": "source", "model": "custom-model", "endpoint": "http://127.0.0.1:1",
+            "apiKey": "fixture-key", "reasoningEffort": "high",
+            "modelMapping": {"sonnet": mapping},
+            "modelMetadata": [
+                {"id": "custom-model", "contextWindow": 1_048_576, "maxContextWindow": 2_000_000},
+                {"id": "role-model", "contextWindow": 1_100_000}
+            ]
+        }]), "source").to_string())?;
+        let preferences = single_provider_preferences("source", json!(mode))?;
+        let fresh = prepare_new_claude_launch_with_budget(
+            root,
+            root,
+            &Value::Null,
+            (&preferences, &Vec::new),
+            environment.clone(),
+            80,
+            24,
+        )?;
+        assert_single_provider_window(&fresh.launch, expected);
+        let mut restored = prepare_claude_launch(
+            root,
+            root,
+            &Value::Null,
+            Some("source-id"),
+            environment.clone(),
+            80,
+            24,
+        )?;
+        restored.capture_restart_gateway(&preferences, &Vec::new, &environment)?;
+        assert_single_provider_window(&restored.launch, expected);
+        assert_eq!(
+            restored.gateway.context("effort gateway")?.context_window,
+            Some(expected)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn single_default_window_leaves_official_and_builtin_models_to_claude() -> Result<()> {
+    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR"))?;
+    let root = root.path();
+    for (id, endpoint, model, catalog_id) in [
+        (
+            "anthropic-official",
+            "https://other.invalid",
+            "custom-model",
+            "custom-model",
+        ),
+        (
+            "source",
+            "https://api.anthropic.com/",
+            "custom-model",
+            "custom-model",
+        ),
+        ("source", "https://other.invalid", "opus", "opus"),
+        (
+            "source",
+            "https://other.invalid",
+            "claude-opus-5-5",
+            "claude-opus-5-5",
+        ),
+        (
+            "source",
+            "https://other.invalid",
+            "ClAuDe-opus-5-5[1M]",
+            "ClAuDe-opus-5-5",
+        ),
+        ("source", "https://other.invalid", "FABLE", "FABLE"),
+        ("source", "https://other.invalid", "default", "default"),
+        ("source", "https://other.invalid", "CLI 默认", "CLI 默认"),
+    ] {
+        fs::write(
+            root.join("provider-config.json"),
+            config(
+                json!([{
+                    "id": id, "model": model, "endpoint": endpoint, "apiKey": "fixture-key",
+                    "modelMetadata": [{"id": catalog_id, "contextWindow": 1_048_576}]
+                }]),
+                id,
+            )
+            .to_string(),
+        )?;
+        let launch = prepare_new_claude_launch_with_budget(
+            root,
+            root,
+            &Value::Null,
+            (
+                &single_provider_preferences(id, json!("default"))?,
+                &Vec::new,
+            ),
+            BTreeMap::from([(
+                "MATOU_CLAUDE_COMMAND".into(),
+                std::env::current_exe()?.into_os_string(),
+            )]),
+            80,
+            24,
+        )?;
+        assert!(
+            !launch
+                .launch
+                .env
+                .contains_key(OsStr::new("CLAUDE_CODE_MAX_CONTEXT_TOKENS")),
+            "{id}/{model}"
+        );
+    }
+    Ok(())
+}
