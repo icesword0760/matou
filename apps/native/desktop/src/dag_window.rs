@@ -10,7 +10,9 @@ use matou_native_desktop::dag_canvas::{
 use matou_native_desktop::windows_titlebar;
 use serde_json::Value;
 
-use super::{Command, Workspace, is_child_window_close_shortcut, shadow};
+use super::{
+    Command, Workspace, card_tooltip_box, is_child_window_close_shortcut, workspace_theme_dark,
+};
 use crate::ui_text::ui_text;
 
 const DAG_FAILURE_TEXT: u32 = 0x9b342f;
@@ -500,6 +502,21 @@ mod viewport_tests {
     use serde_json::json;
 
     #[::core::prelude::v1::test]
+    fn dag_window_tooltip_uses_light_and_dark_surfaces() {
+        let tooltip = DagTooltip("Close session DAG".into());
+        for (dark, background, border, text) in [
+            (false, 0xfffffffa, 0xd0d7de, 0x57606a),
+            (true, 0x1c2128ff, 0x30363d, 0xc9d1d9),
+        ] {
+            let mut element = tooltip.element(dark);
+            let style = element.style();
+            assert_eq!(style.background, Some(rgba(background).into()));
+            assert_eq!(style.border_color, Some(rgb(border).into()));
+            assert_eq!(style.text.as_ref().unwrap().color, Some(rgb(text).into()));
+        }
+    }
+
+    #[::core::prelude::v1::test]
     fn scene_viewport_loads_and_coalesces_writeback_with_read_only_guard() -> anyhow::Result<()> {
         let graph = json!({"sceneId": "scene", "nodes": [], "edges": [], "layoutRevision": 5});
         let layout = DagLayout::new(DagGraph::from_snapshot(&graph)?)?;
@@ -707,21 +724,21 @@ fn failure_button(id: &'static str) -> Stateful<Div> {
 
 struct DagTooltip(SharedString);
 
-impl Render for DagTooltip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
+impl DagTooltip {
+    fn element(&self, dark: bool) -> Div {
+        card_tooltip_box(dark)
             .max_w(px(320.))
-            .px(px(9.))
-            .py(px(7.))
-            .border_1()
-            .border_color(rgb(0xd6dae1))
-            .rounded(px(7.))
-            .bg(rgb(0xffffff))
-            .text_color(rgb(0x333b47))
-            .text_size(px(10.))
-            .line_height(px(15.))
             .whitespace_normal()
-            .shadow(vec![shadow(0x1f2837, 0.16, 8., 24.)])
             .child(ui_text(self.0.clone()))
+    }
+}
+
+impl Render for DagTooltip {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let dark = window
+            .root::<DagWindow>()
+            .flatten()
+            .map_or_else(|| workspace_theme_dark(cx), |dag| dag.read(cx).dark);
+        self.element(dark)
     }
 }
