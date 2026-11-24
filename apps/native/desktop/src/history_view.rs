@@ -96,6 +96,85 @@ const OFFLINE_LOADING: &str = "正在读取历史记录…";
 const OFFLINE_OLDER: &str = "加载更早记录";
 const OFFLINE_LATEST: &str = "返回最新记录";
 
+#[derive(Clone, Copy, PartialEq)]
+struct HistoryColors {
+    base: Rgba,
+    text: Rgba,
+    chrome: Rgba,
+    chrome_border: Rgba,
+    title: Rgba,
+    badge_text: Rgba,
+    badge_background: Rgba,
+    muted: Rgba,
+    error: Rgba,
+    line_number: Rgba,
+    boundary: Rgba,
+    selection: Rgba,
+    #[cfg(target_os = "macos")]
+    use_aqua_selection: bool,
+    current_line_background: Rgba,
+    current_line_text: Rgba,
+    current_line_marker: Rgba,
+    button_text: Rgba,
+    button_border: Rgba,
+    button_background: Rgba,
+    button_hover: Rgba,
+    button_focus: Rgba,
+}
+
+impl HistoryColors {
+    fn for_theme(dark: bool) -> Self {
+        // History chrome and line colors follow .terminal-history-context in terminal.css.
+        let light = Self {
+            base: rgb(0xf7f8fb),
+            text: rgb(0x303848),
+            chrome: rgb(0xeef1f6),
+            chrome_border: rgba(0x3038481f),
+            title: rgb(0x202735),
+            badge_text: rgb(0xc98a39),
+            badge_background: rgba(0xc98a3921),
+            muted: rgb(0x8d95a7),
+            error: rgb(0xa12525),
+            line_number: rgb(0x626b7c),
+            boundary: rgb(0x727b8e),
+            selection: rgb(0xb5d5ff),
+            #[cfg(target_os = "macos")]
+            use_aqua_selection: true,
+            current_line_background: rgba(0xd392362b),
+            current_line_text: rgb(0x4f3814),
+            current_line_marker: rgb(0xd39236),
+            button_text: rgb(0x303848),
+            button_border: rgba(0x30384829),
+            button_background: rgba(0x3038480d),
+            button_hover: rgba(0x30384817),
+            button_focus: rgb(0x548cff),
+        };
+        if dark {
+            Self {
+                base: rgb(0x11141a),
+                text: rgb(0xd7dbe5),
+                chrome: rgb(0x171b23),
+                chrome_border: rgba(0xffffff1a),
+                title: rgb(0xf1f3f8),
+                error: rgb(0xf47067),
+                // The history CSS has no selection override. Use the dark terminal theme.
+                selection: rgb(0x264f78),
+                #[cfg(target_os = "macos")]
+                use_aqua_selection: false,
+                current_line_background: rgba(0xd392362e),
+                current_line_text: rgb(0xfff2cf),
+                button_text: rgb(0xd7dbe5),
+                button_border: rgba(0xffffff24),
+                button_background: rgba(0xffffff0f),
+                button_hover: rgba(0xffffff1a),
+                ..light
+            }
+        } else {
+            light
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum PageAction {
     Older(HistoryPageCursor),
@@ -129,6 +208,7 @@ pub struct HistoryView {
     center_on_anchor: bool,
     font_family: SharedString,
     locale: InterfaceLocale,
+    colors: HistoryColors,
 }
 
 impl EventEmitter<HistoryViewEvent> for HistoryView {}
@@ -168,6 +248,15 @@ impl HistoryView {
             center_on_anchor: false,
             font_family: font_family.into(),
             locale: InterfaceLocale::Chinese,
+            colors: HistoryColors::for_theme(false),
+        }
+    }
+
+    pub(crate) fn set_dark(&mut self, dark: bool, cx: &mut Context<Self>) {
+        let colors = HistoryColors::for_theme(dark);
+        if self.colors != colors {
+            self.colors = colors;
+            cx.notify();
         }
     }
 
@@ -857,6 +946,7 @@ impl HistoryView {
         }
         let focus = self.focus.clone();
         let return_bounds = self.return_bounds.clone();
+        let colors = self.colors;
         let return_button = div()
             .id("history-return-to-live")
             .relative()
@@ -864,10 +954,11 @@ impl HistoryView {
             .px(px(9.))
             .py(px(4.))
             .border_1()
-            .border_color(rgba(0x30384829))
+            .border_color(colors.button_border)
             .rounded(px(6.))
-            .bg(rgba(0x3038480d))
-            .hover(|style| style.bg(rgba(0x30384817)))
+            .text_color(colors.button_text)
+            .bg(colors.button_background)
+            .hover(|style| style.bg(colors.button_hover))
             .cursor_pointer()
             .whitespace_nowrap()
             .track_focus(&self.focus)
@@ -892,9 +983,13 @@ impl HistoryView {
                     move |bounds, _, window, _| {
                         if focus.is_focused(window) {
                             window.paint_quad(
-                                outline(bounds.dilate(px(3.)), rgb(0x548cff), BorderStyle::default())
-                                    .corner_radii(px(9.))
-                                    .border_widths(px(2.)),
+                                outline(
+                                    bounds.dilate(px(3.)),
+                                    colors.button_focus,
+                                    BorderStyle::default(),
+                                )
+                                .corner_radii(px(9.))
+                                .border_widths(px(2.)),
                             );
                         }
                     },
@@ -913,8 +1008,8 @@ impl HistoryView {
             .px(px(12.))
             .py(px(9.))
             .border_b_1()
-            .border_color(rgba(0x3038481f))
-            .bg(rgb(0xeef1f6))
+            .border_color(colors.chrome_border)
+            .bg(colors.chrome)
             .child(
                 div()
                     .flex()
@@ -925,7 +1020,7 @@ impl HistoryView {
                     .child(
                         div()
                             .relative()
-                            .text_color(rgb(0x202735))
+                            .text_color(colors.title)
                             .font_weight(FontWeight::BOLD)
                             .children(self.selectable_text(0, selection_background)),
                     )
@@ -935,8 +1030,8 @@ impl HistoryView {
                             .px(px(6.))
                             .py(px(1.))
                             .rounded(px(4.))
-                            .text_color(rgb(0xc98a39))
-                            .bg(rgba(0xc98a3921))
+                            .text_color(colors.badge_text)
+                            .bg(colors.badge_background)
                             .children(self.selectable_text(1, selection_background)),
                     )
                     .child(
@@ -957,6 +1052,7 @@ impl HistoryView {
         selection_background: Rgba,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
+        let colors = self.colors;
         let older_cursor = page.and_then(offline_older_cursor);
         let older = self.pagination_button(
             "history-offline-older",
@@ -1001,8 +1097,8 @@ impl HistoryView {
             .px(px(12.))
             .py(px(9.))
             .border_b_1()
-            .border_color(rgba(0x3038481f))
-            .bg(rgb(0xeef1f6))
+            .border_color(colors.chrome_border)
+            .bg(colors.chrome)
             .child(
                 div()
                     .flex()
@@ -1015,7 +1111,7 @@ impl HistoryView {
                             .id("history-offline-title")
                             .debug_selector(|| "history-offline-title".to_owned())
                             .relative()
-                            .text_color(rgb(0x202735))
+                            .text_color(colors.title)
                             .font_weight(FontWeight::BOLD)
                             .children(self.selectable_text(0, selection_background)),
                     )
@@ -1027,8 +1123,8 @@ impl HistoryView {
                             .px(px(6.))
                             .py(px(1.))
                             .rounded(px(4.))
-                            .text_color(rgb(0xc98a39))
-                            .bg(rgba(0xc98a3921))
+                            .text_color(colors.badge_text)
+                            .bg(colors.badge_background)
                             .children(self.selectable_text(1, selection_background)),
                     ),
             )
@@ -1047,6 +1143,7 @@ impl HistoryView {
         selection_background: Rgba,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
+        let colors = self.colors;
         let button = div()
             .id(id)
             .debug_selector(move || selector.to_owned())
@@ -1055,9 +1152,10 @@ impl HistoryView {
             .px(px(9.))
             .py(px(4.))
             .border_1()
-            .border_color(rgba(0x30384829))
+            .border_color(colors.button_border)
             .rounded(px(6.))
-            .bg(rgba(0x3038480d))
+            .text_color(colors.button_text)
+            .bg(colors.button_background)
             .whitespace_nowrap()
             .children(self.selectable_text(label_index, selection_background));
         if !enabled {
@@ -1074,7 +1172,7 @@ impl HistoryView {
         let mouse_focus = focus.clone();
         let key_focus = focus.clone();
         button
-            .hover(|style| style.bg(rgba(0x30384817)))
+            .hover(|style| style.bg(colors.button_hover))
             .cursor_pointer()
             .track_focus(&focus)
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
@@ -1105,7 +1203,7 @@ impl HistoryView {
                             window.paint_quad(
                                 outline(
                                     bounds.dilate(px(3.)),
-                                    rgb(0x548cff),
+                                    colors.button_focus,
                                     BorderStyle::default(),
                                 )
                                 .corner_radii(px(9.))
@@ -1144,15 +1242,17 @@ impl HistoryView {
                 .pr(px(12.))
                 .whitespace_nowrap()
                 .when(current, |row| {
-                    row.bg(rgba(0xd392362b)).text_color(rgb(0x4f3814)).child(
-                        div()
-                            .absolute()
-                            .top_0()
-                            .bottom_0()
-                            .left_0()
-                            .w(px(3.))
-                            .bg(rgb(0xd39236)),
-                    )
+                    row.bg(self.colors.current_line_background)
+                        .text_color(self.colors.current_line_text)
+                        .child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .bottom_0()
+                                .left_0()
+                                .w(px(3.))
+                                .bg(self.colors.current_line_marker),
+                        )
                 })
                 .child(
                     div()
@@ -1161,7 +1261,7 @@ impl HistoryView {
                         .w(px(56.))
                         .justify_end()
                         .pr(px(12.))
-                        .text_color(rgb(0x626b7c))
+                        .text_color(self.colors.line_number)
                         .child((index + 1).to_string()),
                 )
                 .child(track_bounds(self.entries[entry].bounds.clone()))
@@ -1231,7 +1331,7 @@ impl HistoryView {
             .pl(px(56.))
             .pr(px(12.))
             .py(px(4.))
-            .text_color(rgb(0x727b8e))
+            .text_color(self.colors.boundary)
             .italic()
             .whitespace_nowrap()
             .child(track_bounds(self.entries[index].bounds.clone()))
@@ -1255,7 +1355,11 @@ impl HistoryView {
             .items_center()
             .justify_center()
             .px(px(24.))
-            .text_color(if error { rgb(0xa12525) } else { rgb(0x8d95a7) })
+            .text_color(if error {
+                self.colors.error
+            } else {
+                self.colors.muted
+            })
             .whitespace_normal()
             .child(track_bounds(self.entries[entry].bounds.clone()))
             .child(
@@ -1298,7 +1402,7 @@ impl HistoryView {
                     .flex_1()
                     .min_w_0()
                     .whitespace_normal()
-                    .text_color(rgb(0xa12525))
+                    .text_color(self.colors.error)
                     .children(self.selectable_text(error_index, selection_background))
                     .into_any_element(),
             );
@@ -1314,9 +1418,9 @@ impl HistoryView {
                 .px(px(12.))
                 .py(px(9.))
                 .border_t_1()
-                .border_color(rgba(0x3038481f))
-                .bg(rgb(0xeef1f6))
-                .text_color(rgb(0x8d95a7))
+                .border_color(self.colors.chrome_border)
+                .bg(self.colors.chrome)
+                .text_color(self.colors.muted)
                 .whitespace_nowrap()
                 .children(children),
         )
@@ -1412,8 +1516,31 @@ fn history_drag_offset(
 
 #[cfg(test)]
 mod tests {
-    use super::history_drag_offset;
-    use gpui::{Bounds, point, px, size};
+    use super::{HistoryColors, history_drag_offset};
+    use gpui::{Bounds, point, px, rgb, rgba, size};
+
+    #[test]
+    fn history_colors_follow_app_theme() {
+        let light = HistoryColors::for_theme(false);
+        assert_eq!(light.base, rgb(0xf7f8fb));
+        assert_eq!(light.chrome, rgb(0xeef1f6));
+        assert_eq!(light.text, rgb(0x303848));
+        assert_eq!(light.muted, rgb(0x8d95a7));
+        assert_eq!(light.error, rgb(0xa12525));
+        assert_eq!(light.selection, rgb(0xb5d5ff));
+        assert_eq!(light.current_line_background, rgba(0xd392362b));
+        assert_eq!(light.current_line_text, rgb(0x4f3814));
+
+        let dark = HistoryColors::for_theme(true);
+        assert_eq!(dark.base, rgb(0x11141a));
+        assert_eq!(dark.chrome, rgb(0x171b23));
+        assert_eq!(dark.text, rgb(0xd7dbe5));
+        assert_eq!(dark.muted, rgb(0x8d95a7));
+        assert_eq!(dark.error, rgb(0xf47067));
+        assert_eq!(dark.selection, rgb(0x264f78));
+        assert_eq!(dark.current_line_background, rgba(0xd392362e));
+        assert_eq!(dark.current_line_text, rgb(0xfff2cf));
+    }
 
     #[test]
     fn history_drag_scroll_matches_frozen_chromium() {
@@ -1700,8 +1827,8 @@ impl Render for HistoryView {
             .text_size(px(11.))
             .line_height(relative(1.55))
             .font_family(self.font_family.clone())
-            .text_color(rgb(0x303848))
-            .bg(rgb(0xf7f8fb))
+            .text_color(self.colors.text)
+            .bg(self.colors.base)
             .track_focus(&self.text_focus)
             .on_mouse_down(MouseButton::Left, cx.listener(Self::begin_selection))
             .on_key_down(cx.listener(Self::copy))
@@ -1748,9 +1875,9 @@ impl Render for HistoryView {
         if self.state.is_none() {
             return view;
         }
-        let selection_background = rgb(0xb5d5ff);
+        let selection_background = self.colors.selection;
         #[cfg(target_os = "macos")]
-        let selection_background = if self.selection.is_some() {
+        let selection_background = if self.colors.use_aqua_selection && self.selection.is_some() {
             crate::macos::history_selection_background(window.is_window_active()).unwrap_or_else(
                 |error| {
                     eprintln!("Read history selection background: {error:#}");
@@ -1795,7 +1922,7 @@ impl Render for HistoryView {
                     .flex_1()
                     .items_center()
                     .justify_center()
-                    .text_color(rgb(0x8d95a7))
+                    .text_color(self.colors.muted)
                     .child(track_bounds(
                         self.entries[self.body_entries.start].bounds.clone(),
                     ))
@@ -1826,9 +1953,9 @@ impl Render for HistoryView {
                     .px(px(12.))
                     .py(px(9.))
                     .border_t_1()
-                    .border_color(rgba(0x3038481f))
-                    .bg(rgb(0xeef1f6))
-                    .text_color(rgb(0x8d95a7))
+                    .border_color(self.colors.chrome_border)
+                    .bg(self.colors.chrome)
+                    .text_color(self.colors.muted)
                     .whitespace_nowrap()
                     .children((self.body_entries.end..self.entries.len()).map(|index| {
                         div()
