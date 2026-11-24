@@ -101,6 +101,9 @@ impl RuntimeChild {
         command
             .env_remove("MATOU_CONTROL_ASSET_ROOT")
             .env_remove("MATOU_LOCALE")
+            .env_remove("CLAUDE_CODE_MAX_CONTEXT_TOKENS")
+            .env_remove("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE")
+            .env_remove("CLAUDE_CODE_DISABLE_1M_CONTEXT")
             .env("MATOU_DISABLE_LIVE_EGRESS", "1")
             .arg("--data-root")
             .arg(&data)
