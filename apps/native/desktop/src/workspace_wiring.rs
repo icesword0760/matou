@@ -688,14 +688,18 @@ impl Workspace {
 
     fn wiring_available(&self) -> bool {
         self.settings.is_none()
-            && self.dialog.is_none()
+            && self.wiring_unblocked()
+            && (self.hierarchy.is_some() || self.read_only.is_some())
+    }
+
+    fn wiring_unblocked(&self) -> bool {
+        self.dialog.is_none()
             && self
                 .project_instructions
                 .values()
                 .all(|state| state.preview.is_none())
             && self.database_recovery.is_none()
             && !self.invalid_recovery_marker
-            && (self.hierarchy.is_some() || self.read_only.is_some())
     }
 
     fn hud_wiring_available(&self, window: &Window) -> bool {
@@ -1002,7 +1006,8 @@ impl Workspace {
     }
 
     pub(super) fn toggle_board(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.wiring_available()
+        if self.read_only.is_some()
+            || !self.wiring_unblocked()
             || self
                 .hierarchy
                 .as_ref()
@@ -1011,19 +1016,32 @@ impl Workspace {
         {
             return;
         }
+        if !self.close_settings_for_navigation(window, cx) {
+            return;
+        }
         self.dismiss_wiring_overlay(window, cx);
         self.stop_edge_browse(false);
-        self.wiring.board_open = !self.wiring.board_open;
-        if self.wiring.board_open
-            && self
-                .terminals
-                .values()
-                .any(|terminal| terminal.read(cx).focus.is_focused(window))
-        {
+        if self.wiring.board_open {
+            self.close_board_to_canvas(true, window, cx);
+        } else {
+            self.wiring.board_open = true;
             window.focus(&self.control_focus["sidebar-board"]);
+            cx.notify();
         }
-        if !self.wiring.board_open {
-            self.restore_geometry = true;
+    }
+
+    pub(super) fn close_board_to_canvas(
+        &mut self,
+        focus_terminal: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !std::mem::take(&mut self.wiring.board_open) {
+            return;
+        }
+        self.restore_geometry = true;
+        if focus_terminal && let Some(focus) = self.active_terminal_focus(cx) {
+            window.focus(&focus);
         }
         cx.notify();
     }

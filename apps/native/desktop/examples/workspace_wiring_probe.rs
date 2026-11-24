@@ -613,6 +613,194 @@ mod workspace {
         );
     }
 
+    fn verify_sidebar_return(cx: &mut AsyncApp) {
+        let (window, sink) = open_probe_at(cx, 1260.);
+        let click_toolbar = |cx: &mut AsyncApp, board: bool| {
+            let board_center = draw(window.into(), cx)["sidebar-board"].center();
+            let position = if board {
+                board_center
+            } else {
+                point(px(NOTIFICATION_UI_SIDEBAR_WIDTH - 32.), board_center.y)
+            };
+            click(window.into(), cx, MouseButton::Left, position);
+        };
+        let open_editor = |cx: &mut AsyncApp| {
+            window
+                .update(cx, |view, window, cx| {
+                    view.settings.as_ref().unwrap().0.update(cx, |shell, cx| {
+                        shell.probe_open_provider_value(
+                            json!({
+                                "id": "api", "name": "Fixture provider", "cli": "claude-code",
+                                "kind": "api", "endpoint": "https://provider.example.test",
+                            }),
+                            window,
+                            cx,
+                        );
+                        assert!(shell.diagnostics_dialog().is_some());
+                    });
+                })
+                .unwrap();
+        };
+        let assert_view = |cx: &mut AsyncApp, settings, board, case: &str| {
+            window
+                .update(cx, |view, _, _| {
+                    assert_eq!(view.settings.is_some(), settings, "{case}: settings");
+                    assert_eq!(view.wiring.board_open, board, "{case}: board");
+                })
+                .unwrap();
+        };
+
+        for (board, editor) in [(true, false), (false, false), (false, true)] {
+            for key in [None, Some("enter"), Some("space")] {
+                let case = format!("task activation: board={board}, editor={editor}, key={key:?}");
+                click_toolbar(cx, board);
+                assert_view(cx, !board, board, "open starting view");
+                if editor {
+                    open_editor(cx);
+                    click_toolbar(cx, false);
+                    assert_view(cx, true, false, "settings toggle with editor open");
+                }
+                draw(window.into(), cx);
+                let task = window
+                    .update(cx, |view, window, _| {
+                        if key.is_some() {
+                            window.focus(&view.task_controls["task"][0]);
+                        }
+                        let bounds = view.task_bounds["task"];
+                        point(bounds.left() + px(24.), bounds.center().y)
+                    })
+                    .unwrap();
+                while sink.try_recv().is_ok() {}
+                if let Some(key) = key {
+                    press(window, cx, key);
+                } else {
+                    click(window.into(), cx, MouseButton::Left, task);
+                }
+                assert_view(cx, false, false, &case);
+                if board {
+                    window
+                        .update(cx, |view, _, _| assert!(view.restore_geometry))
+                        .unwrap();
+                }
+                let commands: Vec<_> = std::iter::from_fn(|| sink.try_recv().ok()).collect();
+                assert_eq!(
+                    commands
+                        .iter()
+                        .filter(|command| matches!(command,
+                            Command::SelectTask { task_id } if task_id == "task"
+                        ))
+                        .count(),
+                    1,
+                    "{case}: SelectTask"
+                );
+                if !board {
+                    assert!(
+                        commands.iter().any(|command| matches!(
+                            command,
+                            Command::CloseSubscriptionSettings { .. }
+                        )),
+                        "{case}: settings subscription released"
+                    );
+                }
+                assert_terminal_input(window, &sink, cx, A);
+            }
+        }
+
+        for editor in [false, true] {
+            click_toolbar(cx, false);
+            if editor {
+                open_editor(cx);
+            }
+            click_toolbar(cx, true);
+            assert_view(cx, false, true, "settings to board");
+            window
+                .update(cx, |view, window, _| {
+                    assert!(view.control_focus["sidebar-board"].is_focused(window));
+                })
+                .unwrap();
+            click_toolbar(cx, false);
+            assert_view(cx, true, false, "board to settings");
+            click_toolbar(cx, false);
+            assert_view(cx, false, false, "close settings after board");
+            assert_terminal_input(window, &sink, cx, A);
+        }
+
+        for board in [false, true] {
+            click_toolbar(cx, board);
+            assert_view(cx, !board, board, "open notification starting view");
+            window
+                .update(cx, |view, _, _| {
+                    view.notifications.push(
+                        &json!({
+                            "eventId": "sidebar-return", "workspaceId": "workspace",
+                            "taskId": "task", "sceneId": "main", "sessionId": B,
+                            "title": "Fixture notification", "body": "Second shell is ready",
+                            "sound": false,
+                        }),
+                        Some(A),
+                        1,
+                    );
+                })
+                .unwrap();
+            let bell = point(
+                px(NOTIFICATION_UI_BELL_LEFT + NOTIFICATION_UI_BELL_SIZE / 2.),
+                px(NOTIFICATION_UI_BELL_TOP + NOTIFICATION_UI_BELL_SIZE / 2.),
+            );
+            draw(window.into(), cx);
+            click(window.into(), cx, MouseButton::Left, bell);
+            draw(window.into(), cx);
+            window
+                .update(cx, |view, _, _| {
+                    assert!(view.notification_open);
+                    assert_eq!(view.notifications.entries.len(), 1);
+                })
+                .unwrap();
+            while sink.try_recv().is_ok() {}
+            click(
+                window.into(),
+                cx,
+                MouseButton::Left,
+                point(px(90.), px(115.)),
+            );
+            assert_view(cx, false, false, "notification to canvas");
+            assert!(std::iter::from_fn(|| sink.try_recv().ok()).any(|command| matches!(
+                command,
+                Command::FocusSession { scene_id, session_id } if scene_id == "main" && session_id == B
+            )));
+            window
+                .update(cx, |view, window, cx| {
+                    let mut hierarchy = view.hierarchy.clone().unwrap();
+                    hierarchy.session.as_mut().unwrap().id = B.into();
+                    let scenes = view.scenes.clone();
+                    view.apply(
+                        BridgeEvent::Runtime {
+                            generation: 1,
+                            event: Event::Navigation {
+                                hierarchy,
+                                scenes,
+                                graph: graph(),
+                                geometry: vec![],
+                            },
+                        },
+                        window,
+                        cx,
+                    );
+                    assert_eq!(view.focused.as_deref(), Some(B));
+                    assert!(!view.notification_open);
+                    assert!(view.notifications.entries[0].read);
+                    view.clear_notifications(cx);
+                    install_fixture(view, window, cx);
+                })
+                .unwrap();
+        }
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        println!(
+            "sidebar return: task click, Enter and Space; settings editor and subscription cleanup, board/settings toggles, notification jumps and terminal focus"
+        );
+    }
+
     async fn verify(cx: &mut AsyncApp, fixture_root: &std::path::Path) {
         let (window, sink) = open_probe_at(cx, 1260.);
         draw(window.into(), cx);
@@ -3384,6 +3572,7 @@ mod workspace {
         let fixture_root = live_wiring::prepare();
         Application::new().with_assets(NativeAssets).run(move |cx| {
             cx.spawn(async move |cx| {
+                verify_sidebar_return(cx);
                 verify(cx, &fixture_root).await;
                 verify_card_headers(cx);
                 verify_footer_hud(cx, &fixture_root).await;

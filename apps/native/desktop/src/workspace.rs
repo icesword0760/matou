@@ -2977,6 +2977,7 @@ impl Workspace {
         self.hidden_tabs = None;
         self.dismiss_wiring_overlay(window, cx);
         self.permission_menu = None;
+        self.close_board_to_canvas(false, window, cx);
         let commands = self.commands.clone();
         let diagnostics_cwd = self
             .focused
@@ -3220,6 +3221,42 @@ impl Workspace {
         cx.notify();
     }
 
+    fn close_settings_for_navigation(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self
+            .settings
+            .as_ref()
+            .is_some_and(|(settings, _)| settings.read(cx).is_switching())
+        {
+            return false;
+        }
+        self.close_settings(window, cx);
+        true
+    }
+
+    fn select_sidebar_task(
+        &mut self,
+        task_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_notifications(cx);
+        self.workspace_menu = None;
+        self.task_menu = None;
+        self.tab_menu = None;
+        self.hidden_tabs = None;
+        self.permission_menu = None;
+        self.dismiss_wiring_overlay(window, cx);
+        // Task selection remains available while a provider switch keeps Settings open.
+        let _ = self.close_settings_for_navigation(window, cx);
+        self.close_board_to_canvas(true, window, cx);
+        self.send(Command::SelectTask { task_id }, cx);
+        cx.notify();
+    }
+
     fn close_notifications(&mut self, cx: &mut Context<Self>) {
         if std::mem::take(&mut self.notification_open) {
             cx.notify();
@@ -3336,7 +3373,7 @@ impl Workspace {
         Some((scene_id, session_id))
     }
 
-    fn open_notification(&mut self, id: u64, _window: &mut Window, cx: &mut Context<Self>) {
+    fn open_notification(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         let Some((scene_id, session_id)) = self
             .notifications
             .entries
@@ -3347,8 +3384,11 @@ impl Workspace {
         else {
             return;
         };
-        // FocusSession activates the target's scene, task and workspace in one
-        // runtime transaction. A removed target leaves the current view intact.
+        if !self.close_settings_for_navigation(window, cx) {
+            return;
+        }
+        self.close_board_to_canvas(false, window, cx);
+        // FocusSession activates the target's scene, task and workspace in one runtime transaction.
         self.send(
             Command::FocusSession {
                 scene_id,
@@ -6927,7 +6967,7 @@ impl Workspace {
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgba(sidebar_palette.toolbar_text))
                     .child(
-                        self.button(
+                        self.mutation_button(
                             div()
                                 .id("sidebar-board")
                                 .relative()
@@ -7012,29 +7052,19 @@ impl Workspace {
                 let focus = focus[0].clone();
                 move |_, window, _| window.focus(&focus)
             })
-            .on_click(cx.listener(move |this, event, _, cx| {
+            .on_click(cx.listener(move |this, event, window, cx| {
                 if !matches!(event, ClickEvent::Keyboard(_)) && !this.workspace_drag_gesture {
-                    this.send(
-                        Command::SelectTask {
-                            task_id: id.clone(),
-                        },
-                        cx,
-                    );
+                    this.select_sidebar_task(id.clone(), window, cx);
                 }
             }))
             .on_key_down(cx.listener({
                 let id = task.id.clone();
-                move |this, e: &KeyDownEvent, _, cx| {
+                move |this, e: &KeyDownEvent, window, cx| {
                     if matches!(e.keystroke.key.as_str(), "enter" | "space")
                         && !e.keystroke.modifiers.modified()
                     {
                         cx.stop_propagation();
-                        this.send(
-                            Command::SelectTask {
-                                task_id: id.clone(),
-                            },
-                            cx,
-                        );
+                        this.select_sidebar_task(id.clone(), window, cx);
                     }
                 }
             }))
