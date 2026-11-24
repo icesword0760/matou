@@ -163,11 +163,26 @@ fn page_scroll_lines(key: &str, shift: bool, rows: usize) -> Option<f64> {
 }
 
 fn wheel_scroll_pixels(delta: gpui::ScrollDelta, alt: bool) -> f64 {
-    let delta = match delta {
+    (match delta {
         gpui::ScrollDelta::Pixels(delta) => f64::from(f32::from(delta.y)) * (50. / 40.),
         gpui::ScrollDelta::Lines(delta) => f64::from(delta.y) * 50.,
-    } * if alt { 5. } else { 1. };
-    delta.signum() * delta.abs().ceil()
+    }) * if alt { 5. } else { 1. }
+}
+
+fn accumulate_wheel_pixels(remainder: &mut f64, delta: f64) -> f64 {
+    if delta != 0. && remainder.signum() != delta.signum() {
+        *remainder = 0.;
+    }
+    let total = *remainder + delta;
+    let whole_pixels = total.trunc();
+    let nearest_pixel = total.round();
+    // GPUI supplies f32 deltas, so a whole pixel can land just below the threshold.
+    if nearest_pixel != whole_pixels && (total - nearest_pixel).abs() <= f64::from(f32::EPSILON) {
+        *remainder = 0.;
+        return nearest_pixel;
+    }
+    *remainder = total - whole_pixels;
+    whole_pixels
 }
 
 #[cfg(test)]
@@ -181,10 +196,48 @@ mod scroll_tests {
         assert_eq!(wheel_scroll_pixels(notched, false), -50.);
         assert_eq!(wheel_scroll_pixels(notched, true), -250.);
         assert_eq!(wheel_scroll_pixels(precise, false), -5.);
+        assert_eq!(wheel_scroll_pixels(precise, true), -25.);
         assert_eq!(
             wheel_scroll_pixels(gpui::ScrollDelta::Pixels(point(px(0.), px(1.))), false),
-            2.
+            1.25
         );
+    }
+
+    #[test]
+    fn wheel_accumulates_small_precise_events_before_scrolling() {
+        for (raw, expected) in [(-0.4, -5.), (-0.32, -4.)] {
+            let delta =
+                wheel_scroll_pixels(gpui::ScrollDelta::Pixels(point(px(0.), px(raw))), false);
+            let mut remainder = 0.;
+            assert_eq!(accumulate_wheel_pixels(&mut remainder, delta), 0.);
+            let pixels: f64 = (1..10)
+                .map(|_| accumulate_wheel_pixels(&mut remainder, delta))
+                .sum();
+            assert_eq!(pixels, expected);
+        }
+    }
+
+    #[test]
+    fn wheel_reversal_discards_the_previous_direction_remainder() {
+        for direction in [-1., 1.] {
+            let mut remainder = 0.;
+            assert_eq!(
+                accumulate_wheel_pixels(&mut remainder, direction * 0.75),
+                0.
+            );
+            assert_eq!(accumulate_wheel_pixels(&mut remainder, 0.), 0.);
+            assert_eq!(remainder, direction * 0.75);
+            assert_eq!(
+                accumulate_wheel_pixels(&mut remainder, direction * -0.5),
+                0.
+            );
+            assert_eq!(remainder, direction * -0.5);
+            assert_eq!(
+                accumulate_wheel_pixels(&mut remainder, direction * -0.5),
+                -direction
+            );
+            assert_eq!(remainder, 0.);
+        }
     }
 
     #[test]
@@ -330,6 +383,7 @@ pub struct TerminalSurface {
     caret: Option<Bounds<Pixels>>,
     mouse_reporter: MouseReporter,
     mouse_wheel: MouseWheel,
+    wheel_accum: f64,
     mouse_buttons: u8,
     blink: Option<Task<()>>,
     blink_visible: bool,
@@ -376,6 +430,7 @@ impl TerminalSurface {
         self.selection_drag = None;
         self.mouse_reporter = MouseReporter::default();
         self.mouse_wheel = MouseWheel::default();
+        self.wheel_accum = 0.;
         self.mouse_buttons = 0;
         self.reset_blink();
         self.scrollbar_position = None;
@@ -490,6 +545,7 @@ impl TerminalSurface {
             caret: None,
             mouse_reporter: MouseReporter::default(),
             mouse_wheel: MouseWheel::default(),
+            wheel_accum: 0.,
             mouse_buttons: 0,
             blink: None,
             blink_visible: true,
@@ -549,6 +605,7 @@ impl TerminalSurface {
             self.scrollbar_position = None;
             self.mouse_reporter = MouseReporter::default();
             self.mouse_wheel = MouseWheel::default();
+            self.wheel_accum = 0.;
             self.mouse_buttons = 0;
         }
         if self.modes.mouse_protocol != modes.mouse_protocol {
@@ -1369,9 +1426,21 @@ impl TerminalSurface {
         if event.modifiers.control || event.modifiers.platform {
             return;
         }
-        let movement = wheel_scroll_pixels(event.delta, event.modifiers.alt);
-        if movement != 0. && self.move_scrollbar(-movement, cx) {
+        let delta = wheel_scroll_pixels(event.delta, event.modifiers.alt);
+        if delta == 0. {
+            return;
+        }
+        let movement = accumulate_wheel_pixels(&mut self.wheel_accum, delta);
+        let handled = if movement == 0. {
+            // A wheel event handled during drag capture must not accumulate again on bubble.
+            self.scrollbar_metrics().is_some()
+        } else {
+            self.move_scrollbar(-movement, cx)
+        };
+        if handled {
             cx.stop_propagation();
+        } else {
+            self.wheel_accum = 0.;
         }
     }
 
