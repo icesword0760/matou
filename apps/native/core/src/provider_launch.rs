@@ -973,6 +973,30 @@ impl ClaudeLaunch {
             } else {
                 gateway_projection(&config, &source, Some(&preferences.assignments), role)
             };
+        if !independent
+            && !role_snapshot
+            && self.assigned_role.is_none()
+            && !source.is_subscription()
+        {
+            let key = "CLAUDE_CODE_MAX_CONTEXT_TOKENS";
+            let current = get_var(&self.launch.env, key);
+            // Restart preferences become available after the initial plan has
+            // already projected the catalog fallback for the restored model.
+            if current.is_none()
+                || (preferences.context_preference(&source.id).is_some()
+                    && get_var(launch_environment, key).is_none()
+                    && single_provider_context_window(&config, &source, &self.model, None)
+                        .is_some_and(|window| current == Some(OsStr::new(&window.to_string()))))
+            {
+                let window = single_provider_context_window(
+                    &config,
+                    &source,
+                    &self.model,
+                    Some(preferences),
+                );
+                project_context_window(&mut self.launch.env, window);
+            }
+        }
         if let Some(projection) = &mut self.gateway {
             projection.context_window = get_var(&self.launch.env, "CLAUDE_CODE_MAX_CONTEXT_TOKENS")
                 .and_then(|value| value.to_str())
@@ -1413,9 +1437,23 @@ fn prepare_claude(
         // Keep a complete direct launch for targets outside the gateway scope.
         project_assigned_role(provider, role, model, &mut environment);
     }
+    let preferences = match target {
+        Some(ClaudeTarget::New {
+            budget_preferences, ..
+        }) => budget_preferences.map(|(preferences, _)| preferences),
+        _ => None,
+    };
     let context_window = context_window.or_else(|| {
-        provider_entry(&config, &provider.id)
-            .and_then(|entry| custom_context_window(&entry["contextWindow"]))
+        if !provider.is_subscription()
+            && assigned_role.is_none()
+            && assignments.is_none_or(BTreeMap::is_empty)
+            && preferences.is_none_or(|preferences| !has_independent_target(preferences))
+        {
+            single_provider_context_window(&config, provider, model, preferences)
+        } else {
+            provider_entry(&config, &provider.id)
+                .and_then(|entry| custom_context_window(&entry["contextWindow"]))
+        }
     });
     project_context_window(&mut environment, context_window);
     if let Some(projection) = &mut gateway {
@@ -2419,6 +2457,72 @@ fn new_assigned_context_window(
         &context_windows(config, preferences),
     )?
     .context_window)
+}
+
+fn is_builtin_claude_model(model: &str) -> bool {
+    let model = without_context_suffix(model);
+    [
+        "",
+        "default",
+        CLI_DEFAULT_MODEL,
+        "opus",
+        "sonnet",
+        "haiku",
+        "fable",
+    ]
+    .iter()
+    .any(|alias| model.eq_ignore_ascii_case(alias))
+        || model
+            .get(..7)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("claude-"))
+}
+
+fn single_provider_context_window(
+    config: &Value,
+    provider: &Provider,
+    model: &str,
+    preferences: Option<&ClaudeRoleLaunchPreferences>,
+) -> Option<u64> {
+    let entry = provider_entry(config, &provider.id);
+    let mode = preferences.and_then(|preferences| preferences.context_preference(&provider.id));
+    if let Some(window) = entry
+        .and_then(|entry| custom_context_window(&entry["contextWindow"]))
+        .or_else(|| mode.and_then(custom_context_window))
+    {
+        return Some(window);
+    }
+
+    let metadata = |model: &str| {
+        let model = without_context_suffix(model.trim());
+        entry?["modelMetadata"]
+            .as_array()?
+            .iter()
+            .find(|metadata| metadata["id"].as_str() == Some(model))
+    };
+    match mode.and_then(Value::as_str) {
+        Some("512k") => Some(512_000),
+        Some("maximum") => {
+            let maximum = |model: &str| {
+                let model = metadata(model);
+                context_tokens(model, "maxContextWindow")
+                    .or_else(|| context_tokens(model, "contextWindow"))
+            };
+            let main = maximum(model)?;
+            provider
+                .model_mapping
+                .values()
+                .filter(|model| !model.trim().is_empty())
+                .try_fold(main, |window, model| Some(window.min(maximum(model)?)))
+                .or(Some(main))
+        }
+        _ if provider.id != OFFICIAL_ID
+            && provider.endpoint.trim_end_matches('/') != OFFICIAL_ENDPOINT
+            && !is_builtin_claude_model(model.trim()) =>
+        {
+            context_tokens(metadata(model), "contextWindow")
+        }
+        _ => None,
+    }
 }
 
 fn project_context_window(environment: &mut BTreeMap<OsString, OsString>, window: Option<u64>) {
