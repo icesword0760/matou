@@ -17,19 +17,20 @@
 
 use std::{cell::RefCell, rc::Rc};
 
-use gpui::{prelude::*, *};
-use matou_native_core::dispatch_config::{
-    DispatchConfigSnapshot, DispatchDefaults,
-    form::{
-        ChoiceField, ChoiceView, DispatchForm, MISSING_NOTE, NumberField, SAVED_MESSAGE, SCOPE_NOTE,
-    },
-};
-
 use crate::{
     rename_input::{RenameInput, RenameInputEvent},
     settings_shell::{
         ACCENT, FocusRingStyle, LINE, LINE_STRONG, MUTED, PANEL, PANEL_MUTED, TEXT,
         focus_ring_with, icon, shadow,
+    },
+    theme_tokens::AppTheme,
+    workspace::{popover_colors, workspace_theme_dark},
+};
+use gpui::{prelude::*, *};
+use matou_native_core::dispatch_config::{
+    DispatchConfigSnapshot, DispatchDefaults,
+    form::{
+        ChoiceField, ChoiceView, DispatchForm, MISSING_NOTE, NumberField, SAVED_MESSAGE, SCOPE_NOTE,
     },
 };
 
@@ -46,9 +47,72 @@ const SAVE: &str = "保存";
 const ERROR_TEXT: u32 = 0xb34d47;
 const SUCCESS_TEXT: u32 = 0x16794b;
 const SUCCESS_BG: u32 = 0x22965a1f; // rgba(34,150,90,.12)
-const MENU_SELECTED_TEXT: u32 = 0x2679d8;
-const MENU_SELECTED_BG: u32 = 0xe4efff;
-const MENU_ACTIVE_BG: u32 = 0xeef5ff;
+const MENU_SELECTED_TEXT: u32 = 0x2679d8ff;
+const MENU_SELECTED_BG: u32 = 0xe4efffff;
+const MENU_ACTIVE_BG: u32 = 0xeef5ffff;
+
+/// The choice menu follows the workspace palette (`dispatch-settings.css`),
+/// while the light selected/hover values stay the frozen local blues.
+struct MenuColors {
+    panel: u32,
+    border: u32,
+    text: u32,
+    selected_text: u32,
+    selected_bg: u32,
+    active_bg: u32,
+    hover_bg: u32,
+    shadow: BoxShadow,
+}
+
+impl MenuColors {
+    fn for_dark(dark: bool) -> Self {
+        if dark {
+            let palette = AppTheme::Dark.palette();
+            Self {
+                panel: palette.workspace.panel,
+                border: palette.workspace.line_strong,
+                text: palette.workspace.text,
+                selected_text: palette.workspace.accent,
+                selected_bg: palette.workspace.accent_soft,
+                active_bg: 0xffffff14,
+                hover_bg: 0xffffff14,
+                // `.perm-menu` / `.workbench-action-popover` shadow.
+                shadow: popover_colors(true).menu_shadow(),
+            }
+        } else {
+            let palette = AppTheme::Light.palette();
+            Self {
+                panel: palette.workspace.panel,
+                border: palette.workspace.line,
+                text: palette.workspace.text,
+                selected_text: MENU_SELECTED_TEXT,
+                selected_bg: MENU_SELECTED_BG,
+                active_bg: MENU_ACTIVE_BG,
+                hover_bg: MENU_SELECTED_BG,
+                shadow: shadow(0x1a304b, 0.16, 8., 24.),
+            }
+        }
+    }
+
+    fn item_background(&self, selected: bool, active: bool) -> Rgba {
+        if selected {
+            rgba(self.selected_bg)
+        } else if active {
+            rgba(self.active_bg)
+        } else {
+            // Transparent lets the translucent panel show through once.
+            rgba(0x00000000)
+        }
+    }
+
+    fn item_hover(&self, selected: bool) -> Rgba {
+        if selected {
+            rgba(self.selected_bg)
+        } else {
+            rgba(self.hover_bg)
+        }
+    }
+}
 
 const ROW_LABEL_WIDTH: f32 = 168.;
 const ROW_BODY_MAX_WIDTH: f32 = 280.;
@@ -810,6 +874,7 @@ impl DispatchSettingsPanel {
             .max(menu_min_width(menu.field))
             .min((f32::from(viewport.width) - 16.).max(120.));
         let max_height = (f32::from(viewport.height) - 16.).min(300.).max(96.);
+        let colors = MenuColors::for_dark(workspace_theme_dark(cx));
 
         let mut popup = div()
             .id("dispatch-settings-menu")
@@ -820,9 +885,9 @@ impl DispatchSettingsPanel {
             .p(px(4.))
             .rounded(px(8.))
             .border_1()
-            .border_color(rgba(LINE))
-            .bg(rgb(PANEL))
-            .shadow(vec![shadow(0x1a304b, 0.16, 8., 24.)])
+            .border_color(rgba(colors.border))
+            .bg(rgba(colors.panel))
+            .shadow(vec![colors.shadow.clone()])
             .overflow_y_scroll()
             .track_scroll(&self.menu_scroll)
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -831,13 +896,8 @@ impl DispatchSettingsPanel {
         for (index, option) in menu.items.iter().enumerate() {
             let selected = option.value == menu.selected;
             let active = index == menu.active;
-            let background = if selected {
-                MENU_SELECTED_BG
-            } else if active {
-                MENU_ACTIVE_BG
-            } else {
-                PANEL
-            };
+            let background = colors.item_background(selected, active);
+            let hover = colors.item_hover(selected);
             let item = div()
                 .id(SharedString::from(format!(
                     "dispatch-choice-{}-{index}",
@@ -850,9 +910,13 @@ impl DispatchSettingsPanel {
                 .px(px(9.))
                 .rounded(px(5.))
                 .text_size(px(12.))
-                .text_color(rgb(if selected { MENU_SELECTED_TEXT } else { TEXT }))
-                .bg(rgb(background))
-                .hover(|style| style.bg(rgb(MENU_SELECTED_BG)))
+                .text_color(rgba(if selected {
+                    colors.selected_text
+                } else {
+                    colors.text
+                }))
+                .bg(background)
+                .hover(move |style| style.bg(hover))
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_ellipsis()
@@ -1059,7 +1123,36 @@ fn monospace_family() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChoiceField, DispatchConfigSnapshot, DispatchDefaults, DispatchForm, NumberField};
+    use super::{
+        ChoiceField, DispatchConfigSnapshot, DispatchDefaults, DispatchForm, MenuColors,
+        NumberField,
+    };
+    use gpui::rgba;
+
+    #[test]
+    fn dispatch_choice_menu_uses_light_and_dark_surfaces_and_item_states() {
+        let light = MenuColors::for_dark(false);
+        assert_eq!(light.panel, 0xffffffff);
+        assert_eq!(light.border, 0x424b581a);
+        assert_eq!(light.text, 0x303744ff);
+        assert_eq!(light.selected_text, 0x2679d8ff);
+        assert_eq!(light.item_background(true, false), rgba(0xe4efffff));
+        assert_eq!(light.item_background(false, true), rgba(0xeef5ffff));
+        assert_eq!(light.item_hover(false), rgba(0xe4efffff));
+        assert_eq!(light.shadow.color.a, 0.16);
+
+        let dark = MenuColors::for_dark(true);
+        assert_eq!(dark.panel, 0x2c2f35f5);
+        assert_eq!(dark.border, 0xffffff26);
+        assert_eq!(dark.text, 0xe1e5ebff);
+        assert_eq!(dark.selected_text, 0x67a6efff);
+        assert_eq!(dark.item_background(false, false), rgba(0x00000000));
+        assert_eq!(dark.item_background(false, true), rgba(0xffffff14));
+        assert_eq!(dark.item_hover(false), rgba(0xffffff14));
+        assert_eq!(dark.item_background(true, true), rgba(0x4a91e224));
+        assert_eq!(dark.item_hover(true), rgba(0x4a91e224));
+        assert_eq!(dark.shadow.color.a, 0.5);
+    }
 
     fn snapshot(defaults: DispatchDefaults) -> DispatchConfigSnapshot {
         DispatchConfigSnapshot {

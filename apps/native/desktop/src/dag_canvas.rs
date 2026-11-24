@@ -1424,6 +1424,7 @@ mod view {
     use crate::carousel_motion::Curve;
     use crate::rename_input::{RenameInput, RenameInputEvent};
     use crate::ui_text::ui_text;
+    use crate::workspace::card_tooltip_box;
 
     // Frozen visual values:
     // - apps/desktop/src/renderer/src/dag/dag.css:2-94 (dark palette and light overrides)
@@ -2252,6 +2253,7 @@ mod view {
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
 
             let zoom_label = format!("{}%", (scale * 100.).round() as i32);
+            let tooltip = |text| TooltipText::builder(text, cx.weak_entity());
             let tooltip_zoom_out = self.locale.text("缩小", "Zoom out");
             let tooltip_reset = self.locale.text("恢复 100%", "Reset to 100%");
             let tooltip_zoom_in = self.locale.text("放大", "Zoom in");
@@ -2285,9 +2287,7 @@ mod view {
                         .rounded(px(6.))
                         .cursor(CursorStyle::PointingHand)
                         .hover(|style| style.bg(rgba(p.toolbar_hover)))
-                        .tooltip(move |_, cx| {
-                            cx.new(|_| TooltipText(tooltip_zoom_out.into())).into()
-                        })
+                        .tooltip(tooltip(tooltip_zoom_out))
                         .on_click(cx.listener(|this, _, _, cx| this.zoom_by(-0.1, cx)))
                         .child(ui_text("−")),
                 )
@@ -2303,7 +2303,7 @@ mod view {
                         .rounded(px(6.))
                         .cursor(CursorStyle::PointingHand)
                         .hover(|style| style.bg(rgba(p.toolbar_hover)))
-                        .tooltip(move |_, cx| cx.new(|_| TooltipText(tooltip_reset.into())).into())
+                        .tooltip(tooltip(tooltip_reset))
                         .on_click(cx.listener(|this, _, _, cx| this.reset_viewport(cx)))
                         .child(ui_text(zoom_label)),
                 )
@@ -2319,9 +2319,7 @@ mod view {
                         .rounded(px(6.))
                         .cursor(CursorStyle::PointingHand)
                         .hover(|style| style.bg(rgba(p.toolbar_hover)))
-                        .tooltip(move |_, cx| {
-                            cx.new(|_| TooltipText(tooltip_zoom_in.into())).into()
-                        })
+                        .tooltip(tooltip(tooltip_zoom_in))
                         .on_click(cx.listener(|this, _, _, cx| this.zoom_by(0.1, cx)))
                         .child(ui_text("＋")),
                 )
@@ -2337,7 +2335,7 @@ mod view {
                         .rounded(px(6.))
                         .cursor(CursorStyle::PointingHand)
                         .hover(|style| style.bg(rgba(p.toolbar_hover)))
-                        .tooltip(move |_, cx| cx.new(|_| TooltipText(tooltip_focus.into())).into())
+                        .tooltip(tooltip(tooltip_focus))
                         .on_click(
                             cx.listener(|this, _, window, cx| this.focus_current_node(window, cx)),
                         )
@@ -3266,24 +3264,55 @@ mod view {
         }
     }
 
-    struct TooltipText(SharedString);
+    struct TooltipText {
+        text: &'static str,
+        canvas: WeakEntity<DagCanvasView>,
+    }
+
+    impl TooltipText {
+        fn builder(
+            text: &'static str,
+            canvas: WeakEntity<DagCanvasView>,
+        ) -> impl Fn(&mut Window, &mut App) -> AnyView {
+            move |_, cx| {
+                cx.new(|_| Self {
+                    text,
+                    canvas: canvas.clone(),
+                })
+                .into()
+            }
+        }
+
+        fn element(text: &'static str, dark: bool) -> Div {
+            card_tooltip_box(dark)
+                .max_w(px(320.))
+                .whitespace_normal()
+                .child(ui_text(text))
+        }
+    }
 
     impl Render for TooltipText {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            div()
-                .max_w(px(320.))
-                .px(px(9.))
-                .py(px(7.))
-                .border_1()
-                .border_color(rgb(0xd6dae1))
-                .rounded(px(7.))
-                .bg(rgb(0xffffff))
-                .text_color(rgb(0x333b47))
-                .text_size(px(10.))
-                .line_height(px(15.))
-                .whitespace_normal()
-                .shadow(vec![shadow(0x1f2837, 0.16, 8., 24., 0.)])
-                .child(ui_text(self.0.clone()))
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let dark = self
+                .canvas
+                .upgrade()
+                .is_some_and(|canvas| canvas.read(cx).dark);
+            Self::element(self.text, dark)
+        }
+    }
+
+    #[cfg(test)]
+    #[::core::prelude::v1::test]
+    fn dag_canvas_tooltip_uses_light_and_dark_surfaces() {
+        for (dark, background, border, text) in [
+            (false, 0xfffffffa, 0xd0d7de, 0x57606a),
+            (true, 0x1c2128ff, 0x30363d, 0xc9d1d9),
+        ] {
+            let mut element = TooltipText::element("Zoom out", dark);
+            let style = element.style();
+            assert_eq!(style.background, Some(rgba(background).into()));
+            assert_eq!(style.border_color, Some(rgb(border).into()));
+            assert_eq!(style.text.as_ref().unwrap().color, Some(rgb(text).into()));
         }
     }
 }

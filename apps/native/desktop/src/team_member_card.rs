@@ -23,6 +23,7 @@ use matou_native_core::sessions::InterfaceLocale;
 use matou_native_terminal::Theme;
 
 use crate::ui_text::ui_text;
+use crate::workspace::{card_tooltip_box, workspace_theme_dark};
 
 /// Frozen `SessionGraphNodeView['workStatus']`
 /// (`hierarchy-types.ts:39`) in declaration order.
@@ -391,21 +392,18 @@ fn single_line_title(raw: &str) -> SharedString {
 
 struct TeamMemberTitleTooltip(SharedString);
 
-impl Render for TeamMemberTitleTooltip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
+impl TeamMemberTitleTooltip {
+    fn element(&self, dark: bool) -> Div {
+        card_tooltip_box(dark)
             .max_w(px(460.))
-            .px(px(9.))
-            .py(px(7.))
-            .border_1()
-            .border_color(rgb(0xd6dae1))
-            .rounded(px(7.))
-            .bg(rgb(0xffffff))
-            .text_color(rgb(0x333b47))
-            .text_size(px(10.))
-            .line_height(px(15.))
             .whitespace_normal()
             .child(ui_text(self.0.clone()))
+    }
+}
+
+impl Render for TeamMemberTitleTooltip {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.element(workspace_theme_dark(cx))
     }
 }
 
@@ -579,12 +577,13 @@ mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
 
-    use gpui::{Styled, TextOverflow, WhiteSpace, relative};
+    use gpui::{Styled, TextOverflow, WhiteSpace, relative, rgb, rgba};
     use matou_native_core::sessions::InterfaceLocale;
 
     use super::{
         TeamMemberAction, TeamMemberActions, TeamMemberCardModel, TeamMemberStatusTone,
-        TeamMemberWorkStatus, single_line_title, team_member_messages, title_element,
+        TeamMemberTitleTooltip, TeamMemberWorkStatus, single_line_title, team_member_messages,
+        title_element,
     };
 
     fn statuses() -> [(TeamMemberWorkStatus, &'static str, &'static str); 7] {
@@ -724,6 +723,22 @@ mod tests {
             style.text_overflow,
             Some(TextOverflow::Truncate("…".into()))
         );
+    }
+
+    #[test]
+    fn teammate_title_tooltip_uses_light_and_dark_surfaces() {
+        let tooltip = TeamMemberTitleTooltip("Full teammate title".into());
+        for (dark, background, border, text, shadow_alpha) in [
+            (false, 0xfffffffa, 0xd0d7de, 0x57606a, 0.18),
+            (true, 0x1c2128ff, 0x30363d, 0xc9d1d9, 0.45),
+        ] {
+            let mut element = tooltip.element(dark);
+            let style = element.style();
+            assert_eq!(style.background, Some(rgba(background).into()));
+            assert_eq!(style.border_color, Some(rgb(border).into()));
+            assert_eq!(style.text.as_ref().unwrap().color, Some(rgb(text).into()));
+            assert_eq!(style.box_shadow.as_ref().unwrap()[0].color.a, shadow_alpha);
+        }
     }
 
     #[test]

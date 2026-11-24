@@ -1099,7 +1099,7 @@ struct WorkspaceThemeGlobal {
 
 impl Global for WorkspaceThemeGlobal {}
 
-fn workspace_theme_dark(cx: &App) -> bool {
+pub(crate) fn workspace_theme_dark(cx: &App) -> bool {
     cx.try_global::<WorkspaceThemeGlobal>()
         .is_some_and(|theme| theme.dark)
 }
@@ -1308,6 +1308,41 @@ struct TerminalSearchState {
     archive_pending: Option<u64>,
     archive_count: Option<(usize, usize)>,
     dismissed_sequence: Option<u64>,
+}
+
+/// Terminal search chrome from the frozen `hierarchy.css` search rules. The
+/// dark surface keeps the Electron `#151515` chrome color at 96% opacity so it
+/// reads as a translucent band over the terminal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SearchBarColors {
+    background: u32,
+    border: u32,
+    text: u32,
+    placeholder: u32,
+    muted: u32,
+    hover_background: u32,
+    selected: u32,
+    error: u32,
+}
+
+impl SearchBarColors {
+    fn for_theme(theme: AppTheme) -> Self {
+        let chrome = theme.palette().chrome;
+        let (background, placeholder, hover_background, error) = match theme {
+            AppTheme::Light => (chrome.background, chrome.muted, 0x00000014, 0xb14542ff),
+            AppTheme::Dark => (0x151515f5, 0x747474ff, 0xffffff1a, 0xf47067ff),
+        };
+        Self {
+            background,
+            border: chrome.divider,
+            text: chrome.text,
+            placeholder,
+            muted: chrome.muted,
+            hover_background,
+            selected: 0xff8c00ff,
+            error,
+        }
+    }
 }
 
 struct HistoryContextRequest {
@@ -2500,10 +2535,13 @@ impl Workspace {
             return;
         }
         if self.search.is_none() {
-            let input = cx.new(|cx| {
+            let colors = SearchBarColors::for_theme(self.theme.effective());
+            let input = cx.new(move |cx| {
                 let mut input = RenameInput::new(String::new(), cx);
                 input.placeholder = "搜索".into();
                 input.search_style = true;
+                input.text_color = Some(rgba(colors.text));
+                input.placeholder_color = Some(rgba(colors.placeholder));
                 input
             });
             // Focusing the reference search input replaces the document's
@@ -2752,6 +2790,7 @@ impl Workspace {
 
     fn search_bar(&self, cx: &mut Context<Self>) -> Option<Div> {
         let search = self.search.as_ref().filter(|search| search.open)?;
+        let colors = SearchBarColors::for_theme(self.theme.effective());
         let count = if let Some(error) = &search.error {
             error.clone()
         } else if search.input.read(cx).text.is_empty() {
@@ -2779,9 +2818,9 @@ impl Workspace {
             .flex()
             .items_center()
             .border_b_1()
-            .border_color(rgb(0xe8e8e8))
-            .bg(rgb(0xffffff))
-            .text_color(rgb(0x2f3547))
+            .border_color(rgba(colors.border))
+            .bg(rgba(colors.background))
+            .text_color(rgba(colors.text))
             .child(
                 div()
                     .flex_1()
@@ -2796,10 +2835,10 @@ impl Workspace {
                     .px(px(8.))
                     .text_size(px(11.))
                     .font_family("SF Mono")
-                    .text_color(rgb(if search.error.is_some() {
-                        0xb14542
+                    .text_color(rgba(if search.error.is_some() {
+                        colors.error
                     } else {
-                        0x606572
+                        colors.muted
                     }))
                     .child(count),
             );
@@ -2811,6 +2850,11 @@ impl Workspace {
             (4, "↓", false),
             (5, "×", false),
         ] {
+            let hover_text = if active {
+                colors.selected
+            } else {
+                colors.text
+            };
             bar = bar.child(
                 div()
                     .id(SharedString::from(format!("terminal-search-{index}")))
@@ -2823,12 +2867,16 @@ impl Workspace {
                     .items_center()
                     .justify_center()
                     .text_size(px(11.))
-                    .text_color(rgb(if active { 0xff8c00 } else { 0x606572 }))
+                    .text_color(rgba(if active {
+                        colors.selected
+                    } else {
+                        colors.muted
+                    }))
                     .cursor_pointer()
-                    .hover(|style| {
+                    .hover(move |style| {
                         style
-                            .bg(rgba(0x00000014))
-                            .text_color(rgb(0x2f3547))
+                            .bg(rgba(colors.hover_background))
+                            .text_color(rgba(hover_text))
                             .rounded(px(6.))
                     })
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -3234,9 +3282,17 @@ impl Workspace {
     }
 
     fn apply_theme_palette(&self, cx: &mut Context<Self>) {
-        cx.set_global(WorkspaceThemeGlobal {
-            dark: self.theme.effective() == AppTheme::Dark,
-        });
+        let app_theme = self.theme.effective();
+        let dark = app_theme == AppTheme::Dark;
+        cx.set_global(WorkspaceThemeGlobal { dark });
+        if let Some(search) = &self.search {
+            let colors = SearchBarColors::for_theme(app_theme);
+            search.input.update(cx, |input, cx| {
+                input.text_color = Some(rgba(colors.text));
+                input.placeholder_color = Some(rgba(colors.placeholder));
+                cx.notify();
+            });
+        }
         #[cfg(target_os = "windows")]
         {
             let handle = self.main_theme_window;
@@ -3257,7 +3313,6 @@ impl Workspace {
             terminal.update(cx, |terminal, cx| terminal.set_theme(theme, cx));
             self.send_terminal_theme(session_id, theme);
         }
-        let dark = self.wiring_dark();
         match &self.dialog {
             Some(TabDialog::SessionLoader(state)) => {
                 for input in [&state.input, &state.content_input] {
@@ -3290,7 +3345,6 @@ impl Workspace {
             water.update(cx, |water, cx| water.set_theme(theme, cx));
         }
         if let Some(child) = self.dag_window {
-            let dark = self.theme.effective() == AppTheme::Dark;
             let _ = child.update(cx, |view, window, cx| view.set_dark(dark, window, cx));
         }
         cx.notify();
@@ -18154,6 +18208,36 @@ fn footer_widths(
 #[cfg(test)]
 mod hud_theme_and_footer_tests {
     use super::*;
+
+    #[::core::prelude::v1::test]
+    fn terminal_search_bar_uses_light_and_dark_chrome_and_states() {
+        assert_eq!(
+            SearchBarColors::for_theme(AppTheme::Light),
+            SearchBarColors {
+                background: 0xffffffff,
+                border: 0xe8e8e8ff,
+                text: 0x2f3547ff,
+                placeholder: 0x606572ff,
+                muted: 0x606572ff,
+                hover_background: 0x00000014,
+                selected: 0xff8c00ff,
+                error: 0xb14542ff,
+            }
+        );
+        assert_eq!(
+            SearchBarColors::for_theme(AppTheme::Dark),
+            SearchBarColors {
+                background: 0x151515f5,
+                border: 0x262626ff,
+                text: 0xfafafaff,
+                placeholder: 0x747474ff,
+                muted: 0x7b7b7bff,
+                hover_background: 0xffffff1a,
+                selected: 0xff8c00ff,
+                error: 0xf47067ff,
+            }
+        );
+    }
 
     #[::core::prelude::v1::test]
     fn popovers_use_the_electron_light_and_dark_palettes() {
