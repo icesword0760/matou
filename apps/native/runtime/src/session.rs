@@ -896,7 +896,9 @@ impl Session {
             }
             Ok(())
         });
-        if let Err(error) = result {
+        if let Err(error) = result
+            && !crate::checkpoint_sync::is_lock_contention(&error)
+        {
             self.events
                 .push(diagnostic(format!("write terminal checkpoint: {error:#}")));
         }

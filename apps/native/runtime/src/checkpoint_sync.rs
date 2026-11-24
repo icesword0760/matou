@@ -133,3 +133,16 @@ impl CheckpointSync {
             .protect_checkpoint_sequences(&protected_terminal_sequences(&connection, session_id)?)
     }
 }
+
+pub(crate) fn is_lock_contention(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<rusqlite::Error>(),
+            Some(rusqlite::Error::SqliteFailure(ffi, _))
+                if matches!(
+                    ffi.code,
+                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                )
+        )
+    })
+}
