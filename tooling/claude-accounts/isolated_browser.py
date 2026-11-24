@@ -18,7 +18,23 @@ import threading
 import tempfile
 import time
 from urllib.parse import parse_qs, urlsplit
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
+
+
+def _is_valid_timezone(timezone: str) -> bool:
+    if (not timezone or len(timezone) > 64 or timezone.startswith("-") or ".." in timezone
+            or re.search(r"[\x00-\x1f\x7f-\x9f\s]", timezone)):
+        return False
+    try:
+        ZoneInfo(timezone)
+    except ZoneInfoNotFoundError:
+        # Windows may have neither a system IANA database nor the tzdata package.
+        return not available_timezones() and re.fullmatch(
+            r"[A-Za-z][A-Za-z0-9_+-]*(?:/[A-Za-z0-9_+-]+){1,2}", timezone
+        ) is not None
+    except ValueError:
+        return False
+    return True
 
 
 def find_browser() -> tuple[str, list[str]]:
@@ -26,14 +42,9 @@ def find_browser() -> tuple[str, list[str]]:
     timezone = os.environ.get("MATOU_SAFE_BROWSER_TZ", "")
     seed = os.environ.get("MATOU_SAFE_BROWSER_SEED", "")
     if (executable and Path(executable).is_file() and os.access(executable, os.X_OK)
-            and timezone and re.fullmatch(r"0*[1-9][0-9]*", seed)):
-        try:
-            ZoneInfo(timezone)
-        except (ValueError, ZoneInfoNotFoundError):
-            pass
-        else:
-            return executable, ["--timezone=" + timezone, "--accept-lang=zh-CN,zh",
-                                "--fingerprint=" + seed, "--fingerprint-platform=macos"]
+            and re.fullmatch(r"0*[1-9][0-9]*", seed) and _is_valid_timezone(timezone)):
+        return executable, ["--timezone=" + timezone, "--accept-lang=zh-CN,zh",
+                            "--fingerprint=" + seed, "--fingerprint-platform=macos"]
     candidates = []
     if os.name == "nt":
         for base in (os.environ.get("PROGRAMFILES"), os.environ.get("PROGRAMFILES(X86)"), os.environ.get("LOCALAPPDATA")):
@@ -59,12 +70,14 @@ def authorization_url(output: bytes) -> str | None:
             url = match.group().decode("ascii")
             parsed = urlsplit(url)
             query = parse_qs(parsed.query)
+            standard_query = query.get("code_challenge") and query.get("state")
+            compact_query = re.fullmatch(r"[A-Za-z0-9._~-]{16,512}", parsed.query)
             if ((parsed.hostname, parsed.path) in {
                     ("claude.com", "/cai/oauth/authorize"), ("claude.ai", "/oauth/authorize"),
                     ("console.anthropic.com", "/oauth/authorize"), ("platform.claude.com", "/oauth/authorize")}
-                    and parsed.port in (None, 443)
-                    and not parsed.username and not parsed.password and not parsed.fragment
-                    and query.get("code_challenge") and query.get("state")):
+                    and parsed.scheme == "https" and parsed.port in (None, 443)
+                    and parsed.username is None and parsed.password is None and "#" not in url
+                    and (standard_query or compact_query)):
                 return url
         except (ValueError, UnicodeError):
             continue
@@ -123,25 +136,32 @@ def login(claude: str, profile: Path, timeout: float = 300, *, code_input=None, 
     urls: queue.Queue[str] = queue.Queue(maxsize=1)
     reader = None
     codes: queue.Queue[str] = queue.Queue(maxsize=1)
+    canceled = threading.Event()
     try:
         child = subprocess.Popen([claude, "auth", "login"], cwd=profile, env=env,
                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                  stderr=subprocess.STDOUT, start_new_session=True)
 
         def read_codes():
-            # Private parent pipe only. Never persist, print, or invoke code as a command.
+            # Private parent pipe only. Keep listening for cancellation after submission.
+            submitted = False
             try:
                 while line := code_input.readline(8193):
                     if len(line) > 8192 or not line.endswith("\n"):
                         return
                     try:
                         message = json.loads(line)
+                        if message.get("nonce") != nonce:
+                            continue
+                        if message.get("action") == "cancel-login":
+                            canceled.set()
+                            return
                         code = message.get("code", "")
-                        if (message.get("action") == "submit-login-code" and message.get("nonce") == nonce
+                        if (not submitted and message.get("action") == "submit-login-code"
                                 and isinstance(code, str) and len(code) <= 4096
                                 and re.fullmatch(r"[A-Za-z0-9_~.\-]{10,}#[A-Za-z0-9_~.\-]{10,}", code.strip())):
                             codes.put_nowait(code.strip())
-                            return  # One code per authorization attempt.
+                            submitted = True
                     except (ValueError, AttributeError, queue.Full):
                         continue
             except (OSError, ValueError):
@@ -157,6 +177,7 @@ def login(claude: str, profile: Path, timeout: float = 300, *, code_input=None, 
                 while chunk := child.stdout.read1(4096):
                     if sent:
                         continue
+                    # Wait for the delimiter so a partial compact token cannot launch.
                     tail = (tail + chunk)[-32768:]
                     url = authorization_url(tail)
                     if url:
@@ -173,11 +194,17 @@ def login(claude: str, profile: Path, timeout: float = 300, *, code_input=None, 
         reader.start()
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
+            if canceled.is_set():
+                raise KeyboardInterrupt
             if browser is None:
                 try:
-                    browser = start_browser(executable, profile, urls.get(timeout=0.1), extra_args)
+                    url = urls.get(timeout=0.1)
                 except queue.Empty:
                     pass
+                else:
+                    if canceled.is_set():
+                        raise KeyboardInterrupt
+                    browser = start_browser(executable, profile, url, extra_args)
             try:
                 submitted = codes.get_nowait()
             except queue.Empty:

@@ -3,7 +3,6 @@ import os
 import io
 import json
 import shutil
-from contextlib import nullcontext
 from pathlib import Path
 import subprocess
 import sys
@@ -15,16 +14,52 @@ from unittest.mock import patch
 import isolated_browser as browser
 
 URL = 'https://claude.ai/oauth/authorize?state=FIXTURE&code_challenge=FIXTURE'
+COMPACT_URL = 'https://claude.ai/oauth/authorize?z-HEHOr2P7pBfhdSDfUPBteRqDDPQWyJ9aC7jG-BhXJMI'
 
 class PrivateBrowserTests(unittest.TestCase):
     def test_only_complete_official_authorization_urls_are_accepted(self):
-        self.assertEqual(browser.authorization_url(('Login: '+URL+'\n').encode()), URL)
-        current = URL.replace('claude.ai/oauth', 'claude.com/cai/oauth')
-        self.assertEqual(browser.authorization_url((current+'\n').encode()), current)
-        for invalid in [URL, URL.replace('claude.ai', 'claude.ai.example.org')+'\n',
-                        URL.replace('https:', 'http:')+'\n', URL.replace('/oauth/authorize', '/redirect')+'\n',
-                        URL.replace('claude.ai', 'attacker@claude.ai')+'\n', URL.replace('state=', 'missing=')+'\n']:
-            self.assertIsNone(browser.authorization_url(invalid.encode()))
+        for url in (URL, COMPACT_URL):
+            for authority in ('claude.ai/oauth', 'claude.com/cai/oauth',
+                              'console.anthropic.com/oauth', 'platform.claude.com:443/oauth'):
+                official = url.replace('claude.ai/oauth', authority)
+                for ending in ('\n', '\r\n', '\x1b[0m'):
+                    self.assertEqual(browser.authorization_url(('Login: ' + official + ending).encode()), official)
+            self.assertIsNone(browser.authorization_url(url.encode()))
+        for invalid in (
+            COMPACT_URL.replace('claude.ai', 'claude.ai.example.org'),
+            COMPACT_URL.replace('claude.ai', 'claude.ai@evil.example'),
+            COMPACT_URL.replace('claude.ai', '@claude.ai'),
+            COMPACT_URL.replace('claude.ai', 'attacker:password@claude.ai'),
+            COMPACT_URL.replace('claude.ai', 'claude.ai:444'),
+            COMPACT_URL.replace('https:', 'http:'),
+            COMPACT_URL.replace('/oauth/authorize', '/redirect'),
+            COMPACT_URL + '#fragment', COMPACT_URL + '#', COMPACT_URL + '=value', COMPACT_URL + '&x',
+            URL.replace('state=', 'missing='), URL.replace('state=FIXTURE', 'state='),
+            *(COMPACT_URL.split('?')[0] + '?' + query for query in ('', 'a' * 15, 'a' * 513, '%41' * 16)),
+        ):
+            self.assertIsNone(browser.authorization_url((invalid + '\n').encode()))
+
+    def test_split_compact_token_waits_for_line_delimiter(self):
+        with tempfile.TemporaryDirectory() as temp:
+            profile = Path(temp)
+            prefix, suffix = COMPACT_URL[:-12], COMPACT_URL[-12:]
+            cli = self.fake_cli(profile, f'''
+import sys, time
+sys.stdout.write({prefix!r})
+sys.stdout.flush()
+time.sleep(0.15)
+sys.stdout.write({(suffix + chr(13) + chr(10))!r})
+sys.stdout.flush()
+time.sleep(0.2)
+''')
+            child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(5)'], start_new_session=True)
+            try:
+                with patch.object(browser, 'find_browser', return_value=('/fixture/chrome', [])), \
+                        patch.object(browser, 'start_browser', return_value=child) as launch:
+                    browser.login(cli, profile, timeout=3)
+                launch.assert_called_once_with('/fixture/chrome', profile, COMPACT_URL, [])
+            finally:
+                browser.stop_process(child)
 
     def test_launch_uses_unique_profile_and_keeps_url_out_of_process_arguments(self):
         with tempfile.TemporaryDirectory() as temp, patch.object(browser.subprocess, 'Popen') as start:
@@ -35,9 +70,26 @@ class PrivateBrowserTests(unittest.TestCase):
             directory = Path(next(arg.split('=', 1)[1] for arg in args if arg.startswith('--user-data-dir=')))
             self.assertNotEqual(directory.parent, profile)
             self.assertNotIn(URL, args)
-            self.assertEqual((profile/'browser-start.html').stat().st_mode & 0o777, 0o600)
-            self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+            if os.name != 'nt':
+                self.assertEqual((profile/'browser-start.html').stat().st_mode & 0o777, 0o600)
+                self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
             shutil.rmtree(directory)
+
+    def test_timezone_validation_without_a_database(self):
+        with patch.object(browser, 'ZoneInfo', side_effect=browser.ZoneInfoNotFoundError), \
+                patch.object(browser, 'available_timezones', return_value=set()):
+            for timezone in ('Asia/Singapore', 'America/Argentina/Buenos_Aires'):
+                with self.subTest(timezone=timezone):
+                    self.assertTrue(browser._is_valid_timezone(timezone))
+            for timezone in ('../etc', '--flag', 'InvalidZone', 'Asia/Tokyo/A/B', '',
+                             'Asia/New Zone', 'Asia/Tokyo\x00', 'Asia/Tokyo\x7f', 'Asia/' + 'A' * 60):
+                with self.subTest(timezone=timezone):
+                    self.assertFalse(browser._is_valid_timezone(timezone))
+
+    def test_unknown_timezone_is_rejected_when_database_is_available(self):
+        with patch.object(browser, 'ZoneInfo', side_effect=browser.ZoneInfoNotFoundError), \
+                patch.object(browser, 'available_timezones', return_value={'Asia/Singapore'}):
+            self.assertFalse(browser._is_valid_timezone('Mars/Olympus'))
 
     def test_safe_kernel_takes_priority_and_returns_exact_parameters(self):
         env = {'MATOU_SAFE_BROWSER_BIN': '/fixture/safe-kernel',
@@ -48,7 +100,14 @@ class PrivateBrowserTests(unittest.TestCase):
                 '--fingerprint=123456', '--fingerprint-platform=macos']))
             which.assert_not_called()
 
+    def browser_lookup_fixture(self):
+        if os.name == 'nt':
+            local = Path('C:/fixture/LocalAppData')
+            return str(local / 'Google/Chrome/Application/chrome.exe'), {'LOCALAPPDATA': str(local)}
+        return '/fixture/chrome', {}
+
     def test_missing_or_invalid_safe_env_falls_back_without_extra_parameters(self):
+        chrome, browser_env = self.browser_lookup_fixture()
         valid = {'MATOU_SAFE_BROWSER_BIN': '/fixture/safe-kernel',
                  'MATOU_SAFE_BROWSER_TZ': 'Asia/Tokyo', 'MATOU_SAFE_BROWSER_SEED': '123456'}
         cases = [{}, *[{k: v for k, v in valid.items() if k != missing} for missing in valid]]
@@ -56,14 +115,22 @@ class PrivateBrowserTests(unittest.TestCase):
         cases += [dict(valid, MATOU_SAFE_BROWSER_SEED=seed) for seed in ('', '0', '000', '-1', '1.5', 'NaN', '1e3', ' 1', '+1', '1\n', '１２')]
         cases += [dict(valid, MATOU_SAFE_BROWSER_BIN='/fixture/missing')]
         for env in cases:
-            with self.subTest(env=env), patch.dict(os.environ, env, clear=True), patch.object(browser.Path, 'is_file', lambda p: str(p) in ('/fixture/chrome', '/fixture/safe-kernel')), patch.object(browser.os, 'access', return_value=True), patch.object(browser.shutil, 'which', side_effect=lambda name: '/fixture/chrome' if name == 'google-chrome' else None):
-                self.assertEqual(browser.find_browser(), ('/fixture/chrome', []))
+            with self.subTest(env=env), patch.dict(os.environ, browser_env | env, clear=True), \
+                    patch.object(browser.Path, 'is_file', lambda p: p in (Path(chrome), Path(valid['MATOU_SAFE_BROWSER_BIN']))), \
+                    patch.object(browser.os, 'access', return_value=True), \
+                    patch.object(browser.shutil, 'which', side_effect=lambda name: chrome if name == 'google-chrome' else None), \
+                    patch.object(browser, 'available_timezones', return_value={'Asia/Tokyo'}):
+                self.assertEqual(browser.find_browser(), (chrome, []))
 
     def test_non_executable_kernel_uses_existing_browser_selection(self):
-        env = {'MATOU_SAFE_BROWSER_BIN': '/fixture/safe-kernel',
-               'MATOU_SAFE_BROWSER_TZ': 'Asia/Tokyo', 'MATOU_SAFE_BROWSER_SEED': '123456'}
-        with patch.dict(os.environ, env, clear=True), patch.object(browser.Path, 'is_file', lambda p: str(p) in ('/fixture/chrome', '/fixture/safe-kernel')), patch.object(browser.os, 'access', side_effect=lambda p, mode: p == '/fixture/chrome'), patch.object(browser.shutil, 'which', side_effect=lambda name: '/fixture/chrome' if name == 'google-chrome' else None):
-            self.assertEqual(browser.find_browser(), ('/fixture/chrome', []))
+        chrome, env = self.browser_lookup_fixture()
+        env.update(MATOU_SAFE_BROWSER_BIN='/fixture/safe-kernel',
+                   MATOU_SAFE_BROWSER_TZ='Asia/Tokyo', MATOU_SAFE_BROWSER_SEED='123456')
+        with patch.dict(os.environ, env, clear=True), \
+                patch.object(browser.Path, 'is_file', lambda p: p in (Path(chrome), Path(env['MATOU_SAFE_BROWSER_BIN']))), \
+                patch.object(browser.os, 'access', side_effect=lambda p, mode: p == chrome), \
+                patch.object(browser.shutil, 'which', side_effect=lambda name: chrome if name == 'google-chrome' else None):
+            self.assertEqual(browser.find_browser(), (chrome, []))
 
     def test_safe_launch_has_exact_arguments_unique_profiles_and_no_redirect_file(self):
         extra = ['--timezone=Asia/Tokyo', '--accept-lang=zh-CN,zh', '--fingerprint=123456', '--fingerprint-platform=macos']
@@ -79,7 +146,8 @@ class PrivateBrowserTests(unittest.TestCase):
                     self.assertEqual(args, ['/fixture/safe-kernel', '--user-data-dir=' + str(directory),
                         '--incognito', '--new-window', '--no-first-run', '--no-default-browser-check',
                         '--disable-sync', '--disable-background-mode', *extra, URL])
-                    self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+                    if os.name != 'nt':
+                        self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
                     self.assertFalse((profile / 'browser-start.html').exists())
                     self.assertEqual(start.call_args.kwargs['stdout'], subprocess.DEVNULL)
                     self.assertEqual(start.call_args.kwargs['stderr'], subprocess.DEVNULL)
@@ -104,6 +172,19 @@ class PrivateBrowserTests(unittest.TestCase):
             self.assertFalse(directory.exists())
 
     def fake_cli(self, root, body):
+        if os.name == 'nt':
+            script = root / 'claude.py'
+            script.write_text(body, encoding='utf-8')
+            popen = browser.subprocess.Popen
+
+            def launch(args, **kwargs):
+                if args[0] == str(script):
+                    # Give login the Python process handle so terminating it also closes its pipes.
+                    args = [sys.executable, *args]
+                return popen(args, **kwargs)
+
+            self.enterContext(patch.object(browser.subprocess, 'Popen', new=launch))
+            return str(script)
         cli = root/'claude'
         cli.write_text('#!'+sys.executable+'\n'+body)
         cli.chmod(0o700)
@@ -166,7 +247,7 @@ class PrivateBrowserTests(unittest.TestCase):
                 with patch.object(browser, 'find_browser', return_value=('/fixture/chrome', [])), patch.object(browser, 'start_browser', return_value=child):
                     browser.login(cli, profile, timeout=3, code_input=io.StringIO(''.join(json.dumps(m)+'\n' for m in messages)), nonce='current')
                 self.assertIsNone(child.poll())
-                self.assertFalse(any(code.encode() in f.read_bytes() for f in profile.iterdir() if f.is_file() and f.name != 'claude'))
+                self.assertFalse(any(code.encode() in f.read_bytes() for f in profile.iterdir() if f.is_file() and f != Path(cli)))
             finally:
                 browser.stop_process(child)
 
@@ -176,19 +257,21 @@ class PrivateBrowserTests(unittest.TestCase):
                 profile = Path(temp)
                 cli = self.fake_cli(profile, 'import time\nprint('+repr(URL)+',flush=True)\ntime.sleep(30)\n')
                 child = subprocess.Popen([sys.executable, '-c', 'import time;time.sleep(30)'], start_new_session=True)
-                original_sleep = time.sleep
-                interrupted = False
-                def interrupt_once(seconds):
-                    nonlocal interrupted
-                    if not interrupted:
-                        interrupted = True
-                        raise KeyboardInterrupt()
-                    original_sleep(seconds)
+                read_fd, write_fd = os.pipe()
                 try:
-                    with patch.object(browser, 'find_browser', return_value=('/fixture/chrome', [])), patch.object(browser, 'start_browser', return_value=child), (patch.object(browser.time, 'sleep', side_effect=interrupt_once) if cancelled else nullcontext()):
-                        with self.assertRaises(KeyboardInterrupt if cancelled else subprocess.TimeoutExpired):
-                            browser.login(cli, profile, timeout=.3)
-                    self.assertIsNone(child.poll())
+                    with os.fdopen(read_fd) as reader, os.fdopen(write_fd, 'w') as writer:
+                        def launch(*_):
+                            if cancelled:
+                                print(json.dumps({'action': 'cancel-login', 'nonce': 'current'}), file=writer, flush=True)
+                            return child
+
+                        with patch.object(browser, 'find_browser', return_value=('/fixture/chrome', [])), \
+                                patch.object(browser, 'start_browser', side_effect=launch) as start:
+                            with self.assertRaises(KeyboardInterrupt if cancelled else subprocess.TimeoutExpired):
+                                browser.login(cli, profile, timeout=3 if cancelled else 1,
+                                              code_input=reader if cancelled else None, nonce='current')
+                        start.assert_called_once()
+                        self.assertIsNone(child.poll())
                 finally:
                     browser.stop_process(child)
 

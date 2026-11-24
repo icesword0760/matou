@@ -1,0 +1,5020 @@
+{
+  "schemaVersion": 1,
+  "gate": "K-update-policy",
+  "frozenCommit": "55b508c211f7087bef091983c464566ed3256476",
+  "dependency": {
+    "electron-updater": "6.8.9"
+  },
+  "defaults": {
+    "currentVersion": "1.2.0",
+    "candidate": "1.3.0",
+    "channel": "stable",
+    "simulatedArch": "x64",
+    "updateBaseUrl": "https://feed.example.invalid/releases",
+    "locale": "zh-CN"
+  },
+  "normalization": {
+    "clock": {
+      "manifestUnixMs": 1767225600000,
+      "downloadStartMs": 0,
+      "downloadStepMs": 200,
+      "timeZone": "UTC",
+      "rendererTimers": "Window timeouts fire only when an expireToast input step runs."
+    },
+    "stagingUserId": "00000000-0000-4000-8000-000000000001",
+    "path": "The temporary case directory prefix is stripped from openedPath.",
+    "errors": "Error messages and available codes are captured; stacks are omitted.",
+    "undefined": "Absent optional fields are omitted from JSON."
+  },
+  "sources": {
+    "entry": {
+      "path": "apps/desktop/src/main/index.ts",
+      "lines": "488-508",
+      "symbol": "updater startup options"
+    },
+    "feed": {
+      "path": "apps/desktop/src/main/update-feed.ts",
+      "lines": "17-42",
+      "symbol": "parseUpdateBaseUrl, configureUpdateFeed"
+    },
+    "channel": {
+      "path": "electron-updater@6.8.9/out/providers/GenericProvider.js",
+      "lines": "7-24",
+      "symbol": "GenericProvider.channel, getLatestVersion"
+    },
+    "suffix": {
+      "path": "electron-updater@6.8.9/out/providers/Provider.js",
+      "lines": "30-46",
+      "symbol": "getChannelFilePrefix, getCustomChannelName"
+    },
+    "url": {
+      "path": "electron-updater@6.8.9/out/util.js",
+      "lines": "9-31",
+      "symbol": "newBaseUrl, newUrlFromBase, getChannelFilename"
+    },
+    "mode": {
+      "path": "apps/desktop/src/main/app-update-install-mode.ts",
+      "lines": "14-25",
+      "symbol": "resolveAppUpdateInstallMode"
+    },
+    "currentVersion": {
+      "path": "electron-updater@6.8.9/out/AppUpdater.js",
+      "lines": "212-218",
+      "symbol": "AppUpdater constructor"
+    },
+    "version": {
+      "path": "electron-updater@6.8.9/out/AppUpdater.js",
+      "lines": "339-363",
+      "symbol": "isUpdateAvailable"
+    },
+    "start": {
+      "path": "apps/desktop/src/main/app-update-manager.ts",
+      "lines": "54-72",
+      "symbol": "constructor, start"
+    },
+    "check": {
+      "path": "apps/desktop/src/main/app-update-manager.ts",
+      "lines": "88-94,223-251",
+      "symbol": "check, checkWithRetry"
+    },
+    "events": {
+      "path": "apps/desktop/src/main/app-update-manager.ts",
+      "lines": "170-220",
+      "symbol": "bindUpdaterEvents"
+    },
+    "release": {
+      "path": "apps/desktop/src/main/app-update-manager.ts",
+      "lines": "253-270,304-314,338-355",
+      "symbol": "releaseState, normalizeReleaseNotes, resolveManualInstaller"
+    },
+    "download": {
+      "path": "apps/desktop/src/main/app-update-manager.ts",
+      "lines": "96-142",
+      "symbol": "download"
+    },
+    "stream": {
+      "path": "apps/desktop/src/main/manual-update-downloader.ts",
+      "lines": "21-91",
+      "symbol": "downloadManualUpdate, installerFileName, progressState"
+    },
+    "error": {
+      "path": "apps/desktop/src/main/app-update-manager.ts",
+      "lines": "272-281,357-365",
+      "symbol": "onError, inferErrorStage"
+    },
+    "mainText": {
+      "path": "apps/desktop/src/main/messages.ts",
+      "lines": "34-39,55-60",
+      "symbol": "mainMessages catalogs"
+    },
+    "errorUi": {
+      "path": "apps/desktop/src/renderer/src/updates/AppUpdateControl.tsx",
+      "lines": "110-112,130-135,172-181,235-273",
+      "symbol": "error actions, UpdateHeader, errorTitle, friendlyError"
+    },
+    "uiText": {
+      "path": "apps/desktop/src/renderer/src/i18n/messages/updates.ts",
+      "lines": "16-75,92-157",
+      "symbol": "updatesZhCN, updatesEn"
+    },
+    "count": {
+      "path": "apps/desktop/src/renderer/src/updates/active-app-sessions.ts",
+      "lines": "3-17",
+      "symbol": "activeAppSessionCount"
+    },
+    "guard": {
+      "path": "apps/desktop/src/renderer/src/updates/AppUpdateControl.tsx",
+      "lines": "66-89,118-123,143-162",
+      "symbol": "idle effect, installNow, protection prompts and actions"
+    },
+    "install": {
+      "path": "apps/desktop/src/main/app-update-manager.ts",
+      "lines": "144-168",
+      "symbol": "install"
+    },
+    "shutdown": {
+      "path": "apps/desktop/src/main/index.ts",
+      "lines": "527-530,658-663,707-713",
+      "symbol": "prepareInstall, installAppUpdate IPC, shutdownRuntime"
+    },
+    "toast": {
+      "path": "apps/desktop/src/renderer/src/updates/AppUpdateControl.tsx",
+      "lines": "38-48,166-168",
+      "symbol": "last-seen version effect and toast"
+    }
+  },
+  "cases": [
+    {
+      "id": "feed-mac-default",
+      "inventory": [
+        "PKG-01"
+      ],
+      "kind": "normal",
+      "sourceRefs": [
+        "entry",
+        "feed",
+        "channel",
+        "suffix",
+        "url",
+        "start"
+      ],
+      "input": {
+        "platform": "darwin"
+      },
+      "expected": {
+        "returnedUrl": "https://updates.baize-ailabs.com/stable",
+        "channel": "stable",
+        "allowDowngrade": false,
+        "allowPrerelease": false,
+        "autoDownload": false,
+        "autoInstallOnAppQuit": true,
+        "feedCalls": [
+          {
+            "provider": "generic",
+            "url": "https://updates.baize-ailabs.com/stable",
+            "channel": "stable"
+          }
+        ],
+        "requests": [
+          "https://updates.baize-ailabs.com/stable/stable-mac.yml?noCache=1jdrdla00"
+        ],
+        "updaterResult": {
+          "isUpdateAvailable": true,
+          "updateInfo": {
+            "version": "1.3.0"
+          }
+        },
+        "states": [
+          {
+            "status": "checking",
+            "currentVersion": "1.2.0"
+          },
+          {
+            "status": "checking",
+            "currentVersion": "1.2.0"
+          },
+          {
+            "status": "available",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [],
+            "installMode": "automatic"
+          }
+        ],
+        "sleepCallsMs": []
+      },
+      "boundary": "缺省渠道为 stable，缺少打包配置时用冻结 URL。"
+    },
+    {
+      "id": "feed-windows-packaged",
+      "inventory": [
+        "PKG-01"
+      ],
+      "kind": "normal",
+      "sourceRefs": [
+        "entry",
+        "feed",
+        "channel",
+        "suffix",
+        "url",
+        "start"
+      ],
+      "input": {
+        "platform": "win32",
+        "channel": "stable",
+        "packagedConfig": "provider: generic\nurl: https://feed.example.invalid/releases\nchannel: ignored\n"
+      },
+      "expected": {
+        "returnedUrl": "https://feed.example.invalid/releases",
+        "channel": "stable",
+        "allowDowngrade": false,
+        "allowPrerelease": false,
+        "autoDownload": false,
+        "autoInstallOnAppQuit": true,
+        "feedCalls": [
+          {
+            "provider": "generic",
+            "url": "https://feed.example.invalid/releases",
+            "channel": "stable"
+          }
+        ],
+        "requests": [
+          "https://feed.example.invalid/releases/stable.yml?noCache=1jdrdla00"
+        ],
+        "updaterResult": {
+          "isUpdateAvailable": true,
+          "updateInfo": {
+            "version": "1.3.0"
+          }
+        },
+        "states": [
+          {
+            "status": "checking",
+            "currentVersion": "1.2.0"
+          },
+          {
+            "status": "checking",
+            "currentVersion": "1.2.0"
+          },
+          {
+            "status": "available",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [],
+            "installMode": "automatic"
+          }
+        ],
+        "sleepCallsMs": []
+      },
+      "boundary": "读打包 URL，Windows 文件名无平台后缀，打包配置内的 channel 不改变显式渠道。"
+    },
+    {
+      "id": "feed-linux-x64-beta",
+      "inventory": [
+        "PKG-01"
+      ],
+      "kind": "normal",
+      "sourceRefs": [
+        "entry",
+        "feed",
+        "channel",
+        "suffix",
+        "url",
+        "start"
+      ],
+      "input": {
+        "platform": "linux",
+        "arch": "x64",
+        "channel": "beta",
+        "overrideUrl": "  https://feed.example.invalid/releases?sample=1  ",
+        "packagedConfig": "provider: generic\nurl: https://ignored.example.invalid/\n"
+      },
+      "expected": {
+        "returnedUrl": "https://feed.example.invalid/releases?sample=1",
+        "channel": "beta",
+        "allowDowngrade": false,
+        "allowPrerelease": false,
+        "autoDownload": false,
+        "autoInstallOnAppQuit": true,
+        "feedCalls": [
+          {
+            "provider": "generic",
+            "url": "https://feed.example.invalid/releases?sample=1",
+            "channel": "beta"
+          }
+        ],
+        "requests": [
+          "https://feed.example.invalid/releases/beta-linux.yml?sample=1"
+        ],
+        "updaterResult": {
+          "isUpdateAvailable": true,
+          "updateInfo": {
+            "version": "1.3.0"
+          }
+        },
+        "states": [
+          {
+            "status": "checking",
+            "currentVersion": "1.2.0"
+          },
+          {
+            "status": "checking",
+            "currentVersion": "1.2.0"
+          },
+          {
+            "status": "available",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [],
+            "installMode": "automatic"
+          }
+        ],
+        "sleepCallsMs": []
+      },
+      "boundary": "覆盖 URL 优先并去首尾空白，保留查询参数，Linux x64 无架构后缀。"
+    },
+    {
+      "id": "feed-linux-arm64-preview",
+      "inventory": [
+        "PKG-01"
+      ],
+      "kind": "normal",
+      "sourceRefs": [
+        "entry",
+        "feed",
+        "channel",
+        "suffix",
+        "url",
+        "start"
+      ],
+      "input": {
+        "platform": "linux",
+        "arch": "arm64",
+        "channel": "preview",
+        "overrideUrl": " \t ",
+        "packagedConfig": "provider: generic\nurl: https://feed.example.invalid/releases\n"
+      },
+      "expected": {
+        "returnedUrl": "https://feed.example.invalid/releases",
+        "channel": "preview",
+        "allowDowngrade": false,
+        "allowPrerelease": false,
+        "autoDownload": false,
+        "autoInstallOnAppQuit": true,
+        "feedCalls": [
+          {
+            "provider": "generic",
+            "url": "https://feed.example.invalid/releases",
+            "channel": "preview"
+          }
+        ],
+        "requests": [
+          "https://feed.example.invalid/releases/preview-linux-arm64.yml?noCache=1jdrdla00"
+        ],
+        "updaterResult": {
+          "isUpdateAvailable": true,
+          "updateInfo": {
+            "version": "1.3.0"
+          }
+        },
+        "states": [
+          {
+            "status": "checking",
+            "currentVersion": "1.2.0"
+          },
+          {
+            "status": "checking",
+            "currentVersion": "1.2.0"
+          },
+          {
+            "status": "available",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [],
+            "installMode": "automatic"
+          }
+        ],
+        "sleepCallsMs": []
+      },
+      "boundary": "空白覆盖无效，Linux arm64 带架构后缀。"
+    },
+    {
+      "id": "feed-other-provider",
+      "inventory": [
+        "PKG-01"
+      ],
+      "kind": "boundary",
+      "sourceRefs": [
+        "entry",
+        "feed",
+        "channel",
+        "suffix",
+        "url",
+        "start"
+      ],
+      "input": {
+        "platform": "darwin",
+        "channel": "beta",
+        "packagedConfig": "provider: custom\nurl: https://feed.example.invalid/releases\n"
+      },
+      "expected": {
+        "returnedUrl": "https://updates.baize-ailabs.com/stable",
+        "channel": "beta",
+        "allowDowngrade": false,
+        "allowPrerelease": false,
+        "autoDownload": false,
+        "autoInstallOnAppQuit": true,
+        "feedCalls": [
+          {
+            "provider": "generic",
+            "url": "https://updates.baize-ailabs.com/stable",
+            "channel": "beta"
+          }
+        ],
+        "requests": [
+          "https://updates.baize-ailabs.com/stable/beta-mac.yml?noCache=1jdrdla00"
+        ],
+        "updaterResult": {
+          "isUpdateAvailable": true,
+          "updateInfo": {
+            "version": "1.3.0"
+          }
+        },
+        "states": [
+          {
+            "status": "checking",
+            "currentVersion": "1.2.0"
+          },
+          {
+            "status": "checking",
+            "currentVersion": "1.2.0"
+          },
+          {
+            "status": "available",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [],
+            "installMode": "automatic"
+          }
+        ],
+        "sleepCallsMs": []
+      },
+      "boundary": "非 generic 配置退回默认 URL，beta 不重写该 URL 的 stable 路径。"
+    },
+    {
+      "id": "feed-empty-channel",
+      "inventory": [
+        "PKG-01"
+      ],
+      "kind": "boundary",
+      "sourceRefs": [
+        "entry",
+        "feed",
+        "channel",
+        "suffix",
+        "url",
+        "start"
+      ],
+      "input": {
+        "platform": "win32",
+        "channel": "",
+        "overrideUrl": "https://feed.example.invalid/releases"
+      },
+      "expected": {
+        "returnedUrl": "https://feed.example.invalid/releases",
+        "channel": "",
+        "allowDowngrade": false,
+        "allowPrerelease": false,
+        "autoDownload": false,
+        "autoInstallOnAppQuit": true,
+        "feedCalls": [
+          {
+            "provider": "generic",
+            "url": "https://feed.example.invalid/releases",
+            "channel": ""
+          }
+        ],
+        "requests": [
+          "https://feed.example.invalid/releases/.yml?noCache=1jdrdla00"
+        ],
+        "updaterResult": {
+          "isUpdateAvailable": true,
+          "updateInfo": {
+            "version": "1.3.0"
+          }
+        },
+        "states": [
+          {
+            "status": "checking",
+            "currentVersion": "1.2.0"
+          },
+          {
+            "status": "checking",
+            "currentVersion": "1.2.0"
+          },
+          {
+            "status": "available",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [],
+            "installMode": "automatic"
+          }
+        ],
+        "sleepCallsMs": []
+      },
+      "boundary": "首次赋值保留空渠道，文件名也保留空渠道的实际结果。"
+    },
+    {
+      "id": "feed-invalid-override",
+      "inventory": [
+        "PKG-01"
+      ],
+      "kind": "failure",
+      "sourceRefs": [
+        "entry",
+        "feed",
+        "channel",
+        "suffix",
+        "url",
+        "start"
+      ],
+      "input": {
+        "platform": "darwin",
+        "overrideUrl": "not-a-url",
+        "packagedConfig": "provider: generic\nurl: https://feed.example.invalid/releases\n"
+      },
+      "expected": {
+        "channel": "stable",
+        "allowDowngrade": false,
+        "allowPrerelease": false,
+        "autoDownload": true,
+        "autoInstallOnAppQuit": true,
+        "feedCalls": [
+          {
+            "provider": "generic",
+            "url": "not-a-url",
+            "channel": "stable"
+          }
+        ],
+        "requests": [],
+        "thrown": {
+          "code": "ERR_INVALID_URL",
+          "message": "Invalid URL"
+        }
+      },
+      "boundary": "非空非法覆盖传入适配器后抛错，未发出检查请求。"
+    },
+    {
+      "id": "version-newer",
+      "inventory": [
+        "PKG-01",
+        "PKG-02"
+      ],
+      "kind": "normal",
+      "sourceRefs": [
+        "feed",
+        "currentVersion",
+        "version",
+        "check",
+        "events"
+      ],
+      "input": {
+        "platform": "darwin",
+        "channel": "stable",
+        "overrideUrl": "https://feed.example.invalid/releases",
+        "version": "1.2.0",
+        "candidate": "1.3.0"
+      },
+      "expected": {
+        "returnedUrl": "https://feed.example.invalid/releases",
+        "channel": "stable",
+        "allowDowngrade": false,
+        "allowPrerelease": false,
+        "autoDownload": false,
+        "autoInstallOnAppQuit": true,
+        "feedCalls": [
+          {
+            "provider": "generic",
+            "url": "https://feed.example.invalid/releases",
+            "channel": "stable"
+          }
+        ],
+        "requests": [
+          "https://feed.example.invalid/releases/stable-mac.yml?noCache=1jdrdla00"
+        ],
+        "updaterResult": {
+          "isUpdateAvailable": true,
+          "updateInfo": {
+            "version": "1.3.0"
+          }
+        },
+        "states": [
+          {
+            "status": "checking",
+            "currentVersion": "1.2.0"
+          },
+          {
+            "status": "checking",
+            "currentVersion": "1.2.0"
+          },
+          {
+            "status": "available",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [],
+            "installMode": "automatic"
+          }
+        ],
+        "sleepCallsMs": []
+      },
+      "boundary": "比较数值版本，进入可更新状态。"
+    },
+    {
+      "id": "version-equal",
+      "inventory": [
+        "PKG-01",
+        "PKG-02"
+      ],
+      "kind": "boundary",
+      "sourceRefs": [
+        "feed",
+        "currentVersion",
+        "version",
+        "check",
+        "events"
+      ],
+      "input": {
+        "platform": "darwin",
+        "channel": "stable",
+        "overrideUrl": "https://feed.example.invalid/releases",
+        "version": "1.2.0",
+        "candidate": "1.2.0"
+      },
+      "expected": {
+        "returnedUrl": "https://feed.example.invalid/releases",
+        "channel": "stable",
+        "allowDowngrade": false,
+        "allowPrerelease": false,
+        "autoDownload": false,
+        "autoInstallOnAppQuit": true,
+        "feedCalls": [
+          {
+            "provider": "generic",
+            "url": "https://feed.example.invalid/releases",
+            "channel": "stable"
+          }
+        ],
+        "requests": [
+          "https://feed.example.invalid/releases/stable-mac.yml?noCache=1jdrdla00"
+        ],
+        "updaterResult": {
+          "isUpdateAvailable": false,
+          "updateInfo": {
+            "version": "1.2.0"
+          }
+        },
+        "states": [
+          {
+            "status": "checking",
+            "currentVersion": "1.2.0"
+          },
+          {
+            "status": "checking",
+            "currentVersion": "1.2.0"
+          },
+          {
+            "status": "not-available",
+            "currentVersion": "1.2.0"
+          }
+        ],
+        "sleepCallsMs": []
+      },
+      "boundary": "相同版本不提供更新。"
+    },
+    {
+      "id": "version-older",
+      "inventory": [
+        "PKG-01",
+        "PKG-02"
+      ],
+      "kind": "boundary",
+      "sourceRefs": [
+        "feed",
+        "currentVersion",
+        "version",
+        "check",
+        "events"
+      ],
+      "input": {
+        "platform": "darwin",
+        "channel": "stable",
+        "overrideUrl": "https://feed.example.invalid/releases",
+        "version": "1.2.0",
+        "candidate": "1.1.9"
+      },
+      "expected": {
+        "returnedUrl": "https://feed.example.invalid/releases",
+        "channel": "stable",
+        "allowDowngrade": false,
+        "allowPrerelease": false,
+        "autoDownload": false,
+        "autoInstallOnAppQuit": true,
+        "feedCalls": [
+          {
+            "provider": "generic",
+            "url": "https://feed.example.invalid/releases",
+            "channel": "stable"
+          }
+        ],
+        "requests": [
+          "https://feed.example.invalid/releases/stable-mac.yml?noCache=1jdrdla00"
+        ],
+        "updaterResult": {
+          "isUpdateAvailable": false,
+          "updateInfo": {
+            "version": "1.1.9"
+          }
+        },
+        "states": [
+          {
+            "status": "checking",
+            "currentVersion": "1.2.0"
+          },
+          {
+            "status": "checking",
+            "currentVersion": "1.2.0"
+          },
+          {
+            "status": "not-available",
+            "currentVersion": "1.2.0"
+          }
+        ],
+        "sleepCallsMs": []
+      },
+      "boundary": "设置渠道后仍禁止降级。"
+    },
+    {
+      "id": "version-build-metadata",
+      "inventory": [
+        "PKG-01",
+        "PKG-02"
+      ],
+      "kind": "boundary",
+      "sourceRefs": [
+        "feed",
+        "currentVersion",
+        "version",
+        "check",
+        "events"
+      ],
+      "input": {
+        "platform": "darwin",
+        "channel": "stable",
+        "overrideUrl": "https://feed.example.invalid/releases",
+        "version": "1.2.0+local",
+        "candidate": "1.2.0+feed"
+      },
+      "expected": {
+        "returnedUrl": "https://feed.example.invalid/releases",
+        "channel": "stable",
+        "allowDowngrade": false,
+        "allowPrerelease": false,
+        "autoDownload": false,
+        "autoInstallOnAppQuit": true,
+        "feedCalls": [
+          {
+            "provider": "generic",
+            "url": "https://feed.example.invalid/releases",
+            "channel": "stable"
+          }
+        ],
+        "requests": [
+          "https://feed.example.invalid/releases/stable-mac.yml?noCache=1jdrdla00"
+        ],
+        "updaterResult": {
+          "isUpdateAvailable": false,
+          "updateInfo": {
+            "version": "1.2.0+feed"
+          }
+        },
+        "states": [
+          {
+            "status": "checking",
+            "currentVersion": "1.2.0+local"
+          },
+          {
+            "status": "checking",
+            "currentVersion": "1.2.0+local"
+          },
+          {
+            "status": "not-available",
+            "currentVersion": "1.2.0+local"
+          }
+        ],
+        "sleepCallsMs": []
+      },
+      "boundary": "构建元数据不影响 SemVer 优先级。"
+    },
+    {
+      "id": "version-prerelease-order",
+      "inventory": [
+        "PKG-01",
+        "PKG-02"
+      ],
+      "kind": "boundary",
+      "sourceRefs": [
+        "feed",
+        "currentVersion",
+        "version",
+        "check",
+        "events"
+      ],
+      "input": {
+        "platform": "darwin",
+        "channel": "stable",
+        "overrideUrl": "https://feed.example.invalid/releases",
+        "version": "1.3.0-beta.2",
+        "candidate": "1.3.0-beta.10"
+      },
+      "expected": {
+        "returnedUrl": "https://feed.example.invalid/releases",
+        "channel": "stable",
+        "allowDowngrade": false,
+        "allowPrerelease": true,
+        "autoDownload": false,
+        "autoInstallOnAppQuit": true,
+        "feedCalls": [
+          {
+            "provider": "generic",
+            "url": "https://feed.example.invalid/releases",
+            "channel": "stable"
+          }
+        ],
+        "requests": [
+          "https://feed.example.invalid/releases/stable-mac.yml?noCache=1jdrdla00"
+        ],
+        "updaterResult": {
+          "isUpdateAvailable": true,
+          "updateInfo": {
+            "version": "1.3.0-beta.10"
+          }
+        },
+        "states": [
+          {
+            "status": "checking",
+            "currentVersion": "1.3.0-beta.2"
+          },
+          {
+            "status": "checking",
+            "currentVersion": "1.3.0-beta.2"
+          },
+          {
+            "status": "available",
+            "currentVersion": "1.3.0-beta.2",
+            "version": "1.3.0-beta.10",
+            "releaseNotes": [],
+            "installMode": "automatic"
+          }
+        ],
+        "sleepCallsMs": []
+      },
+      "boundary": "预发布数值分段按数值比较。"
+    },
+    {
+      "id": "version-prerelease-to-final",
+      "inventory": [
+        "PKG-01",
+        "PKG-02"
+      ],
+      "kind": "boundary",
+      "sourceRefs": [
+        "feed",
+        "currentVersion",
+        "version",
+        "check",
+        "events"
+      ],
+      "input": {
+        "platform": "darwin",
+        "channel": "stable",
+        "overrideUrl": "https://feed.example.invalid/releases",
+        "version": "1.3.0-rc.1",
+        "candidate": "1.3.0"
+      },
+      "expected": {
+        "returnedUrl": "https://feed.example.invalid/releases",
+        "channel": "stable",
+        "allowDowngrade": false,
+        "allowPrerelease": true,
+        "autoDownload": false,
+        "autoInstallOnAppQuit": true,
+        "feedCalls": [
+          {
+            "provider": "generic",
+            "url": "https://feed.example.invalid/releases",
+            "channel": "stable"
+          }
+        ],
+        "requests": [
+          "https://feed.example.invalid/releases/stable-mac.yml?noCache=1jdrdla00"
+        ],
+        "updaterResult": {
+          "isUpdateAvailable": true,
+          "updateInfo": {
+            "version": "1.3.0"
+          }
+        },
+        "states": [
+          {
+            "status": "checking",
+            "currentVersion": "1.3.0-rc.1"
+          },
+          {
+            "status": "checking",
+            "currentVersion": "1.3.0-rc.1"
+          },
+          {
+            "status": "available",
+            "currentVersion": "1.3.0-rc.1",
+            "version": "1.3.0",
+            "releaseNotes": [],
+            "installMode": "automatic"
+          }
+        ],
+        "sleepCallsMs": []
+      },
+      "boundary": "同一正式版本高于其预发布版本。"
+    },
+    {
+      "id": "version-final-to-prerelease",
+      "inventory": [
+        "PKG-01",
+        "PKG-02"
+      ],
+      "kind": "boundary",
+      "sourceRefs": [
+        "feed",
+        "currentVersion",
+        "version",
+        "check",
+        "events"
+      ],
+      "input": {
+        "platform": "darwin",
+        "channel": "stable",
+        "overrideUrl": "https://feed.example.invalid/releases",
+        "version": "1.3.0",
+        "candidate": "1.3.0-rc.1"
+      },
+      "expected": {
+        "returnedUrl": "https://feed.example.invalid/releases",
+        "channel": "stable",
+        "allowDowngrade": false,
+        "allowPrerelease": false,
+        "autoDownload": false,
+        "autoInstallOnAppQuit": true,
+        "feedCalls": [
+          {
+            "provider": "generic",
+            "url": "https://feed.example.invalid/releases",
+            "channel": "stable"
+          }
+        ],
+        "requests": [
+          "https://feed.example.invalid/releases/stable-mac.yml?noCache=1jdrdla00"
+        ],
+        "updaterResult": {
+          "isUpdateAvailable": false,
+          "updateInfo": {
+            "version": "1.3.0-rc.1"
+          }
+        },
+        "states": [
+          {
+            "status": "checking",
+            "currentVersion": "1.3.0"
+          },
+          {
+            "status": "checking",
+            "currentVersion": "1.3.0"
+          },
+          {
+            "status": "not-available",
+            "currentVersion": "1.3.0"
+          }
+        ],
+        "sleepCallsMs": []
+      },
+      "boundary": "当前正式版高于同版本的预发布候选。"
+    },
+    {
+      "id": "version-newer-prerelease-stable-feed",
+      "inventory": [
+        "PKG-01",
+        "PKG-02"
+      ],
+      "kind": "boundary",
+      "sourceRefs": [
+        "feed",
+        "currentVersion",
+        "version",
+        "check",
+        "events"
+      ],
+      "input": {
+        "platform": "darwin",
+        "channel": "stable",
+        "overrideUrl": "https://feed.example.invalid/releases",
+        "version": "1.2.0",
+        "candidate": "1.3.0-beta.1"
+      },
+      "expected": {
+        "returnedUrl": "https://feed.example.invalid/releases",
+        "channel": "stable",
+        "allowDowngrade": false,
+        "allowPrerelease": false,
+        "autoDownload": false,
+        "autoInstallOnAppQuit": true,
+        "feedCalls": [
+          {
+            "provider": "generic",
+            "url": "https://feed.example.invalid/releases",
+            "channel": "stable"
+          }
+        ],
+        "requests": [
+          "https://feed.example.invalid/releases/stable-mac.yml?noCache=1jdrdla00"
+        ],
+        "updaterResult": {
+          "isUpdateAvailable": true,
+          "updateInfo": {
+            "version": "1.3.0-beta.1"
+          }
+        },
+        "states": [
+          {
+            "status": "checking",
+            "currentVersion": "1.2.0"
+          },
+          {
+            "status": "checking",
+            "currentVersion": "1.2.0"
+          },
+          {
+            "status": "available",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0-beta.1",
+            "releaseNotes": [],
+            "installMode": "automatic"
+          }
+        ],
+        "sleepCallsMs": []
+      },
+      "boundary": "generic 直接比较清单内版本，较新预发布候选由 stable 清单提供时仍可用。"
+    },
+    {
+      "id": "version-invalid-candidate",
+      "inventory": [
+        "PKG-01",
+        "PKG-02"
+      ],
+      "kind": "failure",
+      "sourceRefs": [
+        "feed",
+        "currentVersion",
+        "version",
+        "check",
+        "events"
+      ],
+      "input": {
+        "platform": "darwin",
+        "channel": "stable",
+        "overrideUrl": "https://feed.example.invalid/releases",
+        "version": "1.2.0",
+        "candidate": "1.3"
+      },
+      "expected": {
+        "returnedUrl": "https://feed.example.invalid/releases",
+        "channel": "stable",
+        "allowDowngrade": false,
+        "allowPrerelease": false,
+        "autoDownload": false,
+        "autoInstallOnAppQuit": true,
+        "feedCalls": [
+          {
+            "provider": "generic",
+            "url": "https://feed.example.invalid/releases",
+            "channel": "stable"
+          }
+        ],
+        "requests": [
+          "https://feed.example.invalid/releases/stable-mac.yml?noCache=1jdrdla00",
+          "https://feed.example.invalid/releases/stable-mac.yml?noCache=1jdrdla00",
+          "https://feed.example.invalid/releases/stable-mac.yml?noCache=1jdrdla00"
+        ],
+        "updaterResult": {
+          "error": {
+            "code": "ERR_UPDATER_INVALID_VERSION",
+            "message": "This file could not be downloaded, or the latest version (from update server) does not have a valid semver version: \"1.3\""
+          }
+        },
+        "states": [
+          {
+            "status": "checking",
+            "currentVersion": "1.2.0"
+          },
+          {
+            "status": "checking",
+            "currentVersion": "1.2.0"
+          },
+          {
+            "status": "checking",
+            "currentVersion": "1.2.0",
+            "retryAttempt": 1,
+            "maxRetryAttempts": 2
+          },
+          {
+            "status": "checking",
+            "currentVersion": "1.2.0",
+            "retryAttempt": 1,
+            "maxRetryAttempts": 2
+          },
+          {
+            "status": "checking",
+            "currentVersion": "1.2.0",
+            "retryAttempt": 2,
+            "maxRetryAttempts": 2
+          },
+          {
+            "status": "checking",
+            "currentVersion": "1.2.0",
+            "retryAttempt": 2,
+            "maxRetryAttempts": 2
+          },
+          {
+            "status": "error",
+            "currentVersion": "1.2.0",
+            "errorMessage": "This file could not be downloaded, or the latest version (from update server) does not have a valid semver version: \"1.3\"",
+            "errorStage": "check"
+          }
+        ],
+        "sleepCallsMs": [
+          600,
+          1600
+        ]
+      },
+      "boundary": "非法远端版本由 updater 报错，管理器重试后报告 check。"
+    },
+    {
+      "id": "version-invalid-current",
+      "inventory": [
+        "PKG-01",
+        "PKG-02"
+      ],
+      "kind": "failure",
+      "sourceRefs": [
+        "feed",
+        "currentVersion",
+        "version",
+        "check",
+        "events"
+      ],
+      "input": {
+        "platform": "darwin",
+        "channel": "stable",
+        "overrideUrl": "https://feed.example.invalid/releases",
+        "version": "bad",
+        "candidate": "1.3.0"
+      },
+      "expected": {
+        "feedCalls": [],
+        "requests": [],
+        "thrown": {
+          "code": "ERR_UPDATER_INVALID_VERSION",
+          "message": "App version is not a valid semver version: \"bad\""
+        }
+      },
+      "boundary": "非法本地版本在 updater 构造时抛错。"
+    },
+    {
+      "id": "mode-mac-signed",
+      "inventory": [
+        "PKG-01"
+      ],
+      "kind": "normal",
+      "sourceRefs": [
+        "entry",
+        "mode"
+      ],
+      "input": {
+        "platform": "darwin",
+        "isPackaged": true,
+        "signature": {
+          "status": 0,
+          "output": "Authority=Developer ID Application: Example\nTeamIdentifier=EXAMPLE123"
+        }
+      },
+      "expected": {
+        "installMode": "automatic",
+        "inspectCalls": 1
+      },
+      "boundary": "Authority 和非空 Team 都存在。"
+    },
+    {
+      "id": "mode-windows",
+      "inventory": [
+        "PKG-01"
+      ],
+      "kind": "normal",
+      "sourceRefs": [
+        "entry",
+        "mode"
+      ],
+      "input": {
+        "platform": "win32",
+        "isPackaged": true,
+        "signature": null
+      },
+      "expected": {
+        "installMode": "automatic",
+        "inspectCalls": 0
+      },
+      "boundary": "直接选择 automatic，跳过签名检查。"
+    },
+    {
+      "id": "mode-linux",
+      "inventory": [
+        "PKG-01"
+      ],
+      "kind": "normal",
+      "sourceRefs": [
+        "entry",
+        "mode"
+      ],
+      "input": {
+        "platform": "linux",
+        "isPackaged": true,
+        "signature": null
+      },
+      "expected": {
+        "installMode": "automatic",
+        "inspectCalls": 0
+      },
+      "boundary": "直接选择 automatic，跳过签名检查。"
+    },
+    {
+      "id": "mode-mac-development",
+      "inventory": [
+        "PKG-01"
+      ],
+      "kind": "boundary",
+      "sourceRefs": [
+        "entry",
+        "mode"
+      ],
+      "input": {
+        "platform": "darwin",
+        "isPackaged": false,
+        "signature": null
+      },
+      "expected": {
+        "installMode": "automatic",
+        "inspectCalls": 0
+      },
+      "boundary": "选型为 automatic，启动入口独立禁用开发版更新。"
+    },
+    {
+      "id": "mode-mac-adhoc",
+      "inventory": [
+        "PKG-01"
+      ],
+      "kind": "boundary",
+      "sourceRefs": [
+        "entry",
+        "mode"
+      ],
+      "input": {
+        "platform": "darwin",
+        "isPackaged": true,
+        "signature": {
+          "status": 0,
+          "output": "Signature=adhoc\nTeamIdentifier=not set"
+        }
+      },
+      "expected": {
+        "installMode": "manual",
+        "inspectCalls": 1
+      },
+      "boundary": "本地临时签名进入手动 DMG 模式。"
+    },
+    {
+      "id": "mode-mac-missing-team",
+      "inventory": [
+        "PKG-01"
+      ],
+      "kind": "boundary",
+      "sourceRefs": [
+        "entry",
+        "mode"
+      ],
+      "input": {
+        "platform": "darwin",
+        "isPackaged": true,
+        "signature": {
+          "status": 0,
+          "output": "Authority=Developer ID Application: Example\n"
+        }
+      },
+      "expected": {
+        "installMode": "manual",
+        "inspectCalls": 1
+      },
+      "boundary": "有 Authority、无 Team 时仍为 manual。"
+    },
+    {
+      "id": "mode-mac-unset-team",
+      "inventory": [
+        "PKG-01"
+      ],
+      "kind": "boundary",
+      "sourceRefs": [
+        "entry",
+        "mode"
+      ],
+      "input": {
+        "platform": "darwin",
+        "isPackaged": true,
+        "signature": {
+          "status": 0,
+          "output": "Authority=Developer ID Application: Example\nTeamIdentifier= not set "
+        }
+      },
+      "expected": {
+        "installMode": "manual",
+        "inspectCalls": 1
+      },
+      "boundary": "Team 去空白后是 not set 时为 manual。"
+    },
+    {
+      "id": "mode-mac-missing-authority",
+      "inventory": [
+        "PKG-01"
+      ],
+      "kind": "boundary",
+      "sourceRefs": [
+        "entry",
+        "mode"
+      ],
+      "input": {
+        "platform": "darwin",
+        "isPackaged": true,
+        "signature": {
+          "status": 0,
+          "output": "TeamIdentifier=EXAMPLE123"
+        }
+      },
+      "expected": {
+        "installMode": "manual",
+        "inspectCalls": 1
+      },
+      "boundary": "有 Team、无 Authority 时仍为 manual。"
+    },
+    {
+      "id": "mode-mac-inspection-error",
+      "inventory": [
+        "PKG-01"
+      ],
+      "kind": "failure",
+      "sourceRefs": [
+        "entry",
+        "mode"
+      ],
+      "input": {
+        "platform": "darwin",
+        "isPackaged": true,
+        "signature": {
+          "status": 1,
+          "output": "Authority=Example\nTeamIdentifier=EXAMPLE123"
+        }
+      },
+      "expected": {
+        "installMode": "manual",
+        "inspectCalls": 1
+      },
+      "boundary": "检查进程非零退出时忽略输出。"
+    },
+    {
+      "id": "mode-mac-inspection-no-status",
+      "inventory": [
+        "PKG-01"
+      ],
+      "kind": "failure",
+      "sourceRefs": [
+        "entry",
+        "mode"
+      ],
+      "input": {
+        "platform": "darwin",
+        "isPackaged": true,
+        "signature": {
+          "status": null,
+          "output": ""
+        }
+      },
+      "expected": {
+        "installMode": "manual",
+        "inspectCalls": 1
+      },
+      "boundary": "无退出码也进入手动模式。"
+    },
+    {
+      "id": "check-current",
+      "inventory": [
+        "PKG-02"
+      ],
+      "kind": "normal",
+      "sourceRefs": [
+        "entry",
+        "start",
+        "check",
+        "events",
+        "release",
+        "error",
+        "errorUi",
+        "uiText"
+      ],
+      "input": {
+        "attempts": [
+          {
+            "notAvailable": true
+          }
+        ]
+      },
+      "expected": {
+        "initial": {
+          "status": "idle",
+          "currentVersion": "1.2.0"
+        },
+        "states": [
+          {
+            "status": "checking",
+            "currentVersion": "1.2.0"
+          },
+          {
+            "status": "checking",
+            "currentVersion": "1.2.0"
+          },
+          {
+            "status": "not-available",
+            "currentVersion": "1.2.0"
+          }
+        ],
+        "checkpoints": [
+          {
+            "state": {
+              "status": "not-available",
+              "currentVersion": "1.2.0"
+            }
+          }
+        ],
+        "sleepCallsMs": [],
+        "checkCalls": 1,
+        "downloadCalls": 0,
+        "installCalls": 0
+      },
+      "boundary": "检查成功后进入 not-available。"
+    },
+    {
+      "id": "check-release",
+      "inventory": [
+        "PKG-02"
+      ],
+      "kind": "normal",
+      "sourceRefs": [
+        "entry",
+        "start",
+        "check",
+        "events",
+        "release",
+        "error",
+        "errorUi",
+        "uiText"
+      ],
+      "input": {
+        "attempts": [
+          {
+            "available": true
+          }
+        ],
+        "release": {
+          "version": "1.3.0",
+          "releaseDate": "2026-01-02T00:00:00.000Z",
+          "releaseNotes": [
+            {
+              "note": "<p>Example &amp; fixes</p><li>Second&nbsp;line</li>"
+            }
+          ],
+          "files": [
+            {
+              "url": "installer.zip",
+              "size": 100
+            },
+            {
+              "url": "fixture%20build.DMG?download=1",
+              "size": 4
+            }
+          ]
+        }
+      },
+      "expected": {
+        "initial": {
+          "status": "idle",
+          "currentVersion": "1.2.0"
+        },
+        "states": [
+          {
+            "status": "checking",
+            "currentVersion": "1.2.0"
+          },
+          {
+            "status": "checking",
+            "currentVersion": "1.2.0"
+          },
+          {
+            "status": "available",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "automatic",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 100,
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+          }
+        ],
+        "checkpoints": [
+          {
+            "state": {
+              "status": "available",
+              "currentVersion": "1.2.0",
+              "version": "1.3.0",
+              "releaseNotes": [
+                "Example & fixes",
+                "Second line"
+              ],
+              "installMode": "automatic",
+              "releaseDate": "2026-01-02T00:00:00.000Z",
+              "sizeBytes": 100,
+              "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+            }
+          }
+        ],
+        "sleepCallsMs": [],
+        "checkCalls": 1,
+        "downloadCalls": 0,
+        "installCalls": 0
+      },
+      "boundary": "冻结逻辑去除发行说明 HTML、保留日期，自动下载大小取首个数值。"
+    },
+    {
+      "id": "check-retry-transient",
+      "inventory": [
+        "PKG-02"
+      ],
+      "kind": "boundary",
+      "sourceRefs": [
+        "entry",
+        "start",
+        "check",
+        "events",
+        "release",
+        "error",
+        "errorUi",
+        "uiText"
+      ],
+      "input": {
+        "attempts": [
+          {
+            "eventError": "ETIMEDOUT"
+          },
+          {
+            "available": true
+          }
+        ],
+        "release": {
+          "version": "1.3.0",
+          "releaseDate": "2026-01-02T00:00:00.000Z",
+          "releaseNotes": [
+            {
+              "note": "<p>Example &amp; fixes</p><li>Second&nbsp;line</li>"
+            }
+          ],
+          "files": [
+            {
+              "url": "installer.zip",
+              "size": 100
+            },
+            {
+              "url": "fixture%20build.DMG?download=1",
+              "size": 4
+            }
+          ]
+        }
+      },
+      "expected": {
+        "initial": {
+          "status": "idle",
+          "currentVersion": "1.2.0"
+        },
+        "states": [
+          {
+            "status": "checking",
+            "currentVersion": "1.2.0"
+          },
+          {
+            "status": "checking",
+            "currentVersion": "1.2.0"
+          },
+          {
+            "status": "checking",
+            "currentVersion": "1.2.0",
+            "retryAttempt": 1,
+            "maxRetryAttempts": 2
+          },
+          {
+            "status": "checking",
+            "currentVersion": "1.2.0",
+            "retryAttempt": 1,
+            "maxRetryAttempts": 2
+          },
+          {
+            "status": "available",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "automatic",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 100,
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+          }
+        ],
+        "checkpoints": [
+          {
+            "state": {
+              "status": "available",
+              "currentVersion": "1.2.0",
+              "version": "1.3.0",
+              "releaseNotes": [
+                "Example & fixes",
+                "Second line"
+              ],
+              "installMode": "automatic",
+              "releaseDate": "2026-01-02T00:00:00.000Z",
+              "sizeBytes": 100,
+              "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+            }
+          }
+        ],
+        "sleepCallsMs": [
+          600
+        ],
+        "checkCalls": 2,
+        "downloadCalls": 0,
+        "installCalls": 0
+      },
+      "boundary": "只发 error 事件的检查也重试，第二次成功后可更新。"
+    },
+    {
+      "id": "check-exhausted-recovery",
+      "inventory": [
+        "PKG-02"
+      ],
+      "kind": "failure",
+      "sourceRefs": [
+        "entry",
+        "start",
+        "check",
+        "events",
+        "release",
+        "error",
+        "errorUi",
+        "uiText"
+      ],
+      "input": {
+        "attempts": [
+          {
+            "reject": "getaddrinfo ENOTFOUND feed.example.invalid"
+          },
+          {
+            "reject": "getaddrinfo ENOTFOUND feed.example.invalid"
+          },
+          {
+            "reject": "getaddrinfo ENOTFOUND feed.example.invalid"
+          },
+          {
+            "available": true
+          }
+        ],
+        "checks": 2,
+        "release": {
+          "version": "1.3.0",
+          "releaseDate": "2026-01-02T00:00:00.000Z",
+          "releaseNotes": [
+            {
+              "note": "<p>Example &amp; fixes</p><li>Second&nbsp;line</li>"
+            }
+          ],
+          "files": [
+            {
+              "url": "installer.zip",
+              "size": 100
+            },
+            {
+              "url": "fixture%20build.DMG?download=1",
+              "size": 4
+            }
+          ]
+        }
+      },
+      "expected": {
+        "initial": {
+          "status": "idle",
+          "currentVersion": "1.2.0"
+        },
+        "states": [
+          {
+            "status": "checking",
+            "currentVersion": "1.2.0"
+          },
+          {
+            "status": "checking",
+            "currentVersion": "1.2.0"
+          },
+          {
+            "status": "checking",
+            "currentVersion": "1.2.0",
+            "retryAttempt": 1,
+            "maxRetryAttempts": 2
+          },
+          {
+            "status": "checking",
+            "currentVersion": "1.2.0",
+            "retryAttempt": 1,
+            "maxRetryAttempts": 2
+          },
+          {
+            "status": "checking",
+            "currentVersion": "1.2.0",
+            "retryAttempt": 2,
+            "maxRetryAttempts": 2
+          },
+          {
+            "status": "checking",
+            "currentVersion": "1.2.0",
+            "retryAttempt": 2,
+            "maxRetryAttempts": 2
+          },
+          {
+            "status": "error",
+            "currentVersion": "1.2.0",
+            "errorMessage": "getaddrinfo ENOTFOUND feed.example.invalid",
+            "errorStage": "check"
+          },
+          {
+            "status": "checking",
+            "currentVersion": "1.2.0"
+          },
+          {
+            "status": "checking",
+            "currentVersion": "1.2.0"
+          },
+          {
+            "status": "available",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "automatic",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 100,
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+          }
+        ],
+        "checkpoints": [
+          {
+            "state": {
+              "status": "error",
+              "currentVersion": "1.2.0",
+              "errorMessage": "getaddrinfo ENOTFOUND feed.example.invalid",
+              "errorStage": "check"
+            },
+            "dialog": {
+              "title": "更新检查失败",
+              "error": "更新服务器域名解析失败，请检查网络或 DNS 设置。",
+              "actions": [
+                "重新检查"
+              ]
+            }
+          },
+          {
+            "state": {
+              "status": "available",
+              "currentVersion": "1.2.0",
+              "version": "1.3.0",
+              "releaseNotes": [
+                "Example & fixes",
+                "Second line"
+              ],
+              "installMode": "automatic",
+              "releaseDate": "2026-01-02T00:00:00.000Z",
+              "sizeBytes": 100,
+              "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+            }
+          }
+        ],
+        "sleepCallsMs": [
+          600,
+          1600
+        ],
+        "checkCalls": 4,
+        "downloadCalls": 0,
+        "installCalls": 0
+      },
+      "boundary": "前三次 DNS 失败后报告错误，显式重新检查可成功。"
+    },
+    {
+      "id": "check-disabled",
+      "inventory": [
+        "PKG-02"
+      ],
+      "kind": "boundary",
+      "sourceRefs": [
+        "entry",
+        "start",
+        "check",
+        "events",
+        "release",
+        "error",
+        "errorUi",
+        "uiText"
+      ],
+      "input": {
+        "enabled": false,
+        "attempts": []
+      },
+      "expected": {
+        "initial": {
+          "status": "idle",
+          "currentVersion": "1.2.0"
+        },
+        "states": [],
+        "checkpoints": [
+          {
+            "state": {
+              "status": "idle",
+              "currentVersion": "1.2.0"
+            }
+          }
+        ],
+        "sleepCallsMs": [],
+        "checkCalls": 0,
+        "downloadCalls": 0,
+        "installCalls": 0
+      },
+      "boundary": "禁用时 check、download 和 install 均不进入适配器。"
+    },
+    {
+      "id": "download-automatic-progress",
+      "inventory": [
+        "PKG-03"
+      ],
+      "kind": "normal",
+      "sourceRefs": [
+        "download",
+        "events",
+        "release",
+        "error",
+        "errorUi",
+        "uiText"
+      ],
+      "input": {
+        "release": {
+          "version": "1.3.0",
+          "releaseDate": "2026-01-02T00:00:00.000Z",
+          "releaseNotes": [
+            {
+              "note": "<p>Example &amp; fixes</p><li>Second&nbsp;line</li>"
+            }
+          ],
+          "files": [
+            {
+              "url": "installer.zip",
+              "size": 100
+            },
+            {
+              "url": "fixture%20build.DMG?download=1",
+              "size": 4
+            }
+          ]
+        },
+        "steps": [
+          {
+            "progress": [
+              {
+                "percent": 17.25,
+                "transferred": 17,
+                "total": 100,
+                "bytesPerSecond": 0
+              },
+              {
+                "percent": 70.5,
+                "transferred": 71,
+                "total": 100,
+                "bytesPerSecond": 10
+              },
+              {
+                "percent": 100,
+                "transferred": 101,
+                "total": 100,
+                "bytesPerSecond": 10
+              }
+            ],
+            "complete": true
+          }
+        ],
+        "locale": "zh-CN"
+      },
+      "expected": {
+        "states": [
+          {
+            "status": "available",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "automatic",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 100,
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+          },
+          {
+            "status": "downloading",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "automatic",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 100,
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1",
+            "progress": {
+              "percent": 17.25,
+              "transferredBytes": 17,
+              "totalBytes": 100,
+              "bytesPerSecond": 0
+            }
+          },
+          {
+            "status": "downloading",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "automatic",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 100,
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1",
+            "progress": {
+              "percent": 70.5,
+              "transferredBytes": 71,
+              "totalBytes": 100,
+              "bytesPerSecond": 10,
+              "remainingSeconds": 3
+            }
+          },
+          {
+            "status": "downloading",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "automatic",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 100,
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1",
+            "progress": {
+              "percent": 100,
+              "transferredBytes": 101,
+              "totalBytes": 100,
+              "bytesPerSecond": 10,
+              "remainingSeconds": 0
+            }
+          },
+          {
+            "status": "downloaded",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "automatic",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 100,
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+          }
+        ],
+        "downloadCalls": 1
+      },
+      "boundary": "零速时省略剩余秒数，正速用 Math.round，超出总量时剩余为零。"
+    },
+    {
+      "id": "download-automatic-reset",
+      "inventory": [
+        "PKG-03"
+      ],
+      "kind": "failure",
+      "sourceRefs": [
+        "download",
+        "events",
+        "release",
+        "error",
+        "errorUi",
+        "uiText"
+      ],
+      "input": {
+        "release": {
+          "version": "1.3.0",
+          "releaseDate": "2026-01-02T00:00:00.000Z",
+          "releaseNotes": [
+            {
+              "note": "<p>Example &amp; fixes</p><li>Second&nbsp;line</li>"
+            }
+          ],
+          "files": [
+            {
+              "url": "installer.zip",
+              "size": 100
+            },
+            {
+              "url": "fixture%20build.DMG?download=1",
+              "size": 4
+            }
+          ]
+        },
+        "steps": [
+          {
+            "reject": "socket hang up"
+          }
+        ],
+        "locale": "zh-CN"
+      },
+      "expected": {
+        "states": [
+          {
+            "status": "available",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "automatic",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 100,
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+          },
+          {
+            "status": "error",
+            "currentVersion": "1.2.0",
+            "errorMessage": "socket hang up",
+            "errorStage": "download",
+            "version": "1.3.0",
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+          }
+        ],
+        "downloadCalls": 1,
+        "dialog": {
+          "title": "更新下载失败",
+          "error": "下载连接被中途断开，应用已保留当前版本，请重新尝试。",
+          "actions": [
+            "下载 DMG 更新",
+            "重新检查"
+          ]
+        }
+      },
+      "boundary": "下载拒绝归 download。有 DMG 时提供回退按钮。"
+    },
+    {
+      "id": "verify-signature-event",
+      "inventory": [
+        "PKG-03"
+      ],
+      "kind": "failure",
+      "sourceRefs": [
+        "download",
+        "events",
+        "release",
+        "error",
+        "errorUi",
+        "uiText"
+      ],
+      "input": {
+        "release": {
+          "version": "1.3.0",
+          "releaseDate": "2026-01-02T00:00:00.000Z",
+          "releaseNotes": [
+            {
+              "note": "<p>Example &amp; fixes</p><li>Second&nbsp;line</li>"
+            }
+          ],
+          "files": [
+            {
+              "url": "installer.zip",
+              "size": 100
+            },
+            {
+              "url": "fixture%20build.DMG?download=1",
+              "size": 4
+            }
+          ]
+        },
+        "steps": [
+          {
+            "eventError": "Code signature did not pass validation"
+          }
+        ],
+        "locale": "zh-CN"
+      },
+      "expected": {
+        "states": [
+          {
+            "status": "available",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "automatic",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 100,
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+          },
+          {
+            "status": "error",
+            "currentVersion": "1.2.0",
+            "errorMessage": "Code signature did not pass validation",
+            "errorStage": "verify",
+            "version": "1.3.0",
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+          }
+        ],
+        "downloadCalls": 1,
+        "dialog": {
+          "title": "安装包校验未通过",
+          "error": "当前安装包缺少 Apple 发布签名，改用应用内 DMG 下载继续更新。",
+          "actions": [
+            "下载 DMG 更新",
+            "重新检查"
+          ]
+        }
+      },
+      "boundary": "自动下载上报签名错误事件时归 verify，可选择 DMG 回退。"
+    },
+    {
+      "id": "verify-signature-event-en",
+      "inventory": [
+        "PKG-03"
+      ],
+      "kind": "failure",
+      "sourceRefs": [
+        "download",
+        "events",
+        "release",
+        "error",
+        "errorUi",
+        "uiText"
+      ],
+      "input": {
+        "release": {
+          "version": "1.3.0",
+          "releaseDate": "2026-01-02T00:00:00.000Z",
+          "releaseNotes": [
+            {
+              "note": "<p>Example &amp; fixes</p><li>Second&nbsp;line</li>"
+            }
+          ],
+          "files": [
+            {
+              "url": "installer.zip",
+              "size": 100
+            },
+            {
+              "url": "fixture%20build.DMG?download=1",
+              "size": 4
+            }
+          ]
+        },
+        "steps": [
+          {
+            "eventError": "Code signature did not pass validation"
+          }
+        ],
+        "locale": "en"
+      },
+      "expected": {
+        "states": [
+          {
+            "status": "available",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "automatic",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 100,
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+          },
+          {
+            "status": "error",
+            "currentVersion": "1.2.0",
+            "errorMessage": "Code signature did not pass validation",
+            "errorStage": "verify",
+            "version": "1.3.0",
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+          }
+        ],
+        "downloadCalls": 1,
+        "dialog": {
+          "title": "Installer verification failed",
+          "error": "This installer has no Apple release signature. Matou will continue with the in-app DMG download.",
+          "actions": [
+            "Download DMG update",
+            "Check again"
+          ]
+        }
+      },
+      "boundary": "同一错误状态切到英文文案。"
+    },
+    {
+      "id": "verify-signature-rejection",
+      "inventory": [
+        "PKG-03"
+      ],
+      "kind": "boundary",
+      "sourceRefs": [
+        "download",
+        "events",
+        "release",
+        "error",
+        "errorUi",
+        "uiText"
+      ],
+      "input": {
+        "release": {
+          "version": "1.3.0",
+          "releaseDate": "2026-01-02T00:00:00.000Z",
+          "releaseNotes": [
+            {
+              "note": "<p>Example &amp; fixes</p><li>Second&nbsp;line</li>"
+            }
+          ],
+          "files": [
+            {
+              "url": "installer.zip",
+              "size": 100
+            },
+            {
+              "url": "fixture%20build.DMG?download=1",
+              "size": 4
+            }
+          ]
+        },
+        "steps": [
+          {
+            "reject": "Code signature did not pass validation"
+          }
+        ],
+        "locale": "zh-CN"
+      },
+      "expected": {
+        "states": [
+          {
+            "status": "available",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "automatic",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 100,
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+          },
+          {
+            "status": "error",
+            "currentVersion": "1.2.0",
+            "errorMessage": "Code signature did not pass validation",
+            "errorStage": "download",
+            "version": "1.3.0",
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+          }
+        ],
+        "downloadCalls": 1,
+        "dialog": {
+          "title": "更新下载失败",
+          "error": "更新文件下载中断，请检查网络后重试。",
+          "actions": [
+            "下载 DMG 更新",
+            "重新检查"
+          ]
+        }
+      },
+      "boundary": "相同文案经 downloadUpdate 拒绝路径时，显式 download 优先。"
+    },
+    {
+      "id": "download-no-fallback",
+      "inventory": [
+        "PKG-03"
+      ],
+      "kind": "failure",
+      "sourceRefs": [
+        "download",
+        "events",
+        "release",
+        "error",
+        "errorUi",
+        "uiText"
+      ],
+      "input": {
+        "release": {
+          "version": "1.3.0",
+          "releaseDate": "2026-01-02T00:00:00.000Z",
+          "releaseNotes": [
+            {
+              "note": "<p>Example &amp; fixes</p><li>Second&nbsp;line</li>"
+            }
+          ],
+          "files": [
+            {
+              "url": "installer.zip",
+              "size": 100
+            }
+          ]
+        },
+        "steps": [
+          {
+            "reject": "socket hang up"
+          }
+        ],
+        "locale": "zh-CN"
+      },
+      "expected": {
+        "states": [
+          {
+            "status": "available",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "automatic",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 100
+          },
+          {
+            "status": "error",
+            "currentVersion": "1.2.0",
+            "errorMessage": "socket hang up",
+            "errorStage": "download",
+            "version": "1.3.0"
+          }
+        ],
+        "downloadCalls": 1,
+        "dialog": {
+          "title": "更新下载失败",
+          "error": "下载连接被中途断开，应用已保留当前版本，请重新尝试。",
+          "actions": [
+            "重新检查"
+          ]
+        }
+      },
+      "boundary": "缺少 DMG 时错误弹层只有重新检查。"
+    },
+    {
+      "id": "download-manual-success",
+      "inventory": [
+        "PKG-03"
+      ],
+      "kind": "normal",
+      "sourceRefs": [
+        "release",
+        "error",
+        "errorUi",
+        "uiText",
+        "download",
+        "stream",
+        "mainText",
+        "install"
+      ],
+      "input": {
+        "mode": "manual",
+        "release": {
+          "version": "1.3.0",
+          "releaseDate": "2026-01-02T00:00:00.000Z",
+          "releaseNotes": [
+            {
+              "note": "<p>Example &amp; fixes</p><li>Second&nbsp;line</li>"
+            }
+          ],
+          "files": [
+            {
+              "url": "installer.zip",
+              "size": 100
+            },
+            {
+              "url": "fixture%20build.DMG?download=1",
+              "size": 4,
+              "sha512": "/o7tYN2h9j86w7puod3JkGx2dgIxdoGWZ0v9keavtY4Wt57PqE9v9qBEuML5JSrxVBSj91APmauLMFQssTmHZA=="
+            }
+          ]
+        },
+        "steps": [
+          {
+            "chunks": [
+              "dm",
+              "g!"
+            ],
+            "contentLength": 4
+          }
+        ]
+      },
+      "expected": {
+        "states": [
+          {
+            "status": "available",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "manual",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 4,
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+          },
+          {
+            "status": "downloading",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "manual",
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 4,
+            "progress": {
+              "percent": 0,
+              "transferredBytes": 0,
+              "totalBytes": 4,
+              "bytesPerSecond": 0
+            }
+          },
+          {
+            "status": "downloading",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "manual",
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 4,
+            "progress": {
+              "percent": 50,
+              "transferredBytes": 2,
+              "totalBytes": 4,
+              "bytesPerSecond": 10,
+              "remainingSeconds": 0
+            }
+          },
+          {
+            "status": "downloading",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "manual",
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 4,
+            "progress": {
+              "percent": 100,
+              "transferredBytes": 4,
+              "totalBytes": 4,
+              "bytesPerSecond": 10,
+              "remainingSeconds": 0
+            }
+          },
+          {
+            "status": "downloading",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "manual",
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 4,
+            "progress": {
+              "percent": 100,
+              "transferredBytes": 4,
+              "totalBytes": 4,
+              "bytesPerSecond": 7,
+              "remainingSeconds": 0
+            }
+          },
+          {
+            "status": "downloaded",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "manual",
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 4
+          }
+        ],
+        "downloads": [
+          {
+            "url": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1",
+            "expectedSha512": "/o7tYN2h9j86w7puod3JkGx2dgIxdoGWZ0v9keavtY4Wt57PqE9v9qBEuML5JSrxVBSj91APmauLMFQssTmHZA==",
+            "openedPath": "pending-updates/fixture_build.DMG",
+            "openedContents": "dmg!"
+          }
+        ],
+        "automaticCalls": 0,
+        "checkpoints": [
+          {
+            "state": {
+              "status": "downloaded",
+              "currentVersion": "1.2.0",
+              "version": "1.3.0",
+              "releaseNotes": [
+                "Example & fixes",
+                "Second line"
+              ],
+              "installMode": "manual",
+              "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1",
+              "releaseDate": "2026-01-02T00:00:00.000Z",
+              "sizeBytes": 4
+            },
+            "files": [
+              "fixture_build.DMG"
+            ]
+          }
+        ]
+      },
+      "boundary": "真实流式写入并核对 SHA-512。带查询参数的 DMG 解析并清理文件名。"
+    },
+    {
+      "id": "download-manual-size-unknown",
+      "inventory": [
+        "PKG-03"
+      ],
+      "kind": "boundary",
+      "sourceRefs": [
+        "release",
+        "error",
+        "errorUi",
+        "uiText",
+        "download",
+        "stream",
+        "mainText",
+        "install"
+      ],
+      "input": {
+        "mode": "manual",
+        "release": {
+          "version": "1.3.0",
+          "releaseDate": "2026-01-02T00:00:00.000Z",
+          "releaseNotes": [
+            {
+              "note": "<p>Example &amp; fixes</p><li>Second&nbsp;line</li>"
+            }
+          ],
+          "files": [
+            {
+              "url": "installer.zip",
+              "size": 100
+            },
+            {
+              "url": "fixture%20build.DMG?download=1"
+            }
+          ]
+        },
+        "steps": [
+          {
+            "chunks": [
+              "dm",
+              "g!"
+            ]
+          }
+        ]
+      },
+      "expected": {
+        "states": [
+          {
+            "status": "available",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "manual",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 100,
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+          },
+          {
+            "status": "downloading",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "manual",
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 100,
+            "progress": {
+              "percent": 0,
+              "transferredBytes": 0,
+              "totalBytes": 100,
+              "bytesPerSecond": 0
+            }
+          },
+          {
+            "status": "downloading",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "manual",
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 100,
+            "progress": {
+              "percent": 0,
+              "transferredBytes": 2,
+              "totalBytes": 0,
+              "bytesPerSecond": 10,
+              "remainingSeconds": 0
+            }
+          },
+          {
+            "status": "downloading",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "manual",
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 100,
+            "progress": {
+              "percent": 0,
+              "transferredBytes": 4,
+              "totalBytes": 0,
+              "bytesPerSecond": 10,
+              "remainingSeconds": 0
+            }
+          },
+          {
+            "status": "downloading",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "manual",
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 100,
+            "progress": {
+              "percent": 100,
+              "transferredBytes": 4,
+              "totalBytes": 4,
+              "bytesPerSecond": 7,
+              "remainingSeconds": 0
+            }
+          },
+          {
+            "status": "downloaded",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "manual",
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 100
+          }
+        ],
+        "downloads": [
+          {
+            "url": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1",
+            "openedPath": "pending-updates/fixture_build.DMG",
+            "openedContents": "dmg!"
+          }
+        ],
+        "automaticCalls": 0,
+        "checkpoints": [
+          {
+            "state": {
+              "status": "downloaded",
+              "currentVersion": "1.2.0",
+              "version": "1.3.0",
+              "releaseNotes": [
+                "Example & fixes",
+                "Second line"
+              ],
+              "installMode": "manual",
+              "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1",
+              "releaseDate": "2026-01-02T00:00:00.000Z",
+              "sizeBytes": 100
+            },
+            "files": [
+              "fixture_build.DMG"
+            ]
+          }
+        ]
+      },
+      "boundary": "无 HTTP 长度时，初始进度使用清单回退值 100，流式进度总量为零，完成时取实际字节数。无哈希时跳过比对。"
+    },
+    {
+      "id": "download-manual-hash-mismatch",
+      "inventory": [
+        "PKG-03"
+      ],
+      "kind": "failure",
+      "sourceRefs": [
+        "release",
+        "error",
+        "errorUi",
+        "uiText",
+        "download",
+        "stream",
+        "mainText",
+        "install"
+      ],
+      "input": {
+        "mode": "manual",
+        "release": {
+          "version": "1.3.0",
+          "releaseDate": "2026-01-02T00:00:00.000Z",
+          "releaseNotes": [
+            {
+              "note": "<p>Example &amp; fixes</p><li>Second&nbsp;line</li>"
+            }
+          ],
+          "files": [
+            {
+              "url": "installer.zip",
+              "size": 100
+            },
+            {
+              "url": "fixture%20build.DMG?download=1",
+              "size": 4,
+              "sha512": "4lrDhF+MvhKAGi36WonUxV3EeQDztu3Jqe5ZDzwrkxL2ZdADnJOCi3tY8zlQvIF6CVWpxQAKjT4oBWnwh0XKaA=="
+            }
+          ]
+        },
+        "steps": [
+          {
+            "chunks": [
+              "dm",
+              "g!"
+            ],
+            "contentLength": 4
+          }
+        ]
+      },
+      "expected": {
+        "states": [
+          {
+            "status": "available",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "manual",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 4,
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+          },
+          {
+            "status": "downloading",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "manual",
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 4,
+            "progress": {
+              "percent": 0,
+              "transferredBytes": 0,
+              "totalBytes": 4,
+              "bytesPerSecond": 0
+            }
+          },
+          {
+            "status": "downloading",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "manual",
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 4,
+            "progress": {
+              "percent": 50,
+              "transferredBytes": 2,
+              "totalBytes": 4,
+              "bytesPerSecond": 10,
+              "remainingSeconds": 0
+            }
+          },
+          {
+            "status": "downloading",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "manual",
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 4,
+            "progress": {
+              "percent": 100,
+              "transferredBytes": 4,
+              "totalBytes": 4,
+              "bytesPerSecond": 10,
+              "remainingSeconds": 0
+            }
+          },
+          {
+            "status": "error",
+            "currentVersion": "1.2.0",
+            "errorMessage": "更新文件完整性校验失败",
+            "errorStage": "download",
+            "version": "1.3.0",
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+          }
+        ],
+        "downloads": [
+          {
+            "url": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1",
+            "expectedSha512": "4lrDhF+MvhKAGi36WonUxV3EeQDztu3Jqe5ZDzwrkxL2ZdADnJOCi3tY8zlQvIF6CVWpxQAKjT4oBWnwh0XKaA=="
+          }
+        ],
+        "automaticCalls": 0,
+        "checkpoints": [
+          {
+            "state": {
+              "status": "error",
+              "currentVersion": "1.2.0",
+              "errorMessage": "更新文件完整性校验失败",
+              "errorStage": "download",
+              "version": "1.3.0",
+              "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+            },
+            "files": [],
+            "dialog": {
+              "title": "更新下载失败",
+              "error": "更新文件下载中断，请检查网络后重试。",
+              "actions": [
+                "下载 DMG 更新",
+                "重新检查"
+              ]
+            }
+          }
+        ]
+      },
+      "boundary": "哈希不符删除 .part，由管理器归 download 并保留回退 URL。"
+    },
+    {
+      "id": "download-manual-http",
+      "inventory": [
+        "PKG-03"
+      ],
+      "kind": "failure",
+      "sourceRefs": [
+        "release",
+        "error",
+        "errorUi",
+        "uiText",
+        "download",
+        "stream",
+        "mainText",
+        "install"
+      ],
+      "input": {
+        "mode": "manual",
+        "release": {
+          "version": "1.3.0",
+          "releaseDate": "2026-01-02T00:00:00.000Z",
+          "releaseNotes": [
+            {
+              "note": "<p>Example &amp; fixes</p><li>Second&nbsp;line</li>"
+            }
+          ],
+          "files": [
+            {
+              "url": "installer.zip",
+              "size": 100
+            },
+            {
+              "url": "fixture%20build.DMG?download=1",
+              "size": 4,
+              "sha512": "/o7tYN2h9j86w7puod3JkGx2dgIxdoGWZ0v9keavtY4Wt57PqE9v9qBEuML5JSrxVBSj91APmauLMFQssTmHZA=="
+            }
+          ]
+        },
+        "steps": [
+          {
+            "status": 503
+          }
+        ]
+      },
+      "expected": {
+        "states": [
+          {
+            "status": "available",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "manual",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 4,
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+          },
+          {
+            "status": "downloading",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "manual",
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 4,
+            "progress": {
+              "percent": 0,
+              "transferredBytes": 0,
+              "totalBytes": 4,
+              "bytesPerSecond": 0
+            }
+          },
+          {
+            "status": "error",
+            "currentVersion": "1.2.0",
+            "errorMessage": "更新文件下载失败（HTTP 503）",
+            "errorStage": "download",
+            "version": "1.3.0",
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+          }
+        ],
+        "downloads": [
+          {
+            "url": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1",
+            "expectedSha512": "/o7tYN2h9j86w7puod3JkGx2dgIxdoGWZ0v9keavtY4Wt57PqE9v9qBEuML5JSrxVBSj91APmauLMFQssTmHZA=="
+          }
+        ],
+        "automaticCalls": 0,
+        "checkpoints": [
+          {
+            "state": {
+              "status": "error",
+              "currentVersion": "1.2.0",
+              "errorMessage": "更新文件下载失败（HTTP 503）",
+              "errorStage": "download",
+              "version": "1.3.0",
+              "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+            },
+            "files": [],
+            "dialog": {
+              "title": "更新下载失败",
+              "error": "更新服务器返回 HTTP 503，请稍后重试。",
+              "actions": [
+                "下载 DMG 更新",
+                "重新检查"
+              ]
+            }
+          }
+        ]
+      },
+      "boundary": "非成功 HTTP 保留原文案与 503，未留下文件。"
+    },
+    {
+      "id": "download-manual-interruption-retry",
+      "inventory": [
+        "PKG-03"
+      ],
+      "kind": "failure",
+      "sourceRefs": [
+        "release",
+        "error",
+        "errorUi",
+        "uiText",
+        "download",
+        "stream",
+        "mainText",
+        "install"
+      ],
+      "input": {
+        "mode": "manual",
+        "release": {
+          "version": "1.3.0",
+          "releaseDate": "2026-01-02T00:00:00.000Z",
+          "releaseNotes": [
+            {
+              "note": "<p>Example &amp; fixes</p><li>Second&nbsp;line</li>"
+            }
+          ],
+          "files": [
+            {
+              "url": "installer.zip",
+              "size": 100
+            },
+            {
+              "url": "fixture%20build.DMG?download=1",
+              "size": 4,
+              "sha512": "/o7tYN2h9j86w7puod3JkGx2dgIxdoGWZ0v9keavtY4Wt57PqE9v9qBEuML5JSrxVBSj91APmauLMFQssTmHZA=="
+            }
+          ]
+        },
+        "steps": [
+          {
+            "chunks": [
+              "dm"
+            ],
+            "contentLength": 4,
+            "streamError": "socket hang up"
+          },
+          {
+            "chunks": [
+              "dm",
+              "g!"
+            ],
+            "contentLength": 4
+          }
+        ]
+      },
+      "expected": {
+        "states": [
+          {
+            "status": "available",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "manual",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 4,
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+          },
+          {
+            "status": "downloading",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "manual",
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 4,
+            "progress": {
+              "percent": 0,
+              "transferredBytes": 0,
+              "totalBytes": 4,
+              "bytesPerSecond": 0
+            }
+          },
+          {
+            "status": "downloading",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "manual",
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 4,
+            "progress": {
+              "percent": 50,
+              "transferredBytes": 2,
+              "totalBytes": 4,
+              "bytesPerSecond": 10,
+              "remainingSeconds": 0
+            }
+          },
+          {
+            "status": "error",
+            "currentVersion": "1.2.0",
+            "errorMessage": "socket hang up",
+            "errorStage": "download",
+            "version": "1.3.0",
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+          },
+          {
+            "status": "downloading",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "manual",
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 4,
+            "progress": {
+              "percent": 0,
+              "transferredBytes": 0,
+              "totalBytes": 4,
+              "bytesPerSecond": 0
+            }
+          },
+          {
+            "status": "downloading",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "manual",
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 4,
+            "progress": {
+              "percent": 50,
+              "transferredBytes": 2,
+              "totalBytes": 4,
+              "bytesPerSecond": 10,
+              "remainingSeconds": 0
+            }
+          },
+          {
+            "status": "downloading",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "manual",
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 4,
+            "progress": {
+              "percent": 100,
+              "transferredBytes": 4,
+              "totalBytes": 4,
+              "bytesPerSecond": 10,
+              "remainingSeconds": 0
+            }
+          },
+          {
+            "status": "downloading",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "manual",
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 4,
+            "progress": {
+              "percent": 100,
+              "transferredBytes": 4,
+              "totalBytes": 4,
+              "bytesPerSecond": 7,
+              "remainingSeconds": 0
+            }
+          },
+          {
+            "status": "downloaded",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "manual",
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 4
+          }
+        ],
+        "downloads": [
+          {
+            "url": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1",
+            "expectedSha512": "/o7tYN2h9j86w7puod3JkGx2dgIxdoGWZ0v9keavtY4Wt57PqE9v9qBEuML5JSrxVBSj91APmauLMFQssTmHZA=="
+          },
+          {
+            "url": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1",
+            "expectedSha512": "/o7tYN2h9j86w7puod3JkGx2dgIxdoGWZ0v9keavtY4Wt57PqE9v9qBEuML5JSrxVBSj91APmauLMFQssTmHZA==",
+            "openedPath": "pending-updates/fixture_build.DMG",
+            "openedContents": "dmg!"
+          }
+        ],
+        "automaticCalls": 0,
+        "checkpoints": [
+          {
+            "state": {
+              "status": "error",
+              "currentVersion": "1.2.0",
+              "errorMessage": "socket hang up",
+              "errorStage": "download",
+              "version": "1.3.0",
+              "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+            },
+            "files": [],
+            "dialog": {
+              "title": "更新下载失败",
+              "error": "下载连接被中途断开，应用已保留当前版本，请重新尝试。",
+              "actions": [
+                "下载 DMG 更新",
+                "重新检查"
+              ]
+            }
+          },
+          {
+            "state": {
+              "status": "downloaded",
+              "currentVersion": "1.2.0",
+              "version": "1.3.0",
+              "releaseNotes": [
+                "Example & fixes",
+                "Second line"
+              ],
+              "installMode": "manual",
+              "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1",
+              "releaseDate": "2026-01-02T00:00:00.000Z",
+              "sizeBytes": 4
+            },
+            "files": [
+              "fixture_build.DMG"
+            ]
+          }
+        ]
+      },
+      "boundary": "失败清理部分文件，第二次从零开始并恢复发行说明与可打开的路径。"
+    },
+    {
+      "id": "verify-fallback-to-manual",
+      "inventory": [
+        "PKG-03"
+      ],
+      "kind": "normal",
+      "sourceRefs": [
+        "release",
+        "error",
+        "errorUi",
+        "uiText",
+        "download",
+        "stream",
+        "mainText",
+        "install"
+      ],
+      "input": {
+        "mode": "automatic",
+        "release": {
+          "version": "1.3.0",
+          "releaseDate": "2026-01-02T00:00:00.000Z",
+          "releaseNotes": [
+            {
+              "note": "<p>Example &amp; fixes</p><li>Second&nbsp;line</li>"
+            }
+          ],
+          "files": [
+            {
+              "url": "installer.zip",
+              "size": 100
+            },
+            {
+              "url": "fixture%20build.DMG?download=1",
+              "size": 4,
+              "sha512": "/o7tYN2h9j86w7puod3JkGx2dgIxdoGWZ0v9keavtY4Wt57PqE9v9qBEuML5JSrxVBSj91APmauLMFQssTmHZA=="
+            }
+          ]
+        },
+        "steps": [
+          {
+            "chunks": [
+              "dm",
+              "g!"
+            ],
+            "contentLength": 4,
+            "beforeDownloadEvent": "Code signature did not pass validation"
+          }
+        ]
+      },
+      "expected": {
+        "states": [
+          {
+            "status": "available",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "automatic",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 100,
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+          },
+          {
+            "status": "error",
+            "currentVersion": "1.2.0",
+            "errorMessage": "Code signature did not pass validation",
+            "errorStage": "verify",
+            "version": "1.3.0",
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+          },
+          {
+            "status": "downloading",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "manual",
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 4,
+            "progress": {
+              "percent": 0,
+              "transferredBytes": 0,
+              "totalBytes": 4,
+              "bytesPerSecond": 0
+            }
+          },
+          {
+            "status": "downloading",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "manual",
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 4,
+            "progress": {
+              "percent": 50,
+              "transferredBytes": 2,
+              "totalBytes": 4,
+              "bytesPerSecond": 10,
+              "remainingSeconds": 0
+            }
+          },
+          {
+            "status": "downloading",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "manual",
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 4,
+            "progress": {
+              "percent": 100,
+              "transferredBytes": 4,
+              "totalBytes": 4,
+              "bytesPerSecond": 10,
+              "remainingSeconds": 0
+            }
+          },
+          {
+            "status": "downloading",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "manual",
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 4,
+            "progress": {
+              "percent": 100,
+              "transferredBytes": 4,
+              "totalBytes": 4,
+              "bytesPerSecond": 7,
+              "remainingSeconds": 0
+            }
+          },
+          {
+            "status": "downloaded",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "manual",
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 4
+          }
+        ],
+        "downloads": [
+          {
+            "url": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1",
+            "expectedSha512": "/o7tYN2h9j86w7puod3JkGx2dgIxdoGWZ0v9keavtY4Wt57PqE9v9qBEuML5JSrxVBSj91APmauLMFQssTmHZA==",
+            "openedPath": "pending-updates/fixture_build.DMG",
+            "openedContents": "dmg!"
+          }
+        ],
+        "automaticCalls": 0,
+        "checkpoints": [
+          {
+            "state": {
+              "status": "downloaded",
+              "currentVersion": "1.2.0",
+              "version": "1.3.0",
+              "releaseNotes": [
+                "Example & fixes",
+                "Second line"
+              ],
+              "installMode": "manual",
+              "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1",
+              "releaseDate": "2026-01-02T00:00:00.000Z",
+              "sizeBytes": 4
+            },
+            "files": [
+              "fixture_build.DMG"
+            ]
+          }
+        ]
+      },
+      "boundary": "在原有自动模式触发签名错误后，下载回退走应用内 DMG，完成态为 manual。"
+    },
+    {
+      "id": "guard-active-count",
+      "inventory": [
+        "PKG-04"
+      ],
+      "kind": "boundary",
+      "sourceRefs": [
+        "count"
+      ],
+      "input": {
+        "graphs": {
+          "first": {
+            "nodes": [
+              {
+                "sessionId": "shell-a",
+                "workStatus": "running"
+              },
+              {
+                "sessionId": "agent-b",
+                "workStatus": "starting"
+              },
+              {
+                "sessionId": "agent-c",
+                "workStatus": "needs-input"
+              },
+              {
+                "sessionId": "agent-d",
+                "workStatus": "running",
+                "archivedAt": 0
+              },
+              {
+                "sessionId": "shell-e",
+                "workStatus": "idle"
+              },
+              {
+                "sessionId": "agent-f",
+                "workStatus": "exited"
+              }
+            ]
+          },
+          "second": {
+            "nodes": [
+              {
+                "sessionId": "shell-a",
+                "workStatus": "needs-input"
+              }
+            ]
+          }
+        }
+      },
+      "expected": {
+        "activeSessionCount": 3
+      },
+      "boundary": "计入 starting、running、needs-input，跨图按 sessionId 去重。排除归档、idle 和 exited。"
+    },
+    {
+      "id": "guard-no-graphs",
+      "inventory": [
+        "PKG-04"
+      ],
+      "kind": "boundary",
+      "sourceRefs": [
+        "count"
+      ],
+      "input": {},
+      "expected": {
+        "activeSessionCount": 0
+      },
+      "boundary": "无图时活跃会话数为零。"
+    },
+    {
+      "id": "guard-idle-schedule",
+      "inventory": [
+        "PKG-04"
+      ],
+      "kind": "normal",
+      "sourceRefs": [
+        "guard",
+        "uiText",
+        "errorUi",
+        "start"
+      ],
+      "input": {
+        "state": {
+          "status": "downloaded",
+          "currentVersion": "0.2.24",
+          "version": "0.2.25",
+          "releaseNotes": [],
+          "installMode": "automatic"
+        },
+        "activeSessionCount": 3,
+        "steps": [
+          {
+            "click": "空闲后自动更新"
+          },
+          {
+            "activeSessionCount": 1
+          },
+          {
+            "activeSessionCount": 0
+          },
+          {
+            "activeSessionCount": 0
+          }
+        ]
+      },
+      "expected": {
+        "snapshots": [
+          {
+            "trigger": "应用更新：等待安装",
+            "open": true,
+            "title": "更新已准备好",
+            "activeSessions": "当前有 3 个活动会话",
+            "idleUpdateKeepsState": "空闲后更新会保留工作区、画布位置及会话恢复信息。",
+            "actions": [
+              {
+                "text": "空闲后自动更新",
+                "disabled": false
+              },
+              {
+                "text": "立即重启并更新",
+                "disabled": false
+              },
+              {
+                "text": "退出时安装",
+                "disabled": false
+              }
+            ],
+            "installCalls": 0
+          },
+          {
+            "trigger": "应用更新：等待安装",
+            "open": true,
+            "title": "更新已准备好",
+            "activeSessions": "当前有 3 个活动会话",
+            "idleUpdateKeepsState": "空闲后更新会保留工作区、画布位置及会话恢复信息。",
+            "waiting": "已安排：空闲后自动更新",
+            "actions": [
+              {
+                "text": "取消空闲更新",
+                "disabled": false
+              },
+              {
+                "text": "立即重启并更新",
+                "disabled": false
+              },
+              {
+                "text": "退出时安装",
+                "disabled": false
+              }
+            ],
+            "installCalls": 0
+          },
+          {
+            "trigger": "应用更新：等待安装",
+            "open": true,
+            "title": "更新已准备好",
+            "activeSessions": "当前有 1 个活动会话",
+            "idleUpdateKeepsState": "空闲后更新会保留工作区、画布位置及会话恢复信息。",
+            "waiting": "已安排：空闲后自动更新",
+            "actions": [
+              {
+                "text": "取消空闲更新",
+                "disabled": false
+              },
+              {
+                "text": "立即重启并更新",
+                "disabled": false
+              },
+              {
+                "text": "退出时安装",
+                "disabled": false
+              }
+            ],
+            "installCalls": 0
+          },
+          {
+            "trigger": "应用更新：等待安装",
+            "open": true,
+            "title": "更新已准备好",
+            "waiting": "已安排：空闲后自动更新",
+            "actions": [
+              {
+                "text": "正在准备更新…",
+                "disabled": true
+              },
+              {
+                "text": "退出时安装",
+                "disabled": false
+              }
+            ],
+            "installCalls": 1
+          },
+          {
+            "trigger": "应用更新：等待安装",
+            "open": true,
+            "title": "更新已准备好",
+            "waiting": "已安排：空闲后自动更新",
+            "actions": [
+              {
+                "text": "正在准备更新…",
+                "disabled": true
+              },
+              {
+                "text": "退出时安装",
+                "disabled": false
+              }
+            ],
+            "installCalls": 1
+          }
+        ]
+      },
+      "boundary": "有会话时等待，归零后仅调用一次，自动安装按钮进入准备态。"
+    },
+    {
+      "id": "guard-idle-cancel",
+      "inventory": [
+        "PKG-04"
+      ],
+      "kind": "boundary",
+      "sourceRefs": [
+        "guard",
+        "uiText",
+        "errorUi",
+        "start"
+      ],
+      "input": {
+        "state": {
+          "status": "downloaded",
+          "currentVersion": "0.2.24",
+          "version": "0.2.25",
+          "releaseNotes": [],
+          "installMode": "automatic"
+        },
+        "activeSessionCount": 2,
+        "steps": [
+          {
+            "click": "空闲后自动更新"
+          },
+          {
+            "click": "取消空闲更新"
+          },
+          {
+            "activeSessionCount": 0
+          }
+        ]
+      },
+      "expected": {
+        "snapshots": [
+          {
+            "trigger": "应用更新：等待安装",
+            "open": true,
+            "title": "更新已准备好",
+            "activeSessions": "当前有 2 个活动会话",
+            "idleUpdateKeepsState": "空闲后更新会保留工作区、画布位置及会话恢复信息。",
+            "actions": [
+              {
+                "text": "空闲后自动更新",
+                "disabled": false
+              },
+              {
+                "text": "立即重启并更新",
+                "disabled": false
+              },
+              {
+                "text": "退出时安装",
+                "disabled": false
+              }
+            ],
+            "installCalls": 0
+          },
+          {
+            "trigger": "应用更新：等待安装",
+            "open": true,
+            "title": "更新已准备好",
+            "activeSessions": "当前有 2 个活动会话",
+            "idleUpdateKeepsState": "空闲后更新会保留工作区、画布位置及会话恢复信息。",
+            "waiting": "已安排：空闲后自动更新",
+            "actions": [
+              {
+                "text": "取消空闲更新",
+                "disabled": false
+              },
+              {
+                "text": "立即重启并更新",
+                "disabled": false
+              },
+              {
+                "text": "退出时安装",
+                "disabled": false
+              }
+            ],
+            "installCalls": 0
+          },
+          {
+            "trigger": "应用更新：等待安装",
+            "open": true,
+            "title": "更新已准备好",
+            "activeSessions": "当前有 2 个活动会话",
+            "idleUpdateKeepsState": "空闲后更新会保留工作区、画布位置及会话恢复信息。",
+            "actions": [
+              {
+                "text": "空闲后自动更新",
+                "disabled": false
+              },
+              {
+                "text": "立即重启并更新",
+                "disabled": false
+              },
+              {
+                "text": "退出时安装",
+                "disabled": false
+              }
+            ],
+            "installCalls": 0
+          },
+          {
+            "trigger": "应用更新：等待安装",
+            "open": true,
+            "title": "更新已准备好",
+            "actions": [
+              {
+                "text": "重启并更新",
+                "disabled": false
+              },
+              {
+                "text": "退出时安装",
+                "disabled": false
+              }
+            ],
+            "installCalls": 0
+          }
+        ]
+      },
+      "boundary": "取消后归零不触发安装，可再手动重启。"
+    },
+    {
+      "id": "guard-immediate-busy",
+      "inventory": [
+        "PKG-04"
+      ],
+      "kind": "boundary",
+      "sourceRefs": [
+        "guard",
+        "uiText",
+        "errorUi",
+        "start"
+      ],
+      "input": {
+        "state": {
+          "status": "downloaded",
+          "currentVersion": "0.2.24",
+          "version": "0.2.25",
+          "releaseNotes": [],
+          "installMode": "automatic"
+        },
+        "activeSessionCount": 2,
+        "steps": [
+          {
+            "click": "立即重启并更新"
+          },
+          {
+            "click": "立即重启并更新"
+          }
+        ]
+      },
+      "expected": {
+        "snapshots": [
+          {
+            "trigger": "应用更新：等待安装",
+            "open": true,
+            "title": "更新已准备好",
+            "activeSessions": "当前有 2 个活动会话",
+            "idleUpdateKeepsState": "空闲后更新会保留工作区、画布位置及会话恢复信息。",
+            "actions": [
+              {
+                "text": "空闲后自动更新",
+                "disabled": false
+              },
+              {
+                "text": "立即重启并更新",
+                "disabled": false
+              },
+              {
+                "text": "退出时安装",
+                "disabled": false
+              }
+            ],
+            "installCalls": 0
+          },
+          {
+            "trigger": "应用更新：等待安装",
+            "open": true,
+            "title": "更新已准备好",
+            "activeSessions": "当前有 2 个活动会话",
+            "idleUpdateKeepsState": "空闲后更新会保留工作区、画布位置及会话恢复信息。",
+            "actions": [
+              {
+                "text": "空闲后自动更新",
+                "disabled": true
+              },
+              {
+                "text": "立即重启并更新",
+                "disabled": true
+              },
+              {
+                "text": "退出时安装",
+                "disabled": false
+              }
+            ],
+            "installCalls": 1
+          },
+          {
+            "trigger": "应用更新：等待安装",
+            "open": true,
+            "title": "更新已准备好",
+            "activeSessions": "当前有 2 个活动会话",
+            "idleUpdateKeepsState": "空闲后更新会保留工作区、画布位置及会话恢复信息。",
+            "actions": [
+              {
+                "text": "空闲后自动更新",
+                "disabled": true
+              },
+              {
+                "text": "立即重启并更新",
+                "disabled": true
+              },
+              {
+                "text": "退出时安装",
+                "disabled": false
+              }
+            ],
+            "installCalls": 1
+          }
+        ]
+      },
+      "boundary": "忙时仍允许立即更新，安装中即刻禁用重复请求。"
+    },
+    {
+      "id": "guard-install-on-quit",
+      "inventory": [
+        "PKG-04"
+      ],
+      "kind": "boundary",
+      "sourceRefs": [
+        "guard",
+        "uiText",
+        "errorUi",
+        "start"
+      ],
+      "input": {
+        "state": {
+          "status": "downloaded",
+          "currentVersion": "0.2.24",
+          "version": "0.2.25",
+          "releaseNotes": [],
+          "installMode": "automatic"
+        },
+        "activeSessionCount": 2,
+        "steps": [
+          {
+            "click": "退出时安装"
+          }
+        ]
+      },
+      "expected": {
+        "snapshots": [
+          {
+            "trigger": "应用更新：等待安装",
+            "open": true,
+            "title": "更新已准备好",
+            "activeSessions": "当前有 2 个活动会话",
+            "idleUpdateKeepsState": "空闲后更新会保留工作区、画布位置及会话恢复信息。",
+            "actions": [
+              {
+                "text": "空闲后自动更新",
+                "disabled": false
+              },
+              {
+                "text": "立即重启并更新",
+                "disabled": false
+              },
+              {
+                "text": "退出时安装",
+                "disabled": false
+              }
+            ],
+            "installCalls": 0
+          },
+          {
+            "trigger": "应用更新：等待安装",
+            "open": false,
+            "installCalls": 0
+          }
+        ]
+      },
+      "boundary": "按钮关闭弹层且本次不调用安装，由 updater 的退出安装设置负责后续动作。"
+    },
+    {
+      "id": "guard-installing-failure",
+      "inventory": [
+        "PKG-04"
+      ],
+      "kind": "failure",
+      "sourceRefs": [
+        "guard",
+        "uiText",
+        "errorUi",
+        "start"
+      ],
+      "input": {
+        "state": {
+          "status": "downloaded",
+          "currentVersion": "0.2.24",
+          "version": "0.2.25",
+          "releaseNotes": [],
+          "installMode": "automatic"
+        },
+        "activeSessionCount": 0,
+        "steps": [
+          {
+            "click": "重启并更新"
+          },
+          {
+            "publish": {
+              "status": "error",
+              "currentVersion": "0.2.24",
+              "version": "0.2.25",
+              "errorStage": "install",
+              "errorMessage": "prepare failed"
+            }
+          },
+          {
+            "settleInstall": true
+          },
+          {
+            "publish": {
+              "status": "downloaded",
+              "currentVersion": "0.2.24",
+              "version": "0.2.25",
+              "releaseNotes": [],
+              "installMode": "automatic"
+            }
+          },
+          {
+            "click": "正在准备更新…"
+          }
+        ]
+      },
+      "expected": {
+        "snapshots": [
+          {
+            "trigger": "应用更新：等待安装",
+            "open": true,
+            "title": "更新已准备好",
+            "actions": [
+              {
+                "text": "重启并更新",
+                "disabled": false
+              },
+              {
+                "text": "退出时安装",
+                "disabled": false
+              }
+            ],
+            "installCalls": 0
+          },
+          {
+            "trigger": "应用更新：等待安装",
+            "open": true,
+            "title": "更新已准备好",
+            "actions": [
+              {
+                "text": "正在准备更新…",
+                "disabled": true
+              },
+              {
+                "text": "退出时安装",
+                "disabled": false
+              }
+            ],
+            "installCalls": 1
+          },
+          {
+            "trigger": "应用更新：更新安装失败",
+            "open": true,
+            "title": "更新安装失败",
+            "error": "更新安装前的会话保存或应用退出过程出现异常，请重新尝试。",
+            "actions": [
+              {
+                "text": "重新检查",
+                "disabled": false
+              }
+            ],
+            "installCalls": 1
+          },
+          {
+            "trigger": "应用更新：更新安装失败",
+            "open": true,
+            "title": "更新安装失败",
+            "error": "更新安装前的会话保存或应用退出过程出现异常，请重新尝试。",
+            "actions": [
+              {
+                "text": "重新检查",
+                "disabled": false
+              }
+            ],
+            "installCalls": 1
+          },
+          {
+            "trigger": "应用更新：等待安装",
+            "open": true,
+            "title": "更新已准备好",
+            "actions": [
+              {
+                "text": "正在准备更新…",
+                "disabled": true
+              },
+              {
+                "text": "退出时安装",
+                "disabled": false
+              }
+            ],
+            "installCalls": 1
+          },
+          {
+            "trigger": "应用更新：等待安装",
+            "open": true,
+            "title": "更新已准备好",
+            "actions": [
+              {
+                "text": "正在准备更新…",
+                "disabled": true
+              },
+              {
+                "text": "退出时安装",
+                "disabled": false
+              }
+            ],
+            "installCalls": 1
+          }
+        ]
+      },
+      "boundary": "自动安装失败后错误弹层出现。同一控件重新收到 downloaded 时仍保留准备态与防重标志。"
+    },
+    {
+      "id": "guard-manual-busy-and-rearm",
+      "inventory": [
+        "PKG-04"
+      ],
+      "kind": "boundary",
+      "sourceRefs": [
+        "guard",
+        "uiText",
+        "errorUi",
+        "start"
+      ],
+      "input": {
+        "state": {
+          "status": "downloaded",
+          "currentVersion": "0.2.24",
+          "version": "0.2.25",
+          "releaseNotes": [],
+          "installMode": "manual"
+        },
+        "activeSessionCount": 2,
+        "steps": [
+          {
+            "click": "打开 DMG 安装"
+          },
+          {
+            "click": "正在打开…"
+          },
+          {
+            "settleInstall": true
+          },
+          {
+            "click": "打开 DMG 安装"
+          }
+        ]
+      },
+      "expected": {
+        "snapshots": [
+          {
+            "trigger": "应用更新：等待打开安装包",
+            "open": true,
+            "title": "DMG 已下载完成",
+            "actions": [
+              {
+                "text": "打开 DMG 安装",
+                "disabled": false
+              },
+              {
+                "text": "稍后安装",
+                "disabled": false
+              }
+            ],
+            "installCalls": 0
+          },
+          {
+            "trigger": "应用更新：等待打开安装包",
+            "open": true,
+            "title": "DMG 已下载完成",
+            "actions": [
+              {
+                "text": "正在打开…",
+                "disabled": true
+              },
+              {
+                "text": "稍后安装",
+                "disabled": false
+              }
+            ],
+            "installCalls": 1
+          },
+          {
+            "trigger": "应用更新：等待打开安装包",
+            "open": true,
+            "title": "DMG 已下载完成",
+            "actions": [
+              {
+                "text": "正在打开…",
+                "disabled": true
+              },
+              {
+                "text": "稍后安装",
+                "disabled": false
+              }
+            ],
+            "installCalls": 1
+          },
+          {
+            "trigger": "应用更新：等待打开安装包",
+            "open": true,
+            "title": "DMG 已下载完成",
+            "actions": [
+              {
+                "text": "打开 DMG 安装",
+                "disabled": false
+              },
+              {
+                "text": "稍后安装",
+                "disabled": false
+              }
+            ],
+            "installCalls": 1
+          },
+          {
+            "trigger": "应用更新：等待打开安装包",
+            "open": true,
+            "title": "DMG 已下载完成",
+            "actions": [
+              {
+                "text": "正在打开…",
+                "disabled": true
+              },
+              {
+                "text": "稍后安装",
+                "disabled": false
+              }
+            ],
+            "installCalls": 2
+          }
+        ]
+      },
+      "boundary": "手动安装不等待活跃会话。打开请求结束后恢复按钮。"
+    },
+    {
+      "id": "guard-reopen-after-version-change",
+      "inventory": [
+        "PKG-04"
+      ],
+      "kind": "normal",
+      "sourceRefs": [
+        "toast",
+        "uiText"
+      ],
+      "input": {
+        "state": {
+          "status": "idle",
+          "currentVersion": "0.2.24"
+        },
+        "previousVersion": "0.2.23",
+        "steps": [
+          {
+            "expireToast": true
+          }
+        ]
+      },
+      "expected": {
+        "snapshots": [
+          {
+            "trigger": "应用更新",
+            "open": false,
+            "toast": [
+              "Matou 已更新至 0.2.24",
+              "工作空间与会话已恢复"
+            ],
+            "installCalls": 0
+          },
+          {
+            "trigger": "应用更新",
+            "open": false,
+            "installCalls": 0
+          }
+        ],
+        "lastSeenVersion": "0.2.24",
+        "initialTimersMs": [
+          5000
+        ]
+      },
+      "boundary": "从固定旧版本的存储重新挂载时显示更新提示，更新已见版本记录，5000 ms 后收起。实际会话恢复由后续实机验收。"
+    },
+    {
+      "id": "install-before-ready",
+      "inventory": [
+        "PKG-04"
+      ],
+      "kind": "boundary",
+      "sourceRefs": [
+        "install",
+        "shutdown",
+        "error",
+        "errorUi",
+        "uiText"
+      ],
+      "input": {
+        "release": {
+          "version": "1.3.0",
+          "releaseDate": "2026-01-02T00:00:00.000Z",
+          "releaseNotes": [
+            {
+              "note": "<p>Example &amp; fixes</p><li>Second&nbsp;line</li>"
+            }
+          ],
+          "files": [
+            {
+              "url": "installer.zip",
+              "size": 100
+            },
+            {
+              "url": "fixture%20build.DMG?download=1",
+              "size": 4
+            }
+          ]
+        },
+        "mode": "automatic",
+        "initialStatus": "available"
+      },
+      "expected": {
+        "before": {
+          "status": "available",
+          "currentVersion": "1.2.0",
+          "version": "1.3.0",
+          "releaseNotes": [
+            "Example & fixes",
+            "Second line"
+          ],
+          "installMode": "automatic",
+          "releaseDate": "2026-01-02T00:00:00.000Z",
+          "sizeBytes": 100,
+          "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+        },
+        "during": {
+          "state": {
+            "status": "available",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "automatic",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 100,
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+          },
+          "calls": []
+        },
+        "after": {
+          "status": "available",
+          "currentVersion": "1.2.0",
+          "version": "1.3.0",
+          "releaseNotes": [
+            "Example & fixes",
+            "Second line"
+          ],
+          "installMode": "automatic",
+          "releaseDate": "2026-01-02T00:00:00.000Z",
+          "sizeBytes": 100,
+          "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+        },
+        "calls": [],
+        "states": [
+          {
+            "status": "available",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "automatic",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 100,
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+          }
+        ]
+      },
+      "boundary": "尚未下载完成时无准备或安装调用。"
+    },
+    {
+      "id": "install-automatic-single-flight",
+      "inventory": [
+        "PKG-04"
+      ],
+      "kind": "normal",
+      "sourceRefs": [
+        "install",
+        "shutdown",
+        "error",
+        "errorUi",
+        "uiText"
+      ],
+      "input": {
+        "release": {
+          "version": "1.3.0",
+          "releaseDate": "2026-01-02T00:00:00.000Z",
+          "releaseNotes": [
+            {
+              "note": "<p>Example &amp; fixes</p><li>Second&nbsp;line</li>"
+            }
+          ],
+          "files": [
+            {
+              "url": "installer.zip",
+              "size": 100
+            },
+            {
+              "url": "fixture%20build.DMG?download=1",
+              "size": 4
+            }
+          ]
+        },
+        "mode": "automatic",
+        "initialStatus": "downloaded"
+      },
+      "expected": {
+        "before": {
+          "status": "downloaded",
+          "currentVersion": "1.2.0",
+          "version": "1.3.0",
+          "releaseNotes": [
+            "Example & fixes",
+            "Second line"
+          ],
+          "installMode": "automatic",
+          "releaseDate": "2026-01-02T00:00:00.000Z",
+          "sizeBytes": 100,
+          "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+        },
+        "during": {
+          "state": {
+            "status": "downloaded",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "automatic",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 100,
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+          },
+          "calls": [
+            [
+              "prepareInstall"
+            ]
+          ]
+        },
+        "after": {
+          "status": "downloaded",
+          "currentVersion": "1.2.0",
+          "version": "1.3.0",
+          "releaseNotes": [
+            "Example & fixes",
+            "Second line"
+          ],
+          "installMode": "automatic",
+          "releaseDate": "2026-01-02T00:00:00.000Z",
+          "sizeBytes": 100,
+          "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+        },
+        "calls": [
+          [
+            "prepareInstall"
+          ],
+          [
+            "quitAndInstall",
+            false,
+            true
+          ]
+        ],
+        "states": [
+          {
+            "status": "available",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "automatic",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 100,
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+          },
+          {
+            "status": "downloaded",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "automatic",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 100,
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+          }
+        ]
+      },
+      "boundary": "并发请求共享一次准备，等待完成后只调用一次 quitAndInstall(false, true)。"
+    },
+    {
+      "id": "install-prepare-error-and-retry",
+      "inventory": [
+        "PKG-04"
+      ],
+      "kind": "failure",
+      "sourceRefs": [
+        "install",
+        "shutdown",
+        "error",
+        "errorUi",
+        "uiText"
+      ],
+      "input": {
+        "release": {
+          "version": "1.3.0",
+          "releaseDate": "2026-01-02T00:00:00.000Z",
+          "releaseNotes": [
+            {
+              "note": "<p>Example &amp; fixes</p><li>Second&nbsp;line</li>"
+            }
+          ],
+          "files": [
+            {
+              "url": "installer.zip",
+              "size": 100
+            },
+            {
+              "url": "fixture%20build.DMG?download=1",
+              "size": 4
+            }
+          ]
+        },
+        "mode": "automatic",
+        "initialStatus": "downloaded",
+        "prepareError": "prepare failed",
+        "retry": true
+      },
+      "expected": {
+        "before": {
+          "status": "downloaded",
+          "currentVersion": "1.2.0",
+          "version": "1.3.0",
+          "releaseNotes": [
+            "Example & fixes",
+            "Second line"
+          ],
+          "installMode": "automatic",
+          "releaseDate": "2026-01-02T00:00:00.000Z",
+          "sizeBytes": 100,
+          "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+        },
+        "during": {
+          "state": {
+            "status": "downloaded",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "automatic",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 100,
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+          },
+          "calls": [
+            [
+              "prepareInstall"
+            ]
+          ]
+        },
+        "after": {
+          "status": "error",
+          "currentVersion": "1.2.0",
+          "errorMessage": "prepare failed",
+          "errorStage": "install",
+          "version": "1.3.0",
+          "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+        },
+        "dialog": {
+          "title": "更新安装失败",
+          "error": "更新安装前的会话保存或应用退出过程出现异常，请重新尝试。",
+          "actions": [
+            "下载 DMG 更新",
+            "重新检查"
+          ]
+        },
+        "calls": [
+          [
+            "prepareInstall"
+          ]
+        ],
+        "states": [
+          {
+            "status": "available",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "automatic",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 100,
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+          },
+          {
+            "status": "downloaded",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "automatic",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 100,
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+          },
+          {
+            "status": "error",
+            "currentVersion": "1.2.0",
+            "errorMessage": "prepare failed",
+            "errorStage": "install",
+            "version": "1.3.0",
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+          },
+          {
+            "status": "available",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "automatic",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 100,
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+          },
+          {
+            "status": "downloaded",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "automatic",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 100,
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+          }
+        ]
+      },
+      "boundary": "准备失败后 stage=install。即使之后重新收到 downloaded，旧管理器仍复用原已完成 Promise。"
+    },
+    {
+      "id": "install-quit-error",
+      "inventory": [
+        "PKG-04"
+      ],
+      "kind": "failure",
+      "sourceRefs": [
+        "install",
+        "shutdown",
+        "error",
+        "errorUi",
+        "uiText"
+      ],
+      "input": {
+        "release": {
+          "version": "1.3.0",
+          "releaseDate": "2026-01-02T00:00:00.000Z",
+          "releaseNotes": [
+            {
+              "note": "<p>Example &amp; fixes</p><li>Second&nbsp;line</li>"
+            }
+          ],
+          "files": [
+            {
+              "url": "installer.zip",
+              "size": 100
+            },
+            {
+              "url": "fixture%20build.DMG?download=1",
+              "size": 4
+            }
+          ]
+        },
+        "mode": "automatic",
+        "initialStatus": "downloaded",
+        "quitError": "installer launch failed"
+      },
+      "expected": {
+        "before": {
+          "status": "downloaded",
+          "currentVersion": "1.2.0",
+          "version": "1.3.0",
+          "releaseNotes": [
+            "Example & fixes",
+            "Second line"
+          ],
+          "installMode": "automatic",
+          "releaseDate": "2026-01-02T00:00:00.000Z",
+          "sizeBytes": 100,
+          "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+        },
+        "during": {
+          "state": {
+            "status": "downloaded",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "automatic",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 100,
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+          },
+          "calls": [
+            [
+              "prepareInstall"
+            ]
+          ]
+        },
+        "after": {
+          "status": "error",
+          "currentVersion": "1.2.0",
+          "errorMessage": "installer launch failed",
+          "errorStage": "install",
+          "version": "1.3.0",
+          "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+        },
+        "dialog": {
+          "title": "更新安装失败",
+          "error": "更新安装前的会话保存或应用退出过程出现异常，请重新尝试。",
+          "actions": [
+            "下载 DMG 更新",
+            "重新检查"
+          ]
+        },
+        "calls": [
+          [
+            "prepareInstall"
+          ],
+          [
+            "quitAndInstall",
+            false,
+            true
+          ]
+        ],
+        "states": [
+          {
+            "status": "available",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "automatic",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 100,
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+          },
+          {
+            "status": "downloaded",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "automatic",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 100,
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+          },
+          {
+            "status": "error",
+            "currentVersion": "1.2.0",
+            "errorMessage": "installer launch failed",
+            "errorStage": "install",
+            "version": "1.3.0",
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+          }
+        ]
+      },
+      "boundary": "准备完成但启动失败，错误阶段仍是 install。"
+    },
+    {
+      "id": "install-manual-open-error",
+      "inventory": [
+        "PKG-04"
+      ],
+      "kind": "failure",
+      "sourceRefs": [
+        "install",
+        "shutdown",
+        "error",
+        "errorUi",
+        "uiText"
+      ],
+      "input": {
+        "release": {
+          "version": "1.3.0",
+          "releaseDate": "2026-01-02T00:00:00.000Z",
+          "releaseNotes": [
+            {
+              "note": "<p>Example &amp; fixes</p><li>Second&nbsp;line</li>"
+            }
+          ],
+          "files": [
+            {
+              "url": "installer.zip",
+              "size": 100
+            },
+            {
+              "url": "fixture%20build.DMG?download=1",
+              "size": 4
+            }
+          ]
+        },
+        "mode": "manual",
+        "initialStatus": "downloaded",
+        "openError": "unable to open fixture.dmg"
+      },
+      "expected": {
+        "before": {
+          "status": "downloaded",
+          "currentVersion": "1.2.0",
+          "version": "1.3.0",
+          "releaseNotes": [
+            "Example & fixes",
+            "Second line"
+          ],
+          "installMode": "manual",
+          "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1",
+          "releaseDate": "2026-01-02T00:00:00.000Z",
+          "sizeBytes": 4
+        },
+        "during": {
+          "state": {
+            "status": "downloaded",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "manual",
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 4
+          },
+          "calls": [
+            [
+              "openManualInstaller",
+              "pending-updates/fixture.dmg"
+            ]
+          ]
+        },
+        "after": {
+          "status": "error",
+          "currentVersion": "1.2.0",
+          "errorMessage": "unable to open fixture.dmg",
+          "errorStage": "install",
+          "version": "1.3.0",
+          "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+        },
+        "dialog": {
+          "title": "更新安装失败",
+          "error": "更新安装前的会话保存或应用退出过程出现异常，请重新尝试。",
+          "actions": [
+            "下载 DMG 更新",
+            "重新检查"
+          ]
+        },
+        "calls": [
+          [
+            "openManualInstaller",
+            "pending-updates/fixture.dmg"
+          ]
+        ],
+        "states": [
+          {
+            "status": "available",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "manual",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 4,
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+          },
+          {
+            "status": "downloading",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "manual",
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 4,
+            "progress": {
+              "percent": 0,
+              "transferredBytes": 0,
+              "totalBytes": 4,
+              "bytesPerSecond": 0
+            }
+          },
+          {
+            "status": "downloaded",
+            "currentVersion": "1.2.0",
+            "version": "1.3.0",
+            "releaseNotes": [
+              "Example & fixes",
+              "Second line"
+            ],
+            "installMode": "manual",
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1",
+            "releaseDate": "2026-01-02T00:00:00.000Z",
+            "sizeBytes": 4
+          },
+          {
+            "status": "error",
+            "currentVersion": "1.2.0",
+            "errorMessage": "unable to open fixture.dmg",
+            "errorStage": "install",
+            "version": "1.3.0",
+            "manualDownloadUrl": "https://feed.example.invalid/releases/fixture%20build.DMG?download=1"
+          }
+        ]
+      },
+      "boundary": "打开手动安装包失败时报告 install，不调用退出安装。"
+    }
+  ]
+}

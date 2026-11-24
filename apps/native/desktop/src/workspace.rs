@@ -1,0 +1,19487 @@
+use std::{
+    cell::Cell,
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    rc::Rc,
+    sync::Arc,
+    sync::atomic::{AtomicU64, Ordering},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
+
+use crate::history_view::{HistoryView, HistoryViewEvent, HistoryViewState};
+#[cfg(target_os = "macos")]
+use crate::recovery_water_view::RecoveryWater;
+#[cfg(target_os = "windows")]
+use crate::windows_titlebar::{WINDOWS_CAPTION_CONTROLS_WIDTH, windows_caption_controls};
+use database_recovery_page::{ConfirmationFocus, PageAction, PageOperation, PagePresentation};
+use gpui::{prelude::*, *};
+use matou_native_core::geometry::GeometryUpdate;
+use matou_native_core::hierarchy::canvas::{ForkPlacement, ForkWorktreeMode};
+use matou_native_core::hierarchy::cards::RemoveScope;
+use matou_native_core::hierarchy::{HierarchyResult, Scene, Task, Workspace as HierarchyWorkspace};
+use matou_native_core::link_routing::{LinkRejection, LinkSource, route_link};
+use matou_native_core::sessions::{
+    InterfaceLocale, LocalePreference, current_interface_locale, read_locale_preference,
+};
+use matou_native_core::workspace_paths::WorkspacePathState;
+use matou_native_desktop::split_tree::{SplitDirection, SplitRect};
+use matou_native_desktop::theme_tokens::{
+    AppTheme, ThemePalette, ThemePreference, ThemeState, read_theme_preference,
+    write_theme_preference,
+};
+use matou_native_runtime::history::{
+    HistoryCursor, HistoryLine, HistoryPage as OfflineHistoryPage, HistorySearchOptions,
+};
+use matou_native_runtime::history_worker::{HistoryReply, HistoryRequest};
+use matou_native_runtime::host::{
+    DATABASE_RECOVERY_INTERRUPTED, RecentReplies, STORAGE_READ_ONLY_TITLE, StoragePhase,
+    database_recovery_request_id, deferred_summary_text, save_locale_preference,
+};
+use matou_native_runtime::protocol::{
+    ClaudeModelCatalogReply, ClaudeModelPreferencesReply, ProviderSettingsReply,
+};
+use matou_native_terminal::Theme;
+use serde_json::Value;
+
+mod deferred_recovery_card {
+    include!("deferred_recovery_card.rs");
+}
+
+#[path = "database_recovery_page.rs"]
+pub mod database_recovery_page;
+
+#[cfg(target_os = "windows")]
+#[path = "quit_confirmation_dialog.rs"]
+mod quit_confirmation_dialog;
+
+#[path = "dag_window.rs"]
+mod dag_window;
+use dag_window::DagWindow;
+
+#[path = "workspace_wiring.rs"]
+mod workspace_wiring;
+use workspace_wiring::WorkspaceWiring;
+
+#[cfg(all(target_os = "macos", debug_assertions))]
+#[path = "../tests/support/dag_window_probe.rs"]
+mod dag_window_probe;
+
+mod session_levels {
+    include!("session_levels.rs");
+}
+
+mod codex_hud {
+    include!("codex_hud.rs");
+}
+
+#[path = "footer_controls.rs"]
+mod footer_controls;
+use footer_controls::{
+    EnvironmentActionState, FooterGitProjection, FooterGitRequest, FooterMenu, FooterPopover,
+};
+
+#[path = "project_instructions.rs"]
+mod project_instructions;
+
+use crate::{
+    carousel_motion::{
+        CardElevation, CardWidth, CarouselLayout, Curve, HOVER_RESTORE_DELAY_MS, Transition,
+        centered_scroll, focus_scroll_step, fully_visible_scroll, hover_restore_step,
+    },
+    rename_input::{RenameInput, RenameInputEvent, trim_name},
+    runtime_bridge::{
+        BridgeEvent, Command, ConnectionPhase, DatabaseRecoveryAction, DatabaseRecoveryDetails,
+        Event, ReadOnlyNavigation, ReadOnlyQuery, RecoveryState, RuntimeCommands, StartupBlockKind,
+    },
+    settings_shell::{SettingsShell, SettingsShellEvent, settings_button},
+    sidebar_scrollbar::{self, SidebarScrollbarState},
+    tab_dialog_style as tabs_ui,
+    terminal_surface::{self, SurfaceEvent, SurfaceEventKind, TerminalSurface},
+    ui_text::{UiText, ui_text},
+    workspace_drag::{self, WorkspaceDragSnapshot, WorkspaceDragTask},
+};
+
+fn diagnostic_toast_text(message: &str, locale: InterfaceLocale) -> String {
+    let line = message.lines().next().unwrap_or_default().trim();
+    let actionable = [
+        "未检测到 Claude Code",
+        "未检测到 Codex",
+        "未检测到 Antigravity CLI",
+        "未检测到 DSH",
+        "启动准备失败：",
+        "Launch preparation failed:",
+        "Codex 启动失败：",
+        "Codex failed to start:",
+    ]
+    .iter()
+    .any(|prefix| line.starts_with(prefix))
+        || ["Claude Code", "Codex", "Antigravity", "DSH"]
+            .iter()
+            .any(|provider| {
+                line.strip_prefix(provider).is_some_and(|suffix| {
+                    (suffix.starts_with(" CLI (") || suffix.starts_with(" ("))
+                        && suffix.contains(") was not found.")
+                })
+            });
+    if !actionable {
+        return locale
+            .text(
+                "终端操作未完成，请重试。",
+                "The terminal action could not be completed. Try again.",
+            )
+            .into();
+    }
+    let text = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut characters = text.chars().filter(|ch| !ch.is_control());
+    let mut toast: String = characters.by_ref().take(160).collect();
+    if characters.next().is_some() {
+        toast.push('…');
+    }
+    toast
+}
+
+#[cfg(test)]
+mod diagnostic_toast_tests {
+    use super::{InterfaceLocale, diagnostic_toast_text};
+
+    #[test]
+    fn launch_diagnostics_keep_actionable_details_in_both_locales() {
+        let claude = "未检测到 Claude Code，请先安装并确认 `claude` 在 PATH 中，再重试。";
+        assert_eq!(
+            diagnostic_toast_text(
+                &format!("{claude}\r\ninternal details"),
+                InterfaceLocale::Chinese
+            ),
+            claude
+        );
+        let codex = "Codex CLI (codex) was not found. Install it and ensure `codex` is on PATH, then try again.";
+        assert_eq!(
+            diagnostic_toast_text(codex, InterfaceLocale::English),
+            codex
+        );
+        let launch_failure = "Codex failed to start: Sign in and try again.";
+        assert_eq!(
+            diagnostic_toast_text(launch_failure, InterfaceLocale::English),
+            launch_failure
+        );
+    }
+
+    #[test]
+    fn diagnostic_toast_bounds_length_and_keeps_unknown_errors_generic() {
+        let long = format!("启动准备失败：{}", "目录不可用".repeat(80));
+        let toast = diagnostic_toast_text(&long, InterfaceLocale::Chinese);
+        assert!(toast.starts_with("启动准备失败：目录不可用"));
+        assert!(toast.ends_with('…'));
+        assert_eq!(toast.chars().count(), 161);
+        assert_eq!(
+            diagnostic_toast_text("spawn PTY: internal error", InterfaceLocale::Chinese),
+            "终端操作未完成，请重试。"
+        );
+        assert_eq!(
+            diagnostic_toast_text("spawn PTY: internal error", InterfaceLocale::English),
+            "The terminal action could not be completed. Try again."
+        );
+    }
+}
+
+fn is_child_window_close_shortcut(stroke: &Keystroke) -> bool {
+    stroke.key.eq_ignore_ascii_case("w")
+        && stroke.modifiers
+            == (Modifiers {
+                platform: cfg!(target_os = "macos"),
+                control: cfg!(target_os = "windows"),
+                ..Default::default()
+            })
+}
+
+#[cfg(debug_assertions)]
+type MotionTrace = std::rc::Rc<std::cell::RefCell<std::fs::File>>;
+
+#[derive(Clone)]
+struct TaskDrag {
+    task_id: String,
+    workspace_id: String,
+    title: String,
+}
+impl Render for TaskDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .w(px(230.))
+            .h(px(34.))
+            .px(px(7.))
+            .rounded(px(8.))
+            .bg(rgba(0xeceef3b8))
+            .text_color(rgb(0x2f3547))
+            .text_size(px(13.))
+            .flex()
+            .items_center()
+            .gap(px(7.))
+            .child(icon("task", 12., rgb(0x2f3547)))
+            .child(self.title.clone())
+    }
+}
+
+#[derive(Clone)]
+struct WorkspaceDrag {
+    workspace_id: String,
+    snapshot: WorkspaceDragSnapshot,
+    width: Pixels,
+    offset: Point<Pixels>,
+}
+impl Render for WorkspaceDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().relative().w(self.width).child(
+            workspace_drag::group(&self.snapshot, self.width, 1.)
+                .relative()
+                .left(self.offset.x)
+                .top(self.offset.y),
+        )
+    }
+}
+
+struct CardMotion {
+    width: Option<CardWidth>,
+    lift: Transition,
+    drawn_lift: Pixels,
+    hover_elevation: Transition,
+    shadow_start: [f32; 3],
+    shadow_target: CardElevation,
+}
+
+impl CardMotion {
+    fn new(selected: bool) -> Self {
+        let elevation = CardElevation::for_card(selected, false);
+        Self {
+            width: None,
+            lift: Transition::new(if selected { 1. } else { 0. }),
+            drawn_lift: px(0.),
+            hover_elevation: Transition::new(1.),
+            shadow_start: elevation.weights(),
+            shadow_target: elevation,
+        }
+    }
+
+    fn retarget_elevation(&mut self, target: CardElevation, now: f64) {
+        if self.shadow_target != target {
+            self.shadow_start = self.shadow_weights(now);
+            self.shadow_target = target;
+            self.hover_elevation.snap(0.);
+            self.hover_elevation.retarget(1., now, 180., Curve::Ease);
+        }
+    }
+
+    fn shadow_weights(&self, now: f64) -> [f32; 3] {
+        let progress = self.hover_elevation.value(now) as f32;
+        let target = self.shadow_target.weights();
+        std::array::from_fn(|i| self.shadow_start[i] * (1. - progress) + target[i] * progress)
+    }
+
+    fn lift_for_frame(&self, now: f64, in_split: bool) -> Pixels {
+        if in_split {
+            px(0.)
+        } else {
+            px(-4. * self.lift.value(now) as f32)
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LevelFocusRequest {
+    Card,
+    CardOnReady,
+    OpenChildren,
+    ReturnParent,
+    Notification(u64),
+}
+
+const CARD_RADIUS: Pixels = px(12.);
+
+type CardActionBounds = Rc<std::cell::RefCell<Vec<Bounds<Pixels>>>>;
+
+fn measure_card_action<E: Styled + ParentElement>(button: E, actions: &CardActionBounds) -> E {
+    let actions = actions.clone();
+    button.child(
+        canvas(
+            move |bounds, _, _| actions.borrow_mut().push(bounds),
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .inset_0()
+        .size_full(),
+    )
+}
+
+/// The card's activation area uses a half-open rectangle with four rounded corners.
+pub fn session_card_hit(bounds: &Bounds<Pixels>, position: Point<Pixels>) -> bool {
+    if position.x < bounds.left()
+        || position.y < bounds.top()
+        || position.x >= bounds.right()
+        || position.y >= bounds.bottom()
+    {
+        return false;
+    }
+    let width = bounds.size.width;
+    let height = bounds.size.height;
+    let radius = CARD_RADIUS.min(width / 2.).min(height / 2.);
+    let nearest_side = (position.x - bounds.left()).min(bounds.right() - position.x);
+    let dx = f32::from((radius - nearest_side).max(px(0.)));
+    let top_inset = radius - (position.y - bounds.top());
+    let bottom_inset = radius - (bounds.bottom() - position.y);
+    let dy = f32::from(top_inset.max(bottom_inset).max(px(0.)));
+    dx * dx + dy * dy <= f32::from(radius).powi(2)
+}
+
+struct WorkspaceDragMotion {
+    scale: Transition,
+    opacity: Transition,
+    background: Transition,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PermissionMode {
+    Default,
+    Auto,
+    Ask,
+    AcceptEdits,
+    Plan,
+    Bypass,
+}
+
+impl PermissionMode {
+    const ALL: [Self; 5] = [
+        Self::Default,
+        Self::Auto,
+        Self::AcceptEdits,
+        Self::Plan,
+        Self::Bypass,
+    ];
+
+    const CODEX: [Self; 4] = [Self::Default, Self::AcceptEdits, Self::Plan, Self::Bypass];
+
+    const ANTIGRAVITY: [Self; 6] = [
+        Self::Default,
+        Self::Auto,
+        Self::Ask,
+        Self::AcceptEdits,
+        Self::Plan,
+        Self::Bypass,
+    ];
+
+    fn supported(node: &Value) -> Option<&'static [Self]> {
+        match node["currentMode"].as_str() {
+            Some("claude-code") => Some(&Self::ALL),
+            Some("codex") => Some(&Self::CODEX),
+            Some("antigravity") => Some(&Self::ANTIGRAVITY),
+            _ => None,
+        }
+    }
+
+    fn from_node(node: &Value) -> Self {
+        Self::observed(node, node["permissionMode"].as_str())
+    }
+
+    fn observed(node: &Value, value: Option<&str>) -> Self {
+        Self::supported(node)
+            .unwrap_or_default()
+            .iter()
+            .copied()
+            .find(|mode| Some(mode.value()) == value)
+            .unwrap_or(Self::Default)
+    }
+
+    fn value(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Auto => "auto",
+            Self::Ask => "ask",
+            Self::AcceptEdits => "acceptEdits",
+            Self::Plan => "plan",
+            Self::Bypass => "bypassPermissions",
+        }
+    }
+
+    // Frozen i18n/messages/hud.ts: permission.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Default => "Default",
+            Self::Auto => "Auto",
+            Self::Ask => "Ask",
+            Self::AcceptEdits => "Accept Edits",
+            Self::Plan => "Plan Mode",
+            Self::Bypass => "Bypass Permissions",
+        }
+    }
+}
+
+struct PermissionChip {
+    modes: &'static [PermissionMode],
+    mode: PermissionMode,
+    title: String,
+    disabled: bool,
+}
+
+struct PermissionConfirmation {
+    session_id: String,
+    from: PermissionMode,
+    target: PermissionMode,
+    resumable: bool,
+    provider: &'static str,
+}
+
+impl PermissionConfirmation {
+    // Frozen i18n/messages/hud.ts: bypassEnter*, bypassExit*, bypassNotResumable.
+    fn copy(&self) -> (&'static str, String, &'static str) {
+        let agent = self.provider;
+        let (title, action, confirm) = if self.target == PermissionMode::Bypass {
+            ("切换到高权限模式", "切换到", "确认切换")
+        } else {
+            ("退出高权限模式", "退出", "确认退出")
+        };
+        let body = if self.resumable {
+            format!(
+                "{action} Bypass Permissions 会打断当前 {agent} 会话进程（正在执行的任务会被中断），重启后会自动 resume 恢复会话历史。\n\n是否确认？"
+            )
+        } else {
+            format!(
+                "当前 {agent} 会话还没有生成可恢复的 sessionId。继续切换会启动一个全新的 {agent} 会话，当前内容将不会保留。\n\n是否确认？"
+            )
+        };
+        (title, body, confirm)
+    }
+}
+
+#[derive(PartialEq, Eq)]
+enum PermissionOutcome {
+    Pending,
+    Confirmed,
+    Failed,
+}
+
+struct PermissionChange {
+    from: PermissionMode,
+    target: PermissionMode,
+    outcome: PermissionOutcome,
+}
+
+enum TabDialog {
+    RemoveWorkspace {
+        workspace_id: String,
+        name: String,
+    },
+    RenameTask {
+        task_id: String,
+        input: Entity<RenameInput>,
+        empty_submitted: bool,
+        failure: Option<(String, String)>,
+    },
+    DeleteTask {
+        task_id: String,
+        title: String,
+    },
+    Rename {
+        scene_id: String,
+        input: Entity<RenameInput>,
+    },
+    RenameSession {
+        session_id: String,
+        input: Entity<RenameInput>,
+        failure: Option<String>,
+    },
+    Close {
+        scene_id: String,
+        graph: Value,
+        is_last: bool,
+    },
+    CloseSession {
+        scene_id: String,
+        session_id: String,
+        body: String,
+    },
+    LastSession {
+        scene_id: String,
+        session_id: String,
+        return_focus: Option<FocusHandle>,
+    },
+    RemoveSession {
+        scene_id: String,
+        session_id: String,
+        scope: RemoveScope,
+    },
+    SessionLoader(SessionLoader),
+    Branch(BranchDialog),
+    PermissionMode(PermissionConfirmation),
+}
+
+impl TabDialog {
+    fn is_session_card(&self) -> bool {
+        matches!(
+            self,
+            Self::CloseSession { .. }
+                | Self::LastSession { .. }
+                | Self::RemoveSession { .. }
+                | Self::RenameSession { .. }
+                | Self::SessionLoader(_)
+                | Self::Branch(_)
+        )
+    }
+}
+
+struct BranchDialog {
+    scene_id: String,
+    session_id: String,
+    source_title: String,
+    placement: ForkPlacement,
+    worktree_mode: ForkWorktreeMode,
+    input: Entity<RenameInput>,
+    submission_key: String,
+    submitting: bool,
+    error: Option<String>,
+}
+
+impl BranchDialog {
+    fn copy(&self) -> (&'static str, String, &'static str) {
+        let title = match self.placement {
+            ForkPlacement::Child => "创建子会话分支",
+            ForkPlacement::Sibling => "创建同级分支",
+            ForkPlacement::Peer => "Fork 会话",
+        };
+        if self.placement == ForkPlacement::Peer {
+            (
+                title,
+                format!("复制“{}”的当前对话并加入当前列表", self.source_title),
+                "和当前会话使用同一目录，适合连续处理同一份改动",
+            )
+        } else {
+            (
+                title,
+                format!("从“{}”继续一条独立工作路径", self.source_title),
+                "和父会话使用同一目录，适合连续处理同一份改动",
+            )
+        }
+    }
+}
+
+struct ForkAccess {
+    blocked: Option<&'static str>,
+    readiness: Option<&'static str>,
+}
+
+enum ForkRetry {
+    Pending,
+    Rejected(String),
+}
+
+fn fork_error_text(error: &str, locale: InterfaceLocale) -> &str {
+    if error.contains("An isolated worktree root is required") {
+        locale.text(
+            "未配置受信任的隔离目录，无法创建新工作树。可从原工作树创建分支。",
+            "A trusted isolation root is required to create a new worktree. You can fork in the current worktree.",
+        )
+    } else {
+        error
+    }
+}
+
+fn fork_failure_copy(node: &Value) -> Option<(&'static str, Option<&str>)> {
+    let progress = &node["forkProgress"];
+    if progress["stage"] != "failed" && node["forkState"] != "failed" {
+        return None;
+    }
+    let error = progress["error"]
+        .as_str()
+        .or_else(|| node["forkError"].as_str());
+    if error.is_some_and(|error| {
+        error
+            .split(['\n', '\r', '\u{2028}', '\u{2029}'])
+            .any(|line| {
+                let line = line.to_ascii_lowercase();
+                line.contains("provider session not found")
+                    || line.contains("no conversation found")
+                    || line
+                        .split_once("conversation")
+                        .is_some_and(|(_, rest)| rest.contains("not found"))
+            })
+    }) {
+        Some((
+            "父会话已失效",
+            Some(if node["currentMode"] == "antigravity" {
+                "原 Antigravity 对话身份已失效，本次分支没有创建成功。请返回父会话继续，或移除此失败节点后新建空会话。"
+            } else {
+                "原 Claude Code 对话身份已失效，本次分支没有创建成功。请返回父会话继续，或移除此失败节点后新建空会话。"
+            }),
+        ))
+    } else {
+        Some(("分支创建失败", error))
+    }
+}
+
+struct ForkProgressCopy {
+    label: String,
+    description: &'static str,
+    counter: Option<String>,
+    fraction: Option<f32>,
+    interactive: bool,
+}
+
+fn fork_progress_copy(node: &Value) -> Option<ForkProgressCopy> {
+    let progress = &node["forkProgress"];
+    let stage_key = progress["stage"].as_str()?;
+    let (stage, description) = match stage_key {
+        "queued" => ("等待创建分支", "前面的分支任务完成后会自动继续"),
+        "creating-worktree" => (
+            "正在创建独立工作目录",
+            "正在隔离文件修改，其他会话可继续工作",
+        ),
+        "applying-setup" => ("正在准备分支环境", "正在执行此工作空间需要的准备步骤"),
+        "binding-session" => ("正在绑定分支会话", "正在把新会话连接到独立工作目录"),
+        "restoring-provider" => ("正在恢复智能体会话", "正在续接原会话上下文并启动分支任务"),
+        "starting-window" => ("正在打开分支窗口", "分支窗口即将可以输入和查看输出"),
+        _ => return None,
+    };
+    let steps = progress["totalSteps"]
+        .as_i64()
+        .zip(progress["completedSteps"].as_i64());
+    let steps = steps.map(|(total, completed)| (total.max(1), completed.clamp(0, total.max(0))));
+    Some(ForkProgressCopy {
+        label: format!("正在创建分支：{stage}"),
+        description,
+        counter: steps.map(|(total, completed)| {
+            format!(
+                "第 {} / {total} 阶段",
+                completed + i64::from(completed < total)
+            )
+        }),
+        fraction: steps.map(|(total, completed)| completed as f32 / total as f32),
+        interactive: matches!(stage_key, "restoring-provider" | "starting-window"),
+    })
+}
+
+struct LoaderOwner {
+    session_id: String,
+    title: String,
+}
+
+struct LoaderSession {
+    id: String,
+    title: String,
+    model: Option<String>,
+    permission_mode: String,
+    message_count: usize,
+    updated_at: i64,
+    loaded_by: Option<LoaderOwner>,
+}
+
+impl LoaderSession {
+    fn from_graph(value: &Value) -> Option<Self> {
+        let loaded_by = &value["loadedBy"];
+        Some(Self {
+            id: value["providerSessionId"].as_str()?.into(),
+            title: value["title"].as_str()?.into(),
+            model: value["model"].as_str().map(str::to_owned),
+            permission_mode: value["permissionMode"].as_str()?.into(),
+            message_count: value["messageCount"]
+                .as_u64()
+                .or_else(|| value["eventCount"].as_u64())?
+                .try_into()
+                .ok()?,
+            updated_at: value["updatedAt"].as_i64().or_else(|| {
+                value["updatedAt"]
+                    .as_f64()
+                    .map(|timestamp| timestamp.round() as i64)
+            })?,
+            loaded_by: if loaded_by.is_null() {
+                None
+            } else {
+                Some(LoaderOwner {
+                    session_id: loaded_by["sessionId"].as_str()?.into(),
+                    title: loaded_by["title"].as_str()?.into(),
+                })
+            },
+        })
+    }
+}
+
+struct LoaderEvent {
+    index: usize,
+    kind: String,
+    text: String,
+    tool_name: Option<String>,
+}
+
+impl LoaderEvent {
+    fn from_graph(value: &Value) -> Option<Self> {
+        Some(Self {
+            index: value["index"].as_u64()?.try_into().ok()?,
+            kind: value["kind"].as_str()?.into(),
+            text: value["text"].as_str()?.into(),
+            tool_name: value["toolName"].as_str().map(str::to_owned),
+        })
+    }
+}
+
+struct LoaderDetailRequest {
+    id: String,
+    start: Option<i64>,
+    request_id: Option<u64>,
+    around: Option<i64>,
+}
+
+struct LoaderListRequest {
+    id: u64,
+    query: String,
+    offset: usize,
+    refresh: bool,
+}
+
+struct LoaderSearchHit {
+    index: i64,
+    excerpt: String,
+}
+
+#[derive(Clone, Default)]
+struct LoaderRemembered {
+    provider: Option<&'static str>,
+    claude: Option<String>,
+    codex: Option<String>,
+    dsh: Option<String>,
+    antigravity: Option<String>,
+    focus: LoaderFocus,
+}
+
+#[derive(Clone, Copy, Default)]
+enum LoaderFocus {
+    #[default]
+    Filter,
+    List,
+    Content,
+    Control(usize),
+}
+
+impl LoaderRemembered {
+    fn selected(&self, provider: &str) -> Option<String> {
+        match provider {
+            "codex" => self.codex.clone(),
+            "dsh" => self.dsh.clone(),
+            "antigravity" => self.antigravity.clone(),
+            _ => self.claude.clone(),
+        }
+    }
+
+    fn set_selected(&mut self, provider: &str, selection: Option<String>) {
+        match provider {
+            "codex" => self.codex = selection,
+            "dsh" => self.dsh = selection,
+            "antigravity" => self.antigravity = selection,
+            _ => self.claude = selection,
+        }
+    }
+}
+
+struct LoaderLoad {
+    provider: &'static str,
+    id: String,
+    title: String,
+    previous_revision: u64,
+    request_id: Option<u64>,
+}
+
+struct DeferredRecoveryCard {
+    title: String,
+    subtitle: Option<String>,
+    cwd: Option<String>,
+    agent: Option<&'static str>,
+    updated_label: Option<String>,
+    replies: Vec<DeferredReply>,
+    loading: bool,
+    can_open_history: bool,
+    can_restore: bool,
+}
+
+struct DeferredReply {
+    kind: String,
+    label: String,
+    text: String,
+}
+
+struct DeferredPreview {
+    cwd: String,
+    loading: bool,
+    result: Option<RecentReplies>,
+}
+
+struct SessionLoader {
+    history: bool,
+    provider: &'static str,
+    confirm_running: bool,
+    remembered: LoaderRemembered,
+    restore_selection: Option<String>,
+    list_total: usize,
+    list_next: usize,
+    has_more_sessions: bool,
+    pending_list: Option<LoaderListRequest>,
+    list_query: String,
+    catalog_revision: Vec<(String, String, String, String, u64, bool)>,
+    refresh_catalog: bool,
+    content_input: Entity<RenameInput>,
+    _content_subscription: Subscription,
+    _focus_subscriptions: Vec<Subscription>,
+    search_query: String,
+    pending_search: Option<(u64, String)>,
+    search_hits: Vec<LoaderSearchHit>,
+    has_more_hits: bool,
+    search_next: usize,
+    detail_model: Option<String>,
+    detail_permission: Option<String>,
+    scene_id: String,
+    session_id: String,
+    cwd: String,
+    input: Entity<RenameInput>,
+    sessions: Vec<LoaderSession>,
+    selected: Option<String>,
+    events: Vec<LoaderEvent>,
+    first_event: Option<i64>,
+    total_events: usize,
+    loading_list: bool,
+    loading_detail: bool,
+    loading_earlier: bool,
+    pending_detail: Option<LoaderDetailRequest>,
+    has_earlier: bool,
+    error: Option<String>,
+    list_scroll: ScrollHandle,
+    preview_scroll: ScrollHandle,
+    list_focus: FocusHandle,
+}
+
+impl SessionLoader {
+    fn remote_catalog(&self) -> bool {
+        matches!(self.provider, "codex" | "dsh" | "antigravity")
+    }
+
+    fn visible_sessions<'a>(
+        &'a self,
+        cx: &App,
+    ) -> impl Iterator<Item = &'a LoaderSession> + use<'a> {
+        let query = if self.remote_catalog() {
+            String::new()
+        } else {
+            self.input.read(cx).text.trim().to_lowercase()
+        };
+        let cwd_matches = query.is_empty() || self.cwd.to_lowercase().contains(&query);
+        self.sessions.iter().filter(move |session| {
+            cwd_matches
+                || session.title.to_lowercase().contains(&query)
+                || session.id.to_lowercase().contains(&query)
+                || session
+                    .model
+                    .as_ref()
+                    .is_some_and(|model| model.to_lowercase().contains(&query))
+        })
+    }
+}
+
+const SESSION_LOADER_PAGE_SIZE: i64 = 200;
+
+const LAST_TAB_BODY: &str = "当前已是最后一个事项下的最后一个标签，这里点击关闭不会删除该事项。\n\n如需删除该工作区，请在左侧事项面板的下拉菜单中执行删除。";
+const LAST_TAB_CONFIRM: &str = "我知道了";
+const STOP_SESSION: &str = "停止会话";
+const STOPPED_SESSION_STATUS: &str = "正在恢复会话…";
+const INVALID_RECOVERY_MARKER_DIAGNOSTIC: &str = "database recovery marker is invalid";
+const REMOVE_NODE_ACTION: &str = "移除节点…";
+const WORKSPACE_PATH_UNAVAILABLE: &str = "工作区目录不可用，请先在本地恢复原路径，或移出该工作区";
+const SESSION_LOADER_TITLE: &str = "载入 Claude Code 会话";
+const SESSION_LOADER_FILTER_PLACEHOLDER: &str = "筛选左侧：标题、路径、模型或会话 ID";
+const SESSION_LOADER_RUNNING_WARNING: &str = "当前卡片正在运行，继续会结束当前进程。";
+const SESSION_LOADER_NO_SESSIONS: &str = "当前工作空间内没有 Claude Code 会话";
+const SESSION_LOADER_NO_MATCHES: &str = "左侧没有匹配的会话";
+const SESSION_LOADER_LOADING_MORE: &str = "正在载入更多会话…";
+const SESSION_LOADER_SELECT_SESSION: &str = "选择会话查看内容";
+const SESSION_LOADER_LOADING_PREVIEW: &str = "正在载入预览…";
+const SESSION_LOADER_NO_HISTORY: &str = "当前会话还没有可显示的历史内容";
+const SESSION_LOADER_LOADING_EARLIER: &str = "正在载入更早内容…";
+const SESSION_LOADER_LOADING: &str = "正在载入…";
+
+struct StartFailureCard<'a> {
+    title: &'static str,
+    reason: &'a str,
+    retry: &'static str,
+    remove: &'static str,
+    blocked: Option<&'static str>,
+}
+
+enum ProviderRestoreBanner<'a> {
+    Restoring {
+        title: &'static str,
+    },
+    Failed {
+        title: &'static str,
+        reason: &'a str,
+        retry: &'static str,
+        fresh: &'static str,
+        pending: bool,
+        retry_blocked: Option<&'static str>,
+        fresh_blocked: Option<&'static str>,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LoadingBadge {
+    Recovering,
+    Loading,
+}
+
+impl LoadingBadge {
+    fn label(self, locale: &InterfaceLocale) -> &'static str {
+        match self {
+            Self::Recovering => locale.text("恢复中", "Recovering"),
+            Self::Loading => locale.text("加载中", "Loading"),
+        }
+    }
+}
+
+struct PendingProviderRestore {
+    revision: Option<u64>,
+    _watchdog: gpui::Task<()>,
+}
+
+struct CardTooltip(SharedString);
+
+#[derive(Clone, Copy)]
+struct RemoveNodeTooltip {
+    blocked_reason: Option<&'static str>,
+    action: &'static str,
+}
+
+impl RemoveNodeTooltip {
+    fn text(self) -> &'static str {
+        self.blocked_reason.unwrap_or(self.action)
+    }
+}
+
+fn card_tooltip_box() -> Div {
+    div()
+        .px(px(9.))
+        .py(px(7.))
+        .border_1()
+        .border_color(rgb(0xd6dae1))
+        .rounded(px(7.))
+        .bg(rgb(0xffffff))
+        .text_color(rgb(0x333b47))
+        .text_size(px(10.))
+        .line_height(px(15.))
+        .shadow(vec![shadow(0x1f2837, 0.16, 8., 24.)])
+}
+
+impl Render for RemoveNodeTooltip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        card_tooltip_box().child(self.text())
+    }
+}
+
+impl Render for CardTooltip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        card_tooltip_box()
+            .max_w(px(460.))
+            .whitespace_normal()
+            .child(ui_text(self.0.clone()).pre_line())
+    }
+}
+
+struct RemovalDialogText {
+    title: String,
+    body: String,
+    files_unchanged: Option<&'static str>,
+    choices: Option<[RemovalChoiceText; 2]>,
+    warning: Option<String>,
+    confirm: String,
+}
+
+struct RemovalChoiceText {
+    title: &'static str,
+    impact: String,
+    description: String,
+}
+
+#[derive(Default)]
+struct RemovalImpact {
+    sessions: usize,
+    owned_worktrees: Option<usize>,
+    running: usize,
+    needs_input: usize,
+}
+
+impl RemovalImpact {
+    fn add(&mut self, node: &Value) {
+        let owned = node["hasOwnedWorktree"].as_bool().map(usize::from);
+        self.owned_worktrees = if self.sessions == 0 {
+            owned
+        } else {
+            self.owned_worktrees
+                .zip(owned)
+                .map(|(total, count)| total + count)
+        };
+        self.sessions += 1;
+        match node["workStatus"].as_str() {
+            Some("running" | "starting") => self.running += 1,
+            Some("needs-input") => self.needs_input += 1,
+            _ => {}
+        }
+    }
+
+    fn activity(&self, locale: InterfaceLocale) -> String {
+        let running = (self.running > 0).then(|| match locale {
+            InterfaceLocale::Chinese => format!("{} 个运行中", self.running),
+            InterfaceLocale::English => {
+                if self.running == 1 {
+                    "1 running session".to_owned()
+                } else {
+                    format!("{} running sessions", self.running)
+                }
+            }
+        });
+        let needs_input = (self.needs_input > 0).then(|| match locale {
+            InterfaceLocale::Chinese => format!("{} 个待输入", self.needs_input),
+            InterfaceLocale::English => {
+                if self.needs_input == 1 {
+                    "1 session waiting for input".to_owned()
+                } else {
+                    format!("{} sessions waiting for input", self.needs_input)
+                }
+            }
+        });
+        let join = locale.text("、", " and ");
+        [running, needs_input]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(join)
+    }
+
+    fn label(&self, locale: InterfaceLocale) -> String {
+        let mut label = match locale {
+            InterfaceLocale::Chinese => format!("影响 {} 个会话", self.sessions),
+            InterfaceLocale::English => {
+                if self.sessions == 1 {
+                    "Affects 1 session".to_owned()
+                } else {
+                    format!("Affects {} sessions", self.sessions)
+                }
+            }
+        };
+        if let Some(count) = self.owned_worktrees {
+            match locale {
+                InterfaceLocale::Chinese => {
+                    label.push_str(&format!("、{count} 个自有 Worktree"));
+                }
+                InterfaceLocale::English => {
+                    if count == 1 {
+                        label.push_str(", 1 owned worktree");
+                    } else {
+                        label.push_str(&format!(", {count} owned worktrees"));
+                    }
+                }
+            }
+        }
+        let activity = self.activity(locale);
+        if !activity.is_empty() {
+            match locale {
+                InterfaceLocale::Chinese => label.push_str(&format!("；其中 {activity}")),
+                InterfaceLocale::English => label.push_str(&format!(", including {activity}")),
+            }
+        }
+        label
+    }
+}
+
+const CONTROLS: &[&str] = &[
+    "new-workspace",
+    "notifications",
+    "task-menu",
+    "sidebar-board",
+    "settings",
+    "add-tab",
+    "tab-overflow",
+    "graph",
+    "dag-open-retry",
+    "dag-open-dismiss",
+    "split",
+    "project-instructions",
+    "project-instructions-close",
+    "project-instructions-preview",
+    "project-instructions-cancel",
+    "project-instructions-save",
+    "footer-git",
+    "footer-environment",
+    "footer-quota",
+    "permission-mode",
+    "detached-permission-close",
+    "detached-permission-cancel",
+    "detached-permission-confirm",
+    "accounts",
+    "session-return-parent",
+];
+
+struct ArchivedMatches {
+    query: String,
+    options: matou_native_terminal::SearchOptions,
+    sequence: u64,
+    index: usize,
+    matches: Vec<HistoryLine>,
+    gap_count: usize,
+    has_more: bool,
+    show_summary: bool,
+}
+
+struct TerminalSearchState {
+    input: Entity<RenameInput>,
+    controls: [FocusHandle; 6],
+    query: String,
+    open: bool,
+    options: matou_native_terminal::SearchOptions,
+    sequence: u64,
+    session_id: Option<String>,
+    result: Option<matou_native_runtime::search::SearchResult>,
+    error: Option<String>,
+    previous: bool,
+    archive: Option<ArchivedMatches>,
+    archive_pending: Option<u64>,
+    archive_count: Option<(usize, usize)>,
+    dismissed_sequence: Option<u64>,
+}
+
+struct HistoryContextRequest {
+    session_id: String,
+    sequence: u64,
+    cursor: HistoryCursor,
+    result_index: usize,
+    result_count: usize,
+}
+
+const NOTIFICATION_COOLDOWN_MS: u64 = 5_000;
+const NOTIFICATION_LIMIT: usize = 1_000;
+const NOTIFICATION_READ_RETENTION_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
+
+struct NotificationEntry {
+    id: u64,
+    event_id: String,
+    title: String,
+    subtitle: String,
+    body: String,
+    workspace_id: Option<String>,
+    task_id: Option<String>,
+    scene_id: Option<String>,
+    session_id: Option<String>,
+    occurred_at: u64,
+    read: bool,
+    replacement_key: Option<String>,
+    cooldown_key: Option<String>,
+}
+
+struct Notifications {
+    entries: Vec<NotificationEntry>,
+    // Last accepted receipt time and number of rows keeping each key alive.
+    cooldowns: HashMap<String, (u64, usize)>,
+    sequence: u64,
+    sound_enabled: bool,
+    sound_path: Option<PathBuf>,
+}
+
+impl Notifications {
+    fn new(sound_path: Option<PathBuf>) -> Self {
+        let sound_enabled = sound_path
+            .as_ref()
+            .and_then(|path| std::fs::read(path).ok())
+            .is_none_or(|bytes| bytes != b"0");
+        Self {
+            entries: Vec::new(),
+            cooldowns: HashMap::new(),
+            sequence: 0,
+            sound_enabled,
+            sound_path,
+        }
+    }
+
+    fn push(&mut self, value: &Value, focused: Option<&str>, now: u64) -> bool {
+        let text = |name| {
+            value[name]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        };
+        let Some(event_id) = text("eventId") else {
+            return false;
+        };
+        self.prune(now);
+        let replacement_key = text("replacementKey");
+        let replacement = replacement_key.and_then(|key| {
+            self.entries
+                .iter()
+                .position(|entry| entry.replacement_key.as_deref() == Some(key))
+        });
+        if text("operation") == Some("dismiss") {
+            if let Some(index) = replacement {
+                self.remove_at(index);
+            }
+            return false;
+        }
+        if self.entries.iter().any(|entry| entry.event_id == event_id) {
+            return false;
+        }
+        let session_id = text("sessionId");
+        let scene_id = text("sceneId");
+        let task_id = text("taskId");
+        let workspace_id = text("workspaceId");
+        let read = session_id.is_some() && session_id == focused;
+        let (id, cooldown_key) = if let Some(index) = replacement {
+            // A replacement takes precedence over cooldown and keeps the row's identity.
+            let current = self.entries.remove(index);
+            (current.id, current.cooldown_key)
+        } else {
+            let owner = session_id
+                .or(scene_id)
+                .or(task_id)
+                .or(workspace_id)
+                .unwrap_or("global");
+            let key = text("cooldownKey")
+                .or_else(|| text("eventType"))
+                .unwrap_or("attention");
+            let key = format!("{owner}:{key}");
+            let cooldown = self.cooldowns.entry(key.clone()).or_insert((now, 0));
+            if cooldown.1 > 0 && now.saturating_sub(cooldown.0) < NOTIFICATION_COOLDOWN_MS {
+                return false;
+            }
+            *cooldown = (now, cooldown.1 + 1);
+            if let Some(session_id) = session_id {
+                self.mark_session_read(session_id);
+            }
+            self.sequence += 1;
+            (self.sequence, Some(key))
+        };
+        let occurred_at = value["occurredAt"].as_u64().unwrap_or(now);
+        let index = self
+            .entries
+            .partition_point(|entry| entry.occurred_at > occurred_at);
+        self.entries.insert(
+            index,
+            NotificationEntry {
+                id,
+                event_id: event_id.into(),
+                title: text("title").unwrap_or("Claude Code").into(),
+                subtitle: text("subtitle").unwrap_or_default().into(),
+                body: text("body").unwrap_or_default().into(),
+                workspace_id: workspace_id.map(str::to_owned),
+                task_id: task_id.map(str::to_owned),
+                scene_id: scene_id.map(str::to_owned),
+                session_id: session_id.map(str::to_owned),
+                occurred_at,
+                read,
+                replacement_key: replacement_key.map(str::to_owned),
+                cooldown_key,
+            },
+        );
+        self.prune(now);
+        !read && value["sound"].as_bool() != Some(false) && self.sound_enabled
+    }
+
+    fn forget_cooldown(cooldowns: &mut HashMap<String, (u64, usize)>, entry: &NotificationEntry) {
+        if let Some(key) = &entry.cooldown_key
+            && let std::collections::hash_map::Entry::Occupied(mut cooldown) =
+                cooldowns.entry(key.clone())
+        {
+            cooldown.get_mut().1 -= 1;
+            if cooldown.get().1 == 0 {
+                cooldown.remove();
+            }
+        }
+    }
+
+    fn remove_at(&mut self, index: usize) {
+        Self::forget_cooldown(&mut self.cooldowns, &self.entries.remove(index));
+    }
+
+    fn prune(&mut self, now: u64) {
+        self.entries.retain(|entry| {
+            let keep = !entry.read
+                || now.saturating_sub(entry.occurred_at) <= NOTIFICATION_READ_RETENTION_MS;
+            if !keep {
+                Self::forget_cooldown(&mut self.cooldowns, entry);
+            }
+            keep
+        });
+        if self.entries.len() <= NOTIFICATION_LIMIT {
+            return;
+        }
+        let mut counts = HashMap::new();
+        self.entries.retain(|entry| {
+            let count = counts.entry(entry.workspace_id.clone()).or_insert(0);
+            *count += 1;
+            let keep = *count <= NOTIFICATION_LIMIT;
+            if !keep {
+                Self::forget_cooldown(&mut self.cooldowns, entry);
+            }
+            keep
+        });
+    }
+
+    fn mark_session_read(&mut self, id: &str) {
+        for entry in &mut self.entries {
+            if entry.session_id.as_deref() == Some(id) {
+                entry.read = true;
+            }
+        }
+    }
+
+    fn set_sound(&mut self, enabled: bool) {
+        self.sound_enabled = enabled;
+        if let Some(path) = &self.sound_path {
+            let temporary = path.with_extension("tmp");
+            let bytes = if enabled { b"1" } else { b"0" };
+            if let Err(error) =
+                std::fs::write(&temporary, bytes).and_then(|_| std::fs::rename(&temporary, path))
+            {
+                eprintln!("Save notification sound preference: {error}");
+            }
+        }
+    }
+}
+
+struct DatabaseRecoveryPageState {
+    details: Arc<DatabaseRecoveryDetails>,
+    available: bool,
+    pending: Option<(String, PageOperation)>,
+    selected_backup: Option<String>,
+    error: Option<String>,
+    exported_path: Option<PathBuf>,
+    empty_trigger: FocusHandle,
+    confirmation: Option<EmptyDatabaseConfirmation>,
+}
+
+struct EmptyDatabaseConfirmation {
+    recovery_id: String,
+    back: FocusHandle,
+    confirm: FocusHandle,
+}
+
+#[cfg(any(target_os = "windows", test))]
+#[derive(Default)]
+enum QuitConfirmation<F> {
+    #[default]
+    Closed,
+    Open(F),
+    Confirmed,
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl<F> QuitConfirmation<F> {
+    fn open(&mut self, focus: impl FnOnce() -> F) -> Option<&F> {
+        if !matches!(self, Self::Closed) {
+            return None;
+        }
+        *self = Self::Open(focus());
+        self.focus()
+    }
+
+    fn focus(&self) -> Option<&F> {
+        match self {
+            Self::Open(focus) => Some(focus),
+            _ => None,
+        }
+    }
+
+    fn cancel(&mut self) -> Option<F> {
+        if matches!(self, Self::Open(_))
+            && let Self::Open(focus) = std::mem::take(self)
+        {
+            return Some(focus);
+        }
+        None
+    }
+
+    fn confirm(&mut self) -> bool {
+        if !matches!(self, Self::Open(_)) {
+            return false;
+        }
+        *self = Self::Confirmed;
+        true
+    }
+
+    fn is_confirmed(&self) -> bool {
+        matches!(self, Self::Confirmed)
+    }
+}
+
+#[cfg(target_os = "windows")]
+struct QuitConfirmationFocus {
+    previous: Option<FocusHandle>,
+    keyboard_focus: bool,
+    cancel: FocusHandle,
+    quit: FocusHandle,
+}
+
+#[cfg(target_os = "windows")]
+pub struct QuitConfirmed;
+
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, PartialEq, Eq)]
+enum QuitDialogKey {
+    Cancel,
+    FocusCancel,
+    FocusQuit,
+    Confirm,
+    Ignore,
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn quit_dialog_key(stroke: &Keystroke, cancel_focused: bool, quit_focused: bool) -> QuitDialogKey {
+    let mods = stroke.modifiers;
+    if stroke.key == "escape" {
+        return QuitDialogKey::Cancel;
+    }
+    if stroke.key == "tab" && !mods.alt && !mods.control && !mods.platform && !mods.function {
+        return if !quit_focused && (cancel_focused || mods.shift) {
+            QuitDialogKey::FocusQuit
+        } else {
+            QuitDialogKey::FocusCancel
+        };
+    }
+    if matches!(stroke.key.as_str(), "enter" | "space") && !mods.modified() {
+        if quit_focused {
+            return QuitDialogKey::Confirm;
+        }
+        if cancel_focused {
+            return QuitDialogKey::Cancel;
+        }
+    }
+    QuitDialogKey::Ignore
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn quit_dialog_text(locale: InterfaceLocale) -> [&'static str; 4] {
+    [
+        locale.text("退出码头", "Quit Matou"),
+        locale.text(
+            "确定要退出码头吗？退出后将关闭当前窗口并结束所有运行中的终端会话。",
+            "Are you sure you want to quit Matou? This will close the window and end all running terminal sessions.",
+        ),
+        locale.text("取消", "Cancel"),
+        locale.text("退出", "Quit"),
+    ]
+}
+
+#[cfg(test)]
+mod quit_confirmation_tests {
+    use super::{QuitConfirmation, QuitDialogKey, quit_dialog_key, quit_dialog_text};
+    use gpui::Keystroke;
+    use matou_native_core::sessions::InterfaceLocale;
+
+    #[test]
+    fn repeated_close_keeps_one_dialog_until_confirmed() {
+        let mut state = QuitConfirmation::default();
+        assert!(!state.confirm());
+        assert_eq!(state.open(|| "original focus"), Some(&"original focus"));
+        assert_eq!(state.open(|| "new focus"), None);
+        assert_eq!(state.focus(), Some(&"original focus"));
+        assert!(!state.is_confirmed());
+        assert!(state.confirm());
+        assert!(state.is_confirmed());
+        assert!(!state.confirm());
+        assert_eq!(state.open(|| "new focus"), None);
+        assert_eq!(state.cancel(), None);
+    }
+
+    #[test]
+    fn escape_and_cancel_dismiss_and_return_the_previous_focus() {
+        let escape = Keystroke::parse("escape").unwrap();
+        assert_eq!(quit_dialog_key(&escape, false, true), QuitDialogKey::Cancel);
+
+        let mut state = QuitConfirmation::default();
+        state.open(|| "terminal focus");
+        assert_eq!(state.cancel(), Some("terminal focus"));
+        assert!(state.focus().is_none());
+        assert!(!state.is_confirmed());
+        assert_eq!(
+            state.open(|| "recovery page focus"),
+            Some(&"recovery page focus")
+        );
+    }
+
+    #[test]
+    fn tab_and_shift_tab_cycle_only_over_cancel_and_quit() {
+        for key in ["tab", "shift-tab"] {
+            let stroke = Keystroke::parse(key).unwrap();
+            assert_eq!(
+                quit_dialog_key(&stroke, true, false),
+                QuitDialogKey::FocusQuit
+            );
+            assert_eq!(
+                quit_dialog_key(&stroke, false, true),
+                QuitDialogKey::FocusCancel
+            );
+        }
+        let ctrl_tab = Keystroke::parse("ctrl-tab").unwrap();
+        assert_eq!(
+            quit_dialog_key(&ctrl_tab, false, true),
+            QuitDialogKey::Ignore
+        );
+    }
+
+    #[test]
+    fn enter_and_space_activate_only_the_focused_button() {
+        for key in ["enter", "space"] {
+            let stroke = Keystroke::parse(key).unwrap();
+            assert_eq!(quit_dialog_key(&stroke, true, false), QuitDialogKey::Cancel);
+            assert_eq!(
+                quit_dialog_key(&stroke, false, true),
+                QuitDialogKey::Confirm
+            );
+            assert_eq!(
+                quit_dialog_key(&stroke, false, false),
+                QuitDialogKey::Ignore
+            );
+        }
+        let alt_f4 = Keystroke::parse("alt-f4").unwrap();
+        assert_eq!(quit_dialog_key(&alt_f4, false, true), QuitDialogKey::Ignore);
+    }
+
+    #[test]
+    fn quit_dialog_text_matches_both_locales() {
+        assert_eq!(
+            quit_dialog_text(InterfaceLocale::Chinese),
+            [
+                "退出码头",
+                "确定要退出码头吗？退出后将关闭当前窗口并结束所有运行中的终端会话。",
+                "取消",
+                "退出",
+            ]
+        );
+        assert_eq!(
+            quit_dialog_text(InterfaceLocale::English),
+            [
+                "Quit Matou",
+                "Are you sure you want to quit Matou? This will close the window and end all running terminal sessions.",
+                "Cancel",
+                "Quit",
+            ]
+        );
+    }
+}
+
+impl DatabaseRecoveryPageState {
+    fn update_details(&mut self, details: Arc<DatabaseRecoveryDetails>) {
+        let backups = database_recovery_page::visible_backups(&details.backups);
+        if !backups
+            .iter()
+            .any(|backup| Some(&backup.id) == self.selected_backup.as_ref())
+        {
+            self.selected_backup = backups.first().map(|backup| backup.id.clone());
+        }
+        self.details = details;
+        self.available = true;
+    }
+
+    fn disconnect(&mut self) {
+        self.available = false;
+        self.confirmation = None;
+        if self.pending.take().is_some() {
+            self.error = Some(DATABASE_RECOVERY_INTERRUPTED.into());
+        }
+    }
+}
+
+#[derive(Default)]
+struct ReadOnlyState {
+    pending_export: Option<String>,
+    export_feedback: Option<Result<Option<PathBuf>, String>>,
+    pending_navigation: Option<u64>,
+    navigation_sequence: u64,
+    projection_error: Option<String>,
+    task_by_workspace: HashMap<String, String>,
+    scene_by_task: HashMap<String, String>,
+    session_by_scene: HashMap<String, String>,
+    history: ReadOnlyHistory,
+}
+
+#[derive(Default)]
+struct ReadOnlyHistory {
+    sequence: u64,
+    pending: Option<u64>,
+    context_pending: bool,
+    page: Option<OfflineHistoryPage>,
+    show_latest: bool,
+    error: Option<String>,
+}
+
+impl ReadOnlyState {
+    fn disconnect(&mut self) {
+        if self.pending_export.take().is_some() {
+            self.export_feedback = Some(Err(DATABASE_RECOVERY_INTERRUPTED.into()));
+        }
+        self.pending_navigation = None;
+        self.history.pending = None;
+        self.history.context_pending = false;
+    }
+
+    fn remember(&mut self, path: &HierarchyResult) {
+        if let Some((workspace, task)) = path.workspace.as_ref().zip(path.task.as_ref()) {
+            self.task_by_workspace
+                .insert(workspace.id.clone(), task.id.clone());
+        }
+        if let Some((task, scene)) = path.task.as_ref().zip(path.scene.as_ref()) {
+            self.scene_by_task.insert(task.id.clone(), scene.id.clone());
+        }
+        if let Some((scene, session)) = path.scene.as_ref().zip(path.session.as_ref()) {
+            self.session_by_scene
+                .insert(scene.id.clone(), session.id.clone());
+        }
+    }
+
+    fn workspace_query(&self, workspace_id: String) -> ReadOnlyQuery {
+        match self.task_by_workspace.get(&workspace_id) {
+            Some(task_id) => self.task_query(task_id.clone()),
+            None => ReadOnlyQuery::Workspace { workspace_id },
+        }
+    }
+
+    fn task_query(&self, task_id: String) -> ReadOnlyQuery {
+        match self.scene_by_task.get(&task_id) {
+            Some(scene_id) => self.scene_query(scene_id.clone()),
+            None => ReadOnlyQuery::Task { task_id },
+        }
+    }
+
+    fn scene_query(&self, scene_id: String) -> ReadOnlyQuery {
+        match self.session_by_scene.get(&scene_id) {
+            Some(session_id) => ReadOnlyQuery::Session {
+                scene_id,
+                session_id: session_id.clone(),
+            },
+            None => ReadOnlyQuery::Scene { scene_id },
+        }
+    }
+}
+
+fn read_only_navigation(active: ReadOnlyNavigation) -> Event {
+    Event::Navigation {
+        hierarchy: active.hierarchy,
+        scenes: active.scenes,
+        graph: active.graph,
+        geometry: active.geometry,
+    }
+}
+
+pub struct Workspace {
+    #[cfg(target_os = "windows")]
+    quit_confirmation: QuitConfirmation<QuitConfirmationFocus>,
+    #[cfg(target_os = "windows")]
+    main_theme_window: AnyWindowHandle,
+    locale: InterfaceLocale,
+    locale_preference: LocalePreference,
+    data_root: Option<PathBuf>,
+    terminal_font_size: u8,
+    shortcut_alt_down: bool,
+    last_shortcut_alt: Option<Instant>,
+    locale_save_pending: bool,
+    theme: ThemeState,
+    history_view: Option<Entity<HistoryView>>,
+    history_request: Option<HistoryContextRequest>,
+    search: Option<TerminalSearchState>,
+    settings: Option<(Entity<SettingsShell>, Subscription)>,
+    commands: RuntimeCommands,
+    runtime_generation: u64,
+    database_recovery: Option<DatabaseRecoveryPageState>,
+    invalid_recovery_marker: bool,
+    read_only: Option<ReadOnlyState>,
+    transport_connected: bool,
+    domain_ready: bool,
+    session_frames: HashSet<String>,
+    search_after_restore: bool,
+    transport_fault: Option<(u64, String)>,
+    hierarchy: Option<HierarchyResult>,
+    scenes: Vec<Scene>,
+    workspaces: Vec<HierarchyWorkspace>,
+    workspace_paths: Vec<WorkspacePathState>,
+    workspace_controls: HashMap<String, [FocusHandle; 4]>,
+    workspace_drag_source: Option<String>,
+    workspace_drag_press: Option<(String, Point<Pixels>)>,
+    workspace_drag_gesture: bool,
+    workspace_drag_target: Option<String>,
+    workspace_drag_motion: HashMap<String, WorkspaceDragMotion>,
+    workspace_bounds: HashMap<String, Bounds<Pixels>>,
+    workspace_group_bounds: HashMap<String, Bounds<Pixels>>,
+    workspace_hover: Option<String>,
+    workspace_collapsed: HashSet<String>,
+    workspace_menu: Option<(String, Point<Pixels>, Vec<FocusHandle>)>,
+    creating_workspace: bool,
+    tasks: Vec<Task>,
+    task_controls: HashMap<String, [FocusHandle; 2]>,
+    task_bounds: HashMap<String, Bounds<Pixels>>,
+    task_hover: Option<String>,
+    reveal_task: Option<String>,
+    task_menu: Option<(String, Point<Pixels>, Vec<FocusHandle>)>,
+    pub(crate) sidebar_scroll: ScrollHandle,
+    sidebar_overflow: bool,
+    pub(crate) sidebar_scrollbar: SidebarScrollbarState,
+    notifications: Notifications,
+    notification_open: bool,
+    notification_scene_sessions: HashMap<String, (String, HashSet<String>)>,
+    task_toast: Option<String>,
+    task_toast_error: bool,
+    toast_generation: u64,
+    permission_menu: Option<String>,
+    footer_shell: Option<String>,
+    project_instructions: HashMap<AnyWindowHandle, project_instructions::Instructions>,
+    footer_popovers: HashMap<AnyWindowHandle, FooterPopover>,
+    environment_actions: HashMap<String, EnvironmentActionState>,
+    #[cfg(debug_assertions)]
+    environment_picker_path: Option<PathBuf>,
+    pending_footer_git: HashMap<u64, FooterGitRequest>,
+    footer_git_projections: HashMap<String, FooterGitProjection>,
+    detached_permission_menus: HashSet<AnyWindowHandle>,
+    detached_permission_confirmations: HashMap<AnyWindowHandle, PermissionConfirmation>,
+    permission_changes: HashMap<String, PermissionChange>,
+    permission_identities: HashSet<String>,
+    permission_toast: Option<String>,
+    permission_toast_timer: Option<gpui::Task<()>>,
+    tab_scroll: ScrollHandle,
+    tab_hover: Option<String>,
+    tab_overflow: bool,
+    hidden_tabs: Option<Vec<(String, FocusHandle)>>,
+    tab_menu: Option<(String, Point<Pixels>, FocusHandle)>,
+    control_focus: HashMap<&'static str, FocusHandle>,
+    tab_controls: HashMap<String, [FocusHandle; 2]>,
+    card_controls: HashMap<String, FocusHandle>,
+    card_history_controls: HashMap<String, FocusHandle>,
+    remove_card_controls: HashMap<String, FocusHandle>,
+    fork_controls: HashMap<String, [FocusHandle; 4]>,
+    wiring: WorkspaceWiring,
+    fork_readiness: Option<String>,
+    fork_readiness_generation: u64,
+    fork_retries: HashMap<String, ForkRetry>,
+    keyboard_focus: bool,
+    dialog: Option<TabDialog>,
+    dialog_controls: Vec<FocusHandle>,
+    dialog_subscription: Option<Subscription>,
+    pending_close: Option<String>,
+    carousel_scroll: ScrollHandle,
+    carousel_drag: Option<(Point<Pixels>, Pixels)>,
+    motion_clock: Instant,
+    #[cfg(debug_assertions)]
+    motion_trace: Option<MotionTrace>,
+    card_motion: HashMap<String, CardMotion>,
+    focus_follow_until: Option<f64>,
+    hovered: Option<String>,
+    hover_follow_until: Option<f64>,
+    hover_baseline: Option<f64>,
+    hover_restore_at: Option<f64>,
+    pointer_position: Option<Point<Pixels>>,
+    edge_direction: i8,
+    edge_blocked: bool,
+    edge_next_at: Option<f64>,
+    edge_target: Option<String>,
+    edge_phase_start: f64,
+    edge_cruising: bool,
+    card_geometry: Vec<(String, f64, f64)>,
+    geometry: HashMap<String, GeometryUpdate>,
+    geometry_dirty: HashSet<String>,
+    reconnect_geometry: HashSet<String>,
+    restore_geometry: bool,
+    column_capacity: Option<u32>,
+    pending_geometry: Option<GeometryUpdate>,
+    geometry_timer: u64,
+    last_geometry_write: HashMap<String, f64>,
+    geometry_sequence: u64,
+    geometry_writes: HashMap<String, (u64, u8)>,
+    graph: Value,
+    dag_window: Option<WindowHandle<DagWindow>>,
+    dag_open_error: bool,
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    dag_probe: Option<dag_window_probe::OpenProbe>,
+    level_parent_by_scene: HashMap<String, Option<String>>,
+    carousel_owner: Option<String>,
+    hovered_child_badge: Option<String>,
+    terminals: HashMap<String, Entity<TerminalSurface>>,
+    recovery: HashMap<String, RecoveryState>,
+    restoring_sessions: HashSet<String>,
+    recovery_controls: HashMap<String, FocusHandle>,
+    deferred_previews: HashMap<String, DeferredPreview>,
+    deferred_controls: HashMap<String, [FocusHandle; 2]>,
+    start_failure_controls: HashMap<String, [FocusHandle; 2]>,
+    provider_restore_controls: HashMap<String, [FocusHandle; 2]>,
+    pending_provider_restores: HashMap<String, PendingProviderRestore>,
+    pending_loader_loads: HashMap<String, LoaderLoad>,
+    loader_remembered: HashMap<String, LoaderRemembered>,
+    loader_request_id: u64,
+    #[cfg(target_os = "macos")]
+    recovery_water: HashMap<String, Entity<RecoveryWater>>,
+    first_frame_content: HashSet<String>,
+    #[cfg(target_os = "macos")]
+    recovery_water_visibility: Option<gpui::Task<()>>,
+    storage_fault_sessions: HashSet<String>,
+    order: Vec<String>,
+    focused: Option<String>,
+    pending_focus: Option<(String, String)>,
+    pending_card_action: Option<(String, String)>,
+    level_focus_request: Option<LevelFocusRequest>,
+    copy_request_id: u64,
+    resize_revisions: HashMap<String, u64>,
+    fault: Option<String>,
+    subscriptions: Vec<Subscription>,
+}
+
+impl Workspace {
+    fn apply_search_results(
+        &mut self,
+        session_id: String,
+        sequence: u64,
+        result: Result<matou_native_runtime::search::SearchResult, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(search) = self.search.as_mut().filter(|search| {
+            search.open
+                && search.sequence == sequence
+                && search.session_id.as_ref() == Some(&session_id)
+        }) else {
+            return;
+        };
+        if self
+            .history_request
+            .as_ref()
+            .is_some_and(|request| request.session_id == session_id && request.sequence == sequence)
+        {
+            return;
+        }
+        search.archive_count = None;
+        match result {
+            Ok(result) => {
+                if let Some(terminal) = self.terminals.get(&session_id) {
+                    terminal.update(cx, |terminal, cx| {
+                        terminal.set_search(Some(result.clone()), cx)
+                    });
+                }
+                let live = !result.matches.is_empty() || search.query.is_empty();
+                search.result = Some(result);
+                search.error = None;
+                if live {
+                    search.archive = None;
+                    search.archive_pending = None;
+                    self.dismiss_history_context(cx);
+                } else if search.archive.as_ref().is_some_and(|archive| {
+                    archive.query == search.query
+                        && archive.options == search.options
+                        && !archive.matches.is_empty()
+                }) {
+                    let archive = search.archive.as_mut().unwrap();
+                    if archive.sequence != sequence {
+                        archive.index = if search.previous {
+                            (archive.index + archive.matches.len() - 1) % archive.matches.len()
+                        } else {
+                            (archive.index + 1) % archive.matches.len()
+                        };
+                        archive.sequence = sequence;
+                    }
+                    self.open_history_context(window, cx);
+                } else if search.archive_pending != Some(sequence) {
+                    search.archive_pending = Some(sequence);
+                    let options = HistorySearchOptions {
+                        case_sensitive: search.options.case_sensitive,
+                        regex: search.options.regex,
+                        whole_word: search.options.whole_word,
+                    };
+                    let query = search.query.clone();
+                    self.send(
+                        Command::History(HistoryRequest::Search {
+                            session_id,
+                            sequence,
+                            query,
+                            options,
+                        }),
+                        cx,
+                    );
+                }
+            }
+            Err(error) => {
+                search.result = None;
+                search.archive = None;
+                search.archive_pending = None;
+                search.error = Some(
+                    if error.contains("invalid terminal search regular expression") {
+                        "正则表达式无效".into()
+                    } else {
+                        error
+                    },
+                );
+                self.dismiss_history_context(cx);
+                if let Some(terminal) = self.terminals.get(&session_id) {
+                    terminal.update(cx, |terminal, cx| terminal.set_search(None, cx));
+                }
+            }
+        }
+        self.sync_terminal_input(window, cx);
+    }
+
+    fn open_history_context(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(search) = self.search.as_mut().filter(|search| search.open) else {
+            return;
+        };
+        let Some(archive) = &mut search.archive else {
+            return;
+        };
+        archive.show_summary = true;
+        search.archive_count = Some((archive.index, archive.matches.len()));
+        if search.dismissed_sequence == Some(search.sequence) {
+            return;
+        }
+        let Some(matched) = archive.matches.get(archive.index) else {
+            return;
+        };
+        let Some(session_id) = search.session_id.clone() else {
+            return;
+        };
+        let context = HistoryContextRequest {
+            session_id,
+            sequence: search.sequence,
+            cursor: matched.cursor,
+            result_index: archive.index,
+            result_count: archive.matches.len(),
+        };
+        let state = HistoryViewState::Loading {
+            result_index: context.result_index,
+            result_count: context.result_count,
+            gap_count: archive.gap_count,
+        };
+        let command = HistoryRequest::Context {
+            session_id: context.session_id.clone(),
+            sequence: context.sequence,
+            cursor: context.cursor,
+        };
+        self.ensure_history_view(window, cx);
+        if let Some(read_only) = &mut self.read_only {
+            read_only.history.pending = None;
+            read_only.history.context_pending = true;
+            read_only.history.error = None;
+            self.sync_read_only_history(cx);
+        } else if let Some(view) = &self.history_view {
+            view.update(cx, |view, cx| view.set_state(state, cx));
+        }
+        self.history_request = Some(context);
+        self.sync_terminal_input(window, cx);
+        if let Some(read_only) = &mut self.read_only {
+            if let Err(error) = self
+                .commands
+                .send_at(self.runtime_generation, Command::History(command))
+            {
+                self.history_request = None;
+                read_only.history.context_pending = false;
+                read_only.history.error = Some(error.to_string());
+                self.sync_read_only_history(cx);
+            }
+        } else {
+            self.send(Command::History(command), cx);
+        }
+    }
+
+    fn ensure_history_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.history_view.is_none() {
+            let view = cx.new(HistoryView::new);
+            let generation = self.runtime_generation;
+            self.subscriptions.push(cx.subscribe_in(
+                &view,
+                window,
+                move |this, _, event, window, cx| {
+                    if this.runtime_generation != generation
+                        || this.commands.connection().0 != generation
+                    {
+                        return;
+                    }
+                    match event {
+                        HistoryViewEvent::ReturnToLive => this.exit_history(window, cx),
+                        HistoryViewEvent::OlderPage(cursor) => {
+                            this.request_read_only_history(Some(*cursor), window, cx);
+                        }
+                        HistoryViewEvent::LatestPage => {
+                            this.request_read_only_history(None, window, cx);
+                        }
+                    }
+                },
+            ));
+            self.history_view = Some(view);
+        }
+    }
+
+    fn request_read_only_history(
+        &mut self,
+        before: Option<HistoryCursor>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (Some(read_only), Some(session_id)) = (&mut self.read_only, self.focused.clone())
+        else {
+            return;
+        };
+        read_only.history.sequence += 1;
+        let sequence = read_only.history.sequence;
+        read_only.history.context_pending = false;
+        read_only.history.error = None;
+        self.history_request = None;
+        match self.commands.send_at(
+            self.runtime_generation,
+            Command::History(HistoryRequest::Page {
+                session_id,
+                sequence,
+                before,
+            }),
+        ) {
+            Ok(()) => read_only.history.pending = Some(sequence),
+            Err(error) => {
+                read_only.history.pending = None;
+                read_only.history.error = Some(error.to_string());
+            }
+        }
+        self.ensure_history_view(window, cx);
+        self.sync_read_only_history(cx);
+    }
+
+    fn sync_read_only_history(&self, cx: &mut Context<Self>) {
+        if let (Some(read_only), Some(view)) = (&self.read_only, &self.history_view) {
+            let history = &read_only.history;
+            let state = HistoryViewState::Offline {
+                page: history.page.clone(),
+                pending: history.pending.is_some() || history.context_pending,
+                show_latest: history.show_latest,
+                error: history.error.clone(),
+            };
+            let locale = self.locale;
+            view.update(cx, |view, cx| {
+                view.set_offline_locale(locale, cx);
+                view.set_state(state, cx);
+            });
+        }
+    }
+
+    fn apply_history(&mut self, reply: HistoryReply, window: &mut Window, cx: &mut Context<Self>) {
+        match reply {
+            HistoryReply::Page {
+                session_id,
+                sequence,
+                before,
+                result,
+            } => {
+                let Some(state) = self.read_only.as_mut().filter(|state| {
+                    self.focused.as_deref() == Some(&session_id)
+                        && state.history.pending == Some(sequence)
+                }) else {
+                    return;
+                };
+                state.history.pending = None;
+                match result {
+                    Ok(page) => {
+                        state.history.page = Some(page);
+                        state.history.show_latest = before.is_some();
+                    }
+                    Err(error) => state.history.error = Some(error),
+                }
+                self.sync_read_only_history(cx);
+            }
+            HistoryReply::Search {
+                session_id,
+                sequence,
+                result,
+            } => {
+                let Some(search) = self.search.as_mut().filter(|search| {
+                    search.open
+                        && search.sequence == sequence
+                        && search.session_id.as_ref() == Some(&session_id)
+                        && search.archive_pending == Some(sequence)
+                }) else {
+                    return;
+                };
+                search.archive_pending = None;
+                match result {
+                    Ok(result) => {
+                        let mut matches = result.matches;
+                        matches.reverse();
+                        let index = match search.archive.as_ref().filter(|archive| {
+                            self.read_only.is_some()
+                                && !matches.is_empty()
+                                && archive.query == search.query
+                                && archive.options == search.options
+                                && archive.matches == matches
+                        }) {
+                            Some(archive) if search.previous => {
+                                (archive.index + matches.len() - 1) % matches.len()
+                            }
+                            Some(archive) => (archive.index + 1) % matches.len(),
+                            None if search.previous => matches.len().saturating_sub(1),
+                            None => 0,
+                        };
+                        search.archive = Some(ArchivedMatches {
+                            query: search.query.clone(),
+                            options: search.options,
+                            sequence,
+                            index,
+                            matches,
+                            gap_count: result.gaps.len(),
+                            has_more: result.has_more,
+                            show_summary: true,
+                        });
+                        self.open_history_context(window, cx);
+                    }
+                    Err(error) => {
+                        // Frozen archive RPC failures quietly return to the live view.
+                        if self.read_only.is_some() {
+                            search.error = Some(error);
+                        }
+                        if let Some(archive) = &mut search.archive {
+                            archive.show_summary = false;
+                        }
+                        self.dismiss_history_context(cx);
+                    }
+                }
+            }
+            HistoryReply::Context {
+                session_id,
+                sequence,
+                cursor,
+                result,
+            } => {
+                // A later query with zero matches leaves the current panel
+                // open, including any pending read for that panel.
+                let Some(context) = self.history_request.as_ref().filter(|request| {
+                    request.session_id == session_id
+                        && request.sequence == sequence
+                        && request.cursor == cursor
+                }) else {
+                    return;
+                };
+                match result {
+                    Ok(page)
+                        if page
+                            .anchor_index
+                            .and_then(|index| page.lines.get(index))
+                            .is_some_and(|line| line.cursor == cursor) =>
+                    {
+                        if let Some(read_only) = &mut self.read_only {
+                            read_only.history.context_pending = false;
+                            read_only.history.page = Some(page);
+                            read_only.history.show_latest = true;
+                            self.sync_read_only_history(cx);
+                        } else {
+                            let state = HistoryViewState::Ready {
+                                result_index: context.result_index,
+                                result_count: context.result_count,
+                                page,
+                            };
+                            if let Some(view) = &self.history_view {
+                                view.update(cx, |view, cx| view.set_state(state, cx));
+                            }
+                        }
+                    }
+                    result => {
+                        if let Some(read_only) = &mut self.read_only {
+                            read_only.history.context_pending = false;
+                            read_only.history.error = Some(match result {
+                                Ok(_) => "找不到这条历史记录".into(),
+                                Err(error) => error,
+                            });
+                            self.sync_read_only_history(cx);
+                        }
+                        self.dismiss_history_context(cx);
+                    }
+                }
+            }
+        }
+        self.sync_terminal_input(window, cx);
+        cx.notify();
+    }
+
+    fn dismiss_history_context(&mut self, cx: &mut Context<Self>) {
+        self.history_request = None;
+        if let Some(read_only) = &mut self.read_only
+            && std::mem::take(&mut read_only.history.context_pending)
+        {
+            self.sync_read_only_history(cx);
+        }
+        if let Some(view) = &self.history_view {
+            view.update(cx, |view, _| view.stop_drag());
+        }
+    }
+
+    fn clear_read_only_history(&mut self, cx: &mut Context<Self>) {
+        self.history_request = None;
+        if let Some(view) = self.history_view.take() {
+            view.update(cx, |view, cx| view.retire(cx));
+        }
+        if let Some(search) = &mut self.search {
+            search.open = false;
+            search.session_id = None;
+            search.archive = None;
+            search.archive_pending = None;
+            search.archive_count = None;
+        }
+        self.search_after_restore = false;
+    }
+
+    fn exit_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.dismiss_history_context(cx);
+        if let Some(search) = self.search.as_mut() {
+            search.dismissed_sequence = Some(search.sequence);
+            if let Some(archive) = &mut search.archive {
+                archive.show_summary = false;
+            }
+        }
+        if self.read_only.is_some() {
+            self.request_read_only_history(None, window, cx);
+            if let Some(view) = &self.history_view {
+                window.focus(&view.read(cx).focus);
+            }
+            return;
+        }
+        self.sync_terminal_input(window, cx);
+        if let Some(terminal) = self
+            .focused
+            .as_ref()
+            .filter(|id| !self.provider_restore_hides_terminal(id))
+            .and_then(|id| self.terminals.get(id))
+        {
+            window.focus(&terminal.read(cx).focus);
+        }
+        cx.notify();
+    }
+
+    fn archive_summary(&self, session_id: &str) -> Option<Div> {
+        let dark = self.wiring_dark();
+        let search = self
+            .search
+            .as_ref()
+            .filter(|search| search.open && search.session_id.as_deref() == Some(session_id))?;
+        let archive = search
+            .archive
+            .as_ref()
+            .filter(|a| a.show_summary && (!a.matches.is_empty() || a.gap_count > 0))?;
+        if self
+            .history_request
+            .as_ref()
+            .is_some_and(|request| request.session_id == session_id)
+        {
+            return None;
+        }
+        let text = archive
+            .matches
+            .get(archive.index)
+            .map_or("该范围存在不可读的历史片段", |line| {
+                line.text.as_str()
+            });
+        let meta = format!(
+            "{}/{}{}{}",
+            archive.index + 1,
+            archive.matches.len(),
+            if archive.has_more { "+" } else { "" },
+            if archive.gap_count > 0 {
+                format!(" · {} 处历史缺口", archive.gap_count)
+            } else {
+                String::new()
+            }
+        );
+        Some(
+            div()
+                .absolute()
+                .right(px(12.))
+                .bottom(px(10.))
+                .max_w(px(720.))
+                .left(px(12.))
+                .px(px(10.))
+                .py(px(7.))
+                .border_1()
+                .border_color(if dark {
+                    rgba(0xffffff24)
+                } else {
+                    rgba(0x30384826)
+                })
+                .rounded(px(7.))
+                .bg(if dark {
+                    rgba(0x13161df0)
+                } else {
+                    rgba(0xfffffff5)
+                })
+                .text_color(if dark { rgb(0xd7dbe5) } else { rgb(0x303848) })
+                .shadow(vec![if dark {
+                    shadow(0x000000, 0.28, 8., 14.)
+                } else {
+                    shadow(0x2c374e, 0.16, 8., 14.)
+                }])
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .font_family("SFMono-Regular")
+                .text_size(px(11.))
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(rgb(0xff9a3d))
+                        .child("归档历史"),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child(text.to_owned()),
+                )
+                .child(div().flex_none().text_color(rgb(0x8d95a7)).child(meta)),
+        )
+    }
+
+    fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.focused.is_none() {
+            return;
+        }
+        if self.search.is_none() {
+            let input = cx.new(|cx| {
+                let mut input = RenameInput::new(String::new(), cx);
+                input.placeholder = "搜索".into();
+                input.search_style = true;
+                input
+            });
+            // Focusing the reference search input replaces the document's
+            // text selection. Window deactivation alone preserves that range.
+            let input_focus = input.read(cx).focus.clone();
+            self.subscriptions
+                .push(cx.on_focus(&input_focus, window, |this, _, cx| {
+                    if let Some(view) = &this.history_view {
+                        // Focus listeners run after paint. Notify after that draw
+                        // has ended so clearing the range schedules a new frame.
+                        let view = view.clone();
+                        cx.defer(move |cx| {
+                            view.update(cx, |view, cx| view.clear_selection(cx));
+                        });
+                    }
+                }));
+            self.subscriptions.push(cx.subscribe_in(
+                &input,
+                window,
+                |this, _, event, window, cx| match event {
+                    RenameInputEvent::Changed => {
+                        if let Some(search) = this.search.as_mut() {
+                            search.query = search.input.read(cx).text.clone();
+                        }
+                        this.run_search(false, cx);
+                    }
+                    RenameInputEvent::Cancel => this.close_search(window, cx),
+                    RenameInputEvent::Confirm => this.run_search(false, cx),
+                },
+            ));
+            self.search = Some(TerminalSearchState {
+                input,
+                controls: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
+                query: String::new(),
+                open: false,
+                options: Default::default(),
+                sequence: 0,
+                session_id: None,
+                result: None,
+                error: None,
+                previous: false,
+                archive: None,
+                archive_pending: None,
+                archive_count: None,
+                dismissed_sequence: None,
+            });
+        }
+        let search = self.search.as_mut().unwrap();
+        search.open = true;
+        window.focus(&search.input.read(cx).focus);
+        self.run_search(false, cx);
+    }
+
+    fn run_search(&mut self, previous: bool, cx: &mut Context<Self>) {
+        if self
+            .focused
+            .as_ref()
+            .is_some_and(|id| self.recovery_blocked(id))
+        {
+            self.search_after_restore = self.search.as_ref().is_some_and(|search| search.open);
+            return;
+        }
+        let Some(session_id) = self.focused.clone() else {
+            if let Some(view) = &self.history_view {
+                view.update(cx, |view, _| view.stop_drag());
+            }
+            return;
+        };
+        let Some(search) = self.search.as_mut().filter(|search| search.open) else {
+            return;
+        };
+        let dismiss = search.session_id.as_ref() != Some(&session_id) || search.query.is_empty();
+        if search.session_id.as_ref() != Some(&session_id) {
+            if let Some(old) = search.session_id.take() {
+                if self.read_only.is_none() {
+                    let _ = self.commands.send_at(
+                        self.runtime_generation,
+                        Command::ClearSearch {
+                            session_id: old.clone(),
+                        },
+                    );
+                }
+                if let Some(terminal) = self.terminals.get(&old) {
+                    terminal.update(cx, |terminal, cx| terminal.set_search(None, cx));
+                }
+            }
+            search.result = None;
+            search.archive = None;
+            search.archive_pending = None;
+        }
+        search.session_id = Some(session_id.clone());
+        search.sequence += 1;
+        search.previous = previous;
+        search.error = None;
+        if let Some(archive) = &mut search.archive {
+            archive.show_summary = false;
+        }
+        if self.read_only.is_some() {
+            let command = if search.query.is_empty() {
+                search.archive = None;
+                search.archive_count = None;
+                search.archive_pending = None;
+                None
+            } else {
+                search.archive_pending = Some(search.sequence);
+                Some(HistoryRequest::Search {
+                    session_id,
+                    sequence: search.sequence,
+                    query: search.query.clone(),
+                    options: HistorySearchOptions {
+                        case_sensitive: search.options.case_sensitive,
+                        regex: search.options.regex,
+                        whole_word: search.options.whole_word,
+                    },
+                })
+            };
+            if dismiss {
+                self.dismiss_history_context(cx);
+            }
+            if let Some(command) = command
+                && let Err(error) = self
+                    .commands
+                    .send_at(self.runtime_generation, Command::History(command))
+                && let Some(search) = &mut self.search
+            {
+                search.archive_pending = None;
+                search.error = Some(error.to_string());
+            }
+            cx.notify();
+            return;
+        }
+        let request = matou_native_runtime::search::SearchRequest {
+            sequence: search.sequence,
+            query: search.query.clone(),
+            options: search.options,
+            previous,
+        };
+        if dismiss {
+            self.dismiss_history_context(cx);
+        }
+        self.send(
+            Command::Search {
+                session_id,
+                request,
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
+    fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.dismiss_history_context(cx);
+        if let Some(search) = self.search.as_mut() {
+            search.archive = None;
+            search.archive_pending = None;
+            search.archive_count = None;
+            search.open = false;
+            search.query.clear();
+            search.sequence += 1;
+            search.result = None;
+            search.error = None;
+            if let Some(session_id) = &search.session_id {
+                if self.read_only.is_none() {
+                    let _ = self.commands.send_at(
+                        self.runtime_generation,
+                        Command::ClearSearch {
+                            session_id: session_id.clone(),
+                        },
+                    );
+                }
+                if let Some(terminal) = self.terminals.get(session_id) {
+                    terminal.update(cx, |terminal, cx| terminal.set_search(None, cx));
+                }
+            }
+        }
+        self.sync_terminal_input(window, cx);
+        if self.read_only.is_some()
+            && let Some(view) = &self.history_view
+        {
+            window.focus(&view.read(cx).focus);
+        } else if let Some(terminal) = self
+            .focused
+            .as_ref()
+            .filter(|id| !self.provider_restore_hides_terminal(id))
+            .and_then(|id| self.terminals.get(id))
+        {
+            window.focus(&terminal.read(cx).focus);
+        }
+        cx.notify();
+    }
+
+    fn search_key(
+        &mut self,
+        stroke: &Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.dialog.is_some() {
+            return false;
+        }
+        if stroke.key == "escape" && self.history_request.is_some() {
+            self.exit_history(window, cx);
+            return true;
+        }
+        let m = stroke.modifiers;
+        if terminal_surface::terminal_mod(m, cfg!(target_os = "macos"))
+            && stroke.key == "f"
+            && !m.alt
+            && !m.shift
+        {
+            self.open_search(window, cx);
+            return true;
+        }
+        let Some(search) = self
+            .search
+            .as_mut()
+            .filter(|s| s.open && s.input.read(cx).focus.is_focused(window))
+        else {
+            return false;
+        };
+        if stroke.key == "escape" {
+            self.close_search(window, cx);
+            return true;
+        }
+        if stroke.key == "enter" {
+            self.run_search(m.shift, cx);
+            return true;
+        }
+        let modifier = if cfg!(target_os = "macos") {
+            m.platform
+        } else {
+            m.alt
+        };
+        if modifier && matches!(stroke.key.as_str(), "c" | "r") {
+            search.query = search.input.read(cx).text.clone();
+            if stroke.key == "c" {
+                search.options.case_sensitive = !search.options.case_sensitive;
+            } else {
+                search.options.regex = !search.options.regex;
+            }
+            self.run_search(false, cx);
+            return true;
+        }
+        false
+    }
+
+    fn search_bar(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let search = self.search.as_ref().filter(|search| search.open)?;
+        let count = if let Some(error) = &search.error {
+            error.clone()
+        } else if search.input.read(cx).text.is_empty() {
+            String::new()
+        } else if let Some((index, count)) = search.archive_count {
+            if count == 0 {
+                "0/0".into()
+            } else {
+                format!("{}/{}", index + 1, count)
+            }
+        } else {
+            search.result.as_ref().map_or("0/0".into(), |r| {
+                if r.matches.is_empty() {
+                    "0/0".into()
+                } else {
+                    format!("{}/{}", r.result_index + 1, r.matches.len())
+                }
+            })
+        };
+        let mut bar = div()
+            .flex_none()
+            .w_full()
+            .h(px(40.))
+            .px(px(12.))
+            .flex()
+            .items_center()
+            .border_b_1()
+            .border_color(rgb(0xe8e8e8))
+            .bg(rgb(0xffffff))
+            .text_color(rgb(0x2f3547))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .font_family("SF Mono")
+                    .text_size(px(12.))
+                    .child(search.input.clone()),
+            )
+            .child(
+                div()
+                    .min_w(px(42.))
+                    .px(px(8.))
+                    .text_size(px(11.))
+                    .font_family("SF Mono")
+                    .text_color(rgb(if search.error.is_some() {
+                        0xb14542
+                    } else {
+                        0x606572
+                    }))
+                    .child(count),
+            );
+        for (index, label, active) in [
+            (0, "Aa", search.options.case_sensitive),
+            (1, ".*", search.options.regex),
+            (2, "ab", search.options.whole_word),
+            (3, "↑", false),
+            (4, "↓", false),
+            (5, "×", false),
+        ] {
+            bar = bar.child(
+                div()
+                    .id(SharedString::from(format!("terminal-search-{index}")))
+                    .track_focus(&search.controls[index])
+                    .w(px(24.))
+                    .h(px(24.))
+                    .ml(px(4.))
+                    .rounded(px(4.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(11.))
+                    .text_color(rgb(if active { 0xff8c00 } else { 0x606572 }))
+                    .cursor_pointer()
+                    .hover(|style| {
+                        style
+                            .bg(rgba(0x00000014))
+                            .text_color(rgb(0x2f3547))
+                            .rounded(px(6.))
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if index == 5 {
+                            this.close_search(window, cx);
+                            return;
+                        }
+                        if let Some(search) = this.search.as_mut() {
+                            match index {
+                                0 => search.options.case_sensitive = !search.options.case_sensitive,
+                                1 => search.options.regex = !search.options.regex,
+                                2 => search.options.whole_word = !search.options.whole_word,
+                                _ => {}
+                            }
+                        }
+                        this.run_search(index == 3, cx);
+                    }))
+                    .child(label),
+            );
+        }
+        Some(bar)
+    }
+
+    pub fn new(
+        commands: RuntimeCommands,
+        events: async_channel::Receiver<BridgeEvent>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        cx.spawn_in(window, async move |this, cx| {
+            while let Ok(event) = events.recv().await {
+                let applied = cx
+                    .update(|window, cx| this.update(cx, |this, cx| this.apply(event, window, cx)));
+                if !matches!(applied, Ok(Ok(()))) {
+                    break;
+                }
+            }
+        })
+        .detach();
+        let view = cx.weak_entity();
+        let workspace_window = window.window_handle();
+        // Cover the document even when window.blur() leaves no focused GPUI node.
+        let keyboard = cx.intercept_keystrokes(move |event, window, cx| {
+            if window.window_handle() == workspace_window {
+                let _ = view.update(cx, |this, cx| this.tab_key(&event.keystroke, window, cx));
+            }
+        });
+        let launch_options = matou_native_desktop::instance_open::DesktopOptions::from_args(
+            std::env::args_os().skip(1),
+        )
+        .ok()
+        .map(|options| options.runtime);
+        let data_root = launch_options
+            .as_ref()
+            .map(|options| options.data_root.clone());
+        let terminal_font_size = data_root
+            .as_deref()
+            .map(read_terminal_font_size)
+            .unwrap_or(terminal_surface::DEFAULT_TERMINAL_FONT_SIZE);
+        let locale_preference = data_root
+            .as_deref()
+            .map(read_locale_preference)
+            .unwrap_or_default();
+        let theme = data_root.as_deref().map_or(ThemePreference::Light, |root| {
+            read_theme_preference(root).unwrap_or_else(|error| {
+                eprintln!("Read theme preference: {error}");
+                ThemePreference::System
+            })
+        });
+        let appearance = cx.observe_window_appearance(window, |this, window, cx| {
+            if this.theme.set_system_appearance(window.appearance()) {
+                this.apply_theme_palette(cx);
+                if let Some((settings, _)) = &this.settings {
+                    settings.update(cx, |settings, cx| {
+                        settings.configure_theme(this.theme);
+                        cx.notify();
+                    });
+                }
+            }
+        });
+        Self {
+            locale: data_root.as_ref().map_or(InterfaceLocale::default(), |_| {
+                current_interface_locale(locale_preference)
+            }),
+            locale_preference,
+            data_root,
+            terminal_font_size,
+            shortcut_alt_down: false,
+            last_shortcut_alt: None,
+            locale_save_pending: false,
+            #[cfg(target_os = "windows")]
+            main_theme_window: workspace_window,
+            theme: ThemeState::new(theme, window.appearance()),
+            history_view: None,
+            history_request: None,
+            search: None,
+            settings: None,
+            runtime_generation: 0,
+            database_recovery: None,
+            #[cfg(target_os = "windows")]
+            quit_confirmation: QuitConfirmation::default(),
+            invalid_recovery_marker: false,
+            read_only: None,
+            transport_connected: false,
+            domain_ready: false,
+            session_frames: HashSet::new(),
+            search_after_restore: false,
+            transport_fault: None,
+            commands,
+            hierarchy: None,
+            scenes: Vec::new(),
+            workspaces: Vec::new(),
+            workspace_paths: Vec::new(),
+            workspace_controls: HashMap::new(),
+            workspace_drag_source: None,
+            workspace_drag_press: None,
+            workspace_drag_gesture: false,
+            workspace_drag_target: None,
+            workspace_drag_motion: HashMap::new(),
+            workspace_bounds: HashMap::new(),
+            workspace_group_bounds: HashMap::new(),
+            workspace_hover: None,
+            workspace_collapsed: HashSet::new(),
+            workspace_menu: None,
+            creating_workspace: false,
+            tasks: Vec::new(),
+            task_controls: HashMap::new(),
+            task_bounds: HashMap::new(),
+            task_hover: None,
+            reveal_task: None,
+            task_menu: None,
+            sidebar_scroll: ScrollHandle::new(),
+            sidebar_overflow: false,
+            sidebar_scrollbar: SidebarScrollbarState::default(),
+            notifications: Notifications::new(
+                launch_options
+                    .as_ref()
+                    .map(|options| options.data_root.join("notification-sound")),
+            ),
+            notification_open: false,
+            notification_scene_sessions: HashMap::new(),
+            task_toast: None,
+            task_toast_error: false,
+            toast_generation: 0,
+            permission_menu: None,
+            footer_shell: launch_options
+                .as_ref()
+                .and_then(|options| footer_shell_name(options.shell.to_str()?))
+                .map(str::to_owned),
+            project_instructions: HashMap::new(),
+            footer_popovers: HashMap::new(),
+            environment_actions: HashMap::new(),
+            #[cfg(debug_assertions)]
+            environment_picker_path: None,
+            pending_footer_git: HashMap::new(),
+            footer_git_projections: HashMap::new(),
+            detached_permission_menus: HashSet::new(),
+            detached_permission_confirmations: HashMap::new(),
+            permission_changes: HashMap::new(),
+            permission_identities: HashSet::new(),
+            permission_toast: None,
+            permission_toast_timer: None,
+            tab_scroll: ScrollHandle::new(),
+            tab_hover: None,
+            tab_overflow: false,
+            hidden_tabs: None,
+            tab_menu: None,
+            control_focus: CONTROLS
+                .iter()
+                .map(|&id| (id, cx.focus_handle().tab_stop(true)))
+                .collect(),
+            tab_controls: HashMap::new(),
+            card_controls: HashMap::new(),
+            card_history_controls: HashMap::new(),
+            remove_card_controls: HashMap::new(),
+            fork_controls: HashMap::new(),
+            wiring: WorkspaceWiring::new(window, cx),
+            fork_readiness: None,
+            fork_readiness_generation: 0,
+            fork_retries: HashMap::new(),
+            keyboard_focus: false,
+            dialog: None,
+            dialog_controls: Vec::new(),
+            dialog_subscription: None,
+            pending_close: None,
+            carousel_scroll: ScrollHandle::new(),
+            carousel_drag: None,
+            motion_clock: Instant::now(),
+            #[cfg(debug_assertions)]
+            motion_trace: open_motion_trace(),
+            card_motion: HashMap::new(),
+            focus_follow_until: None,
+            hovered: None,
+            hover_follow_until: None,
+            hover_baseline: None,
+            hover_restore_at: None,
+            pointer_position: None,
+            edge_direction: 0,
+            edge_blocked: false,
+            edge_next_at: None,
+            edge_target: None,
+            edge_phase_start: 0.,
+            edge_cruising: false,
+            card_geometry: Vec::new(),
+            geometry: HashMap::new(),
+            geometry_dirty: HashSet::new(),
+            reconnect_geometry: HashSet::new(),
+            restore_geometry: false,
+            column_capacity: None,
+            pending_geometry: None,
+            geometry_timer: 0,
+            last_geometry_write: HashMap::new(),
+            geometry_sequence: 0,
+            geometry_writes: HashMap::new(),
+            graph: Value::Null,
+            dag_window: None,
+            dag_open_error: false,
+            #[cfg(all(target_os = "macos", debug_assertions))]
+            dag_probe: None,
+            level_parent_by_scene: HashMap::new(),
+            carousel_owner: None,
+            hovered_child_badge: None,
+            terminals: HashMap::new(),
+            recovery: HashMap::new(),
+            restoring_sessions: HashSet::new(),
+            recovery_controls: HashMap::new(),
+            deferred_previews: HashMap::new(),
+            deferred_controls: HashMap::new(),
+            start_failure_controls: HashMap::new(),
+            provider_restore_controls: HashMap::new(),
+            pending_provider_restores: HashMap::new(),
+            pending_loader_loads: HashMap::new(),
+            loader_remembered: HashMap::new(),
+            loader_request_id: 0,
+            #[cfg(target_os = "macos")]
+            recovery_water: HashMap::new(),
+            first_frame_content: HashSet::new(),
+            #[cfg(target_os = "macos")]
+            recovery_water_visibility: None,
+            storage_fault_sessions: HashSet::new(),
+            order: Vec::new(),
+            focused: None,
+            pending_focus: None,
+            pending_card_action: None,
+            level_focus_request: None,
+            copy_request_id: 0,
+            resize_revisions: HashMap::new(),
+            fault: None,
+            subscriptions: vec![keyboard, appearance],
+        }
+    }
+
+    fn show_toast(&mut self, message: impl Into<String>, cx: &mut Context<Self>) {
+        self.show_workspace_toast(message, false, cx);
+    }
+
+    fn show_error_toast(&mut self, message: impl Into<String>, cx: &mut Context<Self>) {
+        self.show_workspace_toast(message, true, cx);
+    }
+
+    fn show_workspace_toast(
+        &mut self,
+        message: impl Into<String>,
+        error: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.task_toast_error = error;
+        self.toast_generation += 1;
+        let generation = self.toast_generation;
+        self.task_toast = Some(message.into());
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(2)).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.toast_generation == generation {
+                    this.task_toast = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn toggle_notifications(&mut self, cx: &mut Context<Self>) {
+        if self.notification_open {
+            self.close_notifications(cx);
+        } else {
+            self.notifications.prune(notification_now());
+            self.notification_open = true;
+            cx.notify();
+        }
+    }
+
+    fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((settings, _)) = &self.settings {
+            if settings.read(cx).can_close() {
+                self.close_settings(window, cx);
+            }
+            return;
+        }
+        if self.dialog.is_some() {
+            return;
+        }
+        self.close_notifications(cx);
+        self.workspace_menu = None;
+        self.task_menu = None;
+        self.tab_menu = None;
+        self.hidden_tabs = None;
+        self.dismiss_wiring_overlay(window, cx);
+        self.permission_menu = None;
+        self.close_board_to_canvas(false, window, cx);
+        let commands = self.commands.clone();
+        let diagnostics_cwd = self
+            .focused
+            .as_deref()
+            .and_then(|id| self.graph_node(id))
+            .and_then(|node| trimmed_graph_text(&node["cwd"]))
+            .or_else(|| {
+                self.hierarchy
+                    .as_ref()?
+                    .workspace
+                    .as_ref()
+                    .map(|workspace| workspace.root_directory.as_str())
+            })
+            .map(std::path::PathBuf::from);
+        let settings = cx.new(|cx| {
+            let mut settings = SettingsShell::new(commands, window, cx);
+            settings.configure_locale(
+                self.locale_preference,
+                self.locale,
+                self.locale_save_pending,
+            );
+            settings.configure_theme(self.theme);
+            settings.configure_diagnostics_cwd(diagnostics_cwd);
+            settings
+        });
+        let subscription =
+            cx.subscribe_in(
+                &settings,
+                window,
+                |this, _, event, window, cx| match event {
+                    SettingsShellEvent::Close => this.close_settings(window, cx),
+                    SettingsShellEvent::SaveLocale(preference) => {
+                        this.save_interface_locale(*preference, window, cx);
+                    }
+                    SettingsShellEvent::ProviderActivated => {}
+                    SettingsShellEvent::SaveTheme(preference) => this.save_theme(*preference, cx),
+                    SettingsShellEvent::OpenProviderKeyPage(url) => {
+                        this.open_external_link(
+                            url,
+                            LinkSource::ProviderKeyPage { key_url: url },
+                            window,
+                            cx,
+                        );
+                    }
+                },
+            );
+        self.settings = Some((settings, subscription));
+        self.sync_terminal_input(window, cx);
+        cx.notify();
+    }
+
+    fn theme_palette(&self) -> &'static ThemePalette {
+        self.theme.effective().palette()
+    }
+
+    fn save_theme(&mut self, preference: ThemePreference, cx: &mut Context<Self>) {
+        if self.theme.preference() == preference {
+            return;
+        }
+        let result = if self.is_read_only() {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Workspace is read-only",
+            ))
+        } else {
+            self.data_root
+                .as_deref()
+                .ok_or_else(|| std::io::Error::other("Theme data root is unavailable"))
+                .and_then(|root| write_theme_preference(root, preference))
+        };
+        if let Err(error) = result {
+            eprintln!("Save theme preference: {error}");
+            if let Some((settings, _)) = &self.settings {
+                settings.update(cx, |settings, cx| settings.theme_save_failed(cx));
+            }
+            return;
+        }
+        if self.theme.set_preference(preference) {
+            self.apply_theme_palette(cx);
+        }
+        if let Some((settings, _)) = &self.settings {
+            settings.update(cx, |settings, cx| settings.theme_saved(self.theme, cx));
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn uses_dark_theme(&self) -> bool {
+        self.theme.effective() == AppTheme::Dark
+    }
+
+    fn apply_theme_palette(&self, cx: &mut Context<Self>) {
+        #[cfg(target_os = "windows")]
+        {
+            let handle = self.main_theme_window;
+            // The theme shortcut may be handled by any of the three windows.
+            cx.defer(move |cx| {
+                let _ = handle.update(cx, |view, window, cx| {
+                    if let Ok(workspace) = view.downcast::<Workspace>() {
+                        matou_native_desktop::windows_theme::set_dark(
+                            window,
+                            workspace.read(cx).uses_dark_theme(),
+                        );
+                    }
+                });
+            });
+        }
+        let theme = self.theme_palette().terminal;
+        for (session_id, terminal) in &self.terminals {
+            terminal.update(cx, |terminal, cx| terminal.set_theme(theme, cx));
+            self.send_terminal_theme(session_id, theme);
+        }
+        let dark = self.wiring_dark();
+        match &self.dialog {
+            Some(TabDialog::SessionLoader(state)) => {
+                for input in [&state.input, &state.content_input] {
+                    input.update(cx, |input, cx| {
+                        set_loader_input_colors(input, dark);
+                        cx.notify();
+                    });
+                }
+            }
+            Some(TabDialog::Branch(state)) => {
+                state.input.update(cx, |input, cx| {
+                    set_branch_input_colors(input, dark);
+                    cx.notify();
+                });
+            }
+            Some(
+                TabDialog::Rename { input, .. }
+                | TabDialog::RenameTask { input, .. }
+                | TabDialog::RenameSession { input, .. },
+            ) => {
+                input.update(cx, |input, cx| {
+                    input.set_dialog_theme(dark);
+                    cx.notify();
+                });
+            }
+            _ => {}
+        }
+        #[cfg(target_os = "macos")]
+        for water in self.recovery_water.values() {
+            water.update(cx, |water, cx| water.set_theme(theme, cx));
+        }
+        if let Some(child) = self.dag_window {
+            let dark = self.theme.effective() == AppTheme::Dark;
+            let _ = child.update(cx, |view, window, cx| view.set_dark(dark, window, cx));
+        }
+        cx.notify();
+    }
+
+    fn send_terminal_theme(&self, session_id: &str, theme: Theme) {
+        let _ = self.commands.send_at(
+            self.runtime_generation,
+            Command::Theme {
+                session_id: session_id.to_owned(),
+                theme,
+            },
+        );
+    }
+
+    fn save_interface_locale(
+        &mut self,
+        preference: LocalePreference,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let settings = self
+            .settings
+            .as_ref()
+            .map(|(settings, _)| settings.downgrade());
+        let Some(root) = self.data_root.clone() else {
+            if let Some(settings) = settings {
+                let _ = settings.update(cx, |settings, cx| settings.locale_save_failed(cx));
+            }
+            return;
+        };
+        if self.locale_save_pending {
+            return;
+        }
+        self.locale_save_pending = true;
+        let save = cx.background_spawn(async move { save_locale_preference(&root, preference) });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = save.await;
+            let _ = cx.update(|_, cx| {
+                this.update(cx, |this, cx| {
+                    this.locale_save_pending = false;
+                    match result {
+                        Ok(locale) => {
+                            this.locale_preference = preference;
+                            this.locale = locale;
+                            if let Some(history) = &this.history_view {
+                                history.update(cx, |view, cx| view.set_offline_locale(locale, cx));
+                            }
+                            if let Some((current, _)) = &this.settings {
+                                let is_saving_view = settings
+                                    .as_ref()
+                                    .is_some_and(|original| *original == current.downgrade());
+                                current.update(cx, |settings, cx| {
+                                    settings.locale_saved(preference, locale, is_saving_view, cx);
+                                });
+                            }
+                            cx.emit(locale);
+                            cx.notify();
+                        }
+                        Err(_) => {
+                            if let Some((settings, _)) = &this.settings {
+                                settings.update(cx, |settings, cx| settings.locale_save_failed(cx));
+                            }
+                        }
+                    }
+                })
+            });
+        })
+        .detach();
+    }
+
+    fn workspace_path_unavailable(&self) -> &'static str {
+        self.locale.text(WORKSPACE_PATH_UNAVAILABLE, "The workspace directory is unavailable. Restore the original path locally, or remove the workspace.")
+    }
+
+    fn pin_label(&self, pinned: bool) -> &'static str {
+        if pinned {
+            self.locale.text("取消置顶", "Unpin")
+        } else {
+            self.locale.text("置顶", "Pin")
+        }
+    }
+
+    fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((settings, _)) = self.settings.take() else {
+            return;
+        };
+        settings.update(cx, |shell, cx| shell.close_subscription_page(window, cx));
+        self.sync_terminal_input(window, cx);
+        let focus = self
+            .active_level_focus()
+            .and_then(|id| self.terminals.get(id))
+            .map(|terminal| &terminal.read(cx).focus)
+            .unwrap_or(&self.control_focus["settings"]);
+        window.focus(focus);
+        cx.notify();
+    }
+
+    fn close_settings_for_navigation(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self
+            .settings
+            .as_ref()
+            .is_some_and(|(settings, _)| settings.read(cx).is_switching())
+        {
+            return false;
+        }
+        self.close_settings(window, cx);
+        true
+    }
+
+    fn select_sidebar_task(
+        &mut self,
+        task_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_notifications(cx);
+        self.workspace_menu = None;
+        self.task_menu = None;
+        self.tab_menu = None;
+        self.hidden_tabs = None;
+        self.permission_menu = None;
+        self.dismiss_wiring_overlay(window, cx);
+        // Task selection remains available while a provider switch keeps Settings open.
+        let _ = self.close_settings_for_navigation(window, cx);
+        self.close_board_to_canvas(true, window, cx);
+        self.send(Command::SelectTask { task_id }, cx);
+        cx.notify();
+    }
+
+    fn close_notifications(&mut self, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.notification_open) {
+            cx.notify();
+        }
+    }
+
+    fn clear_notifications(&mut self, cx: &mut Context<Self>) {
+        self.notifications.entries.clear();
+        self.notifications.cooldowns.clear();
+        cx.notify();
+    }
+
+    fn dismiss_notification(&mut self, id: u64, cx: &mut Context<Self>) {
+        if let Some(index) = self
+            .notifications
+            .entries
+            .iter()
+            .position(|entry| entry.id == id)
+        {
+            self.notifications.remove_at(index);
+            cx.notify();
+        }
+    }
+
+    fn toggle_notification_sound(&mut self, cx: &mut Context<Self>) {
+        if self.read_only.is_some() {
+            return;
+        }
+        self.notifications
+            .set_sound(!self.notifications.sound_enabled);
+        cx.notify();
+    }
+
+    fn update_notifications(&mut self, graph: &mut Value) {
+        if let Some((scene, task)) = self
+            .hierarchy
+            .as_ref()
+            .and_then(|hierarchy| Some((hierarchy.scene.as_ref()?, hierarchy.task.as_ref()?)))
+            && graph["sceneId"] == scene.id
+        {
+            let sessions = session_levels::nodes(graph)
+                .iter()
+                .filter(|node| node["archivedAt"].is_null())
+                .filter_map(|node| node["sessionId"].as_str().map(str::to_owned))
+                .collect();
+            self.notification_scene_sessions
+                .insert(scene.id.clone(), (task.id.clone(), sessions));
+        }
+        if let Some(Value::Array(events)) = graph
+            .as_object_mut()
+            .and_then(|graph| graph.remove("agentNotifications"))
+        {
+            let now = notification_now();
+            let mut play_sound = false;
+            for event in &events {
+                play_sound |= self.notifications.push(event, self.focused.as_deref(), now);
+            }
+            if play_sound {
+                play_notification_sound();
+            }
+        }
+    }
+
+    fn notification_target<'a>(
+        &'a self,
+        entry: &'a NotificationEntry,
+    ) -> Option<(&'a str, &'a str)> {
+        let session_id = entry.session_id.as_deref()?;
+        let task = self.tasks.iter().find(|task| {
+            Some(task.id.as_str()) == entry.task_id.as_deref()
+                && entry
+                    .workspace_id
+                    .as_deref()
+                    .is_none_or(|id| id == task.workspace_id)
+                && task.archived_at.is_none()
+                && self.workspaces.iter().any(|workspace| {
+                    workspace.id == task.workspace_id && workspace.archived_at.is_none()
+                })
+        })?;
+        let current = self.hierarchy.as_ref()?;
+        let scene_id = entry
+            .scene_id
+            .as_deref()
+            .or_else(|| {
+                self.notification_scene_sessions
+                    .iter()
+                    .find_map(|(scene, (task_id, sessions))| {
+                        (task_id == &task.id && sessions.contains(session_id))
+                            .then_some(scene.as_str())
+                    })
+            })
+            .or_else(|| {
+                // An inactive scene's last selected session is also recorded by the runtime.
+                current
+                    .navigation
+                    .session_by_scene
+                    .iter()
+                    .find_map(|(scene, session)| (session == session_id).then_some(scene.as_str()))
+            })?;
+        if self
+            .notification_scene_sessions
+            .get(scene_id)
+            .is_some_and(|(task_id, sessions)| {
+                task_id != &task.id || !sessions.contains(session_id)
+            })
+            || (current
+                .task
+                .as_ref()
+                .is_some_and(|active| active.id == task.id)
+                && !self.scenes.iter().any(|scene| scene.id == scene_id))
+        {
+            return None;
+        }
+        Some((scene_id, session_id))
+    }
+
+    fn open_notification(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((scene_id, session_id)) = self
+            .notifications
+            .entries
+            .iter()
+            .find(|entry| entry.id == id)
+            .and_then(|entry| self.notification_target(entry))
+            .map(|(scene, session)| (scene.to_owned(), session.to_owned()))
+        else {
+            return;
+        };
+        if !self.close_settings_for_navigation(window, cx) {
+            return;
+        }
+        self.close_board_to_canvas(false, window, cx);
+        // FocusSession activates the target's scene, task and workspace in one runtime transaction.
+        self.send(
+            Command::FocusSession {
+                scene_id,
+                session_id,
+            },
+            cx,
+        );
+        if self.pending_focus.is_some() {
+            self.level_focus_request = Some(LevelFocusRequest::Notification(id));
+        }
+    }
+
+    fn send(&mut self, command: Command, cx: &mut Context<Self>) {
+        if let Some(state) = &mut self.read_only {
+            let query = match command {
+                Command::SelectWorkspace { workspace_id } => state.workspace_query(workspace_id),
+                Command::SelectTask { task_id } => state.task_query(task_id),
+                Command::SelectScene { scene_id } => state.scene_query(scene_id),
+                Command::FocusSession {
+                    scene_id,
+                    session_id,
+                } => {
+                    self.pending_focus = Some((scene_id.clone(), session_id.clone()));
+                    ReadOnlyQuery::Session {
+                        scene_id,
+                        session_id,
+                    }
+                }
+                command if StoragePhase::ReadOnly.accepts(&command) => {
+                    let _ = self.commands.send_at(self.runtime_generation, command);
+                    return;
+                }
+                _ => return,
+            };
+            state.navigation_sequence += 1;
+            let request_id = state.navigation_sequence;
+            match self.commands.send_at(
+                self.runtime_generation,
+                Command::ReadOnlyQuery { request_id, query },
+            ) {
+                Ok(()) => state.pending_navigation = Some(request_id),
+                Err(error) => {
+                    state.pending_navigation = None;
+                    self.pending_focus = None;
+                    self.level_focus_request = None;
+                    state.projection_error = Some(error.to_string());
+                    cx.notify();
+                }
+            }
+            return;
+        }
+        if matches!(
+            &command,
+            Command::CreateWorkspace { .. }
+                | Command::SelectWorkspace { .. }
+                | Command::ReorderPinnedWorkspace { .. }
+                | Command::RemoveWorkspace { .. }
+                | Command::CreateTask { .. }
+                | Command::SelectTask { .. }
+                | Command::DeleteTask { .. }
+                | Command::SelectScene { .. }
+                | Command::CreateCanvas { .. }
+                | Command::CreateShellSibling { .. }
+                | Command::CloseScene { .. }
+                | Command::ReorderScene { .. }
+        ) {
+            self.flush_geometry(cx);
+        }
+        if let Command::FocusSession {
+            scene_id,
+            session_id,
+        } = &command
+        {
+            self.level_focus_request = None;
+            self.pending_focus = Some((scene_id.clone(), session_id.clone()));
+        }
+        if self
+            .commands
+            .send_at(self.runtime_generation, command)
+            .is_err()
+        {
+            self.pending_focus = None;
+            self.level_focus_request = None;
+            // Offline/reconnecting rejection is expected; do not stack a fault per key.
+            cx.notify();
+        }
+    }
+
+    fn database_recovery_action(
+        &mut self,
+        recovery_id: &str,
+        action: &PageAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = &mut self.database_recovery else {
+            return;
+        };
+        if !state.available
+            || state.pending.is_some()
+            || state.details.recovery_id != recovery_id
+            || (state.confirmation.is_some()
+                && !matches!(
+                    action,
+                    PageAction::CancelConfirmation | PageAction::ConfirmEmpty
+                ))
+        {
+            return;
+        }
+        let (operation, action) = match action {
+            PageAction::SelectBackup(id) => {
+                if database_recovery_page::visible_backups(&state.details.backups)
+                    .iter()
+                    .any(|backup| &backup.id == id)
+                {
+                    state.selected_backup = Some(id.clone());
+                    cx.notify();
+                }
+                return;
+            }
+            PageAction::OpenConfirmation => {
+                if recovery_id.is_empty() {
+                    return;
+                }
+                let back = cx.focus_handle().tab_stop(true);
+                window.focus(&back);
+                state.confirmation = Some(EmptyDatabaseConfirmation {
+                    recovery_id: recovery_id.into(),
+                    back,
+                    confirm: cx.focus_handle().tab_stop(true),
+                });
+                cx.notify();
+                return;
+            }
+            PageAction::CancelConfirmation => {
+                if state.confirmation.take().is_some() {
+                    window.focus(&state.empty_trigger);
+                    cx.notify();
+                }
+                return;
+            }
+            PageAction::ConfirmEmpty => {
+                let Some(confirmation) = state.confirmation.take() else {
+                    return;
+                };
+                if confirmation.recovery_id != recovery_id {
+                    cx.notify();
+                    return;
+                }
+                (
+                    PageOperation::StartEmpty,
+                    DatabaseRecoveryAction::StartEmptyDatabase {
+                        expected_recovery_id: confirmation.recovery_id,
+                    },
+                )
+            }
+            PageAction::Restore if !recovery_id.is_empty() => {
+                let Some(backup_id) = state.selected_backup.clone() else {
+                    return;
+                };
+                (
+                    PageOperation::Restore,
+                    DatabaseRecoveryAction::RestoreBackup {
+                        backup_id,
+                        expected_recovery_id: recovery_id.into(),
+                    },
+                )
+            }
+            PageAction::Retry if !recovery_id.is_empty() => (
+                PageOperation::Retry,
+                DatabaseRecoveryAction::RetryOpen {
+                    expected_recovery_id: recovery_id.into(),
+                },
+            ),
+            PageAction::Export => (
+                PageOperation::Export,
+                DatabaseRecoveryAction::ExportRecoveryBundle,
+            ),
+            PageAction::Retry | PageAction::Restore => return,
+        };
+        let request_id = database_recovery_request_id();
+        state.error = None;
+        state.exported_path = None;
+        match self.commands.send_at(
+            self.runtime_generation,
+            Command::DatabaseRecovery {
+                request_id: request_id.clone(),
+                action,
+            },
+        ) {
+            Ok(()) => state.pending = Some((request_id, operation)),
+            Err(error) => state.error = Some(error.to_string()),
+        }
+        cx.notify();
+    }
+
+    fn export_read_only_database(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = &mut self.read_only else {
+            return;
+        };
+        if state.pending_export.is_some() {
+            return;
+        }
+        let request_id = database_recovery_request_id();
+        match self.commands.send_at(
+            self.runtime_generation,
+            Command::DatabaseRecovery {
+                request_id: request_id.clone(),
+                action: DatabaseRecoveryAction::ExportRecoveryBundle,
+            },
+        ) {
+            Ok(()) => {
+                state.pending_export = Some(request_id);
+                state.export_feedback = None;
+            }
+            Err(error) => state.export_feedback = Some(Err(error.to_string())),
+        }
+        cx.notify();
+    }
+
+    fn retire_transport(&mut self, generation: u64, cx: &mut Context<Self>) {
+        if let Some(recovery) = &mut self.database_recovery {
+            recovery.disconnect();
+        }
+        if let Some(state) = &mut self.read_only {
+            state.disconnect();
+        }
+        let reason = crate::runtime_bridge::SendError::NotReady.to_string();
+        self.fail_pending_forks(&reason);
+        self.fail_pending_permission_modes(&reason, cx);
+        self.permission_identities.clear();
+        self.runtime_generation = generation;
+        self.retire_wiring_commands(cx);
+        self.environment_actions.clear();
+        self.transport_connected = false;
+        self.domain_ready = false;
+        self.session_frames.clear();
+        self.first_frame_content.clear();
+        self.restoring_sessions.clear();
+        self.recovery.clear();
+        self.deferred_previews.clear();
+        self.deferred_controls.clear();
+        self.recovery_controls.clear();
+        self.start_failure_controls.clear();
+        self.pending_provider_restores.clear();
+        self.copy_request_id += 1;
+        self.resize_revisions.clear();
+        self.reconnect_geometry = self.geometry_dirty.clone();
+        self.geometry_timer += 1;
+        self.pending_geometry = None;
+        self.geometry_writes.clear();
+        self.last_geometry_write.clear();
+        if self.level_focus_request != Some(LevelFocusRequest::CardOnReady) {
+            self.pending_focus = None;
+            self.level_focus_request = None;
+        }
+        self.pending_card_action = None;
+        self.level_parent_by_scene.clear();
+        self.refresh_level(cx);
+        self.pending_close = None;
+        self.creating_workspace = false;
+        self.search_after_restore = self.search.as_ref().is_some_and(|search| search.open);
+        if let Some(search) = &mut self.search {
+            search.sequence += 1;
+            search.result = None;
+            search.error = None;
+            search.archive = None;
+            search.archive_pending = None;
+            search.archive_count = None;
+            search.dismissed_sequence = None;
+            search.session_id = None;
+        }
+        self.history_request = None;
+        if let Some(view) = self.history_view.take() {
+            view.update(cx, |view, cx| view.retire(cx));
+        }
+        for terminal in self.terminals.values() {
+            terminal.update(cx, |terminal, cx| {
+                terminal.begin_transport_generation(generation, cx)
+            });
+        }
+        #[cfg(target_os = "macos")]
+        for water in self.recovery_water.values() {
+            water.update(cx, |water, cx| water.set_generation(generation, cx));
+        }
+        cx.notify();
+    }
+    fn resend_terminal_sizes(&self, cx: &Context<Self>) {
+        // The new owner also needs sizes retained from previously visited tabs.
+        // A later Navigation may reuse that surface without a new paint size change.
+        let theme = self.theme_palette().terminal;
+        for (id, terminal) in &self.terminals {
+            if theme != Theme::default() {
+                self.send_terminal_theme(id, theme);
+            }
+            if let Some((cols, rows, cell_width_px, cell_height_px)) =
+                terminal.read(cx).target_dimensions()
+            {
+                let _ = self.commands.send_at(
+                    self.runtime_generation,
+                    Command::Resize {
+                        session_id: id.clone(),
+                        cols,
+                        rows,
+                        cell_width_px,
+                        cell_height_px,
+                    },
+                );
+            }
+        }
+    }
+    fn resume_search_after_frame(&mut self, cx: &mut Context<Self>) {
+        if self.search_after_restore
+            && self
+                .focused
+                .as_ref()
+                .is_some_and(|id| !self.recovery_blocked(id))
+        {
+            self.search_after_restore = false;
+            self.run_search(false, cx);
+        }
+    }
+    fn reconcile_transport_geometry(
+        &mut self,
+        authority: &[GeometryUpdate],
+        cx: &mut Context<Self>,
+    ) {
+        let desired = self
+            .reconnect_geometry
+            .iter()
+            .filter_map(|key| self.geometry.get(key).cloned())
+            .collect::<Vec<_>>();
+        for saved in authority {
+            if !self.geometry_dirty.contains(&saved.owner_key) {
+                self.geometry.insert(saved.owner_key.clone(), saved.clone());
+            }
+        }
+        for mut update in desired {
+            // Ready/Navigation supplies authority only for its active scene.
+            // An absent background/task projection is not a deletion signal.
+            let Some(scene) = self
+                .hierarchy
+                .as_ref()
+                .and_then(|h| h.scene.as_ref())
+                .filter(|scene| scene.id == update.scene_id)
+            else {
+                continue;
+            };
+            let prefix = format!("session-group:{}:", scene.id);
+            let dag_viewport = update.owner_key == dag_window::viewport_owner_key(&scene.id);
+            if !dag_viewport
+                && !update
+                    .owner_key
+                    .strip_prefix(&prefix)
+                    .is_some_and(|owner| owner == "root" || self.graph_node(owner).is_some())
+            {
+                self.geometry_dirty.remove(&update.owner_key);
+                self.reconnect_geometry.remove(&update.owner_key);
+                self.geometry.remove(&update.owner_key);
+                continue;
+            }
+            if authority.iter().any(|saved| {
+                saved.owner_key == update.owner_key && saved.geometry == update.geometry
+            }) {
+                self.geometry_dirty.remove(&update.owner_key);
+                self.reconnect_geometry.remove(&update.owner_key);
+                continue;
+            }
+            let revision = if self
+                .hierarchy
+                .as_ref()
+                .and_then(|h| h.scene.as_ref())
+                .is_some_and(|s| s.id == update.scene_id)
+            {
+                self.graph["layoutRevision"]
+                    .as_f64()
+                    .unwrap_or(scene.layout_revision as f64)
+            } else {
+                scene.layout_revision as f64
+            };
+            update.layout_revision = if dag_viewport {
+                authority
+                    .iter()
+                    .find(|saved| saved.owner_key == update.owner_key)
+                    .map_or(update.layout_revision, |saved| saved.layout_revision)
+                    .max(update.layout_revision)
+                    .max(revision)
+            } else {
+                revision
+            };
+            update.now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64;
+            self.geometry
+                .insert(update.owner_key.clone(), update.clone());
+            self.reconnect_geometry.remove(&update.owner_key);
+            self.write_geometry(update, 0, cx);
+        }
+    }
+    fn close_invalid_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let invalid = self.dialog.as_ref().is_some_and(|dialog| match dialog {
+            TabDialog::RemoveWorkspace { workspace_id, .. } => {
+                !self.workspaces.iter().any(|w| &w.id == workspace_id)
+            }
+            TabDialog::RenameTask { task_id, .. } | TabDialog::DeleteTask { task_id, .. } => {
+                !self.tasks.iter().any(|t| &t.id == task_id)
+            }
+            TabDialog::Rename { scene_id, .. } | TabDialog::Close { scene_id, .. } => {
+                !self.scenes.iter().any(|s| &s.id == scene_id)
+            }
+            TabDialog::RenameSession { session_id, .. } => {
+                self.renameable_card(session_id).is_none()
+            }
+            TabDialog::CloseSession {
+                scene_id,
+                session_id,
+                ..
+            }
+            | TabDialog::LastSession {
+                scene_id,
+                session_id,
+                ..
+            } => self.active_scene_id() != Some(scene_id) || self.graph_node(session_id).is_none(),
+            TabDialog::RemoveSession {
+                scene_id,
+                session_id,
+                scope,
+            } => {
+                self.active_scene_id() != Some(scene_id)
+                    || (self.is_stopped_session(session_id)
+                        && !self.stopped_remove_available(session_id))
+                    || self
+                        .removal_dialog_text(session_id, *scope)
+                        .is_none_or(|text| {
+                            text.choices.is_some() != (self.dialog_controls.len() == 5)
+                        })
+            }
+            TabDialog::SessionLoader(state) => {
+                self.active_scene_id() != Some(state.scene_id.as_str())
+                    || self.graph_node(&state.session_id).is_none_or(|node| {
+                        !node["archivedAt"].is_null()
+                            || node["cwd"] != state.cwd
+                            || (state.history
+                                && (deferred_history_provider(node) != Some(state.provider)
+                                    || trimmed_graph_text(&node["historyProviderSessionId"])
+                                        != state.selected.as_deref()))
+                    })
+            }
+            TabDialog::PermissionMode(state) => !self.permission_confirmation_valid(state),
+            TabDialog::Branch(state) => {
+                self.active_scene_id() != Some(state.scene_id.as_str())
+                    || self
+                        .graph_node(&state.session_id)
+                        .is_none_or(|node| !node["archivedAt"].is_null())
+            }
+        });
+        if invalid {
+            self.close_dialog(window, cx);
+        }
+    }
+    fn apply_workspaces(&mut self, workspaces: Vec<HierarchyWorkspace>, cx: &mut Context<Self>) {
+        self.workspace_drag_motion
+            .retain(|id, _| workspaces.iter().any(|w| &w.id == id));
+        self.workspace_controls
+            .retain(|id, _| workspaces.iter().any(|workspace| &workspace.id == id));
+        self.workspace_group_bounds
+            .retain(|id, _| workspaces.iter().any(|workspace| &workspace.id == id));
+        self.workspace_bounds
+            .retain(|id, _| workspaces.iter().any(|workspace| &workspace.id == id));
+        self.workspace_collapsed
+            .retain(|id| workspaces.iter().any(|workspace| &workspace.id == id));
+        if self
+            .workspace_menu
+            .as_ref()
+            .is_some_and(|(id, _, _)| !workspaces.iter().any(|w| &w.id == id))
+        {
+            self.workspace_menu = None;
+        }
+        for workspace in &workspaces {
+            self.workspace_controls
+                .entry(workspace.id.clone())
+                .or_insert_with(|| {
+                    [
+                        cx.focus_handle().tab_stop(true),
+                        cx.focus_handle().tab_stop(true),
+                        cx.focus_handle().tab_stop(true),
+                        cx.focus_handle().tab_stop(true),
+                    ]
+                });
+        }
+        self.workspaces = workspaces;
+    }
+
+    fn apply_tasks(&mut self, tasks: Vec<Task>, cx: &mut Context<Self>) {
+        self.notification_scene_sessions
+            .retain(|_, (task_id, _)| tasks.iter().any(|task| &task.id == task_id));
+        self.task_controls
+            .retain(|id, _| tasks.iter().any(|task| &task.id == id));
+        self.task_bounds
+            .retain(|id, _| tasks.iter().any(|task| &task.id == id));
+        for task in &tasks {
+            self.task_controls
+                .entry(task.id.clone())
+                .or_insert_with(|| {
+                    [
+                        cx.focus_handle().tab_stop(true),
+                        cx.focus_handle().tab_stop(true),
+                    ]
+                });
+        }
+        self.tasks = tasks;
+    }
+
+    fn apply(&mut self, envelope: BridgeEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.commands.accepts(&envelope) {
+            return;
+        }
+        let generation = envelope.generation();
+        if generation != self.runtime_generation {
+            self.retire_transport(generation, cx);
+        }
+        let event = match envelope {
+            BridgeEvent::TransportDiagnostic { message, .. } => {
+                self.fail_pending_forks(&message);
+                self.fail_pending_permission_modes(&message, cx);
+                self.reconcile_permission_overlay(window, cx);
+                self.fail_pending_loader_commands(message.clone());
+                self.retire_wiring_commands(cx);
+                self.transport_fault = Some((generation, message));
+                cx.notify();
+                return;
+            }
+            BridgeEvent::Connection { phase, .. } => {
+                match &phase {
+                    ConnectionPhase::DatabaseRecovery { details, .. } => {
+                        self.invalid_recovery_marker = false;
+                        if let Some(state) = &mut self.database_recovery
+                            && state.details.recovery_id == details.recovery_id
+                        {
+                            state.update_details(details.clone());
+                        } else {
+                            window.blur();
+                            let mut state = DatabaseRecoveryPageState {
+                                details: details.clone(),
+                                available: true,
+                                pending: None,
+                                selected_backup: None,
+                                error: None,
+                                exported_path: None,
+                                empty_trigger: cx.focus_handle().tab_stop(true),
+                                confirmation: None,
+                            };
+                            state.update_details(details.clone());
+                            self.database_recovery = Some(state);
+                        }
+                    }
+                    ConnectionPhase::Starting | ConnectionPhase::Reconnecting => {
+                        if let Some(recovery) = &mut self.database_recovery {
+                            recovery.disconnect();
+                        }
+                        if let Some(state) = &mut self.read_only {
+                            state.disconnect();
+                            self.sync_read_only_history(cx);
+                        }
+                    }
+                    ConnectionPhase::Blocked(_) | ConnectionPhase::Stopped => {
+                        self.database_recovery = None;
+                        self.read_only = None;
+                    }
+                    // The next projection atomically replaces the workspace.
+                    ConnectionPhase::Ready | ConnectionPhase::ReadOnly { .. } => {}
+                }
+                if let Some((settings, _)) = &self.settings {
+                    settings.update(cx, |settings, cx| settings.connection_changed(window, cx));
+                }
+                self.transport_connected = matches!(phase, ConnectionPhase::Ready);
+                if !self.transport_connected {
+                    self.retire_wiring_commands(cx);
+                    let message = match &phase {
+                        ConnectionPhase::Blocked(block) => block.message.clone(),
+                        _ => crate::runtime_bridge::SendError::NotReady.to_string(),
+                    };
+                    self.fail_pending_forks(&message);
+                    self.fail_pending_permission_modes(&message, cx);
+                    self.fail_pending_loader_commands(message);
+                    self.domain_ready = false;
+                    self.pending_card_action = None;
+                    self.pending_provider_restores.clear();
+                    self.session_frames.clear();
+                    self.restoring_sessions.clear();
+                    if matches!(phase, ConnectionPhase::Reconnecting) {
+                        self.first_frame_content.clear();
+                    }
+                    if matches!(
+                        phase,
+                        ConnectionPhase::Stopped | ConnectionPhase::Blocked(_)
+                    ) && matches!(
+                        self.level_focus_request,
+                        Some(LevelFocusRequest::Card | LevelFocusRequest::CardOnReady)
+                    ) {
+                        self.pending_focus = None;
+                        self.level_focus_request = None;
+                        self.refresh_level(cx);
+                    }
+                    if matches!(&self.dialog, Some(TabDialog::RemoveSession { session_id, .. })
+                        if self.is_stopped_session(session_id))
+                    {
+                        self.close_invalid_dialog(window, cx);
+                    }
+                    self.sync_terminal_input(window, cx);
+                }
+                self.reconcile_permission_overlay(window, cx);
+                #[cfg(target_os = "macos")]
+                self.prune_recovery_water(window, cx);
+                cx.notify();
+                return;
+            }
+            BridgeEvent::Runtime { event, .. } => event,
+        };
+        let fresh_ready = matches!(&event, Event::Ready { .. });
+        if fresh_ready {
+            self.invalid_recovery_marker = false;
+            self.database_recovery = None;
+            if self.read_only.take().is_some() {
+                self.clear_read_only_history(cx);
+                self.geometry.clear();
+                self.hierarchy = None;
+                self.level_parent_by_scene.clear();
+            }
+            self.domain_ready = true;
+            self.transport_connected = true;
+            self.transport_fault = None;
+        }
+        let fresh_read_only = matches!(&event, Event::ReadOnlyReady { .. });
+        let event = match event {
+            Event::ReadOnlyReady { projection, .. } => {
+                self.invalid_recovery_marker = false;
+                self.database_recovery = None;
+                if matches!(
+                    self.level_focus_request,
+                    Some(LevelFocusRequest::Card | LevelFocusRequest::CardOnReady)
+                ) {
+                    self.pending_focus = None;
+                    self.level_focus_request = None;
+                }
+                let feedback = self
+                    .read_only
+                    .take()
+                    .and_then(|state| state.export_feedback);
+                self.read_only = Some(ReadOnlyState {
+                    export_feedback: feedback,
+                    ..ReadOnlyState::default()
+                });
+                self.transport_connected = false;
+                self.domain_ready = false;
+                self.transport_fault = None;
+                self.workspace_paths.clear();
+                self.geometry.clear();
+                self.geometry_dirty.clear();
+                self.reconnect_geometry.clear();
+                self.pending_geometry = None;
+                self.clear_read_only_history(cx);
+                self.recovery.clear();
+                self.storage_fault_sessions.clear();
+                self.deferred_previews.clear();
+                self.dialog = None;
+                match projection {
+                    Ok(projection) => {
+                        self.read_only
+                            .as_mut()
+                            .unwrap()
+                            .remember(&projection.active.hierarchy);
+                        self.apply_workspaces(projection.workspaces, cx);
+                        self.apply_tasks(projection.tasks, cx);
+                        read_only_navigation(projection.active)
+                    }
+                    Err(error) => {
+                        self.read_only.as_mut().unwrap().projection_error = Some(error);
+                        self.hierarchy = None;
+                        self.scenes.clear();
+                        self.focused = None;
+                        self.apply_workspaces(Vec::new(), cx);
+                        self.apply_tasks(Vec::new(), cx);
+                        self.replace_fork_graph(Value::Null, window, cx);
+                        self.refresh_terminals(window, cx);
+                        self.sync_wiring_graph(window, cx);
+                        cx.notify();
+                        return;
+                    }
+                }
+            }
+            Event::ReadOnlyQueryResult { request_id, result } => {
+                let Some(state) = self
+                    .read_only
+                    .as_mut()
+                    .filter(|state| state.pending_navigation == Some(request_id))
+                else {
+                    return;
+                };
+                state.pending_navigation = None;
+                match result {
+                    Ok(active) => {
+                        state.projection_error = None;
+                        state.remember(&active.hierarchy);
+                        read_only_navigation(active)
+                    }
+                    Err(error) => {
+                        self.pending_focus = None;
+                        self.level_focus_request = None;
+                        state.projection_error = Some(error);
+                        cx.notify();
+                        return;
+                    }
+                }
+            }
+            event => event,
+        };
+        match &event {
+            Event::StorageFault { session_id, .. } => {
+                self.storage_fault_sessions.insert(session_id.clone());
+            }
+            Event::StorageRecovered { session_id } => {
+                self.storage_fault_sessions.remove(session_id);
+            }
+            _ => {}
+        }
+        match event {
+            Event::RestoreSessionEnvironmentResult(reply)
+            | Event::LocateSessionEnvironmentResult(reply)
+            | Event::HandoffSessionEnvironmentResult(reply) => {
+                self.receive_environment_change(reply, window, cx);
+                return;
+            }
+            Event::GitStatusDetail(reply)
+            | Event::GitCheckout(reply)
+            | Event::GitCreateBranch(reply)
+            | Event::GitCommit(reply)
+            | Event::GitPush(reply)
+            | Event::GitWorktreeCreate(reply)
+            | Event::GitWorktreeRemove(reply) => {
+                self.receive_footer_git(reply, window, cx);
+                return;
+            }
+            Event::TimeZoneSettings(reply) => {
+                if let Some((settings, _)) = &self.settings {
+                    settings.update(cx, |settings, cx| settings.receive_time_zone(reply, cx));
+                }
+                return;
+            }
+            Event::DatabaseRecoveryResult(result) => {
+                if let Some(state) = &mut self.read_only
+                    && state.pending_export.as_ref() == Some(&result.request_id)
+                {
+                    state.pending_export = None;
+                    state.export_feedback = Some(match result.error {
+                        Some(error) => Err(error.message),
+                        None => Ok(result.exported_path),
+                    });
+                } else if let Some(state) = &mut self.database_recovery
+                    && let Some((pending_id, operation)) = &state.pending
+                    && *pending_id == result.request_id
+                {
+                    if let Some(error) = result.error {
+                        state.pending = None;
+                        state.error = Some(error.message);
+                    } else if *operation == PageOperation::Export {
+                        state.pending = None;
+                        state.exported_path = result.exported_path;
+                    }
+                }
+            }
+            Event::StorageCommandRejected { message, .. } => {
+                self.clear_pending_split();
+                self.fail_pending_forks(&message);
+                self.fail_pending_permission_modes(&message, cx);
+                self.fail_pending_loader_commands(message);
+                self.pending_focus = None;
+                self.pending_close = None;
+                self.pending_card_action = None;
+                self.creating_workspace = false;
+            }
+            Event::DatabaseRecoveryRequired(_) => {}
+            Event::ReadOnlyReady { .. } | Event::ReadOnlyQueryResult { .. } => unreachable!(),
+            Event::Workspaces(workspaces) => self.apply_workspaces(workspaces, cx),
+            Event::WorkspacePaths(paths) => {
+                self.workspace_paths = paths;
+                if matches!(&self.dialog, Some(TabDialog::RemoveSession { session_id, .. })
+                    if self.is_stopped_session(session_id))
+                {
+                    self.close_invalid_dialog(window, cx);
+                }
+                self.sync_terminal_input(window, cx);
+            }
+            Event::WorkspaceActionResult {
+                action,
+                workspace_id,
+                error,
+            } => match action.as_str() {
+                "create" => {
+                    self.creating_workspace = false;
+                    if error.is_some() {
+                        self.show_toast("工作空间添加失败，请重试", cx);
+                    } else if self.control_focus["new-workspace"].is_focused(window) {
+                        // Let the following navigation focus the created Shell.
+                        window.blur();
+                    }
+                }
+                "relink" => {
+                    if error.is_some() {
+                        self.show_toast("工作目录恢复失败，请重新选择", cx);
+                    } else {
+                        let name = workspace_id
+                            .as_deref()
+                            .and_then(|id| self.workspaces.iter().find(|w| w.id == id))
+                            .map(|w| w.name.as_str())
+                            .unwrap_or("");
+                        self.show_toast(format!("已恢复 {name} 的工作目录"), cx);
+                    }
+                }
+                "pin" => {
+                    if error.is_some() {
+                        self.show_toast("工作空间置顶状态更新失败", cx);
+                    } else {
+                        let pinned = workspace_id
+                            .as_deref()
+                            .and_then(|id| self.workspaces.iter().find(|w| w.id == id))
+                            .is_some_and(|w| w.is_pinned);
+                        self.show_toast(
+                            if pinned {
+                                "工作空间已置顶"
+                            } else {
+                                "已取消工作空间置顶"
+                            },
+                            cx,
+                        );
+                    }
+                }
+                _ => {}
+            },
+            Event::Tasks(tasks) => self.apply_tasks(tasks, cx),
+            Event::TaskRenameResult {
+                task_id,
+                title,
+                error,
+            } => {
+                if let Some(TabDialog::RenameTask {
+                    task_id: current,
+                    failure,
+                    ..
+                }) = &mut self.dialog
+                    && *current == task_id
+                {
+                    if let Some(_error) = error {
+                        *failure = Some((title, "重命名失败：名称为空或已存在".into()));
+                    } else {
+                        self.close_dialog(window, cx);
+                        self.show_toast("工作台已重命名", cx);
+                    }
+                }
+            }
+            Event::SessionTitleResult {
+                session_id,
+                title,
+                error,
+            } => {
+                if let Some(title) = title
+                    && let Some(TabDialog::RenameSession {
+                        session_id: current,
+                        input,
+                        failure,
+                    }) = &mut self.dialog
+                    && *current == session_id
+                    && trim_name(&input.read(cx).text) == title
+                {
+                    if error.is_some() {
+                        *failure = Some(title);
+                    } else {
+                        self.close_dialog(window, cx);
+                    }
+                }
+            }
+            Event::Ready {
+                hierarchy,
+                scenes,
+                graph,
+                geometry,
+            }
+            | Event::Navigation {
+                hierarchy,
+                scenes,
+                graph,
+                geometry,
+            } => {
+                let next_workspace = hierarchy.workspace.as_ref().map(|workspace| &workspace.id);
+                let workspace_changed = self
+                    .hierarchy
+                    .as_ref()
+                    .and_then(|h| h.workspace.as_ref())
+                    .map(|w| &w.id)
+                    != next_workspace;
+                if workspace_changed && let Some(workspace_id) = next_workspace {
+                    self.workspace_collapsed.remove(workspace_id);
+                }
+                let next_scene = hierarchy.scene.as_ref().map(|scene| &scene.id);
+                let scene_changed = self
+                    .hierarchy
+                    .as_ref()
+                    .and_then(|h| h.scene.as_ref())
+                    .map(|s| &s.id)
+                    != next_scene;
+                let next_focus = hierarchy.session.as_ref().map(|session| session.id.clone());
+                let focus_changed = self.focused != next_focus;
+                let initializing = self.hierarchy.is_none();
+                let focus_confirmed = self.level_focus_request
+                    != Some(LevelFocusRequest::CardOnReady)
+                    && self.pending_focus.as_ref().is_some_and(|(scene, session)| {
+                        Some(scene) == next_scene && Some(session) == next_focus.as_ref()
+                    });
+                let card_focus_confirmed =
+                    focus_confirmed && self.level_focus_request == Some(LevelFocusRequest::Card);
+                let level_focus_request = if scene_changed || focus_confirmed {
+                    self.pending_focus = None;
+                    self.level_focus_request
+                        .take()
+                        .filter(|request| focus_confirmed && *request != LevelFocusRequest::Card)
+                } else {
+                    None
+                };
+                let return_to_terminal =
+                    level_focus_request == Some(LevelFocusRequest::ReturnParent);
+                let notification_focus = match level_focus_request {
+                    Some(LevelFocusRequest::Notification(id)) => Some(id),
+                    _ => None,
+                };
+                if let Some((id, session_id)) = notification_focus.zip(next_focus.as_deref()) {
+                    if let Some(entry) = self.notifications.entries.iter_mut().find(|entry| {
+                        entry.id == id && entry.session_id.as_deref() == Some(session_id)
+                    }) {
+                        entry.read = true;
+                    }
+                    if let Some(scene_id) = next_scene {
+                        let parent =
+                            session_levels::node(session_levels::nodes(&graph), session_id)
+                                .and_then(session_levels::parent_id)
+                                .map(str::to_owned);
+                        self.level_parent_by_scene.insert(scene_id.clone(), parent);
+                    }
+                    self.close_notifications(cx);
+                    window.blur();
+                }
+                if scene_changed {
+                    #[cfg(target_os = "macos")]
+                    self.retain_recovery_water(window, cx, |_, _| false);
+                    // A newly mounted source carousel starts at its current styles.
+                    for saved in &geometry {
+                        if !self.geometry_dirty.contains(&saved.owner_key) {
+                            self.geometry.insert(saved.owner_key.clone(), saved.clone());
+                        }
+                    }
+                }
+                if !scene_changed && focus_changed && level_focus_request.is_none() {
+                    self.restore_geometry = false;
+                }
+                if scene_changed || (focus_changed && !card_focus_confirmed) {
+                    let at = self.motion_clock.elapsed().as_secs_f64() * 1000.;
+                    self.focus_follow_until = Some(at + 440.);
+                    self.hovered = None;
+                    self.hover_follow_until = None;
+                    self.hover_baseline = None;
+                    self.hover_restore_at = None;
+                    #[cfg(debug_assertions)]
+                    if let Some(trace) = &self.motion_trace {
+                        record_motion(
+                            trace,
+                            &serde_json::json!({"kind":"focus","at":at,"from":self.focused,"to":next_focus,"sceneChanged":scene_changed}),
+                        );
+                    }
+                }
+                self.tab_controls
+                    .retain(|id, _| scenes.iter().any(|scene| &scene.id == id));
+                for scene in &scenes {
+                    self.tab_controls
+                        .entry(scene.id.clone())
+                        .or_insert_with(|| {
+                            [
+                                cx.focus_handle().tab_stop(true),
+                                cx.focus_handle().tab_stop(true),
+                            ]
+                        });
+                }
+                let task_changed = self
+                    .hierarchy
+                    .as_ref()
+                    .and_then(|h| h.task.as_ref())
+                    .map(|task| &task.id)
+                    != hierarchy.task.as_ref().map(|task| &task.id);
+                let active_collapsed = hierarchy
+                    .workspace
+                    .as_ref()
+                    .is_some_and(|w| self.workspace_collapsed.contains(&w.id));
+                if task_changed && !active_collapsed {
+                    self.reveal_task = hierarchy.task.as_ref().map(|task| task.id.clone());
+                }
+                self.scenes = scenes;
+                let search_focus_changed = self.focused != next_focus;
+                self.focused = next_focus;
+                if let Some(read_only) = &mut self.read_only
+                    && (fresh_read_only || scene_changed || focus_changed)
+                {
+                    let sequence = read_only.history.sequence;
+                    read_only.history = ReadOnlyHistory {
+                        sequence,
+                        ..ReadOnlyHistory::default()
+                    };
+                    self.dismiss_history_context(cx);
+                    if let Some(view) = &self.history_view {
+                        view.update(cx, |view, cx| view.clear_selection(cx));
+                    }
+                    self.request_read_only_history(None, window, cx);
+                }
+                if search_focus_changed {
+                    self.run_search(false, cx);
+                }
+                self.hierarchy = Some(hierarchy);
+                self.finish_card_action(&graph["sessionCardAction"]);
+                self.replace_fork_graph(graph, window, cx);
+                self.refresh_terminals(window, cx);
+                self.sync_wiring_graph(window, cx);
+                if fresh_ready || fresh_read_only {
+                    self.refresh_egress_status(cx);
+                }
+                if fresh_ready {
+                    self.clear_pending_split();
+                } else {
+                    self.finish_pane_split(window, cx);
+                }
+                if fresh_ready {
+                    self.session_frames.clear();
+                    self.restoring_sessions.clear();
+                    self.recovery.clear();
+                    self.deferred_previews.clear();
+                    self.deferred_controls.clear();
+                    self.start_failure_controls.clear();
+                    for id in session_levels::nodes(&self.graph)
+                        .iter()
+                        .filter(|node| {
+                            node["archivedAt"].is_null()
+                                && Self::provider_restore_state(node) != Some("failed")
+                                && fork_failure_copy(node).is_none()
+                        })
+                        .filter_map(|node| node["sessionId"].as_str())
+                    {
+                        self.recovery
+                            .insert(id.to_owned(), RecoveryState::Restoring);
+                        self.restoring_sessions.insert(id.to_owned());
+                    }
+                    self.resend_terminal_sizes(cx);
+                }
+                if fresh_ready || self.dialog.as_ref().is_some_and(TabDialog::is_session_card) {
+                    self.close_invalid_dialog(window, cx);
+                }
+                if self.read_only.is_some() {
+                    for saved in geometry {
+                        self.geometry
+                            .entry(saved.owner_key.clone())
+                            .or_insert(saved);
+                    }
+                } else {
+                    self.reconcile_transport_geometry(&geometry, cx);
+                }
+                if fresh_ready && self.level_focus_request == Some(LevelFocusRequest::CardOnReady) {
+                    self.level_focus_request = None;
+                    if let Some((scene_id, session_id)) = self.pending_focus.take()
+                        && self.active_scene_id() == Some(scene_id.as_str())
+                        && self.active_path_valid()
+                        && self.order.contains(&session_id)
+                        && !self.is_stopped_session(&session_id)
+                    {
+                        self.send_card_focus(&scene_id, &session_id, cx);
+                    }
+                    self.refresh_level(cx);
+                }
+                self.sync_terminal_input(window, cx);
+                if scene_changed
+                    && let Some(index) = self.scenes.iter().position(|scene| {
+                        self.hierarchy
+                            .as_ref()
+                            .and_then(|h| h.scene.as_ref())
+                            .is_some_and(|active| active.id == scene.id)
+                    })
+                {
+                    self.tab_scroll.scroll_to_item(index);
+                }
+                if level_focus_request != Some(LevelFocusRequest::OpenChildren)
+                    && (initializing
+                        || scene_changed
+                        || focus_changed
+                        || return_to_terminal
+                        || notification_focus.is_some())
+                    && self.dialog.is_none()
+                    && self.settings.is_none()
+                    && !self.wiring.board_open
+                    && self
+                        .focused
+                        .as_deref()
+                        .is_none_or(|id| !self.wiring.is_detached(id))
+                    && self.active_path_valid()
+                    && (return_to_terminal
+                        || self
+                            .focused
+                            .as_ref()
+                            .is_none_or(|id| !self.recovery_blocked(id)))
+                    && (return_to_terminal
+                        || notification_focus.is_some()
+                        || window.focused(cx).is_none()
+                        || (workspace_changed
+                            && self
+                                .workspace_controls
+                                .values()
+                                .any(|controls| controls[0].is_focused(window)))
+                        || (task_changed
+                            && self
+                                .task_controls
+                                .values()
+                                .any(|controls| controls[0].is_focused(window)))
+                        || self
+                            .terminals
+                            .values()
+                            .any(|terminal| terminal.read(cx).focus.is_focused(window)))
+                    && let Some(terminal) = self
+                        .focused
+                        .as_ref()
+                        .filter(|id| self.active_level_focus() == Some(id.as_str()))
+                        .filter(|id| !self.provider_restore_hides_terminal(id))
+                        .and_then(|id| self.terminals.get(id))
+                {
+                    if self.read_only.is_some()
+                        && let Some(view) = &self.history_view
+                    {
+                        window.focus(&view.read(cx).focus);
+                    } else {
+                        window.focus(&terminal.read(cx).focus);
+                    }
+                }
+            }
+            Event::ScenesDisposed(ids) => {
+                // The replacement graph may arrive on a later frame. Drop these
+                // cards from the layout before removing their view state.
+                self.order.retain(|id| !ids.contains(id));
+                for id in &ids {
+                    self.forget_board_scene(id);
+                }
+                if self
+                    .history_request
+                    .as_ref()
+                    .is_some_and(|request| ids.contains(&request.session_id))
+                {
+                    self.dismiss_history_context(cx);
+                }
+                for id in ids {
+                    self.discard_wiring_session(&id, cx);
+                    for (_, sessions) in self.notification_scene_sessions.values_mut() {
+                        sessions.remove(&id);
+                    }
+                    self.clear_start_failure_focus(&id, window);
+                    self.terminals.remove(&id);
+                    self.recovery.remove(&id);
+                    self.deferred_previews.remove(&id);
+                    self.deferred_controls.remove(&id);
+                    self.recovery_controls.remove(&id);
+                    self.start_failure_controls.remove(&id);
+                    self.provider_restore_controls.remove(&id);
+                    self.pending_provider_restores.remove(&id);
+                    self.pending_loader_loads.remove(&id);
+                    self.loader_remembered.remove(&id);
+                    self.permission_changes.remove(&id);
+                    self.permission_identities.remove(&id);
+                    self.storage_fault_sessions.remove(&id);
+                    self.card_controls.remove(&id);
+                    self.card_history_controls.remove(&id);
+                    self.remove_card_controls.remove(&id);
+                    self.card_motion.remove(&id);
+                    self.resize_revisions.remove(&id);
+                    self.session_frames.remove(&id);
+                    self.first_frame_content.remove(&id);
+                    self.restoring_sessions.remove(&id);
+                }
+            }
+            Event::SceneClosePreview {
+                scene_id,
+                graph,
+                is_last,
+            } => {
+                if self.pending_close.as_ref() == Some(&scene_id) {
+                    self.pending_close = None;
+                    self.dialog_controls = (0..if is_last { 2 } else { 3 })
+                        .map(|_| cx.focus_handle().tab_stop(true))
+                        .collect();
+                    window.focus(&self.dialog_controls[0]);
+                    self.dialog = Some(TabDialog::Close {
+                        scene_id,
+                        graph,
+                        is_last,
+                    });
+                }
+            }
+            Event::GeometryResult {
+                sequence,
+                update,
+                error,
+            } => {
+                #[cfg(debug_assertions)]
+                if let Some(trace) = &self.motion_trace {
+                    record_motion(
+                        trace,
+                        &serde_json::json!({"kind":"geometry-write","at":self.motion_clock.elapsed().as_secs_f64()*1000.,"sequence":sequence,"owner":update.owner_key,"geometry":update.geometry,"error":error}),
+                    );
+                }
+                let current_attempt = self
+                    .geometry_writes
+                    .get(&update.owner_key)
+                    .filter(|(current, _)| *current == sequence)
+                    .map(|(_, attempt)| *attempt);
+                let desired = self
+                    .geometry
+                    .get(&update.owner_key)
+                    .is_some_and(|desired| desired.geometry == update.geometry)
+                    && !self
+                        .pending_geometry
+                        .as_ref()
+                        .is_some_and(|pending| pending.owner_key == update.owner_key);
+                if desired && current_attempt.is_some() && error.is_none() {
+                    self.geometry_dirty.remove(&update.owner_key);
+                } else if desired && let Some(attempt @ 0..=2) = current_attempt {
+                    let generation = self.runtime_generation;
+                    let timer = cx.background_executor().timer(Duration::from_millis(120));
+                    cx.spawn(async move |this, cx| {
+                        timer.await;
+                        let _ = this.update(cx, |this, cx| {
+                            if this.runtime_generation == generation
+                                && this
+                                    .geometry_writes
+                                    .get(&update.owner_key)
+                                    .is_some_and(|(current, _)| *current == sequence)
+                                && this
+                                    .geometry
+                                    .get(&update.owner_key)
+                                    .is_some_and(|desired| desired.geometry == update.geometry)
+                                && !this
+                                    .pending_geometry
+                                    .as_ref()
+                                    .is_some_and(|pending| pending.owner_key == update.owner_key)
+                            {
+                                let mut retry = update;
+                                if this
+                                    .hierarchy
+                                    .as_ref()
+                                    .and_then(|h| h.scene.as_ref())
+                                    .is_some_and(|s| s.id == retry.scene_id)
+                                {
+                                    if let Some(revision) = this.graph["layoutRevision"].as_f64() {
+                                        retry.layout_revision = if retry.owner_key
+                                            == dag_window::viewport_owner_key(&retry.scene_id)
+                                        {
+                                            revision.max(retry.layout_revision)
+                                        } else {
+                                            revision
+                                        };
+                                    }
+                                }
+                                this.write_geometry(retry, attempt + 1, cx);
+                            }
+                        });
+                    })
+                    .detach();
+                }
+            }
+            Event::NavigationFailed {
+                message,
+                attempted_focus,
+            } => {
+                if attempted_focus.is_none() {
+                    self.pending_card_action = None;
+                    self.pending_close = None;
+                }
+                if attempted_focus.is_some() && self.pending_focus == attempted_focus {
+                    self.pending_focus = None;
+                    let request = self.level_focus_request.take();
+                    if matches!(
+                        request,
+                        Some(LevelFocusRequest::Card | LevelFocusRequest::CardOnReady)
+                    ) {
+                        self.refresh_level(cx);
+                    }
+                    if matches!(request, Some(LevelFocusRequest::Notification(_))) {
+                        cx.notify();
+                        return;
+                    }
+                }
+                let text = if message.contains("Scene must keep one Session") {
+                    self.locale.text(
+                        "画布至少要保留一个会话。",
+                        "A canvas must keep at least one session.",
+                    )
+                } else {
+                    self.locale.text(
+                        "操作未完成，请重试。",
+                        "The action could not be completed. Try again.",
+                    )
+                };
+                self.show_error_toast(text, cx);
+            }
+            Event::Graph(mut graph) => {
+                if let (Some(kind), Some(request_id)) =
+                    (graph["type"].as_str(), graph["requestId"].as_u64())
+                {
+                    // Runtime can attach a scene projection to a command reply. Only
+                    // navigation and standalone snapshots may replace the active graph.
+                    self.receive_wiring_reply(kind, request_id, &graph, window, cx);
+                    self.receive_provider_loader_reply(kind, request_id, &graph, window, cx);
+                    if let Some((settings, _)) = &self.settings {
+                        settings.update(cx, |settings, cx| {
+                            settings.receive_runtime_diagnostic(kind, request_id, &graph, cx);
+                        });
+                    }
+                    return;
+                }
+                if let Some(reply) = graph
+                    .as_object_mut()
+                    .and_then(|graph| graph.remove("claudeModelCatalogResult"))
+                    && let Some((settings, _)) = &self.settings
+                    && let Ok(reply) = serde_json::from_value::<ClaudeModelCatalogReply>(reply)
+                {
+                    settings.update(cx, |settings, cx| settings.receive_model_catalog(reply, cx));
+                }
+                if let Some(reply) = graph
+                    .as_object_mut()
+                    .and_then(|graph| graph.remove("claudeRoleAssignmentsResult"))
+                    && let Some((settings, _)) = &self.settings
+                    && let Ok(reply) = serde_json::from_value::<ClaudeModelPreferencesReply>(reply)
+                {
+                    settings.update(cx, |settings, cx| {
+                        if !settings.receive_model_preferences(&reply, cx) {
+                            settings.receive_assignments(reply.roles, cx);
+                        }
+                    });
+                }
+                if let Some(reply) = graph
+                    .as_object_mut()
+                    .and_then(|graph| graph.remove("providerSettingsResult"))
+                    && let Some((settings, _)) = &self.settings
+                    && let Ok(reply) = serde_json::from_value::<ProviderSettingsReply>(reply)
+                {
+                    settings.update(cx, |settings, cx| settings.receive(reply, window, cx));
+                }
+                let action = &graph["sessionCardAction"];
+                if action["outcome"] == "hide-window" {
+                    if self.finish_card_action(action)
+                        && self.dialog.is_none()
+                        && let (Some(scene_id), Some(session_id)) =
+                            (action["sceneId"].as_str(), action["sessionId"].as_str())
+                        && self.active_scene_id() == Some(scene_id)
+                        && self.level_focus() == Some(session_id)
+                    {
+                        self.graph["workspaceSessionCount"] =
+                            graph["workspaceSessionCount"].clone();
+                        self.open_last_session(
+                            scene_id.to_owned(),
+                            session_id.to_owned(),
+                            window,
+                            cx,
+                        );
+                    }
+                    self.update_notifications(&mut graph);
+                    return;
+                }
+                let loader_results = graph.as_object_mut().map(|graph| {
+                    [
+                        graph.remove("providerSessionCatalogResults"),
+                        graph.remove("providerSessionDetailResults"),
+                        graph.remove("providerSessionLoadErrors"),
+                    ]
+                });
+                self.replace_fork_graph(graph, window, cx);
+                self.refresh_terminals(window, cx);
+                self.sync_wiring_graph(window, cx);
+                if self.dialog.as_ref().is_some_and(TabDialog::is_session_card) {
+                    self.close_invalid_dialog(window, cx);
+                }
+                if let Some([catalog, details, errors]) = loader_results {
+                    let rows = |result: Option<Value>| match result {
+                        Some(Value::Array(rows)) => rows,
+                        _ => Vec::new(),
+                    };
+                    self.finish_session_loader(&rows(errors), window, cx);
+                    let details = rows(details);
+                    self.loader_detail_result(&details, cx);
+                    self.loader_search_result(&details, cx);
+                    self.loader_catalog_result(&rows(catalog), cx);
+                }
+                self.refresh_loader_catalog_if_changed();
+                self.sync_terminal_input(window, cx);
+            }
+            Event::ClipboardWrite { session_id, text } => {
+                // The active card belongs to the visible scene even while the
+                // OS window is obscured or a dialog owns keyboard focus.
+                if self.focused.as_ref() == Some(&session_id)
+                    && self.graph_node(&session_id).is_some()
+                {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                }
+            }
+            Event::History(reply) => self.apply_history(reply, window, cx),
+            Event::SearchResults {
+                session_id,
+                sequence,
+                result,
+            } => {
+                self.apply_search_results(session_id, sequence, result, window, cx);
+            }
+            Event::Copied { request_id, text } => {
+                if request_id == self.copy_request_id && !text.is_empty() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                }
+            }
+            Event::Frame {
+                session_id,
+                screen,
+                selection,
+                modes,
+                sequence,
+                scroll_request_id,
+            } => {
+                let was_usable = !self.recovery_blocked(&session_id);
+                if let Some(terminal) = self.terminals.get(&session_id).cloned() {
+                    let valid = self.domain_ready
+                        && screen.cols > 0
+                        && screen.rows > 0
+                        && screen.cells.len() == screen.cols * screen.rows
+                        && terminal.read(cx).target_dimensions().is_some_and(
+                            |(cols, rows, _, _)| {
+                                screen.cols == cols as usize && screen.rows == rows as usize
+                            },
+                        );
+                    if valid {
+                        self.session_frames.insert(session_id.clone());
+                        // The first non-empty grid ends the handoff on every
+                        // platform. An accepted empty frame is not a visible
+                        // first frame.
+                        if !self.first_frame_content.contains(&session_id)
+                            && screen.cells.iter().any(|cell| {
+                                cell.has_content
+                                    && !cell.invisible
+                                    && cell.text.chars().any(|ch| !ch.is_whitespace())
+                            })
+                        {
+                            self.first_frame_content.insert(session_id.clone());
+                            self.restoring_sessions.remove(&session_id);
+                            #[cfg(all(target_os = "macos", debug_assertions))]
+                            if let Some(trace) = &self.motion_trace {
+                                record_motion(
+                                    trace,
+                                    &serde_json::json!({
+                                        "kind": "recovery-water-handoff", "session": session_id,
+                                        "at": self.motion_clock.elapsed().as_secs_f64() * 1000.,
+                                        "generation": generation, "sequence": sequence,
+                                    }),
+                                );
+                            }
+                        }
+                    } else if !was_usable {
+                        self.session_frames.remove(&session_id);
+                    }
+                    terminal.update(cx, |terminal, cx| {
+                        terminal.set_screen(screen, modes, selection, scroll_request_id, cx)
+                    });
+                    self.sync_terminal_input(window, cx);
+                    self.resume_search_after_frame(cx);
+                    // The reference live-output callback restores only an unclaimed
+                    // active terminal; dialogs and focused controls retain ownership.
+                    if self.focused.as_ref() == Some(&session_id)
+                        && self.order.contains(&session_id)
+                        && self.dialog.is_none()
+                        && self.settings.is_none()
+                        && !self.wiring.board_open
+                        && !self.wiring.is_detached(&session_id)
+                        && self.active_path_valid()
+                        && !self.recovery_blocked(&session_id)
+                        && !self.provider_restore_hides_terminal(&session_id)
+                        && window.focused(cx).is_none()
+                    {
+                        window.focus(&terminal.read(cx).focus);
+                    }
+                }
+                let _ = self.commands.send_at(
+                    generation,
+                    Command::Applied {
+                        session_id,
+                        sequence,
+                    },
+                );
+            }
+            Event::Recovery { session_id, state } => {
+                if self.is_stopped_session(&session_id) {
+                    return;
+                }
+                match &state {
+                    // Remember the Restoring intent so a later Ready can still
+                    // label the card as recovery until its first visible frame.
+                    RecoveryState::Restoring => {
+                        self.restoring_sessions.insert(session_id.clone());
+                    }
+                    RecoveryState::Deferred
+                    | RecoveryState::Failed(_)
+                    | RecoveryState::StartFailed(_)
+                    | RecoveryState::Restarting(_) => {
+                        self.restoring_sessions.remove(&session_id);
+                    }
+                    RecoveryState::Ready => {}
+                }
+                if matches!(state, RecoveryState::Restoring)
+                    && matches!(
+                        self.recovery.get(&session_id),
+                        Some(
+                            RecoveryState::Deferred
+                                | RecoveryState::Failed(_)
+                                | RecoveryState::Ready
+                        )
+                    )
+                {
+                    self.first_frame_content.remove(&session_id);
+                }
+                if !matches!(&state, RecoveryState::Ready)
+                    || (self.recovery_blocked(&session_id)
+                        && !self
+                            .terminals
+                            .get(&session_id)
+                            .is_some_and(|t| t.read(cx).frame_matches_target()))
+                {
+                    self.session_frames.remove(&session_id);
+                }
+                if matches!(state, RecoveryState::Failed(_)) {
+                    self.recovery_controls
+                        .entry(session_id.clone())
+                        .or_insert_with(|| cx.focus_handle().tab_stop(true));
+                } else if self
+                    .recovery_controls
+                    .get(&session_id)
+                    .is_some_and(|focus| focus.is_focused(window))
+                {
+                    window.blur();
+                }
+                if matches!(state, RecoveryState::StartFailed(_)) {
+                    self.start_failure_controls
+                        .entry(session_id.clone())
+                        .or_insert_with(|| {
+                            [
+                                cx.focus_handle().tab_stop(true),
+                                cx.focus_handle().tab_stop(true),
+                            ]
+                        });
+                } else {
+                    self.clear_start_failure_focus(&session_id, window);
+                    self.start_failure_controls.remove(&session_id);
+                }
+                if !matches!(state, RecoveryState::Ready)
+                    && self
+                        .terminals
+                        .get(&session_id)
+                        .is_some_and(|terminal| terminal.read(cx).focus.is_focused(window))
+                {
+                    window.blur();
+                }
+                if state == RecoveryState::Deferred {
+                    self.deferred_controls
+                        .entry(session_id.clone())
+                        .or_insert_with(|| {
+                            std::array::from_fn(|_| cx.focus_handle().tab_stop(true))
+                        });
+                } else {
+                    self.deferred_previews.remove(&session_id);
+                    if let Some(controls) = self.deferred_controls.remove(&session_id)
+                        && controls.iter().any(|focus| focus.is_focused(window))
+                    {
+                        window.blur();
+                    }
+                }
+                self.recovery.insert(session_id.clone(), state);
+                self.sync_terminal_input(window, cx);
+                // The replacement's first frame can precede Ready, including
+                // when the CLI is waiting for its own bypass confirmation.
+                if self
+                    .permission_changes
+                    .get(&session_id)
+                    .is_some_and(|change| change.outcome == PermissionOutcome::Pending)
+                    && self.active_level_focus() == Some(session_id.as_str())
+                    && self.dialog.is_none()
+                    && self.settings.is_none()
+                    && !self.wiring.board_open
+                    && self
+                        .focused
+                        .as_deref()
+                        .is_none_or(|id| !self.wiring.is_detached(id))
+                    && self.active_path_valid()
+                    && !self.recovery_blocked(&session_id)
+                    && !self.provider_restore_hides_terminal(&session_id)
+                    && window.focused(cx).is_none()
+                    && let Some(terminal) = self.terminals.get(&session_id)
+                {
+                    window.focus(&terminal.read(cx).focus);
+                }
+                self.resume_search_after_frame(cx);
+            }
+            Event::StorageFault { message, .. } => {
+                self.fault = Some(message);
+                self.show_error_toast(
+                    self.locale.text(
+                        "终端存储异常，请先恢复或结束当前会话。",
+                        "Terminal storage failed. Recover or stop this session.",
+                    ),
+                    cx,
+                );
+            }
+            Event::DeferredRecoveryPreview {
+                session_id,
+                cwd,
+                preview,
+            } => {
+                if let Some(state) = self.deferred_previews.get_mut(&session_id)
+                    && state.cwd == cwd
+                {
+                    state.loading = false;
+                    state.result = preview;
+                }
+            }
+            Event::Diagnostic(message) => {
+                self.clear_pending_split();
+                if !self.domain_ready && message == INVALID_RECOVERY_MARKER_DIAGNOSTIC {
+                    // Keep the error visible across automatic startup attempts.
+                    self.invalid_recovery_marker = true;
+                    self.database_recovery = None;
+                } else if !self.recovery.values().any(|state| {
+                    // Launch failures already carry this diagnostic in their card.
+                    matches!(state, RecoveryState::StartFailed(error) | RecoveryState::Failed(error) if error == &message)
+                }) {
+                    let toast = diagnostic_toast_text(&message, self.locale);
+                    self.fault = Some(message);
+                    self.show_error_toast(toast, cx);
+                }
+            }
+            Event::StorageRecovered { .. } => self.fault = None,
+            Event::StartupBlocked(_) | Event::Closed => {}
+        }
+        self.reconcile_permission_overlay(window, cx);
+        #[cfg(target_os = "macos")]
+        self.prune_recovery_water(window, cx);
+        cx.notify();
+    }
+
+    fn refresh_terminals(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let nodes = session_levels::nodes(&self.graph);
+        self.pending_provider_restores.retain(|id, pending| {
+            session_levels::node(nodes, id).is_some_and(|node| {
+                node["archivedAt"].is_null()
+                    && Self::provider_restore_state(node) == Some("failed")
+                    && node["providerSpawnRevision"].as_u64() == pending.revision
+            })
+        });
+        for node in nodes {
+            let Some(id) = node["sessionId"].as_str() else {
+                continue;
+            };
+            self.remove_card_controls
+                .entry(id.to_owned())
+                .or_insert_with(|| cx.focus_handle().tab_stop(true));
+            if node["archivedAt"].is_null()
+                && (card_history_provider(node).is_some()
+                    || session_levels::parent_id(node).is_some()
+                    || fork_failure_copy(node).is_some())
+            {
+                self.fork_controls
+                    .entry(id.to_owned())
+                    .or_insert_with(|| std::array::from_fn(|_| cx.focus_handle().tab_stop(true)));
+            }
+            if node["archivedAt"].is_null() && Self::provider_restore_state(node) == Some("failed")
+            {
+                self.provider_restore_controls
+                    .entry(id.to_owned())
+                    .or_insert_with(|| {
+                        [
+                            cx.focus_handle().tab_stop(true),
+                            cx.focus_handle().tab_stop(true),
+                        ]
+                    });
+            } else if let Some(controls) = self.provider_restore_controls.remove(id)
+                && controls.iter().any(|focus| focus.is_focused(window))
+            {
+                window.blur();
+            }
+            if !node["archivedAt"].is_null() {
+                let terminal = self.terminals.remove(id);
+                let retry = self.recovery_controls.remove(id);
+                self.clear_start_failure_focus(id, window);
+                self.start_failure_controls.remove(id);
+                if terminal.is_some_and(|terminal| terminal.read(cx).focus.is_focused(window))
+                    || retry.is_some_and(|focus| focus.is_focused(window))
+                {
+                    window.blur();
+                }
+                self.card_controls.remove(id);
+                self.card_history_controls.remove(id);
+                self.recovery.remove(id);
+                self.deferred_previews.remove(id);
+                self.deferred_controls.remove(id);
+                self.session_frames.remove(id);
+                self.first_frame_content.remove(id);
+                self.restoring_sessions.remove(id);
+                self.resize_revisions.remove(id);
+                continue;
+            }
+            if card_history_provider(node).is_some() {
+                self.card_history_controls
+                    .entry(id.to_owned())
+                    .or_insert_with(|| cx.focus_handle().tab_stop(true));
+            }
+            if Self::team_member_node(node) || self.terminals.contains_key(id) {
+                continue;
+            }
+            let disabled = !self.active_path_valid();
+            let theme = self.theme_palette().terminal;
+            let owner = cx.weak_entity();
+            let terminal = cx.new(|cx| {
+                let mut surface = TerminalSurface::new(cx)
+                    .with_canvas_inset()
+                    .with_link_handler(move |url, window, cx| {
+                        // Terminal output can contain either a reference or an OAuth link.
+                        let source = if matches!(
+                            route_link(Some(url), LinkSource::External),
+                            Err(LinkRejection::UntrustedDestination)
+                        ) {
+                            LinkSource::SignIn
+                        } else {
+                            LinkSource::External
+                        };
+                        let _ = owner.update(cx, |this, cx| {
+                            this.open_external_link(url, source, window, cx)
+                        });
+                    });
+                surface.set_theme(theme, cx);
+                surface.set_font_size(self.terminal_font_size, cx);
+                surface.begin_transport_generation(self.runtime_generation, cx);
+                surface.set_input_disabled(disabled || self.recovery_blocked(id), cx);
+                surface
+            });
+            self.card_controls
+                .insert(id.to_owned(), cx.focus_handle().tab_stop(true));
+            let session_id = id.to_owned();
+            cx.subscribe(&terminal, move |this, source, event: &SurfaceEvent, cx| {
+                if this.terminals.get(&session_id) == Some(&source) {
+                    this.handle_surface_event(&session_id, event, cx);
+                }
+            })
+            .detach();
+            self.terminals.insert(id.to_owned(), terminal);
+            if theme != Theme::default() {
+                self.send_terminal_theme(id, theme);
+            }
+        }
+        if self
+            .history_request
+            .as_ref()
+            .is_some_and(|request| self.is_stopped_session(&request.session_id))
+        {
+            self.dismiss_history_context(cx);
+        }
+        self.refresh_level(cx);
+        self.fork_controls
+            .retain(|id, _| self.terminals.contains_key(id));
+    }
+
+    fn zoom_terminal_font(&mut self, zoom: terminal_surface::FontZoom, cx: &mut Context<Self>) {
+        use terminal_surface::{
+            DEFAULT_TERMINAL_FONT_SIZE, FontZoom, MAX_TERMINAL_FONT_SIZE, MIN_TERMINAL_FONT_SIZE,
+        };
+        let size = match zoom {
+            FontZoom::In => (self.terminal_font_size + 1).min(MAX_TERMINAL_FONT_SIZE),
+            FontZoom::Out => (self.terminal_font_size - 1).max(MIN_TERMINAL_FONT_SIZE),
+            FontZoom::Reset => DEFAULT_TERMINAL_FONT_SIZE,
+        };
+        if size == self.terminal_font_size {
+            return;
+        }
+        self.terminal_font_size = size;
+        for terminal in self.terminals.values() {
+            terminal.update(cx, |terminal, cx| terminal.set_font_size(size, cx));
+        }
+        if let Some(root) = self.data_root.as_deref()
+            && let Err(error) = write_terminal_font_size(root, size)
+        {
+            eprintln!("Write terminal font size: {error}");
+        }
+        cx.notify();
+    }
+
+    fn handle_surface_event(
+        &mut self,
+        session_id: &str,
+        event: &SurfaceEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(terminal) = self.terminals.get(session_id) else {
+            return;
+        };
+        if let SurfaceEventKind::FontZoom(zoom) = event.kind {
+            self.zoom_terminal_font(zoom, cx);
+            return;
+        }
+        let terminal_id = terminal.entity_id();
+        if event.generation != self.runtime_generation
+            || !self.domain_ready
+            || self.commands.connection() != (event.generation, ConnectionPhase::Ready)
+        {
+            return;
+        }
+        if !matches!(event.kind, SurfaceEventKind::Resize { .. })
+            && (self.recovery_blocked(session_id)
+                || self.provider_restore_hides_terminal(session_id))
+        {
+            return;
+        }
+        let generation = event.generation;
+        let session_id = session_id.to_owned();
+        // Only an unqualified generation is protected by the first-frame gate.
+        // An ordinary resize of an already usable terminal never starts recovery.
+        if matches!(&event.kind, SurfaceEventKind::Resize { .. })
+            && self.recovery_blocked(&session_id)
+        {
+            self.session_frames.remove(&session_id);
+            if let Some(terminal) = self.terminals.get(&session_id) {
+                terminal.update(cx, |terminal, cx| {
+                    terminal.set_transport_available(false, cx);
+                    terminal.set_input_disabled(true, cx);
+                });
+            }
+        }
+        match &event.kind {
+            SurfaceEventKind::FontZoom(_) => unreachable!(),
+            SurfaceEventKind::Select(action) => self.send(
+                Command::Select {
+                    session_id: session_id.clone(),
+                    action: *action,
+                },
+                cx,
+            ),
+            SurfaceEventKind::Copy { interrupt_if_empty } => {
+                self.copy_request_id += 1;
+                self.send(
+                    Command::CopySelection {
+                        session_id: session_id.clone(),
+                        request_id: self.copy_request_id,
+                        interrupt_if_empty: *interrupt_if_empty,
+                    },
+                    cx,
+                );
+            }
+            SurfaceEventKind::Input(bytes) => self.send(
+                Command::Input {
+                    session_id: session_id.clone(),
+                    bytes: bytes.clone(),
+                    defer_ordering: true,
+                },
+                cx,
+            ),
+            SurfaceEventKind::ScrollSelection(lines) => self.send(
+                Command::ScrollSelection {
+                    session_id: session_id.clone(),
+                    lines: *lines,
+                },
+                cx,
+            ),
+            SurfaceEventKind::Scroll(lines) => self.send(
+                Command::Scroll {
+                    session_id: session_id.clone(),
+                    lines: *lines,
+                },
+                cx,
+            ),
+            SurfaceEventKind::ScrollTo { row, request_id } => self.send(
+                Command::ScrollTo {
+                    session_id: session_id.clone(),
+                    row: *row,
+                    request_id: *request_id,
+                    pixel_target: true,
+                },
+                cx,
+            ),
+            SurfaceEventKind::Resize {
+                cols,
+                rows,
+                cell_width_px,
+                cell_height_px,
+            } => {
+                let revision = self.resize_revisions.entry(session_id.clone()).or_default();
+                *revision += 1;
+                let revision = *revision;
+                let id = session_id.clone();
+                let geometry = (*cols, *rows, *cell_width_px, *cell_height_px);
+                let timer = cx.background_executor().timer(Duration::from_millis(80));
+                cx.spawn(async move |this, cx| {
+                    timer.await;
+                    let _ = this.update(cx, |this, cx| {
+                        if this.runtime_generation != generation {
+                            return;
+                        }
+                        if this.resize_revisions.get(&id) != Some(&revision) {
+                            return;
+                        }
+                        if this.terminals.get(&id).map(Entity::entity_id) != Some(terminal_id) {
+                            return;
+                        }
+                        this.send(
+                            Command::Resize {
+                                session_id: id,
+                                cols: geometry.0,
+                                rows: geometry.1,
+                                cell_width_px: geometry.2,
+                                cell_height_px: geometry.3,
+                            },
+                            cx,
+                        );
+                    });
+                })
+                .detach();
+            }
+        }
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.read_only.is_some()
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn open_quit_confirmation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(focus) = self.quit_confirmation.open(|| QuitConfirmationFocus {
+            previous: window.focused(cx),
+            keyboard_focus: self.keyboard_focus,
+            cancel: cx.focus_handle(),
+            quit: cx.focus_handle(),
+        }) {
+            self.keyboard_focus = true;
+            window.focus(&focus.cancel);
+            cx.notify();
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn is_quit_confirmed(&self) -> bool {
+        self.quit_confirmation.is_confirmed()
+    }
+
+    #[cfg(target_os = "windows")]
+    fn cancel_quit_confirmation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(focus) = self.quit_confirmation.cancel() {
+            self.keyboard_focus = focus.keyboard_focus;
+            if let Some(previous) = focus.previous {
+                window.focus(&previous);
+            } else {
+                window.blur();
+            }
+            cx.notify();
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn confirm_quit(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        if self.quit_confirmation.confirm() {
+            cx.emit(QuitConfirmed);
+        }
+    }
+
+    pub fn flush_geometry(&mut self, cx: &mut Context<Self>) {
+        self.geometry_timer += 1;
+        if let Some(update) = self.pending_geometry.take() {
+            self.last_geometry_write.insert(
+                update.owner_key.clone(),
+                self.motion_clock.elapsed().as_secs_f64() * 1000.,
+            );
+            self.write_geometry(update, 0, cx);
+        }
+        let read_only = self.is_read_only();
+        if let Some(child) = self.dag_window
+            && let Ok(Some(update)) =
+                child.update(cx, |view, _, cx| view.take_viewport_update(read_only, cx))
+        {
+            self.save_dag_viewport(update, cx);
+        }
+    }
+
+    fn save_dag_viewport(&mut self, update: GeometryUpdate, cx: &mut Context<Self>) {
+        if self.is_read_only() {
+            return;
+        }
+        self.geometry_dirty.insert(update.owner_key.clone());
+        self.geometry.insert(update.owner_key.clone(), update.clone());
+        self.write_geometry(update, 0, cx);
+    }
+
+    fn write_geometry(&mut self, update: GeometryUpdate, attempt: u8, cx: &mut Context<Self>) {
+        if self.is_read_only() {
+            return;
+        }
+        if self.active_scene_id() == Some(update.scene_id.as_str())
+            && update.geometry["focusedSessionId"]
+                .as_str()
+                .is_some_and(|id| self.is_stopped_session(id))
+        {
+            self.geometry_dirty.remove(&update.owner_key);
+            self.reconnect_geometry.remove(&update.owner_key);
+            return;
+        }
+        self.geometry_sequence += 1;
+        let sequence = self.geometry_sequence;
+        self.geometry_writes
+            .insert(update.owner_key.clone(), (sequence, attempt));
+        self.send(Command::PutGeometry { sequence, update }, cx);
+    }
+
+    fn geometry_focus(&self) -> Option<&str> {
+        self.pending_focus
+            .as_ref()
+            .filter(|(scene_id, _)| {
+                self.hierarchy
+                    .as_ref()
+                    .and_then(|hierarchy| hierarchy.scene.as_ref())
+                    .is_some_and(|scene| &scene.id == scene_id)
+            })
+            .map(|(_, session_id)| session_id.as_str())
+            .or(self.focused.as_deref())
+            .filter(|id| !self.is_stopped_session(id))
+    }
+
+    fn send_card_focus(
+        &mut self,
+        scene_id: &str,
+        session_id: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.send(
+            Command::FocusSession {
+                scene_id: scene_id.to_owned(),
+                session_id: session_id.to_owned(),
+            },
+            cx,
+        );
+        let sent = self.pending_focus.is_some();
+        if sent {
+            self.level_focus_request = Some(LevelFocusRequest::Card);
+        }
+        sent
+    }
+
+    fn activate_session_card(&mut self, session_id: &str, window: &Window, cx: &mut Context<Self>) {
+        if self.level_focus() == Some(session_id) {
+            return;
+        }
+        let Some(scene_id) = self.active_scene_id().map(str::to_owned) else {
+            return;
+        };
+        let activated_from_preview = self.hovered.as_deref() == Some(session_id);
+        self.hovered = None;
+        self.hover_baseline = None;
+        self.hover_restore_at = None;
+        self.hover_follow_until = None;
+        self.restore_geometry = false;
+        let now = self.motion_clock.elapsed().as_secs_f64() * 1000.;
+        self.focus_follow_until = (!activated_from_preview).then_some(now + 440.);
+        if activated_from_preview && self.active_split_tree().is_none() {
+            self.capture_geometry(Some(session_id.to_owned()), false, window, cx);
+        }
+        #[cfg(target_os = "macos")]
+        let can_defer = self.read_only.is_none() && self.recovery_water.contains_key(session_id);
+        #[cfg(not(target_os = "macos"))]
+        let can_defer = false;
+        let wait_for_ready = can_defer
+            && (!self.domain_ready
+                || !self.transport_connected
+                || self.commands.connection() != (self.runtime_generation, ConnectionPhase::Ready));
+        let sent = !wait_for_ready && self.send_card_focus(&scene_id, session_id, cx);
+        if can_defer && !sent {
+            if let Some(update) = self.pending_geometry.take() {
+                self.reconnect_geometry.insert(update.owner_key);
+            }
+            self.pending_focus = Some((scene_id, session_id.to_owned()));
+            self.level_focus_request = Some(LevelFocusRequest::CardOnReady);
+        } else if activated_from_preview && sent {
+            self.flush_geometry(cx);
+        }
+        self.refresh_level(cx);
+        cx.notify();
+    }
+
+    fn capture_geometry(
+        &mut self,
+        focused: Option<String>,
+        continuous: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let viewport = self.carousel_viewport_width(window);
+        let maximum = self
+            .card_geometry
+            .last()
+            .map(|(_, left, width)| (left + width + 10. - viewport).max(0.))
+            .unwrap_or(0.);
+        let left = focused
+            .as_ref()
+            .and_then(|id| self.card_geometry.iter().find(|(card, _, _)| card == id))
+            .map(|(_, left, _)| *left);
+        self.save_geometry(
+            f64::from(-f32::from(self.carousel_scroll.offset().x)).clamp(0., maximum),
+            left,
+            focused,
+            continuous,
+            cx,
+        );
+    }
+
+    fn carousel_viewport_width(&self, window: &Window) -> f64 {
+        // The fixed sidebar is border-box sized, including its right divider.
+        // Use the current window width even when the scroll handle has stale bounds.
+        let width = window.viewport_size().width - px(NOTIFICATION_UI_SIDEBAR_WIDTH);
+        f64::from(f32::from(width.max(px(0.))))
+    }
+
+    fn carousel_has_overlay(&self, window: &Window) -> bool {
+        self.dialog.is_some()
+            || self.hidden_tabs.is_some()
+            || self.settings.is_some()
+            || self.notification_open
+            || self.footer_popovers.contains_key(&window.window_handle())
+            || self.wiring.board_open
+            || self.wiring_overlay_open(window)
+            || self.permission_menu_open(window)
+            || self.project_instructions_open(window)
+    }
+
+    fn carousel_hit(&self, position: Point<Pixels>, retain_gap: bool) -> Option<String> {
+        if !self.carousel_scroll.bounds().contains(&position) {
+            return None;
+        }
+        let mut previous: Option<Bounds<Pixels>> = None;
+        for (index, id) in self.order.iter().enumerate() {
+            let Some(bounds) = self.carousel_slot_bounds(index, id) else {
+                break;
+            };
+            if session_card_hit(&bounds, position) {
+                return Some(id.clone());
+            }
+            if retain_gap
+                && let Some(left) = previous
+                && position.x >= left.right()
+                && position.x < bounds.left()
+                && position.y >= left.top().max(bounds.top())
+                && position.y < left.bottom().min(bounds.bottom())
+            {
+                return self.hovered.clone();
+            }
+            previous = Some(bounds);
+        }
+        None
+    }
+
+    fn carousel_slot_bounds(&self, index: usize, id: &str) -> Option<Bounds<Pixels>> {
+        let mut bounds = self.carousel_scroll.bounds_for_item(index)?;
+        bounds.origin += self.carousel_scroll.offset();
+        bounds.origin.y += self.card_motion.get(id)?.drawn_lift;
+        Some(bounds)
+    }
+
+    fn cancel_hover_restore(&mut self) {
+        if self.hover_restore_at.take().is_some() {
+            self.hover_baseline = None;
+        }
+    }
+
+    fn leave_carousel(&mut self, cx: &mut Context<Self>) {
+        self.pointer_position = None;
+        if self.hovered_child_badge.take().is_some() || self.edge_direction != 0 {
+            cx.notify();
+        }
+        self.stop_edge_browse(false);
+        self.hover_card(None, cx);
+    }
+
+    fn save_geometry(
+        &mut self,
+        scroll: f64,
+        focused_left: Option<f64>,
+        focused: Option<String>,
+        continuous: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(scene) = self.hierarchy.as_ref().and_then(|h| h.scene.as_ref()) else {
+            return;
+        };
+        let owner_key = session_levels::owner_key(&scene.id, self.level_parent());
+        let mut geometry = serde_json::json!({"scrollLeft":scroll});
+        if let Some(id) = &focused {
+            geometry["focusedSessionId"] = id.clone().into();
+            if let Some(left) = focused_left {
+                geometry["anchorSessionId"] = id.clone().into();
+                geometry["anchorViewportOffset"] = (left - scroll).into();
+            }
+        }
+        if self
+            .geometry
+            .get(&owner_key)
+            .is_some_and(|saved| saved.geometry == geometry)
+        {
+            return;
+        }
+        let update = GeometryUpdate {
+            scene_id: scene.id.clone(),
+            owner_key: owner_key.clone(),
+            layout_revision: self.graph["layoutRevision"]
+                .as_f64()
+                .unwrap_or(scene.layout_revision as f64),
+            geometry,
+            now: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64,
+        };
+        if self.read_only.is_some() {
+            self.geometry.insert(owner_key, update);
+            return;
+        }
+        let elapsed = self
+            .last_geometry_write
+            .get(&owner_key)
+            .map(|last| self.motion_clock.elapsed().as_secs_f64() * 1000. - last)
+            .unwrap_or(f64::INFINITY);
+        self.geometry_dirty.insert(owner_key.clone());
+        self.geometry.insert(owner_key, update.clone());
+        self.pending_geometry = Some(update);
+        // Match SessionCanvas: wheel checkpoints are immediate/throttled at
+        // 50ms, while settled/click checkpoints debounce for 180ms.
+        self.geometry_timer += 1;
+        if continuous && elapsed >= 50. {
+            self.flush_geometry(cx);
+            return;
+        }
+        let generation = self.geometry_timer;
+        let transport_generation = self.runtime_generation;
+        let delay = if continuous {
+            (50. - elapsed).max(1.)
+        } else {
+            180.
+        };
+        let timer = cx
+            .background_executor()
+            .timer(Duration::from_secs_f64(delay / 1000.));
+        cx.spawn(async move |this, cx| {
+            timer.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.runtime_generation == transport_generation
+                    && this.geometry_timer == generation
+                {
+                    this.flush_geometry(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn scroll_carousel(
+        &mut self,
+        event: &ScrollWheelEvent,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.cancel_hover_restore();
+        let delta = event.delta.pixel_delta(px(16.));
+        let horizontal = event.modifiers.shift || delta.x.abs() >= delta.y.abs();
+        let narrow = self.carousel_viewport_width(window) < 720.;
+        let over_terminal = self
+            .order
+            .iter()
+            .filter(|id| !narrow || self.level_focus() == Some(id.as_str()))
+            .any(|id| {
+                self.terminals
+                    .get(id)
+                    .is_some_and(|t| t.read(cx).contains_position(event.position))
+            });
+        if !horizontal && over_terminal {
+            return;
+        }
+        let amount = if horizontal && delta.x != px(0.) {
+            delta.x
+        } else {
+            delta.y
+        };
+        if amount == px(0.) {
+            return;
+        }
+        self.move_carousel(
+            self.carousel_scroll.offset().x + amount,
+            event.position,
+            window,
+            cx,
+        );
+        cx.stop_propagation();
+    }
+
+    fn move_carousel(
+        &mut self,
+        offset: Pixels,
+        position: Point<Pixels>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.stop_edge_browse(true);
+        self.restore_geometry = false;
+        self.focus_follow_until = None;
+        self.hover_follow_until = None;
+        self.hover_baseline = None;
+        self.hover_restore_at = None;
+        let max_scroll = self
+            .card_geometry
+            .last()
+            .map(|(_, left, width)| left + width + 10. - self.carousel_viewport_width(window))
+            .unwrap_or(0.)
+            .max(0.);
+        let next = f64::from(f32::from(offset)).clamp(-max_scroll, 0.);
+        self.carousel_scroll
+            .set_offset(point(px(next as f32), px(0.)));
+        if let Some(focused) = self
+            .geometry_focus()
+            .filter(|id| self.order.iter().any(|card| card == id))
+            .or_else(|| self.active_level_focus())
+        {
+            self.capture_geometry(Some(focused.to_owned()), true, window, cx);
+        }
+        // A horizontal gesture retargets visual expansion under the pointer,
+        // while its own wheel deltas continue to own the viewport.
+        self.hovered = if self.carousel_viewport_width(window) >= 720. {
+            self.carousel_hit(position, true)
+        } else {
+            None
+        };
+        cx.notify();
+    }
+
+    fn stop_edge_browse(&mut self, block: bool) {
+        self.edge_direction = 0;
+        self.edge_blocked = block;
+        self.edge_next_at = None;
+        self.edge_target = None;
+        self.edge_cruising = false;
+    }
+
+    fn nearest_hidden_card(&self, direction: i8, viewport_width: f64) -> Option<String> {
+        let scroll = f64::from(-f32::from(self.carousel_scroll.offset().x));
+        if direction < 0 {
+            self.card_geometry
+                .iter()
+                .rev()
+                .find(|(_, left, _)| *left < scroll + 10. - 0.5)
+        } else {
+            self.card_geometry
+                .iter()
+                .find(|(_, left, width)| *left + *width > scroll + viewport_width - 10. + 0.5)
+        }
+        .map(|(id, _, _)| id.clone())
+    }
+
+    fn edge_intent(&mut self, position: Point<Pixels>, window: &Window, cx: &mut Context<Self>) {
+        let delta = self
+            .pointer_position
+            .map(|old| f32::from(position.x - old.x))
+            .unwrap_or(0.);
+        self.pointer_position = Some(position);
+        let bounds = self.carousel_scroll.bounds();
+        let inside = bounds.contains(&position);
+        let direction = if inside && position.x <= bounds.left() + px(84.) {
+            -1
+        } else if inside && position.x >= bounds.right() - px(84.) {
+            1
+        } else {
+            0
+        };
+        if direction == 0 {
+            let away = (self.edge_direction == 1 && delta < -2.)
+                || (self.edge_direction == -1 && delta > 2.);
+            if self.edge_direction != 0 {
+                cx.notify();
+            }
+            self.stop_edge_browse(away);
+            return;
+        }
+        if self.edge_direction != 0 && self.edge_direction != direction {
+            self.stop_edge_browse(false);
+        }
+        if (direction == 1 && delta < -2.) || (direction == -1 && delta > 2.) {
+            self.stop_edge_browse(true);
+            cx.notify();
+            return;
+        }
+        if self.edge_blocked || self.edge_next_at.is_some() {
+            return;
+        }
+        let Some(target) =
+            self.nearest_hidden_card(direction, self.carousel_viewport_width(window))
+        else {
+            self.stop_edge_browse(false);
+            cx.notify();
+            return;
+        };
+        let now = self.motion_clock.elapsed().as_secs_f64() * 1000.;
+        self.edge_direction = direction;
+        self.edge_target = Some(target);
+        self.edge_phase_start = now;
+        self.edge_next_at = Some(now + 180.);
+        cx.notify();
+    }
+
+    fn advance_edge_browse(&mut self, now: f64, viewport_width: f64, cx: &mut Context<Self>) {
+        if !self.edge_next_at.is_some_and(|deadline| now >= deadline) {
+            return;
+        }
+        let target = self
+            .edge_target
+            .take()
+            .filter(|id| self.order.contains(id))
+            .or_else(|| self.nearest_hidden_card(self.edge_direction, viewport_width))
+            .filter(|id| self.order.contains(id));
+        if let Some(id) = target {
+            // Dwelling at an edge is navigation intent: unlike ordinary
+            // preview, this new position remains after pointer exit.
+            self.hover_baseline = None;
+            self.hover_restore_at = None;
+            self.focus_follow_until = None;
+            self.hovered = Some(id);
+            self.hover_follow_until = Some(now + 440.);
+            if !self.edge_cruising {
+                self.edge_phase_start = now;
+            }
+            self.edge_cruising = true;
+            self.edge_next_at = Some(now + 900.);
+            cx.notify();
+        } else {
+            self.stop_edge_browse(false);
+        }
+    }
+
+    fn hover_card(&mut self, id: Option<String>, cx: &mut Context<Self>) {
+        let id = id.filter(|_| {
+            self.carousel_scroll.bounds().size.width >= px(720.)
+                && self.active_split_tree().is_none()
+        });
+        if self.hovered == id {
+            return;
+        }
+        let focused = id.is_some() && id.as_deref() == self.level_focus();
+        let now = self.motion_clock.elapsed().as_secs_f64() * 1000.;
+        self.hovered = id;
+        #[cfg(debug_assertions)]
+        if let Some(trace) = &self.motion_trace {
+            record_motion(
+                trace,
+                &serde_json::json!({"kind":"hover","at":now,"session":self.hovered,"baseline":self.hover_baseline}),
+            );
+        }
+        match &self.hovered {
+            None => {
+                self.hover_follow_until = None;
+                self.hover_restore_at = self.hover_baseline.map(|_| now + HOVER_RESTORE_DELAY_MS);
+            }
+            Some(_) => {
+                self.hover_restore_at = None;
+                if focused {
+                    self.hover_baseline = None;
+                } else {
+                    self.focus_follow_until = None;
+                    self.hover_baseline
+                        .get_or_insert(f64::from(-f32::from(self.carousel_scroll.offset().x)));
+                }
+                self.hover_follow_until = if self.edge_blocked {
+                    None
+                } else {
+                    Some(now + 440.)
+                };
+            }
+        }
+        cx.notify();
+    }
+
+    fn active_path_valid(&self) -> bool {
+        self.hierarchy
+            .as_ref()
+            .and_then(|h| h.workspace.as_ref())
+            .is_none_or(|workspace| !self.workspace_invalid(&workspace.id))
+    }
+
+    fn sync_terminal_input(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let disabled = self.database_recovery.is_some() || !self.active_path_valid();
+        if self.history_request.as_ref().is_some_and(|request| {
+            disabled
+                || self.recovery_blocked(&request.session_id)
+                || self.focused.as_ref() != Some(&request.session_id)
+        }) {
+            if let Some(view) = &self.history_view {
+                view.update(cx, |view, _| view.stop_drag());
+            }
+        }
+        // A removed recovery button no longer owns focus in the source DOM.
+        if self
+            .workspace_controls
+            .iter()
+            .any(|(id, controls)| !self.workspace_invalid(id) && controls[2].is_focused(window))
+        {
+            window.blur();
+        }
+        for (id, terminal) in &self.terminals {
+            let blocked = self.recovery_blocked(id);
+            #[cfg(target_os = "macos")]
+            let blocked = blocked || self.recovery_water_covers_terminal(id);
+            let restore_hidden = self.provider_restore_hides_terminal(id);
+            if restore_hidden && terminal.read(cx).focus.is_focused(window) {
+                window.blur();
+            }
+            let disabled = self.database_recovery.is_some()
+                || self.detached_path_invalid(id).unwrap_or(disabled)
+                || self.read_only.is_some()
+                || self.environment_unavailable(id)
+                || blocked
+                || restore_hidden
+                || (self.settings.is_some() && !self.wiring.is_detached(id))
+                || self.egress_frozen(id)
+                || self
+                    .history_request
+                    .as_ref()
+                    .is_some_and(|request| request.session_id == *id);
+            terminal.update(cx, |terminal, cx| {
+                terminal.set_transport_available(!blocked && self.read_only.is_none(), cx);
+                terminal.set_input_disabled(disabled, cx);
+            });
+        }
+    }
+
+    fn is_deferred(&self, id: &str) -> bool {
+        self.recovery.get(id) == Some(&RecoveryState::Deferred)
+    }
+
+    /// The transient first-frame badge shared by the recovery water handoff and
+    /// ordinary card loading. Deferred/failed/archived cards own other surfaces.
+    fn loading_badge(
+        &self,
+        id: &str,
+        node: &Value,
+        awaiting_first_frame: bool,
+    ) -> Option<LoadingBadge> {
+        if !awaiting_first_frame || !self.recovery_water_needed(id, node) {
+            return None;
+        }
+        Some(
+            if matches!(self.recovery.get(id), Some(RecoveryState::Restoring))
+                || self.restoring_sessions.contains(id)
+            {
+                LoadingBadge::Recovering
+            } else {
+                LoadingBadge::Loading
+            },
+        )
+    }
+
+    /// Windows has no recovery water; the first non-empty grid recorded by the
+    /// shared frame handler is the equivalent visible-first-frame handoff.
+    /// `session_frames` alone is not enough because an accepted empty frame can
+    /// precede the first painted content.
+    #[cfg(not(target_os = "macos"))]
+    fn can_show_loading_badge(&self) -> bool {
+        !self.wiring.board_open
+            && self.read_only.is_none()
+            && self.active_path_valid()
+            && self
+                .hierarchy
+                .as_ref()
+                .is_some_and(|hierarchy| hierarchy.scene.is_some())
+            && !matches!(
+                self.commands.connection().1,
+                ConnectionPhase::Stopped | ConnectionPhase::Blocked(_)
+            )
+    }
+
+    fn request_deferred_preview(&mut self, id: &str) {
+        let Some(cwd) = self
+            .graph_node(id)
+            .filter(|node| node["currentMode"] == "claude-code")
+            .and_then(|node| node["cwd"].as_str())
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        if self
+            .deferred_previews
+            .get(id)
+            .is_some_and(|preview| preview.cwd == cwd)
+            || !self.domain_ready
+            || !self.transport_connected
+        {
+            return;
+        }
+        let loading = self
+            .commands
+            .send_at(
+                self.runtime_generation,
+                Command::GetDeferredRecoveryPreview {
+                    session_id: id.to_owned(),
+                },
+            )
+            .is_ok();
+        self.deferred_previews.insert(
+            id.to_owned(),
+            DeferredPreview {
+                cwd,
+                loading,
+                result: None,
+            },
+        );
+    }
+
+    fn deferred_card(&self, id: &str) -> Option<DeferredRecoveryCard> {
+        if !self.is_deferred(id) {
+            return None;
+        }
+        let node = self.graph_node(id)?;
+        let cwd = trimmed_graph_text(&node["cwd"]);
+        let state = self
+            .deferred_previews
+            .get(id)
+            .filter(|preview| Some(preview.cwd.as_str()) == cwd);
+        let result = state.and_then(|state| state.result.as_ref());
+        let (agent, agent_short) = match node["currentMode"].as_str() {
+            Some("claude-code") => (Some("Claude Code"), "Claude"),
+            Some("codex") => (Some("Codex"), "Codex"),
+            _ => (None, "Shell"),
+        };
+        let title = node["title"].as_str().unwrap_or(agent_short);
+        let task = self
+            .hierarchy
+            .as_ref()
+            .and_then(|h| h.task.as_ref())
+            .map(|task| task.title.trim())
+            .filter(|title| !title.is_empty());
+        let provider = trimmed_graph_text(&node["providerTitle"]);
+        let transcript = result
+            .and_then(|preview| preview.title.as_deref())
+            .filter(|title| !generic_agent_title(title, agent_short));
+        let display = match node["titleSource"].as_str() {
+            Some("default") => provider.or(transcript).or(task).unwrap_or(title),
+            None if generic_agent_title(title, agent_short) => {
+                provider.or(transcript).or(task).unwrap_or(title)
+            }
+            _ => title,
+        };
+        let subtitle = [provider, transcript, task]
+            .into_iter()
+            .flatten()
+            .find(|candidate| *candidate != display);
+        let mut replies: Vec<_> = result
+            .into_iter()
+            .flat_map(|preview| &preview.events)
+            .map(|event| {
+                let label = match event.kind.as_str() {
+                    "user" => self.locale.text("你", "You"),
+                    "assistant" => agent_short,
+                    "tool" => event
+                        .tool_name
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or(self.locale.text("工具", "Tool")),
+                    _ => self.locale.text("系统", "System"),
+                };
+                DeferredReply {
+                    kind: event.kind.clone(),
+                    label: label.into(),
+                    text: event.text.clone(),
+                }
+            })
+            .collect();
+        if replies.is_empty() {
+            replies.extend(
+                node["latestLines"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .rev()
+                    .filter_map(Value::as_str)
+                    .map(deferred_summary_text)
+                    .filter(|text| !text.is_empty())
+                    .take(4)
+                    .map(|text| DeferredReply {
+                        kind: "assistant".into(),
+                        label: agent_short.into(),
+                        text,
+                    }),
+            );
+            replies.reverse();
+        }
+        Some(DeferredRecoveryCard {
+            title: display.to_owned(),
+            subtitle: subtitle.map(str::to_owned),
+            cwd: result
+                .map(|detail| detail.cwd.as_str())
+                .filter(|cwd| !cwd.is_empty())
+                .or(cwd)
+                .map(str::to_owned),
+            agent,
+            updated_label: result.and_then(|detail| detail.updated_label.clone()),
+            replies,
+            loading: state.is_some_and(|state| state.loading),
+            can_open_history: deferred_history_provider(node).is_some(),
+            can_restore: self.launch_action_blocked_reason(id, node).is_none(),
+        })
+    }
+
+    fn restore_deferred_session(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.is_deferred(id)
+            && self
+                .graph_node(id)
+                .is_some_and(|node| self.launch_action_blocked_reason(id, node).is_none())
+        {
+            self.send(
+                Command::RetryRecovery {
+                    session_id: id.to_owned(),
+                },
+                cx,
+            );
+        }
+    }
+
+    fn recovery_blocked(&self, session_id: &str) -> bool {
+        self.read_only.is_none()
+            && (!self.domain_ready
+                || !self.transport_connected
+                || !self.session_frames.contains(session_id)
+                || !matches!(self.recovery.get(session_id), Some(RecoveryState::Ready)))
+    }
+
+    fn clear_start_failure_focus(&self, id: &str, window: &mut Window) {
+        if self
+            .start_failure_controls
+            .get(id)
+            .is_some_and(|controls| controls.iter().any(|focus| focus.is_focused(window)))
+        {
+            window.blur();
+        }
+    }
+
+    fn recovery_water_needed(&self, id: &str, node: &Value) -> bool {
+        node["archivedAt"].is_null()
+            && !self.environment_unavailable(id)
+            && fork_failure_copy(node).is_none()
+            && fork_progress_copy(node).is_none()
+            && Self::provider_restore_state(node) != Some("failed")
+            && !self.first_frame_content.contains(id)
+            && !self.storage_fault_sessions.contains(id)
+            && !matches!(
+                self.recovery.get(id),
+                Some(
+                    RecoveryState::Deferred
+                        | RecoveryState::Failed(_)
+                        | RecoveryState::StartFailed(_)
+                        | RecoveryState::Restarting(_)
+                )
+            )
+            && !matches!(node["workStatus"].as_str(), Some("error" | "exited"))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn recovery_water_covers_terminal(&self, id: &str) -> bool {
+        self.recovery_water.contains_key(id) && !self.first_frame_content.contains(id)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn recovery_water_window_visible(window: &Window) -> bool {
+        crate::macos::is_window_visible(window).unwrap_or_else(|error| {
+            eprintln!("Recovery water window visibility: {error:#}");
+            false
+        })
+    }
+
+    #[cfg(target_os = "macos")]
+    fn recovery_water_available(&self, window: &Window) -> bool {
+        self.active_path_valid()
+            && self.hierarchy.as_ref().is_some_and(|h| h.scene.is_some())
+            && !matches!(
+                self.commands.connection().1,
+                ConnectionPhase::Stopped | ConnectionPhase::Blocked(_)
+            )
+            && Self::recovery_water_window_visible(window)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn prune_recovery_water(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.recovery_water.is_empty() {
+            return;
+        }
+        let available = self.recovery_water_available(window);
+        self.retain_recovery_water(window, cx, |this, id| {
+            available
+                && this.graph["nodes"].as_array().is_some_and(|nodes| {
+                    nodes
+                        .iter()
+                        .find(|node| node["sessionId"].as_str() == Some(id))
+                        .is_some_and(|node| this.recovery_water_needed(id, node))
+                })
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    fn retain_recovery_water(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        mut keep: impl FnMut(&Self, &str) -> bool,
+    ) {
+        let mut water = std::mem::take(&mut self.recovery_water);
+        water.retain(|id, entity| {
+            if keep(self, id) {
+                true
+            } else {
+                entity.update(cx, |water, cx| water.unmount(window, cx));
+                false
+            }
+        });
+        self.recovery_water = water;
+        if self.recovery_water.is_empty() {
+            self.recovery_water_visibility = None;
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn watch_recovery_water_visibility(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if self.recovery_water.is_empty() || self.recovery_water_visibility.is_some() {
+            return;
+        }
+        // GPUI stops drawing hidden windows. An already inactive window can
+        // also hide without an activation callback. Only watch while mounted.
+        self.recovery_water_visibility = Some(cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
+                let keep = cx.update(|window, cx| {
+                    let visible = Self::recovery_water_window_visible(window);
+                    if !visible {
+                        let _ = this.update(cx, |this, cx| {
+                            this.retain_recovery_water(window, cx, |_, _| false);
+                            cx.notify();
+                        });
+                    }
+                    visible
+                });
+                if !matches!(keep, Ok(true)) {
+                    break;
+                }
+            }
+        }));
+    }
+
+    fn workspace_invalid(&self, workspace_id: &str) -> bool {
+        self.workspace_paths
+            .iter()
+            .any(|state| state.workspace_id == workspace_id && state.status == "invalid")
+    }
+
+    fn finish_directory_choice(
+        &mut self,
+        generation: u64,
+        root_directory: String,
+        workspace_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.runtime_generation != generation || self.commands.connection().0 != generation {
+            return;
+        }
+        if let Some(workspace_id) = workspace_id {
+            self.send(
+                Command::RelinkWorkspace {
+                    workspace_id,
+                    root_directory,
+                },
+                cx,
+            );
+        } else {
+            self.creating_workspace = true;
+            self.send(Command::CreateWorkspace { root_directory }, cx);
+        }
+        cx.notify();
+    }
+    fn choose_workspace_directory(&mut self, cx: &mut Context<Self>) {
+        if self.read_only.is_some() {
+            return;
+        }
+        if self.creating_workspace {
+            return;
+        }
+        let picker = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: None,
+        });
+        let generation = self.runtime_generation;
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(mut paths))) = picker.await else {
+                return;
+            };
+            let Some(path) = paths.pop() else {
+                return;
+            };
+            let root_directory = path.to_string_lossy().into_owned();
+            let _ = this.update(cx, |this, cx| {
+                this.finish_directory_choice(generation, root_directory, None, cx)
+            });
+        })
+        .detach();
+    }
+
+    fn relink_workspace_directory(&mut self, workspace_id: String, cx: &mut Context<Self>) {
+        if self.read_only.is_some() {
+            return;
+        }
+        let picker = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: None,
+        });
+        let generation = self.runtime_generation;
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(mut paths))) = picker.await else {
+                return;
+            };
+            let Some(path) = paths.pop() else {
+                return;
+            };
+            let root_directory = path.to_string_lossy().into_owned();
+            let _ = this.update(cx, |this, cx| {
+                this.finish_directory_choice(generation, root_directory, Some(workspace_id), cx)
+            });
+        })
+        .detach();
+    }
+
+    fn open_workspace_menu(&mut self, workspace_id: &str, cx: &mut Context<Self>) {
+        if self
+            .workspace_menu
+            .as_ref()
+            .is_some_and(|menu| menu.0 == workspace_id)
+        {
+            self.workspace_menu = None;
+        } else if let Some(bounds) = self.workspace_bounds.get(workspace_id) {
+            self.workspace_menu = Some((
+                workspace_id.into(),
+                point(
+                    bounds.right() + px(6.),
+                    bounds.top() + bounds.size.height / 2.,
+                ),
+                (0..5).map(|_| cx.focus_handle().tab_stop(true)).collect(),
+            ));
+        }
+        self.task_menu = None;
+        self.tab_menu = None;
+        self.hidden_tabs = None;
+        cx.notify();
+    }
+
+    fn open_workspace_remove(
+        &mut self,
+        workspace_id: String,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.read_only.is_some() {
+            return;
+        }
+        self.dialog = Some(TabDialog::RemoveWorkspace { workspace_id, name });
+        self.dialog_controls = (0..3).map(|_| cx.focus_handle().tab_stop(true)).collect();
+        window.focus(&self.dialog_controls[0]);
+        self.workspace_menu = None;
+        cx.notify();
+    }
+
+    fn workspace_group(
+        &self,
+        workspace: &HierarchyWorkspace,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let palette = self.theme_palette();
+        let sidebar_palette = palette.sidebar;
+        let active = self
+            .hierarchy
+            .as_ref()
+            .and_then(|h| h.workspace.as_ref())
+            .is_some_and(|w| w.id == workspace.id);
+        let invalid = self.workspace_invalid(&workspace.id);
+        let collapsed = self.workspace_collapsed.contains(&workspace.id);
+        let menu_open = self
+            .workspace_menu
+            .as_ref()
+            .is_some_and(|menu| menu.0 == workspace.id);
+        let hovered = self.workspace_hover.as_ref() == Some(&workspace.id);
+        let actions_visible = active || hovered || menu_open;
+        let controls = &self.workspace_controls[&workspace.id];
+        let id = workspace.id.clone();
+        let hover_id = id.clone();
+        let toggle_id = id.clone();
+        let add_id = id.clone();
+        let menu_id = id.clone();
+        let bounds_id = id.clone();
+        let view = cx.entity().downgrade();
+        let now = self.motion_clock.elapsed().as_secs_f64() * 1000.;
+        let scale = self
+            .workspace_drag_motion
+            .get(&id)
+            .map(|motion| motion.scale.value(now) as f32)
+            .unwrap_or(1.);
+        let opacity = self
+            .workspace_drag_motion
+            .get(&id)
+            .map(|motion| motion.opacity.value(now) as f32)
+            .unwrap_or(1.);
+        let group_bounds = self.workspace_group_bounds.get(&id).copied();
+        let task_count = self
+            .tasks
+            .iter()
+            .filter(|task| task.workspace_id == id)
+            .count();
+        let group_height = px(34.
+            + if collapsed {
+                0.
+            } else {
+                2. + task_count as f32 * 34. + task_count.saturating_sub(1) as f32
+            });
+        let group_measure_id = id.clone();
+        let content_measure_id = id.clone();
+        let content_measure_view = cx.entity().downgrade();
+        let press_id = id.clone();
+        let measure_view = cx.entity().downgrade();
+        let task_active = self
+            .hierarchy
+            .as_ref()
+            .and_then(|h| h.task.as_ref())
+            .map(|t| &t.id);
+        let snapshot = WorkspaceDragSnapshot {
+            name: workspace.name.clone(),
+            active,
+            collapsed,
+            is_default: workspace.is_default,
+            is_pinned: workspace.is_pinned,
+            invalid,
+            actions_visible,
+            header_hovered: group_bounds.is_some_and(|bounds| {
+                bounds.contains(&window.mouse_position())
+                    && window.mouse_position().y < bounds.top() + px(34.)
+            }),
+            tasks: self
+                .tasks
+                .iter()
+                .filter(|task| task.workspace_id == workspace.id)
+                .map(|task| WorkspaceDragTask {
+                    title: task.title.clone(),
+                    active: task_active == Some(&task.id),
+                    is_pinned: task.is_pinned,
+                    menu_visible: task_active == Some(&task.id)
+                        || self.task_hover.as_ref() == Some(&task.id)
+                        || self.task_menu.as_ref().is_some_and(|m| m.0 == task.id),
+                    hovered: self.task_hover.as_ref() == Some(&task.id),
+                })
+                .collect(),
+        };
+
+        let toggle = self.button_inner(
+            div()
+                .id(SharedString::from(format!("workspace-toggle:{id}")))
+                .h(px(34. * scale))
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .pl(px(7. * scale))
+                .pr(px(5. * scale))
+                .gap(px(7. * scale))
+                .cursor_pointer()
+                .child(icon(
+                    if collapsed {
+                        "chevron-right"
+                    } else {
+                        "chevron-down"
+                    },
+                    14. * scale,
+                    rgba(sidebar_palette.chevron),
+                ))
+                .child(icon(
+                    "folder",
+                    16. * scale,
+                    rgba(if active {
+                        sidebar_palette.accent_icon
+                    } else {
+                        sidebar_palette.icon
+                    }),
+                ))
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_size(px(13. * scale))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgba(if active {
+                            sidebar_palette.task_active_text
+                        } else {
+                            sidebar_palette.workspace_name
+                        }))
+                        .child(ui_text(workspace.name.clone()).normal_line_height()),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap(px(6. * scale))
+                        .when(workspace.is_pinned, |status| {
+                            status.child(icon("pin", 13. * scale, rgba(sidebar_palette.icon_muted)))
+                        })
+                        .when(invalid, |status| {
+                            status.child(
+                                div()
+                                    .flex_none()
+                                    .px(px(4. * scale))
+                                    .py(px(1. * scale))
+                                    .rounded(px(4. * scale))
+                                    .bg(rgba(sidebar_palette.invalid_background))
+                                    .text_color(rgba(sidebar_palette.invalid_text))
+                                    .text_size(px(9. * scale))
+                                    .line_height(px(12.5 * scale))
+                                    .child(ui_text(self.locale.text("路径失效", "Invalid path"))),
+                            )
+                        }),
+                ),
+            &controls[0],
+            move |this, window, cx| {
+                if active {
+                    if !this.workspace_collapsed.remove(&toggle_id) {
+                        this.workspace_collapsed.insert(toggle_id.clone());
+                        this.reveal_task = None;
+                    }
+                    cx.notify();
+                } else {
+                    this.workspace_collapsed.remove(&toggle_id);
+                    this.send(
+                        Command::SelectWorkspace {
+                            workspace_id: toggle_id.clone(),
+                        },
+                        cx,
+                    );
+                    window.blur();
+                }
+            },
+            false,
+            cx,
+        );
+
+        let add_btn = div()
+            .id(SharedString::from(format!("workspace-add:{id}")))
+            .size(px(26. * scale))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(6. * scale))
+            .opacity(if invalid {
+                0.28
+            } else if actions_visible {
+                1.
+            } else {
+                0.
+            })
+            .when(!invalid, |btn| {
+                btn.cursor_pointer()
+                    .hover(|s| s.bg(rgba(sidebar_palette.control_hover)))
+            })
+            .when(invalid, |btn| btn.cursor(CursorStyle::OperationNotAllowed))
+            .child(icon("plus", 14. * scale, rgba(sidebar_palette.icon_muted)));
+        let add_el = if invalid {
+            add_btn.into_any_element()
+        } else {
+            self.mutation_button(
+                add_btn,
+                &controls[1],
+                move |this, window, cx| {
+                    this.send(
+                        Command::CreateTask {
+                            workspace_id: add_id.clone(),
+                        },
+                        cx,
+                    );
+                    window.blur();
+                },
+                cx,
+            )
+            .into_any_element()
+        };
+
+        let more_el = self.button(
+            div()
+                .id(SharedString::from(format!("workspace-more:{id}")))
+                .relative()
+                .size(px(26. * scale))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(6. * scale))
+                .opacity(if actions_visible { 1. } else { 0. })
+                .cursor_pointer()
+                .hover(|s| s.bg(rgba(sidebar_palette.control_hover)))
+                .child(icon(
+                    "ellipsis",
+                    14. * scale,
+                    rgba(sidebar_palette.icon_muted),
+                ))
+                .child(
+                    canvas(
+                        |_, _, _| (),
+                        move |bounds, _, _, cx| {
+                            let _ = view.update(cx, |this, _| {
+                                this.workspace_bounds.insert(bounds_id.clone(), bounds);
+                            });
+                        },
+                    )
+                    .absolute()
+                    .inset_0()
+                    .size_full(),
+                ),
+            &controls[3],
+            move |this, _, cx| {
+                this.open_workspace_menu(&menu_id, cx);
+            },
+            cx,
+        );
+
+        let header = div()
+            .min_h(px(34. * scale))
+            .flex()
+            .items_center()
+            .rounded(px(8. * scale))
+            .when(!active, |header| {
+                header.hover(|s| s.bg(rgba(sidebar_palette.action_hover)))
+            })
+            .child(toggle)
+            .child(add_el)
+            .when(invalid && !workspace.is_default, |header| {
+                let relink_id = id.clone();
+                header.child(
+                    self.button(
+                        div()
+                            .id(SharedString::from(format!("workspace-relink:{id}")))
+                            .h(px(24. * scale))
+                            .flex_none()
+                            .px(px(7. * scale))
+                            .rounded(px(6. * scale))
+                            .border(px(scale))
+                            .border_color(rgba(sidebar_palette.relink_line))
+                            .bg(rgba(sidebar_palette.relink_background))
+                            .text_color(rgba(sidebar_palette.relink_text))
+                            .text_size(px(9. * scale))
+                            .line_height(px(12.5 * scale))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgba(sidebar_palette.relink_hover)))
+                            .child(ui_text(self.locale.text("恢复目录", "Restore directory"))),
+                        &controls[2],
+                        move |this, _, cx| {
+                            this.relink_workspace_directory(relink_id.clone(), cx);
+                        },
+                        cx,
+                    ),
+                )
+            })
+            .child(more_el);
+
+        let content = div()
+            .relative()
+            .when(active, |content| {
+                content.child(workspace_drag::active_marker(scale))
+            })
+            .child(header)
+            .child(canvas(|_, _, _| (), move |bounds, _, _, cx| {
+                #[cfg(debug_assertions)]
+                let _ = content_measure_view.update(cx, |this, _| {
+                    if let Some(trace) = &this.motion_trace {
+                        let now = this.motion_clock.elapsed().as_secs_f64() * 1000.;
+                        record_motion(trace, &serde_json::json!({"kind":"workspace-drag-frame","at":now,"workspace":content_measure_id,"scale":scale,"opacity":opacity,"bounds":{"x":f32::from(bounds.origin.x),"y":f32::from(bounds.origin.y),"width":f32::from(bounds.size.width),"height":f32::from(bounds.size.height)}}));
+                    }
+                });
+            }).absolute().inset_0().size_full())
+            .when(!collapsed, |content| {
+                content.child(
+                    div()
+                        .ml(px(17. * scale))
+                        .pt(px(2. * scale))
+                        .flex()
+                        .flex_col()
+                        .gap(px(scale))
+                        .children(
+                            self.tasks
+                                .iter()
+                                .filter(|task| task.workspace_id == workspace.id)
+                                .map(|task| self.task_row(task, scale, cx).into_any_element()),
+                        ),
+                )
+            });
+        let group = div()
+            .id(SharedString::from(format!("workspace:{id}")))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, _, _| {
+                    this.workspace_drag_press = Some((press_id.clone(), event.position));
+                }),
+            )
+            .relative()
+            // Adjacent block margins collapse in the source: max(8px, 1px).
+            // The native flex wrapper must account for that explicitly.
+            .mt(px(
+                if self.workspaces.first().is_some_and(|first| first.id == id) {
+                    1.
+                } else {
+                    0.
+                },
+            ))
+            .mb(px(8.))
+            .when_some(
+                self.workspace_drag_motion.get(id.as_str()),
+                |group, motion| {
+                    let mut background: Hsla = rgb(0x58a6ff).into();
+                    background.a = if active {
+                        0.
+                    } else {
+                        0.1 * motion.background.value(now) as f32
+                    };
+                    group.opacity(opacity).bg(background)
+                },
+            )
+            .when(
+                cx.has_active_drag() && self.workspace_drag_target.as_ref() == Some(&id),
+                |group| {
+                    group.child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .w_full()
+                            .h(px(1.))
+                            .bg(rgb(0x4697e8)),
+                    )
+                },
+            )
+            .on_hover(cx.listener(move |this, hovered, _, cx| {
+                if *hovered {
+                    this.workspace_hover = Some(hover_id.clone());
+                } else if this.workspace_hover.as_ref() == Some(&hover_id) {
+                    this.workspace_hover = None;
+                }
+                cx.notify();
+            }))
+            .child(if scale != 1. {
+                if let Some(bounds) = group_bounds {
+                    content
+                        .absolute()
+                        .left(bounds.size.width * ((1. - scale) * 0.5))
+                        .top(group_height * ((1. - scale) * 0.5))
+                        .w(bounds.size.width * scale)
+                } else {
+                    content
+                }
+            } else {
+                content
+            })
+            .when(scale != 1., |group| {
+                group.when_some(group_bounds, |group, _| group.h(group_height))
+            })
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |bounds, _, _, cx| {
+                        let _ = measure_view.update(cx, |this, _| {
+                            this.workspace_group_bounds
+                                .insert(group_measure_id.clone(), bounds);
+                        });
+                    },
+                )
+                .absolute()
+                .inset_0()
+                .size_full(),
+            );
+
+        if workspace.is_pinned && self.read_only.is_none() {
+            let drag_target = workspace.id.clone();
+            let move_target = drag_target.clone();
+            let view = cx.entity().downgrade();
+            group
+                .on_drag(
+                    WorkspaceDrag {
+                        workspace_id: workspace.id.clone(),
+                        snapshot,
+                        offset: Point::default(),
+                        width: group_bounds
+                            .map(|bounds| bounds.size.width)
+                            .unwrap_or_else(|| self.sidebar_scroll.bounds().size.width - px(12.)),
+                    },
+                    move |info, cursor_offset, window, cx| {
+                        let mut preview = info.clone();
+                        let _ = view.update(cx, |this, cx| {
+                            if let Some((id, press)) = this.workspace_drag_press.take() {
+                                if id == info.workspace_id {
+                                    // GPUI anchors at the threshold-crossing move; the source
+                                    // browser anchors its drag image at the original press.
+                                    let origin = window.mouse_position() - cursor_offset;
+                                    preview.offset = cursor_offset - (press - origin);
+                                }
+                            }
+                            this.workspace_drag_gesture = true;
+                            this.workspace_drag_source = Some(info.workspace_id.clone());
+                            this.workspace_drag_target = None;
+                            cx.notify();
+                        });
+                        cx.new(|_| preview)
+                    },
+                )
+                .on_drag_move(cx.listener(
+                    move |this, event: &DragMoveEvent<WorkspaceDrag>, _, cx| {
+                        if event.bounds.contains(&event.event.position)
+                            && this.sidebar_scroll.bounds().contains(&event.event.position)
+                            && event.drag(cx).workspace_id != move_target
+                            && this.workspace_drag_target.as_ref() != Some(&move_target)
+                        {
+                            this.workspace_drag_target = Some(move_target.clone());
+                            cx.notify();
+                        }
+                    },
+                ))
+                .on_drop(cx.listener(move |this, drag: &WorkspaceDrag, _, cx| {
+                    this.workspace_drag_source = None;
+                    this.workspace_drag_target = None;
+                    if drag.workspace_id != drag_target {
+                        this.send(
+                            Command::ReorderPinnedWorkspace {
+                                workspace_id: drag.workspace_id.clone(),
+                                before_workspace_id: Some(drag_target.clone()),
+                            },
+                            cx,
+                        );
+                    }
+                }))
+                .into_any_element()
+        } else {
+            group.into_any_element()
+        }
+    }
+
+    fn sidebar(&self, window: &Window, cx: &mut Context<Self>) -> Div {
+        let palette = self.theme_palette();
+        let sidebar_palette = palette.sidebar;
+        let background = rgba(sidebar_palette.background);
+        #[cfg(debug_assertions)]
+        crate::settings_shell::probe_workspace_surfaces(|probe| probe.sidebar = Some(background));
+        // At 720 the English title must stay whole. Reclaim only the button's
+        // own padding/gap and a little of the traffic-light reserve on the
+        // left; the bell keeps its existing rect and click target.
+        let new_workspace = div()
+            .id("new-workspace-btn")
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .pl(px(4.))
+            .pr(px(1.))
+            .py(px(7.))
+            .rounded(px(7.))
+            .text_color(rgba(sidebar_palette.new_workspace))
+            .text_size(px(14.))
+            .font_weight(FontWeight::SEMIBOLD)
+            .when(!self.creating_workspace, |btn| {
+                btn.cursor_pointer()
+                    .hover(|s| s.bg(rgba(sidebar_palette.action_hover)))
+            })
+            .when(self.creating_workspace, |btn| btn.opacity(0.6))
+            .child(icon("square-pen", 17., rgba(sidebar_palette.new_workspace)))
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(ui_text(if self.creating_workspace {
+                        self.locale.text("正在添加…", "Adding…")
+                    } else {
+                        self.locale.text("新增工作空间", "New workspace")
+                    })),
+            );
+        let new_workspace = if self.creating_workspace {
+            self.focus_control(new_workspace, &self.control_focus["new-workspace"])
+        } else {
+            self.mutation_button(
+                new_workspace,
+                &self.control_focus["new-workspace"],
+                |this, _, cx| this.choose_workspace_directory(cx),
+                cx,
+            )
+        };
+        let header = div()
+            .h(px(NOTIFICATION_UI_SIDEBAR_HEADER_HEIGHT))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_between()
+            .pl(px(if cfg!(target_os = "macos") { 74. } else { 12. }))
+            .pr(px(NOTIFICATION_UI_SIDEBAR_RIGHT_PADDING))
+            .gap(px(4.))
+            .child(new_workspace);
+        #[cfg(target_os = "windows")]
+        let header = header.child(
+            div()
+                .id("windows-sidebar-drag")
+                .flex_1()
+                .h_full()
+                .window_control_area(WindowControlArea::Drag)
+                .occlude(),
+        );
+        div()
+            .w(px(NOTIFICATION_UI_SIDEBAR_WIDTH))
+            .h_full()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .border_r_1()
+            .border_color(rgba(sidebar_palette.divider))
+            .bg(background)
+            .child(header.child(self.notification_bell(cx)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_row()
+                    .child(
+                        div()
+                            .id("sidebar-groups")
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.sidebar_scroll)
+                            .px(px(6.))
+                            .pt(px(8.))
+                            .pb(px(20.))
+                            .child(
+                                // GPUI measures child border boxes for scroll extent. Keep the
+                                // group's CSS margins inside a flex wrapper so they count too.
+                                div().flex().flex_col().children(
+                                    self.workspaces.iter().map(|workspace| {
+                                        self.workspace_group(workspace, window, cx)
+                                    }),
+                                ),
+                            ),
+                    )
+                    .when(self.sidebar_overflow, |row| {
+                        row.child(sidebar_scrollbar::scrollbar(
+                            self.sidebar_scroll.clone(),
+                            self.sidebar_scrollbar,
+                            self.dialog.is_none()
+                                && self.hidden_tabs.is_none()
+                                && self.workspace_menu.is_none()
+                                && self.task_menu.is_none()
+                                && self.tab_menu.is_none(),
+                            cx.entity().downgrade(),
+                        ))
+                    }),
+            )
+            .child(
+                div()
+                    .h(px(38.))
+                    .flex_none()
+                    .px(px(8.))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .text_size(px(12.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgba(sidebar_palette.toolbar_text))
+                    .child(
+                        self.mutation_button(
+                            div()
+                                .id("sidebar-board")
+                                .relative()
+                                .children(workspace_wiring::wiring_probe_bounds(
+                                    "sidebar-board".into(),
+                                ))
+                                .cursor_pointer()
+                                .h(px(30.))
+                                .px(px(10.))
+                                .flex()
+                                .items_center()
+                                .gap(px(7.))
+                                .child(icon("columns-3", 16., rgba(sidebar_palette.toolbar_text)))
+                                .child(if self.wiring.board_open {
+                                    self.locale.text("画布", "Canvas")
+                                } else {
+                                    self.locale.text("看板", "Board")
+                                }),
+                            &self.control_focus["sidebar-board"],
+                            Self::toggle_board,
+                            cx,
+                        ),
+                    )
+                    .child(self.button(
+                        settings_button(self.settings.is_some(), self.locale),
+                        &self.control_focus["settings"],
+                        Self::toggle_settings,
+                        cx,
+                    )),
+            )
+    }
+
+    fn task_row(&self, task: &Task, scale: f32, cx: &mut Context<Self>) -> Stateful<Div> {
+        let palette = self.theme_palette();
+        let sidebar_palette = palette.sidebar;
+        let active = self
+            .hierarchy
+            .as_ref()
+            .and_then(|h| h.task.as_ref())
+            .is_some_and(|t| t.id == task.id);
+        let focus = &self.task_controls[&task.id];
+        let id = task.id.clone();
+        let menu_id = id.clone();
+        let right_id = id.clone();
+        let hover_id = id.clone();
+        let bounds_id = id.clone();
+        let reveal_id = id.clone();
+        let view = cx.entity().downgrade();
+        let reveal_view = view.clone();
+        let menu_visible = active
+            || self.task_hover.as_ref() == Some(&id)
+            || self.task_menu.as_ref().is_some_and(|m| m.0 == id);
+        let color = if active {
+            sidebar_palette.task_active_text
+        } else {
+            sidebar_palette.task_text
+        };
+        let row = self
+            .focus_control(
+                div().id(SharedString::from(format!("task:{id}"))),
+                &focus[0],
+            )
+            .relative()
+            .h(px(34. * scale))
+            .flex_none()
+            .rounded(px(8. * scale))
+            .flex()
+            .items_center()
+            .px(px(7. * scale))
+            .py(px(6. * scale))
+            .gap(px(7. * scale))
+            .text_size(px(13. * scale))
+            .line_height(px(19.5 * scale))
+            .text_color(rgba(color))
+            .bg(if active {
+                rgba(sidebar_palette.task_active)
+            } else {
+                rgba(0x00000000)
+            })
+            .hover(|s| s.bg(rgba(sidebar_palette.task_hover)))
+            .on_mouse_down(MouseButton::Left, {
+                let focus = focus[0].clone();
+                move |_, window, _| window.focus(&focus)
+            })
+            .on_click(cx.listener(move |this, event, window, cx| {
+                if !matches!(event, ClickEvent::Keyboard(_)) && !this.workspace_drag_gesture {
+                    this.select_sidebar_task(id.clone(), window, cx);
+                }
+            }))
+            .on_key_down(cx.listener({
+                let id = task.id.clone();
+                move |this, e: &KeyDownEvent, window, cx| {
+                    if matches!(e.keystroke.key.as_str(), "enter" | "space")
+                        && !e.keystroke.modifiers.modified()
+                    {
+                        cx.stop_propagation();
+                        this.select_sidebar_task(id.clone(), window, cx);
+                    }
+                }
+            }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, _, window, cx| {
+                    window.focus(&this.task_controls[&right_id][0]);
+                    this.open_task_menu(&right_id, false, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .on_hover(cx.listener(move |this, hovered, _, cx| {
+                this.task_hover = if *hovered {
+                    Some(hover_id.clone())
+                } else {
+                    None
+                };
+                cx.notify();
+            }))
+            .child(icon("task", 12. * scale, rgba(color)))
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_w_0()
+                    .line_height(px(19.5 * scale))
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(ui_text(task.title.clone()))
+                    .child(
+                        canvas(
+                            |_, _, _| (),
+                            move |bounds, _, _, cx| {
+                                let _ = reveal_view.update(cx, |this, cx| {
+                                    if this.reveal_task.as_ref() == Some(&reveal_id) {
+                                        this.reveal_task = None;
+                                        let viewport = this.sidebar_scroll.bounds();
+                                        let delta = if bounds.top() < viewport.top() {
+                                            viewport.top() - bounds.top()
+                                        } else if bounds.bottom() > viewport.bottom() {
+                                            viewport.bottom() - bounds.bottom()
+                                        } else {
+                                            px(0. * scale)
+                                        };
+                                        if delta != px(0. * scale) {
+                                            let offset = this.sidebar_scroll.offset();
+                                            let max_y = this.sidebar_scroll.max_offset().height;
+                                            let next_y =
+                                                (offset.y + delta).clamp(-max_y, px(0. * scale));
+                                            this.sidebar_scroll.set_offset(point(offset.x, next_y));
+                                            cx.notify();
+                                        }
+                                    }
+                                });
+                            },
+                        )
+                        .absolute()
+                        .inset_0()
+                        .size_full(),
+                    ),
+            )
+            .when(task.is_pinned, |row| {
+                row.child(icon("pin", 13. * scale, rgba(sidebar_palette.icon_muted)))
+            })
+            .child(
+                self.button(
+                    div()
+                        .id(SharedString::from(format!("task-more:{}", task.id)))
+                        .size(px(22. * scale))
+                        .flex_none()
+                        .rounded(px(4. * scale))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .opacity(if menu_visible { 1. } else { 0. })
+                        .cursor_pointer()
+                        .hover(|s| s.bg(rgba(sidebar_palette.control_hover)))
+                        .child(icon("ellipsis", 14. * scale, rgba(sidebar_palette.icon))),
+                    &focus[1],
+                    move |this, _, cx| this.open_task_menu(&menu_id, true, cx),
+                    cx,
+                ),
+            )
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |bounds, _, _, cx| {
+                        let _ = view.update(cx, |this, _| {
+                            this.task_bounds.insert(bounds_id.clone(), bounds);
+                        });
+                    },
+                )
+                .absolute()
+                .inset_0()
+                .size_full(),
+            );
+        if task.is_pinned && self.read_only.is_none() {
+            let target = task.id.clone();
+            let workspace_id = task.workspace_id.clone();
+            row.on_drag(
+                TaskDrag {
+                    task_id: task.id.clone(),
+                    workspace_id: workspace_id.clone(),
+                    title: task.title.clone(),
+                },
+                |info, _, _, cx| cx.new(|_| info.clone()),
+            )
+            .drag_over::<TaskDrag>(|s, _, _, _| s.bg(rgba(0x58a6ff24)))
+            .on_drop(cx.listener(move |this, drag: &TaskDrag, _, cx| {
+                if drag.workspace_id == workspace_id && drag.task_id != target {
+                    this.send(
+                        Command::ReorderPinnedTask {
+                            workspace_id: workspace_id.clone(),
+                            task_id: drag.task_id.clone(),
+                            before_task_id: Some(target.clone()),
+                        },
+                        cx,
+                    );
+                }
+            }))
+        } else {
+            row
+        }
+    }
+
+    fn open_task_menu(&mut self, task_id: &str, more_button: bool, cx: &mut Context<Self>) {
+        if self
+            .task_menu
+            .as_ref()
+            .is_some_and(|menu| menu.0 == task_id)
+        {
+            self.task_menu = None;
+        } else if let Some(bounds) = self.task_bounds.get(task_id) {
+            self.task_menu = Some((
+                task_id.into(),
+                point(
+                    bounds.right() + px(if more_button { -1. } else { 6. }),
+                    bounds.top() + bounds.size.height / 2.,
+                ),
+                (0..3).map(|_| cx.focus_handle().tab_stop(true)).collect(),
+            ));
+        }
+        self.workspace_menu = None;
+        self.tab_menu = None;
+        self.hidden_tabs = None;
+        cx.notify();
+    }
+
+    fn open_task_rename(&mut self, task_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only.is_some() {
+            return;
+        }
+        let Some(task) = self.tasks.iter().find(|task| task.id == task_id) else {
+            return;
+        };
+        let dark = self.wiring_dark();
+        let input = cx.new(|cx| {
+            let mut input = RenameInput::new(task.title.clone(), cx);
+            input.placeholder = "请输入事项名称".into();
+            input.set_dialog_theme(dark);
+            input
+        });
+        self.dialog_controls = (0..3).map(|_| cx.focus_handle().tab_stop(true)).collect();
+        self.dialog_subscription =
+            Some(
+                cx.subscribe_in(&input, window, |this, _, event, window, cx| match event {
+                    RenameInputEvent::Changed => {
+                        if let Some(TabDialog::RenameTask {
+                            empty_submitted, ..
+                        }) = &mut this.dialog
+                        {
+                            *empty_submitted = false;
+                        }
+                        cx.notify();
+                    }
+                    RenameInputEvent::Cancel => this.close_dialog(window, cx),
+                    RenameInputEvent::Confirm => this.confirm_dialog(window, cx),
+                }),
+            );
+        window.focus(&input.read(cx).focus);
+        self.dialog = Some(TabDialog::RenameTask {
+            task_id,
+            input,
+            empty_submitted: false,
+            failure: None,
+        });
+        self.task_menu = None;
+        cx.notify();
+    }
+
+    fn task_rename_error(&self, task_id: &str, value: &str) -> Option<String> {
+        let workspace_id = self
+            .tasks
+            .iter()
+            .find(|task| task.id == task_id)
+            .map(|task| task.workspace_id.as_str());
+        self.tasks
+            .iter()
+            .any(|task| {
+                task.id != task_id
+                    && workspace_id.is_none_or(|ws| task.workspace_id == ws)
+                    && task.title == value
+            })
+            .then(|| format!("当前工作区下已存在名为\"{value}\"的工作台"))
+    }
+
+    fn open_task_delete(&mut self, task_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only.is_some() {
+            return;
+        }
+        let Some(task) = self.tasks.iter().find(|task| task.id == task_id) else {
+            return;
+        };
+        self.dialog = Some(TabDialog::DeleteTask {
+            task_id,
+            title: task.title.clone(),
+        });
+        self.dialog_controls = (0..3).map(|_| cx.focus_handle().tab_stop(true)).collect();
+        window.focus(&self.dialog_controls[0]);
+        self.task_menu = None;
+        cx.notify();
+    }
+
+    fn scene_title(&self, scene: &Scene) -> String {
+        if !scene.title_pinned
+            && scene.name.starts_with("Shell · ")
+            && self
+                .hierarchy
+                .as_ref()
+                .and_then(|h| h.scene.as_ref())
+                .is_some_and(|s| s.id == scene.id)
+        {
+            if let Some(cwd) = self.graph["nodes"]
+                .as_array()
+                .and_then(|nodes| {
+                    nodes
+                        .iter()
+                        .find(|n| n["sessionId"].as_str() == self.focused.as_deref())
+                })
+                .and_then(|n| n["cwd"].as_str())
+            {
+                return format!("Shell · {cwd}");
+            }
+        }
+        // `新画布` / `新画布 2` are generated by the runtime for unpinned
+        // default canvases. Translate them at display time only; a pinned or
+        // manually named scene keeps its exact stored title.
+        let name = scene.name.clone();
+        if self.locale != InterfaceLocale::English || scene.title_pinned {
+            return name;
+        }
+        let Some(rest) = name.strip_prefix("新画布") else {
+            return name;
+        };
+        if rest.is_empty() {
+            return "New canvas".to_owned();
+        }
+        let Some(suffix) = rest.strip_prefix(' ') else {
+            return name;
+        };
+        if !suffix.is_empty() && suffix.chars().all(|character| character.is_ascii_digit()) {
+            format!("New canvas {suffix}")
+        } else {
+            name
+        }
+    }
+
+    fn close_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let dialog = self.dialog.take();
+        if let Some(TabDialog::SessionLoader(state)) = &dialog
+            && !state.history
+        {
+            let mut remembered = state.remembered.clone();
+            remembered.provider = Some(state.provider);
+            remembered.set_selected(
+                state.provider,
+                state
+                    .restore_selection
+                    .clone()
+                    .or_else(|| state.selected.clone()),
+            );
+            remembered.focus = if state.list_focus.is_focused(window) {
+                LoaderFocus::List
+            } else if state.content_input.read(cx).focus.is_focused(window) {
+                LoaderFocus::Content
+            } else {
+                self.dialog_controls
+                    .iter()
+                    .position(|focus| focus.is_focused(window))
+                    .filter(|index| *index != 0)
+                    .map_or(remembered.focus, LoaderFocus::Control)
+            };
+            self.loader_remembered
+                .insert(state.session_id.clone(), remembered);
+        }
+        self.dialog_subscription = None;
+        self.dialog_controls.clear();
+        let focus = match dialog {
+            Some(TabDialog::LastSession { return_focus, .. }) => return_focus,
+            Some(TabDialog::SessionLoader(state)) if state.history => self
+                .deferred_controls
+                .get(&state.session_id)
+                .map(|buttons| buttons[0].clone())
+                .or_else(|| self.card_history_controls.get(&state.session_id).cloned()),
+            Some(TabDialog::SessionLoader(state)) => {
+                self.card_controls.get(&state.session_id).cloned()
+            }
+            Some(TabDialog::Branch(state)) => self.card_controls.get(&state.session_id).cloned(),
+            Some(TabDialog::RenameSession { session_id, .. }) => {
+                self.card_controls.get(&session_id).cloned()
+            }
+            Some(TabDialog::PermissionMode(_)) => self
+                .permission_chip()
+                .filter(|chip| !chip.disabled)
+                .map(|_| self.control_focus["permission-mode"].clone()),
+            _ => None,
+        };
+        if let Some(focus) = focus {
+            window.focus(&focus);
+        } else {
+            window.blur();
+        }
+        cx.notify();
+    }
+    fn open_rename(&mut self, scene_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only.is_some() {
+            return;
+        }
+        let Some(scene) = self.scenes.iter().find(|s| s.id == scene_id) else {
+            return;
+        };
+        let text = self.scene_title(scene);
+        let input = self.open_title_input(text, window, cx);
+        self.dialog = Some(TabDialog::Rename { scene_id, input });
+        self.workspace_menu = None;
+        self.tab_menu = None;
+        self.hidden_tabs = None;
+        cx.notify();
+    }
+
+    fn open_session_rename(
+        &mut self,
+        session_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(title) = self
+            .renameable_card(&session_id)
+            .and_then(|node| node["title"].as_str())
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        self.dismiss_wiring_overlay(window, cx);
+        let input = self.open_title_input(title, window, cx);
+        input.update(cx, |input, _| {
+            input.placeholder = self.locale.text("会话名称", "Session name").into();
+        });
+        self.dialog = Some(TabDialog::RenameSession {
+            session_id,
+            input,
+            failure: None,
+        });
+        cx.notify();
+    }
+
+    fn open_title_input(
+        &mut self,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<RenameInput> {
+        let dark = self.wiring_dark();
+        let input = cx.new(|cx| {
+            let mut input = RenameInput::new(text, cx);
+            input.set_dialog_theme(dark);
+            input
+        });
+        self.dialog_controls = (0..3).map(|_| cx.focus_handle().tab_stop(true)).collect();
+        self.dialog_subscription =
+            Some(
+                cx.subscribe_in(&input, window, |this, _, event, window, cx| match event {
+                    RenameInputEvent::Changed => cx.notify(),
+                    RenameInputEvent::Cancel => this.close_dialog(window, cx),
+                    RenameInputEvent::Confirm => this.confirm_dialog(window, cx),
+                }),
+            );
+        window.focus(&input.read(cx).focus);
+        input
+    }
+    fn rename_error(&self, scene_id: &str, value: &str) -> Option<String> {
+        self.scenes
+            .iter()
+            .any(|s| s.id != scene_id && s.title_pinned && self.scene_title(s) == value)
+            .then(|| format!("当前事项下已存在名为\"{value}\"的标签页"))
+    }
+    fn confirm_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(TabDialog::PermissionMode(state)) = &self.dialog {
+            let request = self
+                .permission_confirmation_valid(state)
+                .then(|| (state.session_id.clone(), state.from, state.target));
+            self.close_dialog(window, cx);
+            if let Some((id, from, target)) = request {
+                self.send_permission_mode(id, from, target, window, cx);
+            }
+            return;
+        }
+        if matches!(self.dialog, Some(TabDialog::Branch(_))) {
+            self.submit_fork(window, cx);
+            return;
+        }
+        if let Some(TabDialog::RenameTask { task_id, input, .. }) = &self.dialog {
+            let task_id = task_id.clone();
+            let text = input.read(cx);
+            if text.composing() {
+                return;
+            }
+            let title = trim_name(&text.text).to_owned();
+            if title.is_empty() {
+                if let Some(TabDialog::RenameTask {
+                    empty_submitted, ..
+                }) = &mut self.dialog
+                {
+                    *empty_submitted = true;
+                }
+                cx.notify();
+                return;
+            }
+            if self.task_rename_error(&task_id, &title).is_none() {
+                self.send(Command::RenameTask { task_id, title }, cx);
+            }
+            return;
+        }
+        if let Some(TabDialog::RenameSession {
+            session_id, input, ..
+        }) = &self.dialog
+        {
+            let text = input.read(cx);
+            let title = trim_name(&text.text);
+            if !text.composing() && !title.is_empty() && self.renameable_card(session_id).is_some()
+            {
+                self.send(
+                    Command::SetSessionTitle {
+                        session_id: session_id.clone(),
+                        title: Some(title.to_owned()),
+                    },
+                    cx,
+                );
+            }
+            return;
+        }
+        if let Some(TabDialog::RemoveSession {
+            scene_id,
+            session_id,
+            scope,
+        }) = &self.dialog
+            && self.remove_empties_scene(session_id, *scope)
+        {
+            let (scene_id, session_id, scope) = (scene_id.clone(), session_id.clone(), *scope);
+            self.close_dialog(window, cx);
+            if scope == RemoveScope::NodeOnly || self.scene_membership_count() <= 1 {
+                self.request_close_session_by_id(&session_id, window, cx);
+            } else {
+                self.request_scene_close_preview(scene_id, cx);
+            }
+            return;
+        }
+        let command = match &self.dialog {
+            Some(TabDialog::RenameTask { .. } | TabDialog::RenameSession { .. }) => {
+                unreachable!("rename handled above")
+            }
+            Some(TabDialog::RemoveWorkspace { workspace_id, .. }) => {
+                Some(Command::RemoveWorkspace {
+                    workspace_id: workspace_id.clone(),
+                })
+            }
+            Some(TabDialog::DeleteTask { task_id, .. }) => Some(Command::DeleteTask {
+                task_id: task_id.clone(),
+            }),
+            Some(TabDialog::Rename { scene_id, input }) => {
+                let input = input.read(cx);
+                let name = trim_name(&input.text);
+                if input.composing()
+                    || name.is_empty()
+                    || self.rename_error(scene_id, name).is_some()
+                {
+                    return;
+                }
+                Some(Command::RenameScene {
+                    scene_id: scene_id.clone(),
+                    name: name.to_owned(),
+                })
+            }
+            Some(TabDialog::Close {
+                scene_id, is_last, ..
+            }) => {
+                if *is_last {
+                    None
+                } else {
+                    Some(Command::CloseScene {
+                        scene_id: scene_id.clone(),
+                        confirmed: true,
+                    })
+                }
+            }
+            Some(TabDialog::LastSession { .. }) => None,
+            Some(TabDialog::CloseSession {
+                scene_id,
+                session_id,
+                ..
+            }) => self
+                .card_action_available(session_id)
+                .then(|| Command::CloseSessionCard {
+                    scene_id: scene_id.clone(),
+                    session_id: session_id.clone(),
+                    confirmed_intent: Some(format!("delete-session:{session_id}")),
+                    preserve_scene_on_last_session: false,
+                }),
+            Some(TabDialog::RemoveSession {
+                scene_id,
+                session_id,
+                scope,
+            }) => self
+                .remove_session_available(session_id)
+                .then(|| Command::RemoveSessionBranch {
+                    scene_id: scene_id.clone(),
+                    session_id: session_id.clone(),
+                    scope: *scope,
+                }),
+            Some(
+                TabDialog::SessionLoader(_) | TabDialog::Branch(_) | TabDialog::PermissionMode(_),
+            )
+            | None => return,
+        };
+        self.close_dialog(window, cx);
+        if let Some(command) = command {
+            match command {
+                Command::CloseSessionCard {
+                    scene_id,
+                    session_id,
+                    ..
+                } if self.graph["workspaceSessionCount"].as_u64() == Some(1) => {
+                    self.open_last_session(scene_id, session_id, window, cx);
+                }
+                Command::CloseSessionCard { .. } | Command::RemoveSessionBranch { .. } => {
+                    self.send_card_action(command, cx);
+                }
+                _ => self.send(command, cx),
+            }
+        }
+    }
+    fn create_canvas(&mut self, cx: &mut Context<Self>) {
+        if self.read_only.is_some() {
+            return;
+        }
+        if !self.active_path_valid() {
+            return;
+        }
+        if let Some(task) = self.hierarchy.as_ref().and_then(|h| h.task.as_ref()) {
+            self.send(
+                Command::CreateCanvas {
+                    task_id: task.id.clone(),
+                },
+                cx,
+            );
+        }
+    }
+
+    fn create_shell_sibling(&mut self, cx: &mut Context<Self>) {
+        if !self.active_path_valid() || self.wiring.board_open {
+            return;
+        }
+        let (Some(scene), Some(source)) = (self.active_scene_id(), self.active_level_focus())
+        else {
+            return;
+        };
+        let command = Command::CreateShellSibling {
+            scene_id: scene.to_owned(),
+            source_session_id: source.to_owned(),
+            parent_session_id: self.level_parent().map(str::to_owned),
+        };
+        self.flush_geometry(cx);
+        if self
+            .commands
+            .send_at(self.runtime_generation, command)
+            .is_ok()
+        {
+            self.clear_pending_split();
+            cx.notify();
+        }
+    }
+
+    fn split_horizontal(&mut self, cx: &mut Context<Self>) {
+        if let Some(source) = self.active_level_focus().map(str::to_owned) {
+            self.split_pane(&source, SplitDirection::Horizontal, cx);
+        }
+    }
+
+    fn active_scene_id(&self) -> Option<&str> {
+        self.hierarchy
+            .as_ref()?
+            .scene
+            .as_ref()
+            .map(|scene| scene.id.as_str())
+    }
+
+    fn open_dag_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(scene) = self.active_scene_id() else {
+            return;
+        };
+        if self.graph["sceneId"].as_str() != Some(scene) {
+            return;
+        }
+        let nodes = session_levels::nodes(&self.graph);
+        let focused = self.focused.as_deref();
+        let target = if nodes.is_empty() {
+            focused
+        } else {
+            focused
+                .filter(|id| session_levels::node(nodes, id).is_some())
+                .or_else(|| {
+                    self.graph["focusedSessionId"]
+                        .as_str()
+                        .filter(|id| session_levels::node(nodes, id).is_some())
+                })
+                .or_else(|| {
+                    session_levels::children_of(nodes, None)
+                        .next()
+                        .or_else(|| nodes.first())
+                        .and_then(|node| node["sessionId"].as_str())
+                })
+        };
+        let Some(target) = target.map(str::to_owned) else {
+            return;
+        };
+        #[cfg(all(target_os = "macos", debug_assertions))]
+        let visible = self.dag_probe.is_none();
+        #[cfg(not(all(target_os = "macos", debug_assertions)))]
+        let visible = true;
+        let read_only = self.is_read_only();
+        let opened = if let Some(child) = self.dag_window
+            && let Ok(previous_viewport) = child.update(cx, |view, window, cx| {
+                let saved_viewport = self.geometry.get(&dag_window::viewport_owner_key(scene));
+                let previous_viewport = view.retarget(
+                    &self.graph,
+                    &target,
+                    saved_viewport,
+                    read_only,
+                    self.locale,
+                    window,
+                    cx,
+                );
+                if visible {
+                    window.activate_window();
+                }
+                previous_viewport
+            })
+        {
+            if let Some(update) = previous_viewport {
+                self.save_dag_viewport(update, cx);
+            }
+            Ok(child)
+        } else {
+            self.create_dag_window(&target, visible, window, cx)
+        };
+        match opened {
+            Ok(child) => {
+                self.dag_window = Some(child);
+                self.dismiss_dag_open_error(window, cx);
+            }
+            Err(error) => {
+                eprintln!("Open native session graph: {error:#}");
+                self.dag_window = None;
+                self.dag_open_error = true;
+                cx.notify();
+            }
+        }
+    }
+
+    fn create_dag_window(
+        &mut self,
+        target: &str,
+        visible: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<WindowHandle<DagWindow>> {
+        #[cfg(all(target_os = "macos", debug_assertions))]
+        if let Some(probe) = &mut self.dag_probe
+            && std::mem::take(&mut probe.fail_next_open)
+        {
+            anyhow::bail!("Injected DAG window creation failure");
+        }
+        DagWindow::open(
+            &self.graph,
+            target,
+            self.graph["sceneId"]
+                .as_str()
+                .and_then(|scene_id| self.geometry.get(&dag_window::viewport_owner_key(scene_id))),
+            self.locale,
+            self.theme.effective() == AppTheme::Dark,
+            visible,
+            window,
+            cx,
+        )
+    }
+
+    fn dismiss_dag_open_error(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.dag_open_error) {
+            if ["dag-open-retry", "dag-open-dismiss"]
+                .iter()
+                .any(|id| self.control_focus[id].is_focused(window))
+            {
+                window.focus(&self.control_focus["graph"]);
+            }
+            cx.notify();
+        }
+    }
+
+    fn dag_open_error_banner(&self, cx: &mut Context<Self>) -> Option<Div> {
+        self.dag_open_error.then(|| {
+            dag_window::render_open_failure(
+                self.locale,
+                self.button(
+                    dag_window::open_failure_retry_button(self.locale),
+                    &self.control_focus["dag-open-retry"],
+                    Self::open_dag_window,
+                    cx,
+                ),
+                self.button(
+                    dag_window::open_failure_dismiss_button(self.locale),
+                    &self.control_focus["dag-open-dismiss"],
+                    Self::dismiss_dag_open_error,
+                    cx,
+                ),
+            )
+        })
+    }
+
+    fn permission_blocked_reason(&self, id: &str, node: &Value) -> Option<&'static str> {
+        let (generation, phase) = self.commands.connection();
+        if self.read_only.is_some()
+            || matches!(&phase, ConnectionPhase::Blocked(block) if block.kind == StartupBlockKind::ReadOnly)
+        {
+            Some(self.locale.text(
+                STORAGE_READ_ONLY_TITLE,
+                "The database is in read-only recovery mode",
+            ))
+        } else if self.storage_fault_sessions.contains(id) {
+            Some(self.locale.text(
+                "终端存储异常，请先恢复或结束当前会话",
+                "Terminal storage failed. Recover or end the current session first.",
+            ))
+        } else if self.recovery_blocked(id)
+            || (node["currentMode"] == "codex"
+                && matches!(node["workStatus"].as_str(), Some("starting" | "exited")))
+            || generation != self.runtime_generation
+            || phase != ConnectionPhase::Ready
+            || matches!(
+                Self::provider_restore_state(node),
+                Some("restoring" | "failed")
+            )
+        {
+            Some(self.locale.text(
+                "当前终端需要先完成恢复",
+                "This terminal must finish recovering first.",
+            ))
+        } else {
+            self.card_mutation_blocked_reason(id, node)
+        }
+    }
+
+    fn permission_node(&self) -> Option<(&str, &Value)> {
+        let id = self.level_focus()?;
+        let node = self.graph_node(id)?;
+        PermissionMode::supported(node).map(|_| (id, node))
+    }
+
+    fn observed_permission(&self, id: &str, node: &Value) -> PermissionMode {
+        PermissionMode::observed(
+            node,
+            self.live_agent_hud(id)
+                .and_then(|hud| hud["permissionMode"].as_str())
+                .or_else(|| node["permissionMode"].as_str()),
+        )
+    }
+
+    fn permission_chip_for(&self, id: &str) -> Option<PermissionChip> {
+        let node = self.hud_node(id)?;
+        let change = self.permission_changes.get(id);
+        let mode = change.map_or_else(|| self.observed_permission(id, node), |change| change.from);
+        let blocked = self.permission_blocked_reason(id, node);
+        Some(PermissionChip {
+            modes: PermissionMode::supported(node)?,
+            mode,
+            title: blocked.map_or_else(
+                || match self.locale {
+                    InterfaceLocale::Chinese => format!("当前权限模式：{}，点击切换", mode.label()),
+                    InterfaceLocale::English => {
+                        format!("Permission mode: {} · Click to switch", mode.label())
+                    }
+                },
+                str::to_owned,
+            ),
+            disabled: blocked.is_some() || change.is_some() || self.is_stopped_session(id),
+        })
+    }
+
+    fn permission_chip(&self) -> Option<PermissionChip> {
+        self.permission_chip_for(self.level_focus()?)
+    }
+
+    fn footer_session(&self, window: &Window) -> Option<&str> {
+        self.detached_session_for_window(window.window_handle())
+            .or_else(|| self.level_focus())
+    }
+
+    fn permission_menu_open(&self, window: &Window) -> bool {
+        if self
+            .detached_session_for_window(window.window_handle())
+            .is_some()
+        {
+            self.detached_permission_menus
+                .contains(&window.window_handle())
+        } else {
+            self.permission_menu.is_some()
+        }
+    }
+
+    fn toggle_permission_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.permission_menu_open(window) {
+            self.dismiss_permission_menu(window, cx);
+            return;
+        }
+        let Some(id) = self
+            .footer_session(window)
+            .filter(|id| {
+                self.permission_chip_for(id)
+                    .is_some_and(|chip| !chip.disabled)
+            })
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        self.dismiss_footer_popover(window, cx);
+        if self
+            .detached_session_for_window(window.window_handle())
+            .is_some()
+        {
+            self.dismiss_hud_wiring_overlay(window, cx);
+            self.detached_permission_menus
+                .insert(window.window_handle());
+            cx.notify();
+        } else if self.dialog.is_none() {
+            self.dismiss_wiring_overlay(window, cx);
+            self.permission_menu = Some(id);
+            self.workspace_menu = None;
+            self.task_menu = None;
+            self.tab_menu = None;
+            self.hidden_tabs = None;
+            cx.notify();
+        }
+    }
+
+    fn dismiss_permission_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let removed = if self
+            .detached_session_for_window(window.window_handle())
+            .is_some()
+        {
+            self.detached_permission_menus
+                .remove(&window.window_handle())
+        } else {
+            self.permission_menu.take().is_some()
+        };
+        if removed {
+            if self
+                .footer_session(window)
+                .and_then(|id| self.permission_chip_for(id))
+                .is_some_and(|chip| !chip.disabled)
+            {
+                window.focus(&self.control_focus["permission-mode"]);
+            }
+            cx.notify();
+        }
+    }
+
+    fn permission_confirmation_valid(&self, state: &PermissionConfirmation) -> bool {
+        self.hud_node(&state.session_id).is_some_and(|node| {
+            permission_provider(node) == state.provider
+                && self.observed_permission(&state.session_id, node) == state.from
+                && self
+                    .permission_chip_for(&state.session_id)
+                    .is_some_and(|chip| !chip.disabled)
+        })
+    }
+
+    fn choose_permission_mode(
+        &mut self,
+        target: PermissionMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.permission_menu_open(window) {
+            return;
+        }
+        self.dismiss_permission_menu(window, cx);
+        let Some(session_id) = self.footer_session(window).map(str::to_owned) else {
+            return;
+        };
+        let Some(node) = self.hud_node(&session_id) else {
+            return;
+        };
+        let Some(chip) = self
+            .permission_chip_for(&session_id)
+            .filter(|chip| !chip.disabled && chip.modes.contains(&target))
+        else {
+            return;
+        };
+        let from = chip.mode;
+        if from == target {
+            return;
+        }
+        if from == PermissionMode::Bypass || target == PermissionMode::Bypass {
+            let live = self.live_agent_hud(&session_id);
+            let resumable = live
+                .and_then(|hud| hud["resumable"].as_bool())
+                .unwrap_or_else(|| {
+                    node["currentMode"] == "codex"
+                        || node["canFork"] == true
+                        || self.permission_identities.contains(&session_id)
+                        || ["providerSessionId", "model"]
+                            .into_iter()
+                            .any(|key| trimmed_graph_text(&node[key]).is_some())
+                        || !matches!(from, PermissionMode::Default | PermissionMode::Auto)
+                });
+            let state = PermissionConfirmation {
+                provider: permission_provider(node),
+                session_id,
+                from,
+                target,
+                resumable,
+            };
+            if self
+                .detached_session_for_window(window.window_handle())
+                .is_some()
+            {
+                self.detached_permission_confirmations
+                    .insert(window.window_handle(), state);
+                window.focus(&self.control_focus["detached-permission-cancel"]);
+                cx.notify();
+            } else {
+                self.open_card_dialog(TabDialog::PermissionMode(state), 3, window, cx);
+            }
+        } else {
+            self.send_permission_mode(session_id, from, target, window, cx);
+        }
+    }
+
+    fn close_detached_permission(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.detached_permission_confirmations
+            .remove(&window.window_handle());
+        window.focus(&self.control_focus["permission-mode"]);
+        cx.notify();
+    }
+
+    fn detached_permission_overlay(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Stateful<Div>> {
+        let state = self
+            .detached_permission_confirmations
+            .get(&window.window_handle())?;
+        let (title, body, confirm) = state.copy();
+        let dark = self.wiring_dark();
+        let close = self.button(
+            tabs_ui::dialog_close("detached-permission-close", dark),
+            &self.control_focus["detached-permission-close"],
+            Self::close_detached_permission,
+            cx,
+        );
+        let cancel = self.button(
+            tabs_ui::dialog_button(
+                "detached-permission-cancel",
+                self.locale.text("取消", "Cancel"),
+                false,
+                false,
+                dark,
+            ),
+            &self.control_focus["detached-permission-cancel"],
+            Self::close_detached_permission,
+            cx,
+        );
+        let send = self.button(
+            tabs_ui::dialog_button("detached-permission-confirm", confirm, true, false, dark),
+            &self.control_focus["detached-permission-confirm"],
+            |this, window, cx| {
+                if let Some(state) = this
+                    .detached_permission_confirmations
+                    .remove(&window.window_handle())
+                {
+                    if this.permission_confirmation_valid(&state) {
+                        this.send_permission_mode(
+                            state.session_id,
+                            state.from,
+                            state.target,
+                            window,
+                            cx,
+                        );
+                    } else {
+                        this.close_detached_permission(window, cx);
+                    }
+                    cx.notify();
+                }
+            },
+            cx,
+        );
+        Some(
+            tabs_ui::dialog_overlay("detached-permission-overlay")
+                .on_any_mouse_down(
+                    cx.listener(|this, _, window, cx| this.close_detached_permission(window, cx)),
+                )
+                .child(
+                    tabs_ui::dialog_panel(f32::from(window.viewport_size().width), dark)
+                        .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+                        .child(
+                            tabs_ui::dialog_header()
+                                .child(tabs_ui::dialog_title(title, dark))
+                                .child(close),
+                        )
+                        .child(tabs_ui::dialog_body(dark).child(ui_text(body).pre_line()))
+                        .child(tabs_ui::dialog_footer().child(cancel).child(send)),
+                ),
+        )
+    }
+
+    fn send_permission_mode(
+        &mut self,
+        session_id: String,
+        from: PermissionMode,
+        target: PermissionMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let result = self.commands.send_at(
+            self.runtime_generation,
+            Command::SetProviderPermissionMode {
+                session_id: session_id.clone(),
+                mode: target.value().into(),
+            },
+        );
+        match result {
+            Ok(()) => {
+                self.permission_changes.insert(
+                    session_id,
+                    PermissionChange {
+                        from,
+                        target,
+                        outcome: PermissionOutcome::Pending,
+                    },
+                );
+                // The terminal can reclaim focus when the replacement frame is ready.
+                window.blur();
+                cx.notify();
+            }
+            Err(error) => self.show_permission_failure(&error.to_string(), cx),
+        }
+    }
+
+    fn reconcile_permission_modes(&mut self, results: &[Value], cx: &mut Context<Self>) {
+        for identity in self.graph["providerIdentityEvents"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            if let Some(id) = identity["sessionId"].as_str() {
+                if identity["result"] == "confirmed"
+                    && identity["providerSessionId"]
+                        .as_str()
+                        .is_some_and(|value| !value.trim().is_empty())
+                {
+                    self.permission_identities.insert(id.to_owned());
+                } else if identity["result"] == "restore-failed" {
+                    self.permission_identities.remove(id);
+                }
+            }
+        }
+        let mut failure = None;
+        for result in results {
+            let Some(id) = result["sessionId"].as_str() else {
+                continue;
+            };
+            let Some(change) = self.permission_changes.get_mut(id) else {
+                continue;
+            };
+            if result["permissionMode"] != change.target.value()
+                || change.outcome != PermissionOutcome::Pending
+            {
+                continue;
+            }
+            change.outcome = if let Some(error) = result.get("error") {
+                failure = Some(
+                    error
+                        .as_str()
+                        .filter(|error| !error.is_empty())
+                        .unwrap_or("未知错误"),
+                );
+                PermissionOutcome::Failed
+            } else {
+                PermissionOutcome::Confirmed
+            };
+            if change.outcome == PermissionOutcome::Confirmed {
+                let value = change.target.value();
+                self.confirm_live_hud_permission(id, value);
+            }
+        }
+        let nodes = session_levels::nodes(&self.graph);
+        let wiring = &self.wiring;
+        self.permission_changes.retain(|id, change| {
+            let node = session_levels::node(nodes, id);
+            match change.outcome {
+                PermissionOutcome::Pending => true,
+                PermissionOutcome::Confirmed => node.map_or_else(
+                    || !wiring.is_detached(id),
+                    |node| PermissionMode::from_node(node) != change.target,
+                ),
+                // The existing runtime can park a failed restore and omit its
+                // binding's mode. Keep the pre-switch label while it is parked.
+                PermissionOutcome::Failed => {
+                    node.is_some_and(|node| Self::provider_restore_state(node) == Some("failed"))
+                }
+            }
+        });
+        if let Some(reason) = failure {
+            self.show_permission_failure(reason, cx);
+        }
+    }
+
+    fn reconcile_permission_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.permission_menu.as_deref().is_some_and(|id| {
+            self.dialog.is_some()
+                || self
+                    .permission_node()
+                    .is_none_or(|(focused, _)| id != focused)
+                || self.permission_chip().is_none_or(|chip| chip.disabled)
+        }) {
+            self.dismiss_permission_menu(window, cx);
+        }
+        if matches!(
+            &self.dialog,
+            Some(TabDialog::PermissionMode(state)) if self.level_focus() != Some(state.session_id.as_str()) || !self.permission_confirmation_valid(state)
+        ) {
+            self.close_dialog(window, cx);
+        }
+    }
+
+    fn fail_pending_permission_modes(&mut self, reason: &str, cx: &mut Context<Self>) {
+        let was_pending = self
+            .permission_changes
+            .values()
+            .any(|change| change.outcome != PermissionOutcome::Failed);
+        self.permission_changes.clear();
+        if was_pending {
+            self.show_permission_failure(reason, cx);
+        }
+    }
+
+    fn show_permission_failure(&mut self, reason: &str, cx: &mut Context<Self>) {
+        self.permission_toast = Some(format!("切换失败：{reason}"));
+        self.permission_toast_timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(3)).await;
+            let _ = this.update(cx, |this, cx| {
+                this.permission_toast = None;
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
+    fn graph_node(&self, id: &str) -> Option<&Value> {
+        session_levels::node(session_levels::nodes(&self.graph), id)
+    }
+
+    fn is_stopped_session(&self, id: &str) -> bool {
+        self.graph_node(id)
+            .is_some_and(|node| !node["archivedAt"].is_null())
+    }
+
+    fn card_action_available(&self, id: &str) -> bool {
+        self.graph_node(id).is_some_and(|node| {
+            node["archivedAt"].is_null() && self.card_action_blocked_reason(id, node).is_none()
+        })
+    }
+
+    fn renameable_card(&self, id: &str) -> Option<&Value> {
+        self.graph_node(id).filter(|node| {
+            !Self::team_member_node(node)
+                && node["archivedAt"].is_null()
+                && self.card_mutation_blocked_reason(id, node).is_none()
+        })
+    }
+
+    fn stopped_remove_blocked_reason(&self) -> Option<&'static str> {
+        if !self.active_path_valid() {
+            return Some(self.workspace_path_unavailable());
+        }
+        match self.commands.connection() {
+            (generation, ConnectionPhase::Ready)
+                if generation == self.runtime_generation && self.domain_ready =>
+            {
+                None
+            }
+            (_, ConnectionPhase::ReadOnly { .. }) => Some(self.locale.text(
+                STORAGE_READ_ONLY_TITLE,
+                "The database is in read-only recovery mode",
+            )),
+            (_, ConnectionPhase::Blocked(block)) if block.kind == StartupBlockKind::ReadOnly => {
+                Some(self.locale.text(
+                    STORAGE_READ_ONLY_TITLE,
+                    "The database is in read-only recovery mode",
+                ))
+            }
+            _ => Some(
+                self.locale
+                    .text("当前连接不可用", "The connection is unavailable"),
+            ),
+        }
+    }
+
+    fn stopped_remove_visible(&self, node: &Value) -> bool {
+        let nodes = session_levels::nodes(&self.graph);
+        nodes.iter().any(|other| {
+            other["sessionId"] != node["sessionId"] && session_levels::parent_id(other).is_none()
+        }) || self.removal_branch_impact(node).sessions < nodes.len()
+    }
+
+    fn stopped_remove_available(&self, id: &str) -> bool {
+        self.stopped_remove_blocked_reason().is_none()
+            && self
+                .graph_node(id)
+                .is_some_and(|node| self.stopped_remove_visible(node))
+    }
+
+    fn remove_session_available(&self, id: &str) -> bool {
+        if let Some(node) = self
+            .graph_node(id)
+            .filter(|node| node["archivedAt"].is_null() && fork_failure_copy(node).is_some())
+        {
+            self.fork_repair_blocked_reason(id, node).is_none()
+        } else if self.is_stopped_session(id) {
+            self.stopped_remove_available(id)
+        } else {
+            self.card_action_available(id)
+        }
+    }
+
+    fn card_action_blocked_reason(&self, id: &str, node: &Value) -> Option<&'static str> {
+        self.card_mutation_blocked_reason(id, node).or_else(|| {
+            self.recovery_blocked(id).then_some(
+                self.locale
+                    .text("当前终端仍在恢复", "This terminal is still recovering."),
+            )
+        })
+    }
+
+    fn card_mutation_blocked_reason(&self, id: &str, node: &Value) -> Option<&'static str> {
+        if self.read_only.is_some() {
+            Some(self.locale.text(
+                STORAGE_READ_ONLY_TITLE,
+                "The database is in read-only recovery mode",
+            ))
+        } else if self
+            .detached_path_invalid(id)
+            .unwrap_or_else(|| !self.active_path_valid())
+        {
+            Some(self.workspace_path_unavailable())
+        } else if self.storage_fault_sessions.contains(id) {
+            Some(self.locale.text(
+                "终端存储异常，请先恢复或结束当前会话",
+                "Terminal storage failed. Recover or end the current session first.",
+            ))
+        } else if self.environment_unavailable(id)
+            || node["environment"]["state"]
+                .as_str()
+                .is_some_and(|state| state != "ready")
+        {
+            Some(self.locale.text(
+                "当前运行环境需要先恢复或交接",
+                "The current environment must be recovered or handed off first.",
+            ))
+        } else {
+            None
+        }
+    }
+
+    fn remove_node_tooltip(&self, id: &str, node: &Value) -> RemoveNodeTooltip {
+        RemoveNodeTooltip {
+            blocked_reason: self.card_action_blocked_reason(id, node),
+            action: self.locale.text(REMOVE_NODE_ACTION, "Remove node"),
+        }
+    }
+
+    fn session_loader_blocked_reason(&self, id: &str, node: &Value) -> Option<&'static str> {
+        self.launch_action_blocked_reason(id, node).or_else(|| {
+            self.recovery_blocked(id).then_some(
+                self.locale
+                    .text("当前终端仍在恢复", "This terminal is still recovering."),
+            )
+        })
+    }
+
+    fn session_loader_tooltip(&self, id: &str, node: &Value) -> (&'static str, bool) {
+        if let Some(reason) = self.session_loader_blocked_reason(id, node) {
+            return (reason, false);
+        }
+        let label = match node["currentMode"].as_str() {
+            Some("codex") => self.locale.text("载入 Codex 会话", "Load a Codex session"),
+            Some("dsh") => self.locale.text("载入 DSH 会话", "Load a DSH session"),
+            Some("antigravity") => self
+                .locale
+                .text("载入 Antigravity 会话", "Load an Antigravity session"),
+            _ => self
+                .locale
+                .text(SESSION_LOADER_TITLE, "Load a Claude Code session"),
+        };
+        (label, true)
+    }
+
+    fn fork_connection_blocked_reason(&self) -> Option<&'static str> {
+        match self.commands.connection() {
+            (_, ConnectionPhase::ReadOnly { .. }) => Some(self.locale.text(
+                STORAGE_READ_ONLY_TITLE,
+                "The database is in read-only recovery mode",
+            )),
+            (_, ConnectionPhase::Blocked(block)) if block.kind == StartupBlockKind::ReadOnly => {
+                Some(self.locale.text(
+                    STORAGE_READ_ONLY_TITLE,
+                    "The database is in read-only recovery mode",
+                ))
+            }
+            (generation, ConnectionPhase::Ready)
+                if generation == self.runtime_generation
+                    && self.domain_ready
+                    && self.transport_connected =>
+            {
+                None
+            }
+            _ => Some(
+                self.locale
+                    .text("当前终端仍在恢复", "This terminal is still recovering."),
+            ),
+        }
+    }
+
+    fn fork_access(&self, id: &str, placement: ForkPlacement) -> Option<ForkAccess> {
+        let node = self.graph_node(id)?;
+        if !node["archivedAt"].is_null() || !node["detachedWindowId"].is_null() {
+            return None;
+        }
+        let source = if placement == ForkPlacement::Sibling {
+            self.graph_node(session_levels::parent_id(node)?)?
+        } else {
+            node
+        };
+        if !source["archivedAt"].is_null()
+            || (placement != ForkPlacement::Sibling && card_history_provider(source).is_none())
+            || (placement == ForkPlacement::Peer
+                && source["currentMode"] == "antigravity"
+                && fork_failure_copy(source).is_some())
+        {
+            return None;
+        }
+        let readiness = (source["canFork"] != true).then(|| {
+            if placement == ForkPlacement::Sibling {
+                self.locale.text(
+                    "父会话完成首轮回复后即可创建兄弟分支",
+                    "Wait for the parent session to finish its first reply before forking.",
+                )
+            } else if matches!(
+                source["workStatus"].as_str(),
+                Some("running" | "starting" | "needs-input")
+            ) {
+                "当前回复完成后即可 Fork"
+            } else {
+                match source["currentMode"].as_str() {
+                    Some("codex") => self.locale.text(
+                        "在当前会话输入一次，并等待 Codex 完成回复后，即可创建分支",
+                        "Send a message and wait for Codex to finish replying before forking.",
+                    ),
+                    Some("antigravity") => self.locale.text(
+                        "在当前会话输入一次，并等待 Antigravity 完成回复后，即可创建分支",
+                        "Send a message and wait for Antigravity to finish replying before forking.",
+                    ),
+                    _ => "在当前会话输入一次，并等待 Claude Code 完成回复后，即可创建分支",
+                }
+            }
+        });
+        Some(ForkAccess {
+            blocked: self
+                .fork_connection_blocked_reason()
+                .or_else(|| self.card_action_blocked_reason(id, node)),
+            readiness,
+        })
+    }
+
+    fn fork_repair_blocked_reason(&self, id: &str, node: &Value) -> Option<&'static str> {
+        self.fork_connection_blocked_reason()
+            .or_else(|| self.card_mutation_blocked_reason(id, node))
+            .or_else(|| {
+                // A failed fork has no usable terminal frame. Only actual recovery
+                // in progress should block repairing the failed operation.
+                matches!(
+                    self.recovery.get(id),
+                    Some(RecoveryState::Restoring | RecoveryState::Restarting(_))
+                )
+                .then_some("当前终端仍在恢复")
+            })
+    }
+
+    fn show_fork_readiness(&mut self, message: impl Into<String>, cx: &mut Context<Self>) {
+        self.fork_readiness = Some(message.into());
+        self.fork_readiness_generation += 1;
+        let generation = self.fork_readiness_generation;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(2800))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.fork_readiness_generation == generation {
+                    this.fork_readiness = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn open_fork(
+        &mut self,
+        id: &str,
+        placement: ForkPlacement,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_fork_with_worktree(id, placement, ForkWorktreeMode::Current, window, cx);
+    }
+
+    fn open_fork_with_worktree(
+        &mut self,
+        id: &str,
+        placement: ForkPlacement,
+        worktree_mode: ForkWorktreeMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.dismiss_wiring_overlay(window, cx);
+        cx.notify();
+        if self.dialog.is_some() {
+            return;
+        }
+        let Some(access) = self.fork_access(id, placement) else {
+            return;
+        };
+        if access.blocked.is_some() {
+            return;
+        }
+        if let Some(reason) = access.readiness {
+            self.show_fork_readiness(reason, cx);
+            return;
+        }
+        let Some((scene_id, node)) = self.active_scene_id().zip(self.graph_node(id)) else {
+            return;
+        };
+        let source = if placement == ForkPlacement::Sibling {
+            session_levels::parent_id(node)
+                .and_then(|parent| self.graph_node(parent))
+                .unwrap_or(node)
+        } else {
+            node
+        };
+        let input_dark = self.wiring_dark();
+        let state = BranchDialog {
+            scene_id: scene_id.into(),
+            session_id: id.into(),
+            source_title: source["title"].as_str().unwrap_or_default().into(),
+            placement,
+            worktree_mode,
+            input: cx.new(|cx| {
+                let mut input = RenameInput::session_loader_search("例如：修复登录流程", cx);
+                set_branch_input_colors(&mut input, input_dark);
+                input
+            }),
+            submission_key: fork_submission_key(),
+            submitting: false,
+            error: None,
+        };
+        self.workspace_menu = None;
+        self.task_menu = None;
+        self.tab_menu = None;
+        self.hidden_tabs = None;
+        self.fork_readiness = None;
+        self.dialog_controls = (0..3).map(|_| cx.focus_handle().tab_stop(true)).collect();
+        self.dialog_subscription = Some(cx.subscribe_in(
+            &state.input,
+            window,
+            |this, _, event, window, cx| match event {
+                RenameInputEvent::Changed => {
+                    if let Some(TabDialog::Branch(state)) = &mut this.dialog {
+                        state.error = None;
+                    }
+                    cx.notify();
+                }
+                RenameInputEvent::Cancel => this.cancel_fork(window, cx),
+                RenameInputEvent::Confirm => this.submit_fork(window, cx),
+            },
+        ));
+        window.focus(&state.input.read(cx).focus);
+        self.dialog = Some(TabDialog::Branch(state));
+        cx.notify();
+    }
+
+    fn cancel_fork(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(&self.dialog, Some(TabDialog::Branch(state)) if !state.submitting) {
+            self.close_dialog(window, cx);
+        }
+    }
+
+    fn submit_fork(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(TabDialog::Branch(state)) = &self.dialog else {
+            return;
+        };
+        let input = state.input.read(cx);
+        if state.submitting || input.composing() {
+            return;
+        }
+        let name = trim_name(&input.text);
+        let error = if name.is_empty() {
+            Some("请输入分支名称")
+        } else if name.chars().count() > FORK_NAME_LIMIT {
+            Some("分支名称最多 64 个字符")
+        } else {
+            match self.fork_access(&state.session_id, state.placement) {
+                Some(access) => access.blocked.or(access.readiness),
+                None => Some(if state.placement == ForkPlacement::Sibling {
+                    "完成首轮 AI 对话后可创建分支"
+                } else {
+                    "当前终端仍在恢复"
+                }),
+            }
+        };
+        let result = if let Some(error) = error {
+            Err(error.to_owned())
+        } else {
+            self.commands
+                .send_at(
+                    self.runtime_generation,
+                    Command::ForkSession {
+                        scene_id: state.scene_id.clone(),
+                        source_session_id: state.session_id.clone(),
+                        placement: state.placement,
+                        name: name.to_owned(),
+                        worktree_mode: state.worktree_mode,
+                        submission_key: state.submission_key.clone(),
+                    },
+                )
+                .map_err(|error| error.to_string())
+        };
+        let focus = input.focus.clone();
+        let Some(TabDialog::Branch(state)) = &mut self.dialog else {
+            return;
+        };
+        state.submitting = result.is_ok();
+        state.error = result.err();
+        if state.submitting {
+            window.blur();
+        } else {
+            window.focus(&focus);
+        }
+        cx.notify();
+    }
+
+    fn retry_fork(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.graph_node(id).is_none_or(|node| {
+            !node["archivedAt"].is_null()
+                || fork_failure_copy(node).is_none()
+                || self.fork_repair_blocked_reason(id, node).is_some()
+        }) || matches!(self.fork_retries.get(id), Some(ForkRetry::Pending))
+        {
+            return;
+        }
+        let result = self.commands.send_at(
+            self.runtime_generation,
+            Command::RetryFork {
+                session_id: id.to_owned(),
+            },
+        );
+        self.fork_retries.insert(
+            id.into(),
+            match result {
+                Ok(()) => ForkRetry::Pending,
+                Err(error) => ForkRetry::Rejected(error.to_string()),
+            },
+        );
+        cx.notify();
+    }
+
+    fn fail_pending_forks(&mut self, message: &str) {
+        if let Some(TabDialog::Branch(state)) = &mut self.dialog
+            && state.submitting
+        {
+            state.submitting = false;
+            state.error = Some(message.into());
+        }
+        for retry in self.fork_retries.values_mut() {
+            if matches!(retry, ForkRetry::Pending) {
+                *retry = ForkRetry::Rejected(message.into());
+            }
+        }
+    }
+
+    fn replace_fork_graph(
+        &mut self,
+        mut graph: Value,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let result = graph
+            .as_object_mut()
+            .and_then(|object| object.remove("forkSessionResult"));
+        let permission_results = graph
+            .as_object_mut()
+            .and_then(|object| object.remove("providerPermissionModeResults"));
+        self.update_notifications(&mut graph);
+        self.refresh_egress_for_graph_change(&graph, cx);
+        self.graph = graph;
+        if let Some(child) = self.dag_window
+            && child
+                .update(cx, |view, _, cx| view.refresh(&self.graph, cx))
+                .is_err()
+        {
+            self.dag_window = None;
+        }
+        self.reconcile_permission_modes(
+            permission_results
+                .as_ref()
+                .and_then(Value::as_array)
+                .map_or(&[], Vec::as_slice),
+            cx,
+        );
+        if let Some(result) = result {
+            let error = result["error"].as_str();
+            if let Some(TabDialog::Branch(state)) = &mut self.dialog
+                && state.submitting
+                && result["submissionKey"] == state.submission_key
+            {
+                if let Some(error) = error {
+                    state.error = Some(fork_error_text(error, self.locale).into());
+                    state.submitting = false;
+                    window.focus(&state.input.read(cx).focus);
+                } else if result["sessionId"].is_string() {
+                    if state.placement == ForkPlacement::Child
+                        && session_levels::node(
+                            session_levels::nodes(&self.graph),
+                            &state.session_id,
+                        )
+                        .is_some_and(|node| node["archivedAt"].is_null())
+                    {
+                        self.level_parent_by_scene
+                            .insert(state.scene_id.clone(), Some(state.session_id.clone()));
+                    }
+                    self.close_dialog(window, cx);
+                }
+            } else if let Some(id) = result["sessionId"].as_str()
+                && matches!(self.fork_retries.get(id), Some(ForkRetry::Pending))
+            {
+                if let Some(error) = error {
+                    if self.graph_node(id).and_then(fork_failure_copy).is_some() {
+                        self.fork_retries.insert(
+                            id.into(),
+                            ForkRetry::Rejected(fork_error_text(error, self.locale).into()),
+                        );
+                    } else {
+                        self.show_toast(error, cx);
+                    }
+                } else {
+                    self.fork_retries.remove(id);
+                }
+            }
+        }
+        let nodes = session_levels::nodes(&self.graph);
+        self.fork_retries.retain(|id, _| {
+            session_levels::node(nodes, id).is_some_and(|node| {
+                node["archivedAt"].is_null() && fork_failure_copy(node).is_some()
+            })
+        });
+    }
+
+    fn session_loader_running(&self, id: &str) -> bool {
+        self.graph_node(id)
+            .is_some_and(|node| matches!(node["workStatus"].as_str(), Some("running" | "starting")))
+    }
+
+    fn session_loader_can_submit(&self, state: &SessionLoader) -> bool {
+        !state.history
+            && state.selected.as_ref().is_some_and(|id| {
+                state.provider != "codex"
+                    || state
+                        .sessions
+                        .iter()
+                        .any(|row| &row.id == id && row.loaded_by.is_none())
+            })
+            && !self.pending_loader_loads.contains_key(&state.session_id)
+            && self.graph_node(&state.session_id).is_some_and(|node| {
+                self.launch_action_blocked_reason(&state.session_id, node)
+                    .is_none()
+            })
+    }
+
+    fn open_session_loader(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_session_loader_mode(id, false, window, cx);
+    }
+
+    fn open_deferred_history(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_deferred(id) {
+            self.open_session_loader_mode(id, true, window, cx);
+        }
+    }
+
+    fn open_session_loader_mode(
+        &mut self,
+        id: &str,
+        history: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.dialog.is_some()
+            || self.pending_close.is_some()
+            || self.pending_card_action.is_some()
+        {
+            return;
+        }
+        let Some((scene_id, node)) = self.active_scene_id().zip(self.graph_node(id)) else {
+            return;
+        };
+        let history_provider = card_history_provider(node);
+        if !self.order.iter().any(|card| card == id)
+            || !node["archivedAt"].is_null()
+            || if history {
+                history_provider.is_none()
+            } else {
+                self.session_loader_blocked_reason(id, node).is_some()
+            }
+        {
+            return;
+        }
+        let Some(cwd) = node["cwd"].as_str().filter(|path| !path.is_empty()) else {
+            return;
+        };
+        let remembered = self.loader_remembered.get(id).cloned().unwrap_or_default();
+        let initial_provider = match node["currentMode"].as_str() {
+            Some("codex") => "codex",
+            Some("dsh") => "dsh",
+            Some("antigravity") => "antigravity",
+            _ => "claude-code",
+        };
+        let provider = if history {
+            history_provider.expect("history provider validated")
+        } else {
+            remembered.provider.unwrap_or(initial_provider)
+        };
+        let selected = history
+            .then(|| trimmed_graph_text(&node["historyProviderSessionId"]))
+            .flatten()
+            .map(str::to_owned);
+        // Until a provider has a history ID, open its workspace catalog.
+        let history = history && (provider == "claude-code" || selected.is_some());
+        let scene_id = scene_id.to_owned();
+        let cwd = cwd.to_owned();
+        let filter_placeholder = self.locale.text(
+            SESSION_LOADER_FILTER_PLACEHOLDER,
+            "Filter by title, path, model or session ID",
+        );
+        let input = cx.new(|cx| loader_search_input(filter_placeholder, self.wiring_dark(), cx));
+        let content_placeholder = self.locale.text("查找右侧内容", "Search content");
+        let content_input =
+            cx.new(|cx| loader_search_input(content_placeholder, self.wiring_dark(), cx));
+        self.dialog_subscription =
+            Some(cx.subscribe_in(&input, window, |this, _, event, _, cx| {
+                if matches!(event, RenameInputEvent::Changed) {
+                    this.loader_filter_changed(cx);
+                }
+            }));
+        let content_subscription =
+            cx.subscribe_in(&content_input, window, |this, _, event, _, cx| {
+                if matches!(event, RenameInputEvent::Changed) {
+                    this.loader_search_changed(cx);
+                }
+            });
+        self.dialog_controls = (0..11).map(|_| cx.focus_handle().tab_stop(true)).collect();
+        let list_focus = cx.focus_handle().tab_stop(true);
+        let focus_subscriptions = [
+            (input.read(cx).focus.clone(), LoaderFocus::Filter),
+            (list_focus.clone(), LoaderFocus::List),
+            (content_input.read(cx).focus.clone(), LoaderFocus::Content),
+            (self.dialog_controls[4].clone(), LoaderFocus::Control(4)),
+            (self.dialog_controls[5].clone(), LoaderFocus::Control(5)),
+            (self.dialog_controls[8].clone(), LoaderFocus::Control(8)),
+            (self.dialog_controls[9].clone(), LoaderFocus::Control(9)),
+        ]
+        .into_iter()
+        .map(|(handle, saved)| {
+            cx.on_focus(&handle, window, move |this, _, _| {
+                if let Some(TabDialog::SessionLoader(state)) = &mut this.dialog {
+                    state.remembered.focus = saved;
+                }
+            })
+        })
+        .collect();
+        let focus = if history {
+            self.dialog_controls[0].clone()
+        } else {
+            match remembered.focus {
+                LoaderFocus::List => list_focus.clone(),
+                LoaderFocus::Content if matches!(provider, "codex" | "dsh" | "antigravity") => {
+                    content_input.read(cx).focus.clone()
+                }
+                LoaderFocus::Control(index @ (4 | 5 | 8 | 9)) => {
+                    self.dialog_controls[index].clone()
+                }
+                _ => input.read(cx).focus.clone(),
+            }
+        };
+        window.focus(&focus);
+        self.dialog = Some(TabDialog::SessionLoader(SessionLoader {
+            history,
+            provider,
+            confirm_running: false,
+            restore_selection: remembered.selected(provider),
+            remembered,
+            list_total: 0,
+            list_next: 0,
+            has_more_sessions: false,
+            pending_list: None,
+            list_query: String::new(),
+            catalog_revision: loader_catalog_revision(&self.graph),
+            refresh_catalog: false,
+            content_input,
+            _content_subscription: content_subscription,
+            _focus_subscriptions: focus_subscriptions,
+            search_query: String::new(),
+            pending_search: None,
+            search_hits: Vec::new(),
+            has_more_hits: false,
+            search_next: 0,
+            detail_model: None,
+            detail_permission: None,
+            scene_id,
+            session_id: id.to_owned(),
+            cwd,
+            input,
+            sessions: Vec::new(),
+            selected,
+            events: Vec::new(),
+            first_event: None,
+            total_events: 0,
+            loading_list: false,
+            loading_detail: false,
+            loading_earlier: false,
+            pending_detail: None,
+            has_earlier: false,
+            error: None,
+            list_scroll: ScrollHandle::new(),
+            preview_scroll: ScrollHandle::new(),
+            list_focus,
+        }));
+        if history {
+            self.request_loader_detail(None);
+        } else {
+            self.request_loader_list(0, false);
+        }
+        self.workspace_menu = None;
+        self.task_menu = None;
+        self.tab_menu = None;
+        self.hidden_tabs = None;
+        cx.notify();
+    }
+
+    fn clear_session_loader_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(TabDialog::SessionLoader(state)) = &self.dialog {
+            let input = state.input.clone();
+            window.focus(&input.read(cx).focus);
+            input.update(cx, |input, cx| {
+                let length = input.text.encode_utf16().count();
+                input.replace_text_in_range(Some(0..length), "", window, cx);
+            });
+        }
+    }
+
+    fn loader_filter_changed(&mut self, cx: &mut Context<Self>) {
+        let Some(TabDialog::SessionLoader(state)) = &mut self.dialog else {
+            return;
+        };
+        if !state.remote_catalog() {
+            self.refresh_loader_selection(true, cx);
+            return;
+        }
+        let query = state.input.read(cx).text.trim().to_owned();
+        if state.list_query != query {
+            state.list_query = query;
+            state.restore_selection = None;
+            state.error = None;
+            state.confirm_running = false;
+            state.has_more_sessions = false;
+            state.list_scroll.set_offset(Point::default());
+            self.request_loader_list(0, false);
+            cx.notify();
+        }
+    }
+
+    fn switch_loader_provider(&mut self, provider: &'static str, cx: &mut Context<Self>) {
+        let Some(TabDialog::SessionLoader(state)) = &mut self.dialog else {
+            return;
+        };
+        if state.history
+            || state.provider == provider
+            || self.pending_loader_loads.contains_key(&state.session_id)
+        {
+            return;
+        }
+        state.remembered.set_selected(
+            state.provider,
+            state
+                .restore_selection
+                .take()
+                .or_else(|| state.selected.clone()),
+        );
+        state.provider = provider;
+        state.restore_selection = state.remembered.selected(provider);
+        state.pending_list = None;
+        state.pending_detail = None;
+        state.pending_search = None;
+        state.list_query = state.input.read(cx).text.trim().to_owned();
+        state.sessions.clear();
+        state.list_total = 0;
+        state.list_next = 0;
+        state.has_more_sessions = false;
+        state.loading_list = false;
+        state.refresh_catalog = false;
+        state.list_scroll.set_offset(Point::default());
+        self.set_loader_selection(None, cx);
+        self.request_loader_list(0, false);
+        cx.notify();
+    }
+
+    fn request_loader_list(&mut self, from: usize, refresh: bool) {
+        let Some(TabDialog::SessionLoader(state)) = &mut self.dialog else {
+            return;
+        };
+        if state.pending_list.is_some() || state.history {
+            return;
+        }
+        let command = if state.remote_catalog() {
+            self.loader_request_id += 1;
+            let request_id = self.loader_request_id;
+            let cwd = state.cwd.clone();
+            let query = state.list_query.clone();
+            let offset = Some(from as i64);
+            let limit = Some(if refresh {
+                state.sessions.len().clamp(50, 200) as i64
+            } else {
+                50
+            });
+            match state.provider {
+                "dsh" => Command::ListDshSessions {
+                    request_id,
+                    cwd,
+                    query,
+                    full_text: false,
+                    offset,
+                    limit,
+                },
+                "antigravity" => Command::ListAntigravitySessions {
+                    request_id,
+                    cwd,
+                    query,
+                    full_text: false,
+                    offset,
+                    limit,
+                },
+                _ => Command::ListCodexSessions {
+                    request_id,
+                    cwd,
+                    query,
+                    full_text: false,
+                    offset,
+                    limit,
+                },
+            }
+        } else {
+            Command::ListProviderSessions {
+                cwd: state.cwd.clone(),
+            }
+        };
+        match self.commands.send_at(self.runtime_generation, command) {
+            Ok(()) => {
+                state.loading_list = !refresh;
+                state.pending_list = Some(LoaderListRequest {
+                    id: self.loader_request_id,
+                    query: state.list_query.clone(),
+                    offset: from,
+                    refresh,
+                });
+            }
+            Err(error) if !refresh => {
+                state.loading_list = false;
+                state.error = Some(error.to_string());
+            }
+            Err(_) => {}
+        }
+    }
+
+    fn load_more_loader_sessions(&mut self, cx: &mut Context<Self>) {
+        if let Some(TabDialog::SessionLoader(state)) = &self.dialog
+            && state.has_more_sessions
+        {
+            let from = state.list_next;
+            self.request_loader_list(from, false);
+            cx.notify();
+        }
+    }
+
+    fn refresh_loader_catalog_if_changed(&mut self) {
+        let Some(TabDialog::SessionLoader(state)) = &mut self.dialog else {
+            return;
+        };
+        if state.history || state.provider != "codex" {
+            return;
+        }
+        let revision = loader_catalog_revision(&self.graph);
+        if state.catalog_revision != revision {
+            state.catalog_revision = revision;
+            state.refresh_catalog = true;
+        }
+        if state.refresh_catalog && state.pending_list.is_none() {
+            state.refresh_catalog = false;
+            self.request_loader_list(0, true);
+        }
+    }
+
+    fn refresh_loader_selection(&mut self, reset_scroll: bool, cx: &mut Context<Self>) {
+        let Some(TabDialog::SessionLoader(state)) = &self.dialog else {
+            return;
+        };
+        if state.history {
+            return;
+        }
+        if reset_scroll {
+            state.list_scroll.set_offset(Point::default());
+        }
+        let mut visible = state.visible_sessions(cx);
+        let first = visible.next();
+        let selected = state
+            .restore_selection
+            .as_deref()
+            .or(state.selected.as_deref());
+        let matching = first
+            .filter(|first| Some(first.id.as_str()) == selected)
+            .or_else(|| visible.find(|session| Some(session.id.as_str()) == selected));
+        let need_more =
+            state.restore_selection.is_some() && matching.is_none() && state.has_more_sessions;
+        if state.restore_selection.is_some()
+            && let Some(matching) = matching
+            && let Some(position) = state
+                .visible_sessions(cx)
+                .position(|row| row.id == matching.id)
+        {
+            state.list_scroll.scroll_to_item(position);
+        }
+        let next = matching.or(first).map(|session| session.id.clone());
+        drop(visible);
+        if need_more {
+            self.load_more_loader_sessions(cx);
+            return;
+        }
+        if let Some(TabDialog::SessionLoader(state)) = &mut self.dialog {
+            state.restore_selection = None;
+        }
+        self.set_loader_selection(next, cx);
+        cx.notify();
+    }
+
+    fn select_loader_session(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Some(TabDialog::SessionLoader(state)) = &mut self.dialog {
+            state.restore_selection = None;
+        }
+        self.set_loader_selection(Some(id.to_owned()), cx);
+    }
+
+    fn step_loader_session(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let Some(TabDialog::SessionLoader(state)) = &self.dialog else {
+            return;
+        };
+        let visible: Vec<_> = state.visible_sessions(cx).collect();
+        let Some(current) = visible
+            .iter()
+            .position(|session| Some(&session.id) == state.selected.as_ref())
+        else {
+            return;
+        };
+        let next = current.saturating_add_signed(delta).min(visible.len() - 1);
+        let id = visible[next].id.clone();
+        state.list_scroll.scroll_to_item(next);
+        self.select_loader_session(&id, cx);
+    }
+
+    fn set_loader_selection(&mut self, next: Option<String>, cx: &mut Context<Self>) {
+        let Some(TabDialog::SessionLoader(state)) = &mut self.dialog else {
+            return;
+        };
+        if state.selected == next {
+            return;
+        }
+        state.selected = next;
+        state.confirm_running = false;
+        state.detail_model = None;
+        state.detail_permission = None;
+        if state.remote_catalog() {
+            state.pending_detail = None;
+            state.pending_search = None;
+            state.search_hits.clear();
+            state.search_next = 0;
+            state.has_more_hits = false;
+            state.search_query = state.content_input.read(cx).text.trim().to_owned();
+        }
+        state.events.clear();
+        state.first_event = None;
+        state.total_events = 0;
+        state.has_earlier = false;
+        state.loading_earlier = false;
+        state.loading_detail = state.selected.is_some();
+        state.error = None;
+        state.preview_scroll.set_offset(Point::default());
+        if state.loading_detail {
+            self.request_loader_detail(None);
+            self.request_loader_search(0);
+        }
+        cx.notify();
+    }
+
+    fn request_loader_detail(&mut self, page: Option<(i64, i64)>) {
+        self.request_loader_detail_at(page, None);
+    }
+
+    fn request_loader_detail_at(&mut self, page: Option<(i64, i64)>, around: Option<i64>) {
+        let Some(TabDialog::SessionLoader(state)) = &mut self.dialog else {
+            return;
+        };
+        let Some(id) = state
+            .selected
+            .as_ref()
+            .filter(|_| state.pending_detail.is_none())
+        else {
+            return;
+        };
+        let start = page.map(|(start, _)| start);
+        let request_id = if state.remote_catalog() {
+            self.loader_request_id += 1;
+            Some(self.loader_request_id)
+        } else {
+            None
+        };
+        let limit = page.map(|(_, limit)| limit);
+        let command = if let Some(request_id) = request_id {
+            match state.provider {
+                "dsh" => Command::GetDshSession {
+                    request_id,
+                    cwd: state.cwd.clone(),
+                    provider_session_id: id.clone(),
+                    before_event_index: page.map(|(start, count)| start + count),
+                    around_event_index: around,
+                    limit,
+                },
+                "antigravity" => Command::GetAntigravitySession {
+                    request_id,
+                    cwd: state.cwd.clone(),
+                    provider_session_id: id.clone(),
+                    before_event_index: page.map(|(start, count)| start + count),
+                    around_event_index: around,
+                    limit,
+                },
+                _ => Command::GetCodexSession {
+                    request_id,
+                    cwd: state.cwd.clone(),
+                    provider_session_id: id.clone(),
+                    start_event_index: start,
+                    around_event_index: around,
+                    limit,
+                },
+            }
+        } else {
+            Command::GetProviderSession {
+                cwd: state.cwd.clone(),
+                provider_session_id: id.clone(),
+                start_event_index: start,
+                limit,
+            }
+        };
+        match self.commands.send_at(self.runtime_generation, command) {
+            Ok(()) => {
+                state.pending_detail = Some(LoaderDetailRequest {
+                    id: id.clone(),
+                    start,
+                    request_id,
+                    around,
+                });
+                state.loading_detail = page.is_none();
+                state.loading_earlier = page.is_some();
+            }
+            Err(error) => {
+                state.loading_detail = false;
+                state.loading_earlier = false;
+                state.error = Some(error.to_string());
+            }
+        }
+    }
+
+    fn loader_search_changed(&mut self, cx: &mut Context<Self>) {
+        let Some(TabDialog::SessionLoader(state)) = &mut self.dialog else {
+            return;
+        };
+        let query = state.content_input.read(cx).text.trim().to_owned();
+        if state.search_query == query {
+            return;
+        }
+        state.search_query = query;
+        state.search_hits.clear();
+        state.has_more_hits = false;
+        state.search_next = 0;
+        self.request_loader_search(0);
+        cx.notify();
+    }
+
+    fn request_loader_search(&mut self, offset: usize) {
+        let Some(TabDialog::SessionLoader(state)) = &mut self.dialog else {
+            return;
+        };
+        let Some(id) = state.selected.as_ref().filter(|_| {
+            state.remote_catalog()
+                && !state.search_query.is_empty()
+                && state.pending_search.is_none()
+        }) else {
+            return;
+        };
+        self.loader_request_id += 1;
+        let request_id = self.loader_request_id;
+        let cwd = state.cwd.clone();
+        let provider_session_id = id.clone();
+        let query = state.search_query.clone();
+        let offset = Some(offset as i64);
+        let command = match state.provider {
+            "dsh" => Command::SearchDshSession {
+                request_id,
+                cwd,
+                provider_session_id,
+                query,
+                offset,
+                limit: None,
+            },
+            "antigravity" => Command::SearchAntigravitySession {
+                request_id,
+                cwd,
+                provider_session_id,
+                query,
+                offset,
+                limit: None,
+            },
+            _ => Command::SearchCodexSession {
+                request_id,
+                cwd,
+                provider_session_id,
+                query,
+                offset,
+                limit: None,
+            },
+        };
+        match self.commands.send_at(self.runtime_generation, command) {
+            Ok(()) => state.pending_search = Some((request_id, state.search_query.clone())),
+            Err(error) => state.error = Some(error.to_string()),
+        }
+    }
+
+    fn load_more_loader_hits(&mut self, cx: &mut Context<Self>) {
+        if let Some(TabDialog::SessionLoader(state)) = &self.dialog
+            && state.has_more_hits
+        {
+            let from = state.search_next;
+            self.request_loader_search(from);
+            cx.notify();
+        }
+    }
+
+    fn select_loader_hit(&mut self, index: i64, cx: &mut Context<Self>) {
+        let Some(TabDialog::SessionLoader(state)) = &mut self.dialog else {
+            return;
+        };
+        state.pending_detail = None;
+        state.error = None;
+        self.request_loader_detail_at(None, Some(index));
+        cx.notify();
+    }
+
+    fn loader_search_result(&mut self, results: &[Value], cx: &mut Context<Self>) {
+        let Some(TabDialog::SessionLoader(state)) = &mut self.dialog else {
+            return;
+        };
+        let Some((id, query)) = &state.pending_search else {
+            return;
+        };
+        let Some(result) = results.iter().find(|result| {
+            result["provider"] == state.provider
+                && result["search"] == true
+                && result["requestId"] == *id
+        }) else {
+            return;
+        };
+        let stale = query != &state.search_query;
+        state.pending_search = None;
+        if stale {
+            self.request_loader_search(0);
+        } else if let Some(error) = result["error"].as_str() {
+            state.error = Some(error.to_owned());
+        } else if let Some(hits) = result["hits"].as_array() {
+            state.search_hits.extend(hits.iter().filter_map(|hit| {
+                Some(LoaderSearchHit {
+                    index: hit["eventIndex"].as_i64()?,
+                    excerpt: hit["excerpt"].as_str()?.to_owned(),
+                })
+            }));
+            state.has_more_hits = result["hasMore"] == true;
+            state.search_next = result["nextOffset"].as_u64().unwrap_or_default() as usize;
+        }
+        cx.notify();
+    }
+
+    fn load_earlier_session_events(&mut self, cx: &mut Context<Self>) {
+        let Some(TabDialog::SessionLoader(state)) = &mut self.dialog else {
+            return;
+        };
+        let Some(first) = state.first_event.filter(|first| *first > 1) else {
+            return;
+        };
+        if !state.has_earlier || state.pending_detail.is_some() {
+            return;
+        }
+        let count = (first - 1).min(SESSION_LOADER_PAGE_SIZE);
+        let start = first - count;
+        state.error = None;
+        self.request_loader_detail(Some((start, count)));
+        cx.notify();
+    }
+
+    fn submit_session_loader(&mut self, cx: &mut Context<Self>) {
+        let Some(TabDialog::SessionLoader(state)) = &self.dialog else {
+            return;
+        };
+        if !self.session_loader_can_submit(state) {
+            return;
+        }
+        if state.remote_catalog()
+            && !state.confirm_running
+            && self.session_loader_running(&state.session_id)
+        {
+            if let Some(TabDialog::SessionLoader(state)) = &mut self.dialog {
+                state.confirm_running = true;
+            }
+            cx.notify();
+            return;
+        }
+        let Some(session) = state
+            .sessions
+            .iter()
+            .find(|session| Some(&session.id) == state.selected.as_ref())
+        else {
+            return;
+        };
+        let session_id = state.session_id.clone();
+        let previous_revision = self
+            .graph_node(&session_id)
+            .and_then(|node| node["providerSpawnRevision"].as_u64())
+            .unwrap_or(0);
+        let request_id = matches!(state.provider, "dsh" | "antigravity").then(|| {
+            self.loader_request_id += 1;
+            self.loader_request_id
+        });
+        let load = LoaderLoad {
+            provider: state.provider,
+            id: session.id.clone(),
+            title: session.title.clone(),
+            previous_revision,
+            request_id,
+        };
+        let command = match (state.provider, request_id) {
+            ("dsh", Some(request_id)) => Command::LoadDshSession {
+                request_id,
+                session_id: session_id.clone(),
+                provider_session_id: load.id.clone(),
+            },
+            ("antigravity", Some(request_id)) => Command::LoadAntigravitySession {
+                request_id,
+                session_id: session_id.clone(),
+                provider_session_id: load.id.clone(),
+            },
+            ("codex", _) => Command::LoadCodexSession {
+                session_id: session_id.clone(),
+                provider_session_id: load.id.clone(),
+            },
+            _ => Command::LoadProviderSession {
+                session_id: session_id.clone(),
+                provider_session_id: load.id.clone(),
+            },
+        };
+        let result = self.commands.send_at(self.runtime_generation, command);
+        if let Some(TabDialog::SessionLoader(state)) = &mut self.dialog {
+            state.error = result.err().map(|error| error.to_string());
+            if state.error.is_none() {
+                self.pending_loader_loads.insert(session_id, load);
+            }
+        }
+        cx.notify();
+    }
+
+    fn loader_catalog_result(&mut self, results: &[Value], cx: &mut Context<Self>) {
+        let Some(TabDialog::SessionLoader(state)) = &mut self.dialog else {
+            return;
+        };
+        let Some(request) = &state.pending_list else {
+            return;
+        };
+        let Some(result) = results.iter().find(|result| {
+            result["cwd"] == state.cwd
+                && if state.remote_catalog() {
+                    result["provider"] == state.provider && result["requestId"] == request.id
+                } else {
+                    result["provider"].is_null()
+                }
+        }) else {
+            return;
+        };
+        let request = state.pending_list.take().unwrap();
+        state.loading_list = false;
+        if state.remote_catalog() && request.query != state.list_query {
+            self.request_loader_list(0, false);
+            return;
+        }
+        if let Some(error) = result["error"].as_str() {
+            if !request.refresh {
+                state.error = Some(error.to_owned());
+            }
+            return;
+        }
+        if let Some(rows) = result["sessions"].as_array() {
+            let rows: Vec<_> = rows.iter().filter_map(LoaderSession::from_graph).collect();
+            state.list_total = result["total"]
+                .as_u64()
+                .map_or(rows.len(), |total| total as usize);
+            let next = result["nextOffset"]
+                .as_u64()
+                .map_or(rows.len(), |offset| offset as usize);
+            if request.refresh && state.list_next > next && result["hasMore"] == true {
+                for row in rows {
+                    if let Some(existing) = state
+                        .sessions
+                        .iter_mut()
+                        .find(|existing| existing.id == row.id)
+                    {
+                        *existing = row;
+                    }
+                }
+            } else {
+                state.list_next = next;
+                state.has_more_sessions = result["hasMore"] == true;
+                if request.offset == 0 {
+                    state.sessions = rows;
+                } else {
+                    for row in rows {
+                        if !state.sessions.iter().any(|existing| existing.id == row.id) {
+                            state.sessions.push(row);
+                        }
+                    }
+                }
+            }
+            self.refresh_loader_selection(!request.refresh && request.offset == 0, cx);
+        }
+    }
+
+    fn loader_detail_result(&mut self, results: &[Value], cx: &mut Context<Self>) {
+        let Some(TabDialog::SessionLoader(state)) = &mut self.dialog else {
+            return;
+        };
+        let Some(request) = &state.pending_detail else {
+            return;
+        };
+        let Some(result) = results.iter().find(|result| {
+            if let Some(request_id) = request.request_id {
+                return result["provider"] == state.provider
+                    && result["requestId"] == request_id
+                    && result["search"] != true;
+            }
+            result["provider"].is_null()
+                && result["cwd"] == state.cwd
+                && result["providerSessionId"] == request.id
+                && (result["error"].is_string()
+                    || match request.start {
+                        Some(start) => {
+                            result["page"]["startEventIndex"].as_i64() == Some(start)
+                                || result["page"]["hasLater"] == false
+                        }
+                        None => result["page"]["hasLater"] == false,
+                    })
+        }) else {
+            return;
+        };
+        let request = state.pending_detail.take().unwrap();
+        state.loading_earlier = false;
+        if state.selected.as_ref() != Some(&request.id)
+            || request.start.is_some() && state.first_event.is_none()
+        {
+            self.request_loader_detail(None);
+            cx.notify();
+            return;
+        }
+        state.loading_detail = false;
+        if let Some(error) = result["error"].as_str() {
+            state.error = Some(error.to_owned());
+        } else if let Some(rows) = result["events"].as_array() {
+            state.detail_model = result["model"].as_str().map(str::to_owned);
+            state.detail_permission = result["permissionMode"].as_str().map(str::to_owned);
+            let page = &result["page"];
+            let previous_first = state.first_event;
+            state.first_event = page["startEventIndex"].as_i64();
+            state.total_events = page["total"].as_u64().unwrap_or(0) as usize;
+            state.has_earlier = page["hasEarlier"] == true;
+            let events = rows.iter().filter_map(LoaderEvent::from_graph);
+            if request.start.is_some() && page["hasLater"] == true {
+                let first = previous_first.unwrap_or_default() as usize;
+                let mut previous: Vec<_> = events.filter(|event| event.index < first).collect();
+                let anchor = previous.len() + usize::from(state.has_earlier);
+                previous.append(&mut state.events);
+                state.events = previous;
+                state.preview_scroll.scroll_to_top_of_item(anchor);
+            } else {
+                state.events = events.collect();
+                if let Some(index) = request.around
+                    && let Some(position) = state
+                        .events
+                        .iter()
+                        .position(|event| event.index as i64 == index)
+                {
+                    state
+                        .preview_scroll
+                        .scroll_to_top_of_item(position + usize::from(state.has_earlier));
+                } else {
+                    state.preview_scroll.scroll_to_bottom();
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn receive_provider_loader_reply(
+        &mut self,
+        kind: &str,
+        request_id: u64,
+        reply: &Value,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (provider, kind) = if let Some(kind) = kind.strip_prefix("dshSession") {
+            ("dsh", kind)
+        } else if let Some(kind) = kind.strip_prefix("antigravitySession") {
+            ("antigravity", kind)
+        } else {
+            return;
+        };
+        if kind == "LoadResult" {
+            // The receipt only acknowledges the request. The standalone graph tracks recovery.
+            if let Some(error) = reply["error"].as_str()
+                && let Some((session_id, load)) =
+                    self.pending_loader_loads.iter().find(|(_, load)| {
+                        load.provider == provider && load.request_id == Some(request_id)
+                    })
+            {
+                let errors = [serde_json::json!({
+                    "sessionId": session_id, "providerSessionId": load.id, "requestId": request_id,
+                    "error": error,
+                })];
+                self.finish_session_loader(&errors, window, cx);
+                cx.notify();
+            }
+            return;
+        }
+        let Some(TabDialog::SessionLoader(state)) = &self.dialog else {
+            return;
+        };
+        if state.provider != provider {
+            return;
+        }
+        // Translate the typed envelope into the session loader's existing projections.
+        let mut row = reply["result"].as_object().cloned().unwrap_or_default();
+        row.insert("provider".into(), provider.into());
+        row.insert("requestId".into(), request_id.into());
+        row.insert("cwd".into(), state.cwd.clone().into());
+        if let Some(error) = reply.get("error") {
+            row.insert("error".into(), error.clone());
+        }
+        if kind == "SearchResult" {
+            row.insert("search".into(), true.into());
+        }
+        let rows = [Value::Object(row)];
+        match kind {
+            "ListResult" => self.loader_catalog_result(&rows, cx),
+            "DetailResult" => self.loader_detail_result(&rows, cx),
+            "SearchResult" => self.loader_search_result(&rows, cx),
+            _ => return,
+        }
+        cx.notify();
+    }
+
+    fn finish_session_loader(
+        &mut self,
+        errors: &[Value],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let nodes = session_levels::nodes(&self.graph);
+        let identities = self.graph["providerIdentityEvents"].as_array();
+        let visible_target = match &self.dialog {
+            Some(TabDialog::SessionLoader(state)) => Some(state.session_id.as_str()),
+            _ => None,
+        };
+        let mut outcome = None;
+        // The runtime request can still finish after the user dismisses the modal.
+        self.pending_loader_loads.retain(|session_id, load| {
+            let error = errors.iter().find_map(|result| {
+                (result["sessionId"] == *session_id
+                    // Antigravity already returned a typed receipt for the catalog error.
+                    && (load.provider != "antigravity"
+                        || result["requestId"].as_u64() == load.request_id)
+                    && (result["providerSessionId"].is_null()
+                        || result["providerSessionId"] == load.id))
+                    .then(|| result["error"].as_str())
+                    .flatten()
+            });
+            let newer_revision = |value: &Value| {
+                value
+                    .as_u64()
+                    .is_some_and(|revision| revision > load.previous_revision)
+            };
+            let identity = identities.and_then(|events| {
+                events.iter().find(|result| {
+                    result["sessionId"] == *session_id
+                        && (result["provider"] == load.provider
+                            || (load.provider == "claude-code" && result["provider"].is_null()))
+                        && result["providerSessionId"] == load.id
+                        && match result["result"].as_str() {
+                            Some("confirmed") => {
+                                result["reason"] == "already-loaded"
+                                    || newer_revision(&result["spawnRevision"])
+                            }
+                            Some("restore-failed") => newer_revision(&result["spawnRevision"]),
+                            _ => false,
+                        }
+                })
+            });
+            let error = error.or_else(|| {
+                identity
+                    .filter(|result| result["result"] == "restore-failed")
+                    .and_then(|result| result["restoreError"].as_str())
+            });
+            // The committed binding hands off subsequent recovery to the card.
+            let committed = session_levels::node(nodes, session_id).is_some_and(|node| {
+                node["currentMode"] == load.provider
+                    && newer_revision(&node["providerSpawnRevision"])
+                    && node["title"] == load.title
+            });
+            if error.is_none()
+                && !committed
+                && !identity.is_some_and(|result| result["result"] == "confirmed")
+            {
+                return true;
+            }
+            if visible_target == Some(session_id.as_str()) {
+                outcome = Some(error.map_or(Ok(()), |error| Err(error.to_owned())));
+            }
+            false
+        });
+        match outcome {
+            Some(Ok(())) => self.close_dialog(window, cx),
+            Some(Err(error)) => {
+                if let Some(TabDialog::SessionLoader(state)) = &mut self.dialog {
+                    state.error = Some(error);
+                    state.confirm_running = false;
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn fail_pending_loader_commands(&mut self, message: String) {
+        if let Some(TabDialog::SessionLoader(state)) = &mut self.dialog
+            && (state.loading_list
+                || state.pending_list.is_some()
+                || state.pending_detail.is_some()
+                || state.pending_search.is_some()
+                || self.pending_loader_loads.contains_key(&state.session_id))
+        {
+            state.loading_list = false;
+            state.loading_detail = false;
+            state.loading_earlier = false;
+            state.pending_list = None;
+            state.pending_detail = None;
+            state.pending_search = None;
+            state.error = Some(message);
+        }
+        self.pending_loader_loads.clear();
+    }
+
+    fn launch_action_blocked_reason(&self, id: &str, node: &Value) -> Option<&'static str> {
+        match self.commands.connection() {
+            (_, ConnectionPhase::ReadOnly { .. }) => Some(self.locale.text(
+                STORAGE_READ_ONLY_TITLE,
+                "The database is in read-only recovery mode",
+            )),
+            (_, ConnectionPhase::Blocked(block)) if block.kind == StartupBlockKind::ReadOnly => {
+                Some(self.locale.text(
+                    STORAGE_READ_ONLY_TITLE,
+                    "The database is in read-only recovery mode",
+                ))
+            }
+            (generation, ConnectionPhase::Ready)
+                if generation == self.runtime_generation
+                    && self.domain_ready
+                    && self.transport_connected =>
+            {
+                self.card_mutation_blocked_reason(id, node)
+            }
+            _ => Some(
+                self.locale
+                    .text("当前终端仍在恢复", "This terminal is still recovering."),
+            ),
+        }
+    }
+
+    fn provider_restore_state(node: &Value) -> Option<&str> {
+        if !matches!(
+            node["currentMode"].as_str(),
+            Some("claude-code" | "codex" | "antigravity")
+        ) {
+            return None;
+        }
+        node["providerRestoreState"]
+            .as_str()
+            .filter(|state| matches!(*state, "restoring" | "failed"))
+    }
+
+    fn provider_restore_hides_terminal(&self, id: &str) -> bool {
+        self.read_only.is_none()
+            && !self.wiring.is_detached(id)
+            && !self.is_deferred(id)
+            && self.graph_node(id).is_some_and(|node| {
+                Self::provider_restore_state(node) == Some("failed")
+                    && node["archivedAt"].is_null()
+                    && fork_failure_copy(node).is_none()
+                    && fork_progress_copy(node).is_none()
+            })
+    }
+
+    fn provider_restore_banner<'a>(
+        &self,
+        id: &str,
+        node: &'a Value,
+    ) -> Option<ProviderRestoreBanner<'a>> {
+        if self.is_deferred(id) {
+            return None;
+        }
+        if !node["archivedAt"].is_null() || node["forkState"] == "failed" {
+            return None;
+        }
+        let codex = node["currentMode"] == "codex";
+        let antigravity = node["currentMode"] == "antigravity";
+        if Self::provider_restore_state(node)? == "restoring" {
+            return Some(ProviderRestoreBanner::Restoring {
+                title: if antigravity {
+                    self.locale.text(
+                        "正在恢复 Antigravity 会话…",
+                        "Restoring Antigravity session…",
+                    )
+                } else if codex {
+                    "正在恢复 Codex 会话…"
+                } else {
+                    "正在恢复 Claude Code 会话…"
+                },
+            });
+        }
+        let reason = match node["providerRestoreError"].as_str() {
+            Some("provider session running in background") if codex => {
+                "此会话仍在 Codex 后台运行。请先停止对应后台会话，再重试恢复；聊天记录会保留。"
+            }
+            Some("provider session running in background") if !antigravity => {
+                "此会话仍在 Claude 后台运行。请先停止对应后台会话，再重试恢复；聊天记录会保留。"
+            }
+            None | Some("") => "终端进程未能启动",
+            Some(error) => error,
+        };
+        let pending = self.pending_provider_restores.contains_key(id);
+        let fresh_blocked = self.launch_action_blocked_reason(id, node);
+        let retry_blocked = fresh_blocked.or_else(|| {
+            matches!(
+                self.recovery.get(id),
+                Some(RecoveryState::Restoring | RecoveryState::Restarting(_))
+            )
+            .then_some("当前终端仍在恢复")
+        });
+        Some(ProviderRestoreBanner::Failed {
+            title: if antigravity {
+                self.locale
+                    .text("Antigravity 恢复失败", "Antigravity restore failed")
+            } else if codex {
+                "Codex 恢复失败"
+            } else {
+                "Claude Code 恢复失败"
+            },
+            reason,
+            retry: if pending {
+                "正在恢复…"
+            } else {
+                "重试恢复"
+            },
+            fresh: if antigravity {
+                self.locale
+                    .text("新开 Antigravity", "Start a new Antigravity session")
+            } else if codex {
+                "新开 Codex"
+            } else {
+                "新开 Claude Code"
+            },
+            pending,
+            retry_blocked,
+            fresh_blocked,
+        })
+    }
+
+    fn run_provider_restore(
+        &mut self,
+        id: &str,
+        fresh: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.order.iter().any(|session| session == id)
+            || self.dialog.is_some()
+            || self.pending_close.is_some()
+            || self.pending_card_action.is_some()
+        {
+            return;
+        }
+        let Some(node) = self.graph_node(id) else {
+            return;
+        };
+        let Some(ProviderRestoreBanner::Failed {
+            pending: false,
+            retry_blocked,
+            fresh_blocked,
+            ..
+        }) = self.provider_restore_banner(id, node)
+        else {
+            return;
+        };
+        let blocked = if fresh { fresh_blocked } else { retry_blocked };
+        if blocked.is_some() {
+            return;
+        }
+        let revision = node["providerSpawnRevision"].as_u64();
+        let session_id = id.to_owned();
+        let command = if fresh {
+            Command::StartFreshProviderSession { session_id }
+        } else {
+            Command::RetryProviderRestore { session_id }
+        };
+        match self.commands.send_at(self.runtime_generation, command) {
+            Ok(()) => {
+                let session_id = id.to_owned();
+                let watchdog = cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(Duration::from_secs(8)).await;
+                    let _ = this.update(cx, |this, cx| {
+                        // The host can ignore a command while the old PTY retires.
+                        // Allow another explicit click if no graph confirms it.
+                        this.pending_provider_restores.remove(&session_id);
+                        cx.notify();
+                    });
+                });
+                self.pending_provider_restores.insert(
+                    id.to_owned(),
+                    PendingProviderRestore {
+                        revision,
+                        _watchdog: watchdog,
+                    },
+                );
+                self.clear_start_failure_focus(id, window);
+                self.start_failure_controls.remove(id);
+                self.recovery_controls.remove(id);
+                if matches!(
+                    self.recovery.get(id),
+                    Some(RecoveryState::Failed(_) | RecoveryState::StartFailed(_))
+                ) {
+                    self.recovery.remove(id);
+                }
+                window.blur();
+            }
+            Err(error) => self.show_toast(error.to_string(), cx),
+        }
+        cx.notify();
+    }
+
+    fn start_failure_card(&self, id: &str, node: &Value) -> Option<StartFailureCard<'_>> {
+        if !node["archivedAt"].is_null() || Self::provider_restore_state(node).is_some() {
+            return None;
+        }
+        let RecoveryState::StartFailed(error) = self.recovery.get(id)? else {
+            return None;
+        };
+        Some(StartFailureCard {
+            title: "会话启动失败",
+            reason: if error.is_empty() {
+                "终端进程未能启动"
+            } else {
+                error
+            },
+            retry: "重试启动",
+            remove: "移除失败会话",
+            blocked: self.launch_action_blocked_reason(id, node),
+        })
+    }
+
+    fn start_failure_action_available(&self, id: &str) -> bool {
+        self.active_scene_id().is_some()
+            && self.dialog.is_none()
+            && self.pending_close.is_none()
+            && self.pending_card_action.is_none()
+            && self.graph_node(id).is_some_and(|node| {
+                self.start_failure_card(id, node)
+                    .is_some_and(|card| card.blocked.is_none())
+            })
+    }
+
+    fn retry_session_start(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.start_failure_action_available(id) {
+            return;
+        }
+        let Some(RecoveryState::StartFailed(reason)) = self.recovery.get(id) else {
+            return;
+        };
+        if self
+            .commands
+            .send_at(
+                self.runtime_generation,
+                Command::RestartSession {
+                    session_id: id.to_owned(),
+                },
+            )
+            .is_ok()
+        {
+            self.recovery
+                .insert(id.to_owned(), RecoveryState::Restarting(reason.clone()));
+            self.clear_start_failure_focus(id, window);
+            self.start_failure_controls.remove(id);
+            cx.notify();
+        }
+    }
+
+    fn remove_failed_session(&mut self, id: &str, cx: &mut Context<Self>) {
+        if !self.start_failure_action_available(id) {
+            return;
+        }
+        let Some(scene_id) = self.active_scene_id() else {
+            return;
+        };
+        self.send_card_action(
+            Command::CloseSessionCard {
+                scene_id: scene_id.to_owned(),
+                session_id: id.to_owned(),
+                confirmed_intent: Some(format!("delete-session:{id}")),
+                preserve_scene_on_last_session: false,
+            },
+            cx,
+        );
+    }
+
+    fn open_card_dialog(
+        &mut self,
+        dialog: TabDialog,
+        controls: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.dialog = Some(dialog);
+        self.dialog_controls = (0..controls)
+            .map(|_| cx.focus_handle().tab_stop(true))
+            .collect();
+        window.focus(&self.dialog_controls[0]);
+        cx.notify();
+    }
+
+    fn open_last_session(
+        &mut self,
+        scene_id: String,
+        session_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let return_focus = window.focused(cx);
+        self.open_card_dialog(
+            TabDialog::LastSession {
+                scene_id,
+                session_id,
+                return_focus,
+            },
+            2,
+            window,
+            cx,
+        );
+    }
+
+    fn request_close_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.active_level_focus().map(str::to_owned) {
+            self.request_close_session_by_id(&id, window, cx);
+        }
+    }
+
+    fn request_close_session_by_id(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.read_only.is_some() {
+            return;
+        }
+        if self.dialog.is_some()
+            || self.pending_close.is_some()
+            || self.pending_card_action.is_some()
+        {
+            return;
+        }
+        let Some(scene_id) = self.active_scene_id() else {
+            return;
+        };
+        if !self.card_action_available(id) {
+            return;
+        }
+        let (scene_id, session_id) = (scene_id.to_owned(), id.to_owned());
+        if self.graph["workspaceSessionCount"].as_u64() == Some(1) {
+            self.open_last_session(scene_id, session_id, window, cx);
+            return;
+        }
+        let node = self.graph_node(id).expect("available session");
+        let active = matches!(node["workStatus"].as_str(), Some("running" | "needs-input"));
+        let child_count =
+            session_levels::children_of(session_levels::nodes(&self.graph), Some(id)).count();
+        if !active && child_count == 0 {
+            self.send_card_action(
+                Command::CloseSessionCard {
+                    scene_id,
+                    session_id,
+                    confirmed_intent: None,
+                    preserve_scene_on_last_session: false,
+                },
+                cx,
+            );
+            return;
+        }
+        let title = node["title"].as_str().unwrap_or("当前会话");
+        let activity = if active {
+            "正在运行"
+        } else {
+            "当前空闲"
+        };
+        let descendants = if child_count > 0 {
+            format!("，并有 {child_count} 个子会话")
+        } else {
+            String::new()
+        };
+        let body = format!(
+            "“{title}”{activity}{descendants}。停止后，该节点会在会话列表和 DAG 中保持为“已停止”，子会话继续工作。"
+        );
+        self.open_card_dialog(
+            TabDialog::CloseSession {
+                scene_id,
+                session_id,
+                body,
+            },
+            3,
+            window,
+            cx,
+        );
+    }
+
+    fn send_card_action(&mut self, command: Command, cx: &mut Context<Self>) {
+        let (scene_id, session_id) = match &command {
+            Command::CloseSessionCard {
+                scene_id,
+                session_id,
+                ..
+            }
+            | Command::RemoveSessionBranch {
+                scene_id,
+                session_id,
+                ..
+            } => (scene_id, session_id),
+            _ => unreachable!("expected a session card action"),
+        };
+        let target = (scene_id.clone(), session_id.clone());
+        if self
+            .commands
+            .send_at(self.runtime_generation, command)
+            .is_ok()
+        {
+            self.pending_card_action = Some(target);
+        }
+        cx.notify();
+    }
+
+    fn finish_card_action(&mut self, action: &Value) -> bool {
+        let matches = self
+            .pending_card_action
+            .as_ref()
+            .is_some_and(|(scene_id, session_id)| {
+                action["sceneId"] == *scene_id && action["sessionId"] == *session_id
+            });
+        if matches {
+            self.pending_card_action = None;
+        }
+        matches
+    }
+
+    fn scene_membership_count(&self) -> usize {
+        session_levels::nodes(&self.graph)
+            .iter()
+            .filter(|node| !Self::team_member_node(node))
+            .count()
+    }
+
+    fn remove_empties_scene(&self, id: &str, scope: RemoveScope) -> bool {
+        let count = self.scene_membership_count();
+        if scope == RemoveScope::NodeOnly {
+            return count <= 1;
+        }
+        self.graph_node(id)
+            .is_some_and(|node| self.removal_branch_impact(node).sessions >= count)
+    }
+
+    fn request_scene_close_preview(&mut self, scene_id: String, cx: &mut Context<Self>) {
+        self.pending_close = Some(scene_id.clone());
+        self.send(Command::PreviewSceneClose { scene_id }, cx);
+    }
+
+    fn open_remove_session(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dialog.is_some()
+            || self.pending_close.is_some()
+            || self.pending_card_action.is_some()
+            || !self.remove_session_available(id)
+        {
+            return;
+        }
+        if self.remove_empties_scene(id, RemoveScope::NodeOnly) && !self.is_stopped_session(id) {
+            self.request_close_session_by_id(id, window, cx);
+            return;
+        }
+        let (Some(scene_id), Some(text)) = (
+            self.active_scene_id(),
+            self.removal_dialog_text(id, RemoveScope::NodeOnly),
+        ) else {
+            return;
+        };
+        let dialog = TabDialog::RemoveSession {
+            scene_id: scene_id.to_owned(),
+            session_id: id.to_owned(),
+            scope: RemoveScope::NodeOnly,
+        };
+        self.open_card_dialog(
+            dialog,
+            if text.choices.is_some() { 5 } else { 3 },
+            window,
+            cx,
+        );
+    }
+
+    fn select_remove_scope(&mut self, scope: RemoveScope, cx: &mut Context<Self>) {
+        if let Some(TabDialog::RemoveSession {
+            scope: selected, ..
+        }) = &mut self.dialog
+        {
+            *selected = scope;
+            cx.notify();
+        }
+    }
+
+    fn removal_branch_impact(&self, current: &Value) -> RemovalImpact {
+        let mut children: HashMap<&str, Vec<&Value>> = HashMap::new();
+        for node in session_levels::nodes(&self.graph) {
+            if let Some(parent) = session_levels::parent_id(node) {
+                children.entry(parent).or_default().push(node);
+            }
+        }
+        let mut branch = RemovalImpact::default();
+        let mut stack = vec![current];
+        let mut seen = HashSet::new();
+        while let Some(node) = stack.pop() {
+            let Some(session_id) = node["sessionId"].as_str() else {
+                continue;
+            };
+            if seen.insert(session_id) {
+                branch.add(node);
+                if let Some(children) = children.get(session_id) {
+                    stack.extend(children);
+                }
+            }
+        }
+        branch
+    }
+
+    fn removal_dialog_text(&self, id: &str, scope: RemoveScope) -> Option<RemovalDialogText> {
+        let current = self.graph_node(id)?;
+        let title = match self.locale {
+            InterfaceLocale::Chinese => format!("移除节点“{}”？", current["title"].as_str()?),
+            InterfaceLocale::English => format!("Remove node \"{}\"?", current["title"].as_str()?),
+        };
+        let mut node_only = RemovalImpact::default();
+        node_only.add(current);
+        let branch = self.removal_branch_impact(current);
+        if branch.sessions == 1 {
+            let body = match self.locale {
+                InterfaceLocale::Chinese => format!(
+                    "{}。移除后，该会话会从会话列表和 DAG 中消失。",
+                    node_only.label(self.locale)
+                ),
+                InterfaceLocale::English => format!(
+                    "{}. Once removed, the session disappears from the session list and the DAG.",
+                    node_only.label(self.locale)
+                ),
+            };
+            return Some(RemovalDialogText {
+                title,
+                body,
+                files_unchanged: Some(self.locale.text(
+                    "项目文件和自有 Worktree 保持原样。",
+                    "Project files and owned worktrees stay as they are.",
+                )),
+                choices: None,
+                warning: None,
+                confirm: self.locale.text("移除", "Remove").into(),
+            });
+        }
+        let description = if session_levels::parent_id(current).is_some() {
+            self.locale.text(
+                "后代会话将重连到当前节点的父级。",
+                "Descendant sessions reattach to the parent of this node.",
+            )
+        } else {
+            self.locale.text(
+                "直接后代会话将成为根节点。",
+                "Direct descendant sessions become root nodes.",
+            )
+        };
+        let (activity, confirm) = match (self.locale, scope) {
+            (InterfaceLocale::Chinese, RemoveScope::NodeOnly) => {
+                (node_only.activity(self.locale), "移除当前节点".into())
+            }
+            (InterfaceLocale::Chinese, RemoveScope::NodeAndDescendants) => (
+                branch.activity(self.locale),
+                format!("移除 {} 个会话", branch.sessions),
+            ),
+            (InterfaceLocale::English, RemoveScope::NodeOnly) => {
+                (node_only.activity(self.locale), "Remove this node".into())
+            }
+            (InterfaceLocale::English, RemoveScope::NodeAndDescendants) => (
+                branch.activity(self.locale),
+                if branch.sessions == 1 {
+                    "Remove 1 session".to_owned()
+                } else {
+                    format!("Remove {} sessions", branch.sessions)
+                },
+            ),
+        };
+        let body = self
+            .locale
+            .text(
+                "请选择移除范围。项目文件和自有 Worktree 保持原样。",
+                "Choose what to remove. Project files and owned worktrees stay as they are.",
+            )
+            .to_owned();
+        let warning = (!activity.is_empty()).then(|| match self.locale {
+            InterfaceLocale::Chinese => format!("其中 {activity}的会话将先停止。"),
+            InterfaceLocale::English => format!("{activity} will stop first."),
+        });
+        let descendants = branch.sessions - 1;
+        let descendants_removed = match self.locale {
+            InterfaceLocale::Chinese => format!("当前节点与 {descendants} 个后代会话会全部移除。"),
+            InterfaceLocale::English if descendants == 1 => {
+                "This node and its 1 descendant session will be removed.".to_owned()
+            }
+            InterfaceLocale::English => {
+                format!("This node and its {descendants} descendant sessions will be removed.")
+            }
+        };
+        Some(RemovalDialogText {
+            title,
+            body,
+            files_unchanged: None,
+            choices: Some([
+                RemovalChoiceText {
+                    title: self.locale.text("仅移除当前节点", "Remove this node only"),
+                    impact: node_only.label(self.locale),
+                    description: description.into(),
+                },
+                RemovalChoiceText {
+                    title: self.locale.text(
+                        "移除当前节点及全部后代",
+                        "Remove this node and all descendants",
+                    ),
+                    impact: branch.label(self.locale),
+                    description: descendants_removed,
+                },
+            ]),
+            warning,
+            confirm,
+        })
+    }
+
+    fn level_parent(&self) -> Option<&str> {
+        let explicit_parent = self
+            .active_scene_id()
+            .and_then(|scene_id| self.level_parent_by_scene.get(scene_id))
+            .map(Option::as_deref);
+        session_levels::level_parent(
+            session_levels::nodes(&self.graph),
+            explicit_parent,
+            self.focused.as_deref(),
+        )
+    }
+
+    fn level_focus(&self) -> Option<&str> {
+        let card_focus = self.pending_focus.as_ref().filter(|(scene_id, id)| {
+            matches!(
+                self.level_focus_request,
+                Some(LevelFocusRequest::Card | LevelFocusRequest::CardOnReady)
+            ) && self.active_scene_id() == Some(scene_id.as_str())
+                && self.order.contains(id)
+                && !self.is_stopped_session(id)
+        });
+        card_focus
+            .map(|(_, id)| id)
+            .or(self.focused.as_ref())
+            .filter(|id| self.order.contains(id))
+            .or_else(|| self.order.first())
+            .map(String::as_str)
+    }
+
+    fn active_level_focus(&self) -> Option<&str> {
+        // Visual focus can expand a stopped card. Runtime actions require a live session.
+        self.level_focus().filter(|id| !self.is_stopped_session(id))
+    }
+
+    fn breadcrumb_labels(&self) -> (String, String) {
+        let title = self
+            .level_parent()
+            .and_then(|id| self.graph_node(id))
+            .and_then(|node| node["title"].as_str())
+            .filter(|title| !title.is_empty());
+        let count = self.order.len();
+        match self.locale {
+            InterfaceLocale::Chinese => {
+                let label =
+                    title.map_or_else(|| "根会话".into(), |title| format!("{title} 的子会话"));
+                (label, format!("· {count} 个会话"))
+            }
+            InterfaceLocale::English => {
+                let label = title.map_or_else(
+                    || "Root sessions".to_owned(),
+                    |title| format!("Child sessions of {title}"),
+                );
+                let sessions = if count == 1 {
+                    "1 session".to_owned()
+                } else {
+                    format!("{count} sessions")
+                };
+                (label, format!("· {sessions}"))
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    fn footer_fields(&self) -> Option<FooterFields<'_>> {
+        self.footer_fields_for(self.level_focus()?)
+    }
+
+    fn footer_fields_for(&self, id: &str) -> Option<FooterFields<'_>> {
+        let node = self.hud_node(id)?;
+        let mode = node["currentMode"].as_str()?;
+        let codex = (mode == "codex").then(|| codex_hud::CodexHud::from_node(node));
+        let live = self.live_agent_hud(id);
+        let hud = live.map(|hud| codex_hud::CodexHud::from_live(node, hud, mode));
+        let name = if mode == "shell" {
+            self.footer_shell.clone()
+        } else {
+            hud.as_ref()
+                .and_then(|hud| hud.model_label())
+                .or_else(|| codex.as_ref().and_then(|hud| hud.model_label()))
+                .or_else(|| {
+                    (mode != "codex")
+                        .then(|| {
+                            codex_hud::CodexHud::from_live(node, &Value::Null, mode).model_label()
+                        })
+                        .flatten()
+                })
+                .map(|label| label.to_string())
+        };
+        let cwd = live
+            .and_then(|hud| trimmed_graph_text(&hud["cwd"]))
+            .or_else(|| trimmed_graph_text(&node["cwd"]))
+            .and_then(|path| {
+                let tail = path.rsplit(['/', '\\']).find(|part| !part.is_empty())?;
+                Some((path, format!("~/{}", tail.replace(['\r', '\n', '\t'], " "))))
+            });
+        let git = self
+            .footer_git_projection(id)
+            .or_else(|| FooterGit::projected(node, live, self.locale));
+        let environment = FooterEnvironment::from_node(&node["environment"])
+            .or_else(|| live.and_then(|hud| FooterEnvironment::from_node(&hud["environment"])));
+        Some(FooterFields {
+            name,
+            is_shell: mode == "shell",
+            cwd,
+            git,
+            environment,
+            codex,
+            live_hud: hud,
+            live,
+            mode,
+            node,
+            projected_permission: trimmed_graph_text(&node["permissionMode"]),
+        })
+    }
+
+    fn child_badge(&self, id: &str) -> Option<session_levels::ChildBadge> {
+        session_levels::child_badge(session_levels::children_of(
+            session_levels::nodes(&self.graph),
+            Some(id),
+        ))
+    }
+
+    fn refresh_level(&mut self, cx: &mut Context<Self>) {
+        if let Some(scene) = self.active_scene_id()
+            && let Some(Some(parent)) = self.level_parent_by_scene.get(scene)
+            && self.graph_node(parent).is_none()
+        {
+            eprintln!(
+                "Session level parent {parent} is missing in scene {scene}; returning to root"
+            );
+            self.level_parent_by_scene.insert(scene.to_owned(), None);
+        }
+        let parent = self.level_parent();
+        let owner = self
+            .active_scene_id()
+            .map(|scene| session_levels::owner_key(scene, parent));
+        self.order = session_levels::children_of(session_levels::nodes(&self.graph), parent)
+            .filter_map(|node| node["sessionId"].as_str().map(str::to_owned))
+            .collect();
+        let now = self.motion_clock.elapsed().as_secs_f64() * 1000.;
+        if self.carousel_owner != owner {
+            self.flush_geometry(cx);
+            self.carousel_owner = owner;
+            self.restore_geometry = true;
+            self.focus_follow_until = (!self.order.is_empty()).then_some(now + 440.);
+            self.stop_edge_browse(false);
+            self.pointer_position = None;
+            self.carousel_drag = None;
+            self.card_motion.clear();
+            self.card_geometry.clear();
+            self.hovered = None;
+            self.hovered_child_badge = None;
+            self.hover_follow_until = None;
+            self.hover_baseline = None;
+            self.hover_restore_at = None;
+            self.carousel_scroll.set_offset(point(px(0.), px(0.)));
+        }
+        let focus = self.level_focus().map(str::to_owned);
+        for id in &self.order {
+            let selected = focus.as_ref() == Some(id);
+            let motion = self
+                .card_motion
+                .entry(id.clone())
+                .or_insert_with(|| CardMotion::new(selected));
+            motion
+                .lift
+                .retarget(if selected { 1. } else { 0. }, now, 180., Curve::Lift);
+        }
+    }
+
+    fn open_child_level(&mut self, id: &str, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(scene) = self.active_scene_id().map(str::to_owned) else {
+            return;
+        };
+        let nodes = session_levels::nodes(&self.graph);
+        if self
+            .graph_node(id)
+            .is_none_or(|node| !node["archivedAt"].is_null())
+            || !self.order.iter().any(|card| card == id)
+        {
+            return;
+        }
+        let children = || session_levels::children_of(nodes, Some(id));
+        if children().next().is_none() {
+            return;
+        }
+        let preferred = session_levels::preferred_child(children()).map(str::to_owned);
+        self.level_parent_by_scene
+            .insert(scene.clone(), Some(id.to_owned()));
+        self.refresh_level(cx);
+        if let Some(session_id) = preferred {
+            self.send(
+                Command::FocusSession {
+                    scene_id: scene,
+                    session_id,
+                },
+                cx,
+            );
+            if self.pending_focus.is_some() {
+                self.level_focus_request = Some(LevelFocusRequest::OpenChildren);
+            }
+        }
+        cx.notify();
+    }
+
+    fn return_to_parent(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(scene) = self.active_scene_id().map(str::to_owned) else {
+            return;
+        };
+        let Some(parent) = self.level_parent().map(str::to_owned) else {
+            return;
+        };
+        let ancestor = self
+            .graph_node(&parent)
+            .and_then(session_levels::parent_id)
+            .filter(|id| self.graph_node(id).is_some())
+            .map(str::to_owned);
+        self.level_parent_by_scene.insert(scene.clone(), ancestor);
+        self.refresh_level(cx);
+        self.send(
+            Command::FocusSession {
+                scene_id: scene,
+                session_id: parent,
+            },
+            cx,
+        );
+        if self.pending_focus.is_some() {
+            self.level_focus_request = Some(LevelFocusRequest::ReturnParent);
+        }
+        cx.notify();
+    }
+
+    fn jump_to_scene(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(scene) = self.scenes.get(index) {
+            self.send(
+                Command::SelectScene {
+                    scene_id: scene.id.clone(),
+                },
+                cx,
+            );
+        }
+    }
+
+    fn step_scene(&mut self, offset: isize, cx: &mut Context<Self>) {
+        let index = self
+            .scenes
+            .iter()
+            .position(|scene| Some(scene.id.as_str()) == self.active_scene_id());
+        let len = self.scenes.len().max(1) as isize;
+        self.jump_to_scene(
+            (index.map_or(-1, |i| i as isize) + offset).rem_euclid(len) as usize,
+            cx,
+        );
+    }
+
+    fn move_scene(&mut self, offset: isize, cx: &mut Context<Self>) {
+        if self.read_only.is_some() {
+            return;
+        }
+        let Some(index) = self
+            .scenes
+            .iter()
+            .position(|scene| Some(scene.id.as_str()) == self.active_scene_id())
+        else {
+            return;
+        };
+        let Some(target) = index
+            .checked_add_signed(offset)
+            .filter(|&i| i < self.scenes.len())
+        else {
+            return;
+        };
+        let before = if offset < 0 { target } else { target + 1 };
+        self.send(
+            Command::ReorderScene {
+                scene_id: self.scenes[index].id.clone(),
+                before_scene_id: self.scenes.get(before).map(|scene| scene.id.clone()),
+            },
+            cx,
+        );
+    }
+
+    fn step_session(&mut self, offset: isize, cx: &mut Context<Self>) {
+        let sessions = self
+            .order
+            .iter()
+            .filter(|id| {
+                self.graph_node(id)
+                    .is_some_and(|node| node["archivedAt"].is_null())
+            })
+            .collect::<Vec<_>>();
+        if sessions.len() <= 1 {
+            return;
+        }
+        let Some(scene_id) = self.active_scene_id() else {
+            return;
+        };
+        let current = sessions
+            .iter()
+            .position(|id| Some(*id) == self.focused.as_ref())
+            .unwrap_or(0);
+        let next = (current as isize + offset).rem_euclid(sessions.len() as isize) as usize;
+        self.send(
+            Command::FocusSession {
+                scene_id: scene_id.to_owned(),
+                session_id: sessions[next].clone(),
+            },
+            cx,
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    fn restore_dag_terminal_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((scene, session)) = self.active_scene_id().zip(self.active_level_focus()) {
+            self.return_terminal_focus(scene.to_owned(), session.to_owned(), window, cx);
+        }
+    }
+
+    fn is_theme_shortcut(stroke: &Keystroke) -> bool {
+        let mods = stroke.modifiers;
+        stroke.key.eq_ignore_ascii_case("i")
+            && !mods.shift
+            && !mods.alt
+            && terminal_surface::terminal_mod(mods, cfg!(target_os = "macos"))
+    }
+
+    fn toggle_theme_shortcut(&mut self, cx: &mut Context<Self>) {
+        let preference = match self.theme.effective() {
+            AppTheme::Light => ThemePreference::Dark,
+            AppTheme::Dark => ThemePreference::Light,
+        };
+        self.save_theme(preference, cx);
+    }
+
+    fn standalone_alt(&mut self, mods: Modifiers, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(target_os = "windows")]
+        if self.quit_confirmation.focus().is_some() {
+            self.shortcut_alt_down = mods.alt;
+            self.last_shortcut_alt = None;
+            return;
+        }
+        let down = mods.alt && !mods.shift && !mods.control && !mods.platform && !mods.function;
+        let pressed = down && !self.shortcut_alt_down;
+        self.shortcut_alt_down = down;
+        if mods.alt && !down {
+            self.last_shortcut_alt = None;
+        }
+        if pressed {
+            let now = Instant::now();
+            if self
+                .last_shortcut_alt
+                .is_some_and(|previous| now.duration_since(previous) < Duration::from_millis(300))
+            {
+                self.last_shortcut_alt = None;
+                self.toggle_shortcuts(window, cx);
+                cx.stop_propagation();
+            } else {
+                self.last_shortcut_alt = Some(now);
+            }
+        }
+    }
+
+    fn workspace_shortcut(
+        &mut self,
+        stroke: &Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let mods = stroke.modifiers;
+        let mac = cfg!(target_os = "macos");
+        if !terminal_surface::terminal_mod(mods, mac) {
+            return false;
+        }
+        if let Some(zoom) = terminal_surface::font_zoom_for_key(stroke, mac) {
+            self.zoom_terminal_font(zoom, cx);
+            return true;
+        }
+        if self.split_shortcut(stroke, window, cx) {
+            return true;
+        }
+        if mods.alt {
+            match (stroke.key.as_str(), mods.shift) {
+                ("arrowleft" | "left", false) => self.step_session(-1, cx),
+                ("arrowright" | "right", false) => self.step_session(1, cx),
+                ("arrowup" | "up" | "arrowdown" | "down", false) => {}
+                _ => return false,
+            }
+            return true;
+        }
+        match (stroke.key.as_str(), mods.shift) {
+            ("i", false) => self.toggle_theme_shortcut(cx),
+            ("d", false) => self.create_shell_sibling(cx),
+            ("d", true) => {
+                if let Some(source) = self.active_level_focus().map(str::to_owned) {
+                    self.split_pane(&source, SplitDirection::Vertical, cx);
+                }
+            }
+            ("w", false) => {
+                if self.active_level_focus().is_some() {
+                    self.request_close_session(window, cx);
+                } else if let Some(scene) = self.active_scene_id().map(str::to_owned) {
+                    self.request_scene_close_preview(scene, cx);
+                }
+            }
+            ("t", false) => self.create_canvas(cx),
+            ("]", false) => self.step_session(1, cx),
+            ("[", false) => self.step_session(-1, cx),
+            ("]" | "}", true) => self.step_scene(1, cx),
+            ("[" | "{", true) => self.step_scene(-1, cx),
+            ("tab", shift) if !mac => self.step_scene(if shift { -1 } else { 1 }, cx),
+            ("arrowleft" | "left" | "pageup", true) => self.move_scene(-1, cx),
+            ("arrowright" | "right" | "pagedown", true) => self.move_scene(1, cx),
+            (key, false) if matches!(key.as_bytes(), [b'1'..=b'9']) => {
+                self.jump_to_scene(usize::from(key.as_bytes()[0] - b'1'), cx);
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    fn tab_key(&mut self, stroke: &Keystroke, window: &mut Window, cx: &mut Context<Self>) {
+        let normalized;
+        let stroke = if stroke.key.bytes().any(|byte| byte.is_ascii_uppercase()) {
+            normalized = Keystroke {
+                key: stroke.key.to_ascii_lowercase(),
+                ..stroke.clone()
+            };
+            &normalized
+        } else {
+            stroke
+        };
+        if self.shortcut_alt_down {
+            self.last_shortcut_alt = None;
+        }
+        #[cfg(target_os = "windows")]
+        if let Some(focus) = self.quit_confirmation.focus() {
+            match quit_dialog_key(
+                stroke,
+                focus.cancel.is_focused(window),
+                focus.quit.is_focused(window),
+            ) {
+                QuitDialogKey::Cancel => self.cancel_quit_confirmation(window, cx),
+                QuitDialogKey::FocusCancel => window.focus(&focus.cancel),
+                QuitDialogKey::FocusQuit => window.focus(&focus.quit),
+                QuitDialogKey::Confirm => self.confirm_quit(window, cx),
+                QuitDialogKey::Ignore => {}
+            }
+            cx.stop_propagation();
+            return;
+        }
+        if self.invalid_recovery_marker {
+            return;
+        }
+        if self.database_recovery.is_some() {
+            if stroke.key == "tab"
+                && !stroke.modifiers.alt
+                && !stroke.modifiers.control
+                && !stroke.modifiers.platform
+            {
+                if stroke.modifiers.shift {
+                    window.focus_prev();
+                } else {
+                    window.focus_next();
+                }
+                cx.stop_propagation();
+            }
+            return;
+        }
+        if self.footer_popover_key(stroke, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
+        if self.wiring_key(stroke, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
+        let mods = stroke.modifiers;
+        if self.project_instructions_open(window) {
+            if self.project_instructions_key(stroke, window, cx) {
+                cx.stop_propagation();
+            }
+            return;
+        }
+        if stroke.key == "escape" && self.notification_open {
+            self.close_notifications(cx);
+            cx.stop_propagation();
+            return;
+        }
+        if let Some((settings, _)) = &self.settings
+            && self.dialog.is_none()
+        {
+            if stroke.key == "escape" && self.workspace_menu.is_none() && self.task_menu.is_none() {
+                settings
+                    .clone()
+                    .update(cx, |settings, cx| settings.escape(window, cx));
+                cx.stop_propagation();
+                return;
+            }
+            if settings.read(cx).modal_open()
+                || self.workspace_menu.is_none() && self.task_menu.is_none()
+            {
+                if stroke.key == "tab"
+                    && !mods.alt
+                    && !mods.control
+                    && !mods.platform
+                    && !settings.read(cx).modal_open()
+                {
+                    self.keyboard_focus = true;
+                    settings.update(cx, |settings, cx| settings.dismiss_time_zone_menu(cx));
+                    if mods.shift {
+                        window.focus_prev();
+                    } else {
+                        window.focus_next();
+                    }
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+                return;
+            }
+        }
+        if let Some(TabDialog::Branch(state)) = &self.dialog {
+            let input = state.input.read(cx);
+            if stroke.key == "escape" && !input.composing() {
+                self.cancel_fork(window, cx);
+                cx.stop_propagation();
+            } else if stroke.key == "tab" && !mods.alt && !mods.control && !mods.platform {
+                if !state.submitting && !input.composing() {
+                    let controls = [
+                        &self.dialog_controls[0],
+                        &input.focus,
+                        &self.dialog_controls[1],
+                        &self.dialog_controls[2],
+                    ];
+                    let current = controls.iter().position(|focus| focus.is_focused(window));
+                    let next = match (current, mods.shift) {
+                        (Some(index), true) => (index + controls.len() - 1) % controls.len(),
+                        (Some(index), false) => (index + 1) % controls.len(),
+                        (None, true) => controls.len() - 1,
+                        (None, false) => 0,
+                    };
+                    window.focus(controls[next]);
+                    self.keyboard_focus = true;
+                    cx.notify();
+                }
+                cx.stop_propagation();
+            }
+            return;
+        }
+
+        if stroke.key == "escape" && self.permission_menu.is_some() {
+            self.dismiss_permission_menu(window, cx);
+            cx.stop_propagation();
+            return;
+        }
+        if let Some(TabDialog::SessionLoader(state)) = &self.dialog {
+            if stroke.key == "escape" {
+                self.close_dialog(window, cx);
+                cx.stop_propagation();
+            } else if stroke.key == "tab" && !mods.alt && !mods.control && !mods.platform {
+                let input = state.input.read(cx);
+                let mut controls = vec![&self.dialog_controls[0]];
+                if !state.history {
+                    controls.extend([4, 9, 5, 8].map(|index| &self.dialog_controls[index]));
+                }
+                controls.push(&input.focus);
+                if !input.text.is_empty() {
+                    controls.push(&self.dialog_controls[3]);
+                }
+                controls.push(&state.list_focus);
+                if state.remote_catalog() {
+                    if state.has_more_sessions && !state.loading_list {
+                        controls.push(&self.dialog_controls[6]);
+                    }
+                    if state.has_more_hits && state.pending_search.is_none() {
+                        controls.push(&self.dialog_controls[7]);
+                    }
+                }
+                if state.has_earlier && !state.loading_earlier {
+                    controls.push(&self.dialog_controls[1]);
+                }
+                if !state.history {
+                    controls.push(&state.content_input.read(cx).focus);
+                    controls.push(&self.dialog_controls[10]);
+                }
+                if self.session_loader_can_submit(state) {
+                    controls.push(&self.dialog_controls[2]);
+                }
+                let current = controls.iter().position(|focus| focus.is_focused(window));
+                let next = match (current, mods.shift) {
+                    (Some(index), true) => (index + controls.len() - 1) % controls.len(),
+                    (Some(index), false) => (index + 1) % controls.len(),
+                    (None, true) => controls.len() - 1,
+                    (None, false) => 0,
+                };
+                window.focus(controls[next]);
+                self.keyboard_focus = true;
+                cx.stop_propagation();
+                cx.notify();
+            }
+            return;
+        }
+        if self.search_key(stroke, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
+        if self.search.as_ref().is_some_and(|search| {
+            search.open
+                && (search.input.read(cx).focus.is_focused(window)
+                    || search.controls.iter().any(|focus| focus.is_focused(window)))
+        }) {
+            return;
+        }
+        if stroke.key == "escape" && self.workspace_drag_source.is_some() && cx.has_active_drag() {
+            cx.stop_active_drag(window);
+            self.workspace_drag_source = None;
+            self.workspace_drag_target = None;
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+        if self.dialog.is_none() && self.workspace_shortcut(stroke, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
+        let confirmation = matches!(
+            self.dialog,
+            Some(
+                TabDialog::Close { .. }
+                    | TabDialog::DeleteTask { .. }
+                    | TabDialog::RemoveWorkspace { .. }
+                    | TabDialog::CloseSession { .. }
+                    | TabDialog::LastSession { .. }
+                    | TabDialog::RemoveSession { .. }
+                    | TabDialog::PermissionMode(_)
+            )
+        );
+        if stroke.key == "escape" {
+            if confirmation {
+                self.close_dialog(window, cx);
+                cx.stop_propagation();
+            } else if self.workspace_menu.take().is_some()
+                || self.task_menu.take().is_some()
+                || self.tab_menu.take().is_some()
+            {
+                // SceneTabBar dismisses this menu in the window bubble listener;
+                // it neither moves focus nor consumes the underlying Escape.
+                cx.notify();
+            }
+            return;
+        }
+        let m = stroke.modifiers;
+        if stroke.key != "tab" || m.alt || m.control || m.platform {
+            return;
+        }
+        if !confirmation
+            && (self
+                .terminals
+                .values()
+                .any(|terminal| terminal.read(cx).focus.is_focused(window))
+                || matches!(&self.dialog, Some(TabDialog::Rename { input, .. } | TabDialog::RenameTask { input, .. } | TabDialog::RenameSession { input, .. }) if input.read(cx).focus.is_focused(window) && input.read(cx).composing()))
+        {
+            return;
+        }
+        self.keyboard_focus = true;
+        if confirmation {
+            let controls = &self.dialog_controls;
+            let current = controls.iter().position(|focus| focus.is_focused(window));
+            let next = match (current, m.shift) {
+                (Some(i), true) => (i + controls.len() - 1) % controls.len(),
+                (Some(i), false) => (i + 1) % controls.len(),
+                (None, true) => controls.len() - 1,
+                (None, false) => 0,
+            };
+            window.focus(&controls[next]);
+        } else {
+            if m.shift {
+                window.focus_prev();
+            } else {
+                window.focus_next();
+            }
+            if let Some(index) = self.scenes.iter().position(|scene| {
+                self.tab_controls[&scene.id]
+                    .iter()
+                    .any(|focus| focus.is_focused(window))
+            }) {
+                self.tab_scroll.scroll_to_item(index);
+            }
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn focus_control<E: InteractiveElement + ParentElement + Styled>(
+        &self,
+        mut element: E,
+        focus: &FocusHandle,
+    ) -> E {
+        let style_radii = &element.style().corner_radii;
+        let radii = Corners {
+            top_left: style_radii.top_left.unwrap_or_default(),
+            top_right: style_radii.top_right.unwrap_or_default(),
+            bottom_right: style_radii.bottom_right.unwrap_or_default(),
+            bottom_left: style_radii.bottom_left.unwrap_or_default(),
+        };
+        let element = element.track_focus(focus);
+        if !self.keyboard_focus {
+            return element;
+        }
+        let focus = focus.clone();
+        // Paint an outline without changing control geometry. A GPUI shadow
+        // fills transparent controls and cannot represent the reference ring.
+        element.relative().child(
+            canvas(
+                |_, _, _| (),
+                move |bounds, _, window, _| {
+                    if focus.is_focused(window) {
+                        let radii = radii.map(|radius| radius.to_pixels(window.rem_size()));
+                        window.paint_quad(
+                            outline(bounds, rgb(0xe3ab44), BorderStyle::default())
+                                .corner_radii(radii)
+                                .border_widths(px(2.)),
+                        );
+                    }
+                },
+            )
+            .absolute()
+            .inset_0()
+            .size_full(),
+        )
+    }
+
+    fn button<E: StatefulInteractiveElement + ParentElement + Styled>(
+        &self,
+        element: E,
+        focus: &FocusHandle,
+        activate: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> E {
+        self.button_inner(element, focus, activate, true, cx)
+    }
+
+    // Workspace titles must let mouse-down reach their draggable group.
+    fn button_inner<E: StatefulInteractiveElement + ParentElement + Styled>(
+        &self,
+        element: E,
+        focus: &FocusHandle,
+        activate: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        stop_mouse_down: bool,
+        cx: &mut Context<Self>,
+    ) -> E {
+        let activate = Rc::new(activate);
+        let key_activate = activate.clone();
+        let mouse_focus = focus.clone();
+        self.focus_control(element, focus)
+            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                window.focus(&mouse_focus);
+                if stop_mouse_down {
+                    cx.stop_propagation();
+                }
+            })
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "enter" && !event.keystroke.modifiers.modified() {
+                    cx.stop_propagation();
+                    key_activate(this, window, cx);
+                }
+            }))
+            .on_click(cx.listener(move |this, event, window, cx| {
+                // GPUI synthesizes both clicks on keyup. Match button Enter on keydown.
+                if !stop_mouse_down && matches!(event, ClickEvent::Mouse(_)) && this.workspace_drag_gesture {
+                    return;
+                }
+                if !matches!(event, ClickEvent::Keyboard(event) if event.button == KeyboardButton::Enter) {
+                    cx.stop_propagation();
+                    activate(this, window, cx);
+                }
+            }))
+    }
+
+    fn read_only_disabled<E: StatefulInteractiveElement + Styled>(&self, element: E) -> E {
+        let read_only = self.locale.text(
+            STORAGE_READ_ONLY_TITLE,
+            "The database is in read-only recovery mode",
+        );
+        element
+            .opacity(0.55)
+            .cursor(CursorStyle::OperationNotAllowed)
+            .tooltip(move |_, cx| cx.new(|_| CardTooltip(read_only.into())).into())
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+    }
+
+    fn mutation_button<E: StatefulInteractiveElement + ParentElement + Styled>(
+        &self,
+        element: E,
+        focus: &FocusHandle,
+        activate: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> E {
+        if self.read_only.is_some() {
+            self.read_only_disabled(element)
+        } else {
+            self.button(element, focus, activate, cx)
+        }
+    }
+
+    fn read_only_banner(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let state = self.read_only.as_ref()?;
+        let phase = self.commands.connection();
+        let available = phase.0 == self.runtime_generation
+            && matches!(phase.1, ConnectionPhase::ReadOnly { .. });
+        let feedback_path = state.export_feedback.as_ref().and_then(|feedback| {
+            feedback
+                .as_ref()
+                .ok()?
+                .as_ref()
+                .map(|path| path.display().to_string())
+        });
+        let feedback = state
+            .export_feedback
+            .as_ref()
+            .map(|feedback| match feedback {
+                Ok(_) => Ok(feedback_path.as_deref()),
+                Err(error) => Err(error.as_str()),
+            });
+        let theme = Theme::default();
+        Some(
+            div()
+                .flex_none()
+                .child(database_recovery_page::render_read_only_banner(
+                    theme.background,
+                    theme.foreground,
+                    self.locale,
+                    state.pending_export.is_some(),
+                    feedback,
+                    self.focused.is_some() && available,
+                    available,
+                    cx.listener(|this, _: &ClickEvent, window, cx| this.open_search(window, cx)),
+                    cx.listener(|this, _: &ClickEvent, _, cx| this.export_read_only_database(cx)),
+                ))
+                .children(state.projection_error.as_ref().map(|error| {
+                    div()
+                        .px(px(14.))
+                        .py(px(6.))
+                        .text_size(px(12.))
+                        .text_color(rgb(0xb42318))
+                        .child(error.clone())
+                })),
+        )
+    }
+
+    fn topbar(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let palette = self.theme_palette();
+        let background = rgba(palette.tabs.bar);
+        #[cfg(debug_assertions)]
+        crate::settings_shell::probe_workspace_surfaces(|probe| probe.topbar = Some(background));
+        let active_id = self
+            .hierarchy
+            .as_ref()
+            .and_then(|h| h.scene.as_ref())
+            .map(|s| &s.id);
+        let tabs = div()
+            .id("scene-tabs")
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .overflow_x_scroll()
+            .overflow_y_hidden()
+            .track_scroll(&self.tab_scroll);
+        #[cfg(target_os = "windows")]
+        let tabs = tabs.h_full();
+        let mut tabs = tabs;
+        for scene in &self.scenes {
+            let active = active_id == Some(&scene.id);
+            let select_id = scene.id.clone();
+            let rename_id = scene.id.clone();
+            let close_id = scene.id.clone();
+            let menu_id = scene.id.clone();
+            let hover_id = scene.id.clone();
+            let title = self.scene_title(scene);
+            let [title_focus, close_focus] = &self.tab_controls[&scene.id];
+            let double_click_focus = title_focus.clone();
+            tabs = tabs.child(
+                tabs_ui::tab(
+                    SharedString::from(format!("tab-{}", scene.id)),
+                    active,
+                    &palette.tabs,
+                )
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_hover(cx.listener(move |this, hover: &bool, _, cx| {
+                    this.tab_hover = hover.then(|| hover_id.clone());
+                    cx.notify();
+                }))
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                        let size = window.viewport_size();
+                        let focus = cx.focus_handle().tab_stop(true);
+                        this.tab_menu = Some((
+                            menu_id.clone(),
+                            point(
+                                e.position.x.clamp(px(8.), size.width - px(136.)),
+                                e.position.y.clamp(px(8.), size.height - px(44.)),
+                            ),
+                            focus,
+                        ));
+                        this.workspace_menu = None;
+                        this.task_menu = None;
+                        this.hidden_tabs = None;
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                )
+                .child(
+                    self.button(
+                        tabs_ui::tab_title(title)
+                            .id(SharedString::from(format!("tab-title-{}", scene.id))),
+                        title_focus,
+                        move |this, _, cx| {
+                            this.send(
+                                Command::SelectScene {
+                                    scene_id: select_id.clone(),
+                                },
+                                cx,
+                            );
+                        },
+                        cx,
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                            window.focus(&double_click_focus);
+                            if e.click_count == 2 && this.read_only.is_none() {
+                                this.open_rename(rename_id.clone(), window, cx);
+                            }
+                            cx.stop_propagation();
+                        }),
+                    ),
+                )
+                .child(self.mutation_button(
+                    tabs_ui::tab_close(
+                        SharedString::from(format!("tab-close-{}", scene.id)),
+                        active
+                            || self.tab_hover.as_ref() == Some(&scene.id)
+                            || close_focus.is_focused(window),
+                        &palette.tabs,
+                    ),
+                    close_focus,
+                    move |this, _, cx| {
+                        this.pending_close = Some(close_id.clone());
+                        this.send(
+                            Command::PreviewSceneClose {
+                                scene_id: close_id.clone(),
+                            },
+                            cx,
+                        );
+                    },
+                    cx,
+                )),
+            );
+        }
+        let path_valid = self.active_path_valid();
+        let add_btn = tabs_ui::tab_add(
+            if self.tab_overflow {
+                "create-canvas-overflow"
+            } else {
+                "create-canvas"
+            },
+            path_valid,
+            &palette.tabs,
+        );
+        let add = if path_valid {
+            self.mutation_button(
+                add_btn,
+                &self.control_focus["add-tab"],
+                |this, _, cx| this.create_canvas(cx),
+                cx,
+            )
+            .into_any_element()
+        } else {
+            add_btn
+                .opacity(0.5)
+                .cursor(CursorStyle::OperationNotAllowed)
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .into_any_element()
+        };
+        let mut overflow_actions = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(4.))
+            .ml(px(8.));
+        if !self.tab_overflow {
+            tabs = tabs.child(add);
+        } else {
+            overflow_actions = overflow_actions
+                .child(self.button(
+                    tabs_ui::tab_overflow_btn("tab-overflow", &palette.tabs),
+                    &self.control_focus["tab-overflow"],
+                    |this, _, cx| {
+                        if this.hidden_tabs.is_some() {
+                            this.hidden_tabs = None;
+                        } else {
+                            let viewport = this.tab_scroll.bounds();
+                            let offset = this.tab_scroll.offset();
+                            let hidden = this
+                                .scenes
+                                .iter()
+                                .enumerate()
+                                .filter(|(i, _)| {
+                                    this.tab_scroll.bounds_for_item(*i).is_none_or(|b| {
+                                        b.left() + offset.x < viewport.left() - px(1.)
+                                            || b.right() + offset.x > viewport.right() + px(1.)
+                                    })
+                                })
+                                .map(|(_, s)| (s.id.clone(), cx.focus_handle().tab_stop(true)))
+                                .collect::<Vec<_>>();
+                            this.hidden_tabs = Some(hidden);
+                        }
+                        this.workspace_menu = None;
+                        this.task_menu = None;
+                        this.tab_menu = None;
+                        cx.notify();
+                    },
+                    cx,
+                ))
+                .child(add);
+        }
+        #[cfg(target_os = "windows")]
+        if !self.tab_overflow {
+            // A zero-basis trailing child only consumes leftover tab space, so
+            // it never adds scroll extent and cannot flip `tab_overflow` back
+            // and forth. The fixed 24px strip below covers the fully-scrolled
+            // overflow state.
+            tabs = tabs.child(
+                div()
+                    .id("windows-tabs-drag")
+                    .flex_1()
+                    .min_w(px(0.))
+                    .h_full()
+                    .window_control_area(WindowControlArea::Drag)
+                    .occlude(),
+            );
+        }
+        let bar = div()
+            .h(px(48.))
+            .flex_none()
+            .px(px(8.))
+            .flex()
+            .items_center()
+            .bg(background)
+            .children(workspace_wiring::wiring_probe_bounds("scene-bar".into()));
+        #[cfg(not(target_os = "windows"))]
+        let bar = bar.on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move());
+        #[cfg(target_os = "windows")]
+        let bar = bar.pr(px(WINDOWS_CAPTION_CONTROLS_WIDTH + 8.));
+        let bar = bar
+            .child(tabs)
+            .when(self.tab_overflow, |bar| bar.child(overflow_actions));
+        #[cfg(target_os = "windows")]
+        let bar = bar.when(self.tab_overflow, |bar| {
+            bar.child(
+                div()
+                    .id("windows-overflow-drag")
+                    .w(px(24.))
+                    .h_full()
+                    .flex_none()
+                    .window_control_area(WindowControlArea::Drag)
+                    .occlude(),
+            )
+        });
+        bar.child(
+            self.button(
+                div()
+                    .id("graph")
+                    .size(px(28.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .tooltip({
+                        let title = self.locale.text("打开会话 DAG", "Open session DAG");
+                        move |_, cx| cx.new(|_| CardTooltip(title.into())).into()
+                    })
+                    .child(icon("graph-ring", 16., rgba(palette.tabs.action_text))),
+                &self.control_focus["graph"],
+                Self::open_dag_window,
+                cx,
+            ),
+        )
+        .child({
+            let split_disabled = !path_valid
+                || self.active_scene_id().is_none()
+                || self.active_level_focus().is_none();
+            let split_btn = div()
+                .id("create-shell")
+                .relative()
+                .children(workspace_wiring::wiring_probe_bounds("create-shell".into()))
+                .size(px(28.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(icon(
+                    "panel-right-open",
+                    16.,
+                    rgba(palette.tabs.action_text),
+                ));
+            if self.read_only.is_some() {
+                self.read_only_disabled(split_btn).into_any_element()
+            } else if split_disabled {
+                split_btn
+                    .opacity(0.5)
+                    .cursor(CursorStyle::OperationNotAllowed)
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .into_any_element()
+            } else {
+                self.button(
+                    split_btn.cursor_pointer().tooltip({
+                        let label = self.locale.text("横向新增卡", "Add shell card");
+                        move |_, cx| cx.new(|_| CardTooltip(label.into())).into()
+                    }),
+                    &self.control_focus["split"],
+                    |this, _, cx| this.create_shell_sibling(cx),
+                    cx,
+                )
+                .into_any_element()
+            }
+        })
+        .child(self.update_trigger(cx))
+    }
+
+    fn remove_scope_choice(
+        &self,
+        choice: RemovalChoiceText,
+        scope: RemoveScope,
+        selected: RemoveScope,
+        dark: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let (id, index, other) = match scope {
+            RemoveScope::NodeOnly => ("remove-node-only", 1, RemoveScope::NodeAndDescendants),
+            RemoveScope::NodeAndDescendants => {
+                ("remove-node-and-descendants", 2, RemoveScope::NodeOnly)
+            }
+        };
+        let selected = scope == selected;
+        let choice = div()
+            .id(id)
+            .flex()
+            .items_start()
+            .gap(px(10.))
+            .p(px(12.))
+            .border_1()
+            .border_color(if selected {
+                if dark {
+                    rgba(0x5b9de9cc)
+                } else {
+                    rgb(0x458bd7)
+                }
+            } else if dark {
+                rgba(0xffffff1a)
+            } else {
+                rgba(0x0000001f)
+            })
+            .bg(if selected {
+                if dark {
+                    rgba(0x5b9de91a)
+                } else {
+                    rgb(0xeef6ff)
+                }
+            } else if dark {
+                rgba(0xffffff06)
+            } else {
+                rgba(0x00000005)
+            })
+            .rounded(px(9.))
+            .cursor_pointer()
+            .child(
+                div()
+                    .size(px(18.))
+                    .mt(px(3.))
+                    .flex_none()
+                    .flex()
+                    .justify_center()
+                    .child(
+                        div()
+                            .size(px(13.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_full()
+                            .border_1()
+                            .border_color(if selected {
+                                rgb(0x5b9de9)
+                            } else {
+                                rgb(0x878787)
+                            })
+                            .bg(if selected {
+                                rgb(0x5b9de9)
+                            } else {
+                                rgb(0xffffff)
+                            })
+                            .when(selected, |radio| {
+                                radio.child(div().size(px(5.)).rounded_full().bg(rgb(0xffffff)))
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.))
+                    .child(
+                        div()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(if dark { rgb(0xf0f1f3) } else { rgb(0x2f3547) })
+                            .child(choice.title),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(if dark { rgb(0xb8c0ca) } else { rgb(0x596273) })
+                            .child(ui_text(choice.impact)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(if dark { rgb(0x8e98a5) } else { rgb(0x77808e) })
+                            .child(ui_text(choice.description)),
+                    ),
+            )
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                if matches!(
+                    event.keystroke.key.as_str(),
+                    "left" | "right" | "up" | "down"
+                ) && !event.keystroke.modifiers.modified()
+                {
+                    window.focus(&this.dialog_controls[3 - index]);
+                    this.select_remove_scope(other, cx);
+                    cx.stop_propagation();
+                }
+            }));
+        self.button(
+            choice,
+            &self.dialog_controls[index],
+            move |this, _, cx| this.select_remove_scope(scope, cx),
+            cx,
+        )
+    }
+
+    /// Backwards-compatible two-argument form used by layout probes; the host
+    /// render path uses `compact_session_summary_themed`.
+    #[allow(dead_code)]
+    fn compact_session_summary(node: Option<&Value>, title: &str) -> Div {
+        Self::compact_session_summary_themed(
+            node,
+            title,
+            &matou_native_desktop::theme_tokens::LIGHT,
+        )
+    }
+
+    fn compact_session_summary_themed(
+        node: Option<&Value>,
+        title: &str,
+        palette: &ThemePalette,
+    ) -> Div {
+        let status = node
+            .and_then(|node| node["workStatus"].as_str())
+            .unwrap_or("idle");
+        let active_child_count = node
+            .and_then(|node| node["activeChildCount"].as_u64())
+            .unwrap_or(0);
+        let summary = node
+            .and_then(|node| node["latestLines"].as_array())
+            .map(|lines| {
+                lines
+                    .iter()
+                    .skip(lines.len().saturating_sub(3))
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .filter(|text| !text.is_empty())
+            .unwrap_or_else(|| {
+                node.and_then(|node| node["cwd"].as_str())
+                    .unwrap_or("")
+                    .to_owned()
+            });
+        div()
+            .size_full()
+            .px(px(12.))
+            .py(px(14.))
+            .bg(rgba(palette.cards.compact_background))
+            .rounded(px(12.))
+            .text_color(rgba(palette.cards.compact_text))
+            .flex()
+            .flex_col()
+            .gap(px(9.))
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(rgba(palette.cards.compact_title))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(title.to_owned()),
+            )
+            .child(Self::compact_session_status(status))
+            .children((active_child_count > 0).then(|| {
+                div()
+                    .text_size(px(9.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(0xe8ae48))
+                    .child(format!("子会话 {active_child_count}"))
+            }))
+            .child(
+                div()
+                    .text_size(px(9.))
+                    .font_family("Menlo")
+                    .line_height(relative(1.5))
+                    .overflow_hidden()
+                    .child(summary.to_owned()),
+            )
+    }
+
+    fn compact_session_status(status: &str) -> Div {
+        div()
+            .text_size(px(9.))
+            .px(px(6.))
+            .py(px(2.))
+            .rounded(px(8.))
+            .bg(rgba(0xffffff0f))
+            .when(status == "needs-input", |badge| {
+                badge.text_color(rgb(0xe8ae48))
+            })
+            .map(|mut badge| {
+                badge.style().align_self = Some(AlignSelf::FlexStart);
+                badge
+            })
+            .child(match status {
+                "starting" | "running" => "运行中",
+                "needs-input" => "等待输入",
+                "error" => "异常",
+                "interrupted" => "中断",
+                "exited" => "已停止",
+                _ => "空闲",
+            })
+    }
+
+    /// Backwards-compatible two-argument form used by layout probes; the
+    /// host render path uses `session_card_header_themed`.
+    #[allow(dead_code)]
+    fn session_card_header(title: UiText, actions: Div) -> Div {
+        Self::session_card_header_themed(
+            title,
+            actions,
+            &matou_native_desktop::theme_tokens::LIGHT,
+            None,
+        )
+    }
+
+    fn loading_badge_element(label: &'static str) -> Div {
+        let dot = div()
+            .flex_none()
+            .size(px(6.))
+            .rounded_full()
+            .bg(rgb(0x56a7ef))
+            .shadow(vec![loading_badge_ring(3.)]);
+        let dot: AnyElement = if reduced_motion() {
+            dot.into_any_element()
+        } else {
+            dot.with_animation(
+                // The card header's element id scopes this pulse per card.
+                "loading-badge-pulse",
+                Animation::new(Duration::from_millis(1350))
+                    .repeat()
+                    .with_easing(bounce(ease_in_out)),
+                |dot, pulse| {
+                    // CSS scales the whole dot, including its ring, and eases
+                    // back to the base state at the end of each CSS keyframe.
+                    let scale = 1. - 0.18 * pulse;
+                    dot.size(px(6. * scale))
+                        .opacity(1. - 0.55 * pulse)
+                        .shadow(vec![loading_badge_ring(3. * scale)])
+                },
+            )
+            .into_any_element()
+        };
+        div()
+            .flex_none()
+            .ml(px(8.))
+            .flex()
+            .items_center()
+            .gap(px(5.))
+            .text_size(px(9.))
+            .line_height(relative(1.2))
+            .text_color(rgb(0x87b9eb))
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(6.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(dot),
+            )
+            .child(div().whitespace_nowrap().child(ui_text(label)))
+    }
+
+    fn session_card_header_themed(
+        title: UiText,
+        actions: Div,
+        palette: &ThemePalette,
+        loading_badge: Option<Div>,
+    ) -> Div {
+        let background = rgba(palette.cards.header);
+        #[cfg(debug_assertions)]
+        crate::settings_shell::probe_workspace_surfaces(|probe| {
+            probe.card_header = Some(background)
+        });
+        div()
+            .h(px(42.))
+            .flex_none()
+            .rounded_t(px(12.))
+            .px(px(12.))
+            .flex()
+            .items_center()
+            .bg(background)
+            .text_color(rgba(palette.cards.title))
+            .child(
+                // The percentage resolves against the space left after the actions.
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .max_w(relative(0.46))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::BOLD)
+                            .child(title),
+                    )
+                    .children(loading_badge),
+            )
+            .child(actions)
+    }
+
+    /// The reference header uses `box-shadow: 0 5px 9px -7px`. GPUI clips
+    /// `paint_shadows` to the card's content mask, which dropped the whole
+    /// shadow. Paint it explicitly as a 10px band of tight vertical gradient
+    /// quads instead; each quad re-uses the CSS blur's alpha decay.
+    fn session_card_header_shadow(dark: bool) -> Canvas<()> {
+        let color = Hsla::from(rgb(if dark { 0x000000 } else { 0x2f3f52 }));
+        let bands = card_header_shadow_bands(dark);
+        canvas(
+            |_, _, _| (),
+            move |bounds, _, window, _| {
+                let inset = px(CARD_HEADER_SHADOW_INSET);
+                let fade = px(4.);
+                let width = bounds.size.width - inset * 2.;
+                if width <= px(0.) {
+                    return;
+                }
+                let left = bounds.left() + inset;
+                let right = bounds.right() - inset;
+                let clear = color.opacity(0.);
+                for band in bands {
+                    let y = bounds.top() + px(band.top);
+                    let gradient = linear_gradient(
+                        180.,
+                        linear_color_stop(color.opacity(band.from_alpha), 0.),
+                        linear_color_stop(color.opacity(band.to_alpha), 1.),
+                    );
+                    window.paint_quad(fill(
+                        Bounds::new(point(left, y), size(width, px(band.height))),
+                        gradient,
+                    ));
+                    // Continue the same falloff toward the card edges using
+                    // horizontal gradients in one-point rows.
+                    for row in 0..band.height as u32 {
+                        let fraction = (row as f32 + 0.5) / band.height;
+                        let alpha = band.from_alpha + (band.to_alpha - band.from_alpha) * fraction;
+                        let tint = color.opacity(alpha);
+                        let y = y + px(row as f32);
+                        for (x, angle) in [(left - fade, 90.), (right, 270.)] {
+                            window.paint_quad(fill(
+                                Bounds::new(point(x, y), size(fade, px(1.))),
+                                linear_gradient(
+                                    angle,
+                                    linear_color_stop(clear, 0.),
+                                    linear_color_stop(tint, 1.),
+                                ),
+                            ));
+                        }
+                    }
+                }
+            },
+        )
+        .absolute()
+        .left_0()
+        .right_0()
+        .top(px(CARD_HEADER_SHADOW_TOP))
+        .h(px(CARD_HEADER_SHADOW_HEIGHT))
+    }
+
+    fn session_card_actions() -> Div {
+        div()
+            .flex_none()
+            .ml_auto()
+            .flex()
+            .items_center()
+            .gap(px(2.))
+    }
+
+    fn stopped_session_status(id: &str) -> Stateful<Div> {
+        div()
+            .id(SharedString::from(format!("stopped-session-status-{id}")))
+            .flex_none()
+            .px(px(7.))
+            .py(px(2.))
+            .rounded(px(999.))
+            // The frozen light theme inherits the white-on-white label.
+            .bg(white().alpha(0.06))
+            .text_color(white().alpha(0.52))
+            .text_size(px(9.))
+            .whitespace_nowrap()
+            .child(ui_text(STOPPED_SESSION_STATUS).normal_line_height())
+    }
+
+    fn stopped_session_lines(node: &Value) -> Option<String> {
+        let lines = node["latestLines"]
+            .as_array()
+            .filter(|lines| !lines.is_empty())?;
+        let end = &lines[lines.len().saturating_sub(8)..];
+        Some(
+            end.iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    }
+
+    fn stopped_session_card(
+        &self,
+        id: &str,
+        node: &Value,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let palette = self.theme_palette().cards;
+        let title = node["title"].as_str().unwrap_or("Shell");
+        let remove = self.stopped_remove_visible(node).then(|| {
+            let blocked_reason = self.stopped_remove_blocked_reason();
+            let tooltip = RemoveNodeTooltip {
+                blocked_reason,
+                action: self.locale.text(REMOVE_NODE_ACTION, "Remove node…"),
+            };
+            let button_id = SharedString::from(format!("remove-session-{id}"));
+            let session_id = id.to_owned();
+            let glyph = svg()
+                .path("icons/circle-minus.svg")
+                .size(px(14.))
+                .flex_none()
+                .text_color(rgba(palette.stopped_remove_text))
+                .when(blocked_reason.is_none(), |glyph| {
+                    glyph.group_hover(button_id.clone(), |style| style.text_color(rgb(0xc5443e)))
+                });
+            let button = div()
+                .id(button_id.clone())
+                .group(button_id)
+                .w(px(28.))
+                .h(px(27.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(5.))
+                .child(glyph)
+                .tooltip(move |_, cx| cx.new(|_| tooltip).into());
+            if blocked_reason.is_none() {
+                self.focus_control(button, &self.remove_card_controls[id])
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(rgba(palette.remove_hover)))
+                    .capture_any_mouse_down(|event, window, _| {
+                        if event.button == MouseButton::Left {
+                            window.prevent_default();
+                        }
+                    })
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.open_remove_session(&session_id, window, cx);
+                    }))
+            } else {
+                button.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            }
+        });
+        let monospace = if cfg!(target_os = "macos") {
+            "SF Mono"
+        } else {
+            "Consolas"
+        };
+        div()
+            .id(SharedString::from(format!("stopped-session-card-{id}")))
+            .size_full()
+            .flex()
+            .flex_col()
+            .gap(px(14.))
+            .pb(px(18.))
+            .bg(rgba(palette.stopped_background))
+            .text_color(rgba(palette.stopped_text))
+            .child(
+                div()
+                    .id(SharedString::from(format!("stopped-session-header-{id}")))
+                    .h(px(42.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px(px(14.))
+                    .bg(rgba(palette.stopped_header))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("stopped-session-title-{id}")))
+                            .min_w_0()
+                            .max_h(px(42.))
+                            .overflow_hidden()
+                            .text_color(rgba(palette.title))
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::BOLD)
+                            .child(ui_text(title.to_owned()).normal_line_height()),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(Self::stopped_session_status(id))
+                            .children(remove),
+                    ),
+            )
+            .children(Self::stopped_session_lines(node).map(|lines| {
+                div()
+                    .id(SharedString::from(format!("stopped-session-lines-{id}")))
+                    .mx(px(18.))
+                    .max_h(px(180.))
+                    .overflow_hidden()
+                    .p(px(10.))
+                    .rounded(px(7.))
+                    .bg(black().alpha(0.16))
+                    .font_family(monospace)
+                    .text_size(px(10.))
+                    .line_height(px(15.5))
+                    .whitespace_normal()
+                    .child(lines)
+            }))
+    }
+
+    fn remove_card_button(&self, id: &str, node: &Value, cx: &mut Context<Self>) -> Stateful<Div> {
+        let palette = self.theme_palette().cards;
+        let tooltip = self.remove_node_tooltip(id, node);
+        let button = div()
+            .id(SharedString::from(format!("remove-session-{id}")))
+            .size(px(27.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(5.))
+            .child(icon("circle-minus", 14., rgba(palette.fork_text)))
+            .children(workspace_wiring::wiring_probe_bounds(format!(
+                "remove-session-{id}"
+            )))
+            .tooltip(move |_, cx| cx.new(|_| tooltip).into());
+        if tooltip.blocked_reason.is_none() {
+            let session_id = id.to_owned();
+            self.button(
+                button
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(rgba(palette.action_hover))),
+                &self.remove_card_controls[id],
+                move |this, window, cx| this.open_remove_session(&session_id, window, cx),
+                cx,
+            )
+        } else {
+            button
+                .opacity(0.38)
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        }
+    }
+
+    fn card_history_button(&self, id: &str, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        let focus = self.card_history_controls.get(id)?;
+        let target = id.to_owned();
+        let palette = self.theme_palette().cards;
+        let label = self.locale.text("历史 / 重连", "History / reconnect");
+        Some(
+            self.button(
+                div()
+                    .id(SharedString::from(format!("session-history-open-{id}")))
+                    .size(px(24.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(5.))
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(rgba(palette.action_hover)))
+                    .child(icon("history", 16., rgba(palette.action_text)))
+                    .children(workspace_wiring::wiring_probe_bounds(format!(
+                        "session-history-open-{id}"
+                    )))
+                    .tooltip(move |_, cx| cx.new(|_| CardTooltip(label.into())).into()),
+                focus,
+                move |this, window, cx| this.open_session_loader_mode(&target, true, window, cx),
+                cx,
+            ),
+        )
+    }
+
+    fn session_loader_button(
+        &self,
+        id: &str,
+        node: &Value,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let (tooltip, enabled) = self.session_loader_tooltip(id, node);
+        let palette = self.theme_palette().cards;
+        let button_id = SharedString::from(format!("session-loader-open-{id}"));
+        let glyph = svg()
+            .path("icons/folder-input.svg")
+            .size(px(16.))
+            .flex_none()
+            .text_color(rgba(palette.action_text))
+            .when(enabled, |glyph| {
+                glyph.group_hover(button_id.clone(), move |style| {
+                    style.text_color(rgba(palette.action_text_hover))
+                })
+            });
+        let button = div()
+            .id(button_id.clone())
+            .group(button_id)
+            .size(px(24.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(5.))
+            .child(glyph)
+            .children(workspace_wiring::wiring_probe_bounds(format!(
+                "session-loader-open-{id}"
+            )))
+            .tooltip(move |_, cx| cx.new(|_| CardTooltip(tooltip.into())).into());
+        if enabled {
+            let session_id = id.to_owned();
+            self.button(
+                button
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(rgba(palette.action_hover))),
+                &self.card_controls[id],
+                move |this, window, cx| {
+                    this.open_session_loader(&session_id, window, cx);
+                },
+                cx,
+            )
+        } else {
+            button
+                .opacity(0.38)
+                .cursor(CursorStyle::OperationNotAllowed)
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        }
+    }
+
+    fn render_provider_restore_banner(
+        &self,
+        id: &str,
+        banner: ProviderRestoreBanner<'_>,
+        theme: Theme,
+        action_bounds: &CardActionBounds,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        // The card keeps its light surface and has no theme picker; follow the
+        // terminal theme only where the native recovery water already does.
+        let dark = theme.background != Theme::LIGHT.background;
+        let solid = |color| Hsla::from(rgb(color));
+        let alpha = |color, value| Hsla::from(rgb(color)).alpha(value);
+        let restoring = matches!(banner, ProviderRestoreBanner::Restoring { .. });
+        let (text, background, border) = match (dark, restoring) {
+            (false, false) => (solid(0x8a4d10), solid(0xfff7eb), solid(0xefcfaa)),
+            (true, false) => (solid(0xe4aa78), solid(0x2a1e17), alpha(0xeea858, 0.28)),
+            (false, true) => (solid(0x315f9d), solid(0xedf5ff), solid(0xc5dcf8)),
+            (true, true) => (solid(0x8fb8ed), solid(0x172333), alpha(0x679fe2, 0.28)),
+        };
+        let row = div()
+            .id(SharedString::from(format!("provider-restore-banner-{id}")))
+            .w_full()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .px(px(10.))
+            .py(px(7.))
+            .border_t_1()
+            .border_b_1()
+            .border_color(border)
+            .bg(background)
+            .text_color(text)
+            .text_size(px(11.))
+            .line_height(relative(1.2))
+            .when(restoring, |row| row.justify_start())
+            .when(!restoring, |row| row.justify_between())
+            .children(workspace_wiring::wiring_probe_bounds(format!(
+                "provider-restore-banner-{id}"
+            )));
+        match banner {
+            ProviderRestoreBanner::Restoring { title } => {
+                row.child(div().font_weight(FontWeight::BOLD).child(title))
+            }
+            ProviderRestoreBanner::Failed {
+                title,
+                reason,
+                retry,
+                fresh,
+                pending,
+                retry_blocked,
+                fresh_blocked,
+            } => {
+                let (reason_color, button_text, button_border, button_background) = if dark {
+                    (
+                        solid(0xc99a73),
+                        solid(0xf1c08f),
+                        alpha(0xeea858, 0.55),
+                        alpha(0xeea858, 0.1),
+                    )
+                } else {
+                    (
+                        solid(0x966b43),
+                        solid(0x7c440d),
+                        solid(0xdaa86d),
+                        solid(0xffffff),
+                    )
+                };
+                let controls = &self.provider_restore_controls[id];
+                let reason_tooltip = SharedString::from(reason.to_owned());
+                let reason = if reason.contains(['\r', '\n']) {
+                    SharedString::from(reason.replace(['\r', '\n'], " "))
+                } else {
+                    reason_tooltip.clone()
+                };
+                let mut action = |name: &str, label, blocked: Option<&'static str>, fresh: bool| {
+                    let button = div()
+                        .id(SharedString::from(format!("{name}-{id}")))
+                        .flex_none()
+                        .px(px(8.))
+                        .py(px(3.))
+                        .border_1()
+                        .border_color(button_border)
+                        .rounded(px(5.))
+                        .text_color(button_text)
+                        .bg(button_background)
+                        .whitespace_nowrap()
+                        .cursor_pointer()
+                        .children(workspace_wiring::wiring_probe_bounds(format!(
+                            "{name}-{id}"
+                        )))
+                        .child(label);
+                    let button = measure_card_action(button, action_bounds);
+                    if let Some(blocked) = blocked {
+                        return button
+                            .tooltip(move |_, cx| cx.new(|_| CardTooltip(blocked.into())).into());
+                    }
+                    if pending {
+                        return button;
+                    }
+                    let session_id = id.to_owned();
+                    self.button(
+                        button,
+                        &controls[usize::from(fresh)],
+                        move |this, window, cx| {
+                            this.run_provider_restore(&session_id, fresh, window, cx)
+                        },
+                        cx,
+                    )
+                };
+                let retry_button = action("retry-provider-restore", retry, retry_blocked, false);
+                let fresh_button = action("start-fresh-provider", fresh, fresh_blocked, true);
+                row.child(
+                    div()
+                        .flex()
+                        .flex_auto()
+                        .min_w_0()
+                        .items_baseline()
+                        .gap(px(8.))
+                        .child(
+                            div()
+                                .flex_initial()
+                                .min_w_0()
+                                .max_w_full()
+                                .font_weight(FontWeight::BOLD)
+                                .children(workspace_wiring::wiring_probe_bounds(format!(
+                                    "provider-restore-title-{id}"
+                                )))
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("provider-restore-reason-{id}")))
+                                .flex_1()
+                                .w(px(0.))
+                                .min_w_0()
+                                .text_color(reason_color)
+                                .truncate()
+                                .children(workspace_wiring::wiring_probe_bounds(format!(
+                                    "provider-restore-reason-{id}"
+                                )))
+                                .tooltip(move |_, cx| {
+                                    cx.new(|_| CardTooltip(reason_tooltip.clone())).into()
+                                })
+                                .child(ui_text(reason)),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .max_w_full()
+                        .ml_auto()
+                        .justify_end()
+                        .gap(px(12.))
+                        .child(retry_button)
+                        .child(fresh_button),
+                )
+            }
+        }
+    }
+
+    fn render_start_failure_card(
+        &self,
+        id: &str,
+        card: StartFailureCard<'_>,
+        width: f32,
+        action_bounds: &CardActionBounds,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let controls = &self.start_failure_controls[id];
+        let dark = self.wiring_dark();
+        let narrow = width - 20. <= 520.;
+        let reason = SharedString::from(card.reason.to_owned());
+        let reason_tooltip = reason.clone();
+        let action = |name: &str, label| {
+            div()
+                .id(SharedString::from(format!("{name}-{id}")))
+                .flex_none()
+                .px(px(8.))
+                .py(px(3.))
+                .border_1()
+                .border_color(if dark {
+                    Hsla::from(rgb(0xe45d55)).alpha(0.45)
+                } else {
+                    rgb(0xd69b97).into()
+                })
+                .rounded(px(5.))
+                .text_color(if dark { rgb(0xf2b7b3) } else { rgb(0x8e2d28) })
+                .bg(if dark {
+                    rgba(0xe45d5514)
+                } else {
+                    rgb(0xffffff)
+                })
+                .whitespace_nowrap()
+                .cursor_pointer()
+                .child(label)
+        };
+        let retry = measure_card_action(action("retry-start", card.retry), action_bounds);
+        let remove =
+            measure_card_action(action("remove-failed-session", card.remove), action_bounds);
+        let (retry, remove) = if let Some(blocked) = card.blocked {
+            let disable = |button: Stateful<Div>| {
+                button.tooltip(move |_, cx| cx.new(|_| CardTooltip(blocked.into())).into())
+            };
+            (disable(retry), disable(remove))
+        } else {
+            let retry_id = id.to_owned();
+            let remove_id = id.to_owned();
+            (
+                self.button(
+                    retry,
+                    &controls[0],
+                    move |this, window, cx| this.retry_session_start(&retry_id, window, cx),
+                    cx,
+                ),
+                self.button(
+                    remove,
+                    &controls[1],
+                    move |this, _, cx| this.remove_failed_session(&remove_id, cx),
+                    cx,
+                ),
+            )
+        };
+        div()
+            .w_full()
+            .flex_none()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .justify_between()
+            .gap(px(12.))
+            .px(px(10.))
+            .py(px(8.))
+            .border_t_1()
+            .border_b_1()
+            .border_color(if dark {
+                Hsla::from(rgb(0xe45d55)).alpha(0.3)
+            } else {
+                rgb(0xedc2bf).into()
+            })
+            .bg(if dark { rgb(0x2b1919) } else { rgb(0xfff3f2) })
+            .text_color(if dark { rgb(0xf0b1ad) } else { rgb(0x9b2f2a) })
+            .text_size(px(11.))
+            .line_height(relative(1.2))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .flex()
+                    .min_w_0()
+                    .items_baseline()
+                    .gap(px(8.))
+                    .when(narrow, |summary| summary.w_full())
+                    .when(!narrow, |summary| summary.flex_1())
+                    .child(
+                        div()
+                            .flex_none()
+                            .font_weight(FontWeight::BOLD)
+                            .whitespace_nowrap()
+                            .child(card.title),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("start-failure-reason-{id}")))
+                            .flex_1()
+                            .min_w_0()
+                            .text_color(if dark { rgb(0xd98e89) } else { rgb(0xa95853) })
+                            .when(narrow, |label| label.whitespace_normal().line_clamp(2))
+                            .when(!narrow, |label| label.truncate())
+                            .tooltip(move |_, cx| {
+                                cx.new(|_| CardTooltip(reason_tooltip.clone())).into()
+                            })
+                            .child(reason),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .ml_auto()
+                    .gap(px(8.))
+                    .child(retry)
+                    .child(remove),
+            )
+    }
+
+    fn render_session_loader(
+        &self,
+        state: &SessionLoader,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let dark = self.wiring_dark();
+        let tone = move |dark_color, light_color| rgb(if dark { dark_color } else { light_color });
+        let wash = move |dark_color, light_color| rgba(if dark { dark_color } else { light_color });
+        let viewport = window.viewport_size();
+        let viewport_width = f32::from(viewport.width);
+        let viewport_height = f32::from(viewport.height);
+        let backdrop_pad = (viewport_width * 0.03).clamp(14., 34.);
+        let panel_width = 1040_f32.min((viewport_width - backdrop_pad * 2.).max(0.));
+        let panel_height = 720_f32
+            .min((viewport_height - backdrop_pad * 2.).max(0.))
+            .max(430.);
+        let list_width = (panel_width * 0.36).max(250.);
+        let events_padding = (viewport_width * 0.03).clamp(14., 28.);
+
+        let sessions: Vec<_> = state.visible_sessions(cx).collect();
+        let input = state.input.read(cx);
+        let filter_empty = input.text.is_empty();
+        let filter_focused = input.focus.is_focused(window);
+        let is_codex = state.provider == "codex";
+        let remote_catalog = state.remote_catalog();
+        let content_input = state.content_input.read(cx);
+        let content_empty = content_input.text.is_empty();
+        let local_content_query = content_input.text.trim().to_lowercase();
+        let content_focused = content_input.focus.is_focused(window);
+        let selected = state
+            .selected
+            .as_ref()
+            .and_then(|id| state.sessions.iter().find(|session| &session.id == id));
+        let target_title = self
+            .graph_node(&state.session_id)
+            .and_then(|node| node["title"].as_str())
+            .unwrap_or("Shell")
+            .to_owned();
+        let running = !state.history && self.session_loader_running(&state.session_id);
+        // Claude keeps the always-on running warning; Codex only reveals the
+        // same warning after the first press moves the button into confirm mode.
+        let confirm_warning = if remote_catalog {
+            state.confirm_running
+        } else {
+            running
+        };
+        let can_submit = self.session_loader_can_submit(state);
+        let mut focus_ring: Hsla = rgb(0x5b9de9).into();
+        focus_ring.a = 0.13;
+
+        let filter = div()
+            .id("session-loader-filter")
+            .h(px(34.))
+            .w_full()
+            .max_w(px(310.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(7.))
+            .px(px(9.))
+            .border_1()
+            .border_color(if filter_focused {
+                rgb(0x5b9de9)
+            } else {
+                tone(0x414854, 0xcbd2dc)
+            })
+            .rounded(px(9.))
+            .bg(tone(0x15181c, 0xffffff))
+            .when(filter_focused, |filter| {
+                filter.shadow(vec![BoxShadow {
+                    color: focus_ring,
+                    offset: point(px(0.), px(0.)),
+                    blur_radius: px(0.),
+                    spread_radius: px(3.),
+                }])
+            })
+            .child(icon("search", 15., rgb(0x858e9b)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .child(state.input.clone()),
+            )
+            .children((!filter_empty).then(|| {
+                self.button(
+                    div()
+                        .id("session-loader-filter-clear")
+                        .size(px(20.))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(5.))
+                        .text_size(px(14.))
+                        .text_color(rgb(0x7f8895))
+                        .cursor_pointer()
+                        .child("×"),
+                    &self.dialog_controls[3],
+                    |this, window, cx| this.clear_session_loader_filter(window, cx),
+                    cx,
+                )
+            }));
+
+        // Codex body search reuses the loader filter field: same height,
+        // border, focus ring, icon and 11px editor text.
+        let content_search = div().flex_none().flex().items_center().gap(px(7.)).child(
+            div()
+                .id("session-loader-content")
+                .w(px(220.))
+                .h(px(34.))
+                .flex()
+                .items_center()
+                .gap(px(7.))
+                .px(px(9.))
+                .border_1()
+                .border_color(if content_focused {
+                    rgb(0x5b9de9)
+                } else {
+                    tone(0x414854, 0xcbd2dc)
+                })
+                .rounded(px(9.))
+                .bg(tone(0x15181c, 0xffffff))
+                .when(content_focused, |content| {
+                    content.shadow(vec![BoxShadow {
+                        color: focus_ring,
+                        offset: point(px(0.), px(0.)),
+                        blur_radius: px(0.),
+                        spread_radius: px(3.),
+                    }])
+                })
+                .child(icon("search", 15., rgb(0x858e9b)))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .flex()
+                        .items_center()
+                        .child(state.content_input.clone()),
+                ),
+        );
+
+        let provider_name = match state.provider {
+            "codex" => "Codex",
+            "dsh" => "DSH",
+            "antigravity" => "Antigravity",
+            _ => "Claude Code",
+        };
+        let mut rows = Vec::with_capacity(sessions.len());
+        for session in &sessions {
+            let is_selected = state.selected.as_deref() == Some(session.id.as_str());
+            let row_session_id = session.id.clone();
+            let model = session
+                .model
+                .as_deref()
+                .filter(|model| !model.is_empty())
+                .unwrap_or(provider_name);
+            let meta = format!(
+                "{} · {}",
+                loader_relative_time(session.updated_at, self.locale),
+                model
+            );
+            let detail = (!is_codex).then(|| {
+                let entries = loader_content_count(session.message_count as usize, self.locale);
+                format!(
+                    "{} · {entries}",
+                    loader_permission_label(&session.permission_mode, self.locale)
+                )
+            });
+            let loaded = session.loaded_by.as_ref().map(|owner| {
+                if owner.session_id == state.session_id {
+                    self.locale
+                        .text("已载入当前卡片", "Loaded in this card")
+                        .to_owned()
+                } else {
+                    match self.locale {
+                        InterfaceLocale::Chinese => format!("已载入“{}”", owner.title),
+                        InterfaceLocale::English => format!("Loaded in \"{}\"", owner.title),
+                    }
+                }
+            });
+            rows.push(
+                div()
+                    .id(SharedString::from(format!(
+                        "session-loader-row-{}",
+                        session.id
+                    )))
+                    .w_full()
+                    .flex_none()
+                    .mb(px(6.))
+                    .border_1()
+                    .border_color(if is_selected {
+                        wash(0x5b9de999, 0x80b4efff)
+                    } else {
+                        rgba(0x00000000)
+                    })
+                    .rounded(px(10.))
+                    .bg(if is_selected {
+                        wash(0x5b9de91a, 0xeaf3feff)
+                    } else {
+                        wash(0xffffff06, 0x30415706)
+                    })
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.select_loader_session(&row_session_id, cx);
+                    }))
+                    .child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.))
+                            .px(px(11.))
+                            .py(px(10.))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_size(px(11.))
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(tone(0xe8ebf0, 0x2d3542))
+                                    .child(ui_text(session.title.clone()).normal_line_height()),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_size(px(9.))
+                                    .text_color(tone(0x8a939f, 0x687587))
+                                    .child(ui_text(meta).normal_line_height()),
+                            )
+                            .children(detail.map(|detail| {
+                                div()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_size(px(9.))
+                                    .text_color(tone(0x8a939f, 0x687587))
+                                    .child(ui_text(detail).normal_line_height())
+                            }))
+                            .children(loaded.map(|loaded| {
+                                div()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_size(px(9.))
+                                    .text_color(tone(0x8a939f, 0x687587))
+                                    .child(ui_text(loaded).normal_line_height())
+                            })),
+                    ),
+            );
+        }
+
+        let list_focus = state.list_focus.clone();
+        let list_results = div()
+            .id("session-loader-results")
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .pb(px(12.))
+            .overflow_y_scroll()
+            .track_scroll(&state.list_scroll)
+            .track_focus(&state.list_focus)
+            .when(
+                remote_catalog && state.has_more_sessions && !state.loading_list,
+                |list| {
+                    list.on_scroll_wheel(cx.listener(
+                        |this, event: &ScrollWheelEvent, window, cx| {
+                            let Some(TabDialog::SessionLoader(state)) = &this.dialog else {
+                                return;
+                            };
+                            let delta = event.delta.pixel_delta(window.line_height()).y;
+                            let scroll = &state.list_scroll;
+                            if delta < px(0.)
+                                && scroll.max_offset().height + scroll.offset().y + delta
+                                    <= px(140.)
+                            {
+                                this.load_more_loader_sessions(cx);
+                            }
+                        },
+                    ))
+                },
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |_, _, window, _| {
+                    window.focus(&list_focus);
+                }),
+            )
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                match event.keystroke.key.as_str() {
+                    "up" => {
+                        cx.stop_propagation();
+                        this.step_loader_session(-1, cx);
+                    }
+                    "down" => {
+                        cx.stop_propagation();
+                        this.step_loader_session(1, cx);
+                    }
+                    _ => {}
+                }
+            }))
+            .children(rows);
+        let list_results = if state.loading_list {
+            list_results.child(
+                div()
+                    .w_full()
+                    .py(px(7.))
+                    .text_center()
+                    .text_size(px(9.))
+                    .text_color(tone(0x8490a0, 0x748091))
+                    .child(
+                        ui_text(
+                            self.locale
+                                .text(SESSION_LOADER_LOADING_MORE, "Loading more sessions…"),
+                        )
+                        .normal_line_height(),
+                    ),
+            )
+        } else if sessions.is_empty() {
+            list_results.child(
+                div()
+                    .min_h(px(120.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .p(px(18.))
+                    .text_center()
+                    .text_size(px(11.))
+                    .text_color(tone(0x77818e, 0x687587))
+                    .child(ui_text(if filter_empty {
+                        if state.provider == "antigravity" {
+                            self.locale.text(
+                                "当前工作空间内没有 Antigravity 会话",
+                                "No Antigravity sessions in this workspace",
+                            )
+                        } else if state.provider == "dsh" {
+                            self.locale.text(
+                                "当前工作空间内没有 DSH 会话",
+                                "No DSH sessions in this workspace",
+                            )
+                        } else if is_codex {
+                            self.locale.text(
+                                "当前工作空间内没有 Codex 会话",
+                                "No Codex sessions in this workspace",
+                            )
+                        } else {
+                            self.locale.text(
+                                SESSION_LOADER_NO_SESSIONS,
+                                "No Claude Code sessions in this workspace",
+                            )
+                        }
+                    } else {
+                        self.locale
+                            .text(SESSION_LOADER_NO_MATCHES, "No matching sessions")
+                    })),
+            )
+        } else if state.has_more_sessions {
+            list_results.child(
+                self.button(
+                    div()
+                        .id("session-loader-more-sessions")
+                        .w_full()
+                        .h(px(30.))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .border_1()
+                        .border_color(rgba(0x5b9de926))
+                        .rounded(px(8.))
+                        .bg(wash(0xffffff08, 0x30415708))
+                        .text_size(px(10.))
+                        .text_color(tone(0x9aa4b1, 0x5b6675))
+                        .cursor_pointer()
+                        .hover(move |style| {
+                            style
+                                .border_color(tone(0x3c4653, 0xcbd2dc))
+                                .text_color(tone(0xb5c0cd, 0x2d3542))
+                                .bg(wash(0xffffff0f, 0x3041570f))
+                        })
+                        .child(self.locale.text("载入更多会话", "Load more sessions")),
+                    &self.dialog_controls[6],
+                    |this, _, cx| this.load_more_loader_sessions(cx),
+                    cx,
+                ),
+            )
+        } else {
+            list_results
+        };
+
+        let list = div()
+            .id("session-loader-list")
+            .w(px(list_width))
+            .flex_none()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .pt(px(14.))
+            .px(px(12.))
+            .border_r_1()
+            .border_color(tone(0x333943, 0xd9dee6))
+            .bg(tone(0x1d2025, 0xf5f7f9))
+            .child(filter)
+            .child(
+                div()
+                    .h(px(32.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .text_size(px(9.))
+                    .text_color(tone(0x747e8c, 0x687587))
+                    .child(
+                        ui_text(match self.locale {
+                            InterfaceLocale::Chinese => {
+                                format!("{} / {} 个会话", sessions.len(), state.list_total)
+                            }
+                            InterfaceLocale::English => format!(
+                                "{} / {} {}",
+                                sessions.len(),
+                                state.list_total,
+                                if state.list_total == 1 {
+                                    "session"
+                                } else {
+                                    "sessions"
+                                }
+                            ),
+                        })
+                        .normal_line_height(),
+                    ),
+            )
+            .child(list_results)
+            .when(
+                !state.loading_list && !state.has_more_sessions && !sessions.is_empty(),
+                |list| {
+                    list.child(
+                        div()
+                            .py(px(7.))
+                            .text_size(px(9.))
+                            .text_center()
+                            .text_color(tone(0x8490a0, 0x748091))
+                            .child(self.locale.text("已加载全部", "All loaded")),
+                    )
+                },
+            );
+
+        let preview_title = if state.history && is_codex {
+            provider_name.to_owned()
+        } else if state.history {
+            self.locale
+                .text(
+                    "包含压缩前的消息，不影响当前会话",
+                    "Includes messages from before compaction and does not affect the current session",
+                )
+                .to_owned()
+        } else {
+            selected
+                .map(|session| session.title.clone())
+                .unwrap_or_else(|| {
+                    self.locale
+                        .text(
+                            SESSION_LOADER_SELECT_SESSION,
+                            "Select a session to see its content",
+                        )
+                        .to_owned()
+                })
+        };
+        // Keep the Codex list compact while preserving permission in its preview.
+        let preview_meta = if !is_codex || state.history {
+            state
+                .first_event
+                .map(|_| loader_content_count(state.total_events as usize, self.locale))
+        } else {
+            selected.map(|session| {
+                let model = state
+                    .detail_model
+                    .as_deref()
+                    .or(session.model.as_deref())
+                    .filter(|model| !model.is_empty())
+                    .unwrap_or(provider_name);
+                format!(
+                    "{} · {}",
+                    model,
+                    loader_permission_label(
+                        state
+                            .detail_permission
+                            .as_deref()
+                            .unwrap_or(&session.permission_mode),
+                        self.locale,
+                    )
+                )
+            })
+        };
+        let preview_header = div()
+            .h(px(48.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .px(px(16.))
+            .border_b_1()
+            .border_color(tone(0x303640, 0xdce1e8))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_size(px(11.))
+                            .font_weight(FontWeight::BOLD)
+                            .child(ui_text(preview_title).normal_line_height()),
+                    )
+                    .children(preview_meta.map(|meta| {
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_size(px(9.))
+                            .text_color(tone(0x818b98, 0x687587))
+                            .child(ui_text(meta).normal_line_height())
+                    })),
+            )
+            .when(!state.history, |header| header.child(content_search));
+
+        let mut events = div()
+            .id("session-loader-events")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .track_scroll(&state.preview_scroll)
+            .px(px(events_padding))
+            .pt(px(16.))
+            .pb(px(28.));
+        if state.first_event.is_some() {
+            let label = match self.locale {
+                InterfaceLocale::Chinese => {
+                    format!("已加载 {} / {} 条", state.events.len(), state.total_events)
+                }
+                InterfaceLocale::English => {
+                    format!("Loaded {} / {}", state.events.len(), state.total_events)
+                }
+            };
+            events = events.child(
+                div().flex().justify_center().mb(px(10.)).child(
+                    div()
+                        .id("session-loader-history-status")
+                        .rounded_full()
+                        .border_1()
+                        .border_color(wash(0x5b9de926, 0x347bc82b))
+                        .bg(wash(0x181b20eb, 0xffffffeb))
+                        .px(px(9.))
+                        .py(px(5.))
+                        .text_size(px(9.))
+                        .text_color(tone(0x8490a0, 0x748091))
+                        .child(label),
+                ),
+            );
+        }
+        if state.has_earlier || state.loading_earlier {
+            let pill = div()
+                .id("session-loader-earlier")
+                .h(px(22.))
+                .px(px(9.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(999.))
+                .border_1()
+                .border_color(rgba(0x5b9de926))
+                .bg(wash(0x181b20eb, 0xffffffeb))
+                .text_size(px(9.))
+                .text_color(tone(0x8490a0, 0x748091))
+                .child(
+                    ui_text(
+                        self.locale
+                            .text(SESSION_LOADER_LOADING_EARLIER, "Loading earlier content…"),
+                    )
+                    .normal_line_height(),
+                );
+            let pill = if state.loading_earlier {
+                pill.opacity(0.6)
+            } else {
+                self.button(
+                    pill.cursor_pointer().hover(move |style| {
+                        style
+                            .border_color(tone(0x3c4653, 0xcbd2dc))
+                            .text_color(tone(0xb5c0cd, 0x2d3542))
+                            .bg(wash(0xffffff0a, 0x3041570a))
+                    }),
+                    &self.dialog_controls[1],
+                    |this, _, cx| this.load_earlier_session_events(cx),
+                    cx,
+                )
+            };
+            events = events.child(
+                div()
+                    .w_full()
+                    .flex()
+                    .justify_center()
+                    .mb(px(10.))
+                    .child(pill),
+            );
+        }
+        let mono = if cfg!(target_os = "macos") {
+            "SF Mono"
+        } else {
+            "Consolas"
+        };
+        for event in &state.events {
+            let (border, background) = match event.kind.as_str() {
+                "tool" => (tone(0x4c3d5a, 0xd8cae4), tone(0x241f2a, 0xf7f2fb)),
+                "user" => (tone(0x343b46, 0xd8dee6), tone(0x252b32, 0xeef2f6)),
+                _ => (tone(0x343b46, 0xd8dee6), tone(0x20242a, 0xf7f9fb)),
+            };
+            let matches = !remote_catalog
+                && !local_content_query.is_empty()
+                && event.text.to_lowercase().contains(&local_content_query);
+            let assistant = if remote_catalog {
+                provider_name
+            } else {
+                "Claude"
+            };
+            let label = loader_event_label(
+                &event.kind,
+                event.tool_name.as_deref(),
+                assistant,
+                self.locale,
+            );
+            let is_user = event.kind == "user";
+            events = events.child(
+                div()
+                    .w_full()
+                    .flex()
+                    .mb(px(12.))
+                    .when(is_user, |row| row.justify_end())
+                    .when(!is_user, |row| row.justify_center())
+                    .child(
+                        div()
+                            .w_full()
+                            .max_w(px(760.))
+                            .border_1()
+                            .border_color(if matches { rgb(0x5b9de9) } else { border })
+                            .rounded(px(11.))
+                            .bg(background)
+                            .px(px(13.))
+                            .py(px(11.))
+                            .child(
+                                div()
+                                    .w_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap(px(8.))
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
+                                            .text_ellipsis()
+                                            .text_size(px(9.))
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(tone(0xb9c1cc, 0x475569))
+                                            .child(ui_text(label.to_owned()).normal_line_height()),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_size(px(9.))
+                                            .text_color(tone(0x8e98a5, 0x687587))
+                                            .child(format!("#{}", event.index)),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .w_full()
+                                    .min_w_0()
+                                    .mt(px(7.))
+                                    .font_family(mono)
+                                    .text_size(px(10.))
+                                    .line_height(px(16.))
+                                    .text_color(tone(0xd9dde3, 0x394250))
+                                    .whitespace_normal()
+                                    .child(ui_text(event.text.clone())),
+                            ),
+                    ),
+            );
+        }
+        if let Some(message) = if state.loading_detail {
+            Some(
+                self.locale
+                    .text(SESSION_LOADER_LOADING_PREVIEW, "Loading the preview…"),
+            )
+        } else if state.history && state.error.is_none() && state.events.is_empty() {
+            Some(self.locale.text(
+                "当前会话还没有可显示的历史内容",
+                "This session has no history to show yet",
+            ))
+        } else {
+            (state.first_event.is_some() && state.events.is_empty()).then_some(self.locale.text(
+                SESSION_LOADER_NO_HISTORY,
+                "This session has no history to show yet",
+            ))
+        } {
+            events = events.child(
+                div()
+                    .min_h(px(120.))
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .p(px(18.))
+                    .text_center()
+                    .text_size(px(11.))
+                    .text_color(tone(0x77818e, 0x687587))
+                    .child(ui_text(message)),
+            );
+        }
+
+        let mut hit_rows = Vec::with_capacity(state.search_hits.len());
+        for hit in &state.search_hits {
+            let index = hit.index;
+            hit_rows.push(
+                div()
+                    .id(SharedString::from(format!("session-loader-hit-{index}")))
+                    .w_full()
+                    .mb(px(4.))
+                    .px(px(7.))
+                    .py(px(5.))
+                    .rounded(px(6.))
+                    .bg(rgba(0x5b9de914))
+                    .text_size(px(9.))
+                    .text_color(tone(0x9dbfe6, 0x276cc0))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .cursor_pointer()
+                    .hover(move |style| {
+                        style
+                            .bg(rgba(0x5b9de926))
+                            .text_color(tone(0xd9dde3, 0x394250))
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.select_loader_hit(index, cx);
+                    }))
+                    .child(ui_text(format!("#{index}  {}", hit.excerpt))),
+            );
+        }
+        let hit_status = if state.pending_search.is_some() {
+            self.locale.text("正在查找…", "Searching…").to_owned()
+        } else if state.search_hits.is_empty() {
+            self.locale.text("0 条命中", "0 matches").to_owned()
+        } else if state.search_hits.len() == 1 {
+            self.locale.text("1 条命中", "1 match").to_owned()
+        } else {
+            format!("{} matches", state.search_hits.len())
+        };
+        let hits_panel = div()
+            .id("session-loader-hits")
+            .flex_none()
+            .max_h(px(150.))
+            .overflow_y_scroll()
+            .border_b_1()
+            .border_color(tone(0x303640, 0xdce1e8))
+            .bg(tone(0x1a1d22, 0xffffff))
+            .px(px(12.))
+            .py(px(8.))
+            .child(
+                div()
+                    .mb(px(6.))
+                    .text_size(px(9.))
+                    .text_color(tone(0x8d96a3, 0x5b6675))
+                    .child(ui_text(hit_status).normal_line_height()),
+            )
+            .children(hit_rows)
+            .when(
+                state.has_more_hits && state.pending_search.is_none(),
+                |panel| {
+                    panel.child(
+                        self.button(
+                            div()
+                                .id("session-loader-more-hits")
+                                .h(px(24.))
+                                .w_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(6.))
+                                .bg(wash(0xffffff08, 0x30415708))
+                                .text_size(px(9.))
+                                .text_color(tone(0x9aa4b1, 0x5b6675))
+                                .cursor_pointer()
+                                .hover(move |style| {
+                                    style
+                                        .text_color(tone(0xb5c0cd, 0x2d3542))
+                                        .bg(wash(0xffffff0f, 0x3041570f))
+                                })
+                                .child(self.locale.text("载入更多命中", "Load more matches")),
+                            &self.dialog_controls[7],
+                            |this, _, cx| this.load_more_loader_hits(cx),
+                            cx,
+                        ),
+                    )
+                },
+            );
+        let hits_panel = (remote_catalog && !content_empty).then_some(hits_panel);
+
+        let preview = div()
+            .id("session-loader-preview")
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .bg(tone(0x181b20, 0xffffff))
+            .child(preview_header)
+            .children(hits_panel)
+            .child(events);
+
+        let body = div()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .min_w_0()
+            .flex()
+            .children((!state.history).then_some(list))
+            .child(preview);
+
+        let primary_label = if self.pending_loader_loads.contains_key(&state.session_id) {
+            self.locale
+                .text(SESSION_LOADER_LOADING, "Loading…")
+                .to_owned()
+        } else if remote_catalog && state.confirm_running {
+            self.locale
+                .text("结束当前进程并载入", "End the current run and load")
+                .to_owned()
+        } else {
+            self.locale
+                .text("载入到当前卡片", "Load into current card")
+                .to_owned()
+        };
+        let primary = div()
+            .id("session-loader-submit")
+            .h(px(32.))
+            .max_w(px(480.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .px(px(14.))
+            .border_1()
+            .border_color(rgb(0x4a8fdc))
+            .rounded(px(8.))
+            .bg(rgb(0x347bc8))
+            .text_color(rgb(0xffffff))
+            .text_size(px(12.))
+            .child(ui_text(primary_label).normal_line_height());
+        let primary = if can_submit {
+            self.button(
+                primary.cursor_pointer(),
+                &self.dialog_controls[2],
+                |this, _, cx| this.submit_session_loader(cx),
+                cx,
+            )
+        } else {
+            primary
+                .opacity(0.48)
+                .cursor(CursorStyle::OperationNotAllowed)
+        };
+
+        let footer = div()
+            .h(px(58.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .px(px(18.))
+            .border_t_1()
+            .border_color(tone(0x343a44, 0xd9dee6))
+            .bg(tone(0x20242a, 0xf7f8fa))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .children(state.error.as_ref().map(|error| {
+                        div()
+                            .id("session-loader-error")
+                            .w_full()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_size(px(10.))
+                            .text_color(tone(0xff8276, 0xa13d39))
+                            .child(ui_text(error.clone()).normal_line_height())
+                    }))
+                    .when(confirm_warning, |left| {
+                        left.child(
+                            div()
+                                .w_full()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_size(px(10.))
+                                .text_color(tone(0xe5af52, 0x90601b))
+                                .child(
+                                    ui_text(self.locale.text(
+                                        SESSION_LOADER_RUNNING_WARNING,
+                                        "This card is running. Continuing ends the current process.",
+                                    ))
+                                    .normal_line_height(),
+                                ),
+                        )
+                    }),
+            )
+            .when(!state.history, |footer| footer.child(self.button(
+                div().id("session-loader-cancel").h(px(32.)).px(px(14.)).flex().items_center()
+                    .rounded(px(8.)).border_1().border_color(tone(0x424954, 0xcbd2dc))
+                    .text_color(tone(0xd9dde3, 0x394250)).bg(tone(0x292d33, 0xf1f3f6))
+                    .cursor_pointer().child(self.locale.text("取消", "Cancel")),
+                &self.dialog_controls[10], |this, window, cx| this.close_dialog(window, cx), cx,
+            )).child(primary))
+            .children(state.history.then(|| {
+                let mut actions = div().flex().items_center().gap(px(10.));
+                if state.error.is_some() && !state.loading_detail {
+                    actions = actions.child(
+                        self.button(
+                            div()
+                                .id("session-history-retry")
+                                .px(px(8.))
+                                .py(px(5.))
+                                .cursor_pointer()
+                                .child(self.locale.text(
+                                    "重试读取会话历史",
+                                    "Retry loading session history",
+                                )),
+                            &self.dialog_controls[2],
+                            |this, _, cx| {
+                                if let Some(TabDialog::SessionLoader(state)) = &mut this.dialog {
+                                    state.error = None;
+                                }
+                                this.request_loader_detail(None);
+                                cx.notify();
+                            },
+                            cx,
+                        ),
+                    );
+                }
+                actions.child(
+                    self.button(
+                        div()
+                            .id("session-history-close")
+                            .px(px(8.))
+                            .py(px(5.))
+                            .cursor_pointer()
+                            .child(self.locale.text(
+                                "关闭会话历史",
+                                "Close session history",
+                            )),
+                        &self.dialog_controls[3],
+                        |this, window, cx| this.close_dialog(window, cx),
+                        cx,
+                    ),
+                )
+            }));
+
+        let provider_tab = |provider: &'static str,
+                            label: &'static str,
+                            focus: &FocusHandle,
+                            cx: &mut Context<Self>|
+         -> Stateful<Div> {
+            let active = state.provider == provider;
+            let tab = div()
+                .id(SharedString::from(format!(
+                    "session-loader-provider-{provider}"
+                )))
+                .h(px(24.))
+                .px(px(10.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(6.))
+                .text_size(px(11.))
+                .text_color(if active {
+                    rgb(0xffffff)
+                } else {
+                    tone(0x8d96a3, 0x5b6675)
+                })
+                .bg(if active {
+                    rgb(0x347bc8)
+                } else {
+                    rgba(0x00000000)
+                })
+                .when(!active, |tab| {
+                    tab.hover(move |style| {
+                        style
+                            .text_color(tone(0xd9dde3, 0x394250))
+                            .bg(wash(0xffffff0d, 0x30415712))
+                    })
+                })
+                .cursor_pointer()
+                .child(label);
+            self.button(
+                tab,
+                focus,
+                move |this, _, cx| this.switch_loader_provider(provider, cx),
+                cx,
+            )
+        };
+        let providers = (!state.history).then(|| {
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(px(4.))
+                .p(px(3.))
+                .border_1()
+                .border_color(tone(0x39404b, 0xcbd2dc))
+                .rounded(px(9.))
+                .bg(tone(0x16191e, 0xeef1f5))
+                .child(provider_tab(
+                    "claude-code",
+                    "Claude Code",
+                    &self.dialog_controls[4],
+                    cx,
+                ))
+                .child(provider_tab(
+                    "antigravity",
+                    "Antigravity",
+                    &self.dialog_controls[9],
+                    cx,
+                ))
+                .child(provider_tab("codex", "Codex", &self.dialog_controls[5], cx))
+                .child(provider_tab("dsh", "DSH", &self.dialog_controls[8], cx))
+        });
+
+        let header = div()
+            .h(px(58.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(10.))
+            .px(px(18.))
+            .border_b_1()
+            .border_color(tone(0x343a44, 0xd9dee6))
+            .bg(tone(0x20242a, 0xf7f8fa))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_size(px(15.))
+                            .font_weight(FontWeight::BOLD)
+                            .child(
+                                ui_text(if state.history {
+                                    self.locale.text("会话历史", "Session history")
+                                } else if state.provider == "antigravity" {
+                                    self.locale
+                                        .text("载入 Antigravity 会话", "Load Antigravity session")
+                                } else if state.provider == "dsh" {
+                                    self.locale.text("载入 DSH 会话", "Load DSH session")
+                                } else if is_codex {
+                                    self.locale.text("载入 Codex 会话", "Load Codex session")
+                                } else {
+                                    self.locale
+                                        .text(SESSION_LOADER_TITLE, "Load Claude Code session")
+                                })
+                                .normal_line_height(),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_size(px(10.))
+                            .text_color(tone(0x8d96a3, 0x5b6675))
+                            .child(
+                                ui_text(if state.history {
+                                    target_title
+                                } else {
+                                    state.cwd.clone()
+                                })
+                                .normal_line_height(),
+                            ),
+                    ),
+            )
+            .children(providers)
+            .child(
+                self.button(
+                    div()
+                        .id("session-loader-close")
+                        .size(px(28.))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(7.))
+                        .text_size(px(20.))
+                        .line_height(relative(1.))
+                        .text_color(tone(0x9fa7b3, 0x5b6675))
+                        .cursor_pointer()
+                        .hover(move |style| {
+                            style
+                                .text_color(rgb(0xffffff))
+                                .bg(wash(0xffffff12, 0xe9edf2ff))
+                        })
+                        .child("×"),
+                    &self.dialog_controls[0],
+                    |this, window, cx| this.close_dialog(window, cx),
+                    cx,
+                ),
+            );
+
+        let panel = div()
+            .id("session-loader-dialog")
+            .w(px(panel_width))
+            .h(px(panel_height))
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .rounded(px(16.))
+            .border_1()
+            .border_color(tone(0x3b424d, 0xcbd2dc))
+            .bg(tone(0x1a1d22, 0xffffff))
+            .text_color(tone(0xe8ebf0, 0x2d3542))
+            .shadow(vec![if dark {
+                shadow(0x000000, 0.48, 28., 90.)
+            } else {
+                shadow(0x283445, 0.23, 26., 80.)
+            }])
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(header)
+            .child(body)
+            .child(footer);
+
+        div()
+            .id("session-loader-backdrop")
+            .absolute()
+            .inset_0()
+            .occlude()
+            .flex()
+            .items_center()
+            .justify_center()
+            .p(px(backdrop_pad))
+            .bg(wash(0x0f12177a, 0xe2e7ee9e))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    this.close_dialog(window, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+            .child(panel)
+            .into_any_element()
+    }
+
+    fn render_fork_header(
+        &self,
+        id: &str,
+        placement: ForkPlacement,
+        cx: &mut Context<Self>,
+    ) -> Option<Stateful<Div>> {
+        let sibling = placement == ForkPlacement::Sibling;
+        let access = self.fork_access(id, placement)?;
+        let (role, title) = if sibling {
+            ("sibling", "从共同父会话 Fork 兄弟分支")
+        } else {
+            ("child", "创建子分支")
+        };
+        let tooltip = access.blocked.or(access.readiness).unwrap_or(title);
+        let button = fork_header_button(
+            format!("fork-{role}-{id}").into(),
+            sibling,
+            access.blocked.or(access.readiness).is_some(),
+            access.blocked.is_some(),
+            tooltip.into(),
+            self.theme_palette().cards,
+        )
+        .children(workspace_wiring::wiring_probe_bounds(format!(
+            "fork-{role}-{id}"
+        )));
+        Some(if access.blocked.is_some() {
+            button.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        } else {
+            let id = id.to_owned();
+            self.button(
+                button,
+                &self.fork_controls[&id][usize::from(sibling)],
+                {
+                    let id = id.clone();
+                    move |this, window, cx| this.open_fork(&id, placement, window, cx)
+                },
+                cx,
+            )
+        })
+    }
+
+    fn render_fork_failure(
+        &self,
+        id: &str,
+        node: &Value,
+        action_bounds: &CardActionBounds,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
+        let (title, reason) = fork_failure_copy(node)?;
+        let reason = reason.map(|error| fork_error_text(error, self.locale));
+        let retry = self.fork_retries.get(id);
+        let pending = matches!(retry, Some(ForkRetry::Pending));
+        let error = match retry {
+            Some(ForkRetry::Rejected(error)) => Some(error.as_str()),
+            _ => None,
+        };
+        let blocked = self.fork_repair_blocked_reason(id, node);
+        let dark = self.wiring_dark();
+        let action = |remove: bool, cx: &mut Context<Self>| {
+            let (role, label) = if remove {
+                ("remove", "移除节点…")
+            } else {
+                ("retry", "重试创建分支")
+            };
+            let retry_pending = pending && !remove;
+            let button = fork_failure_button(
+                format!("fork-{role}-{id}").into(),
+                label,
+                blocked,
+                retry_pending,
+                dark,
+            );
+            let button = measure_card_action(button, action_bounds);
+            if blocked.is_some() || retry_pending {
+                return button;
+            }
+            let session_id = id.to_owned();
+            self.button(
+                button,
+                &self.fork_controls[id][2 + usize::from(remove)],
+                move |this, window, cx| {
+                    if remove {
+                        this.open_remove_session(&session_id, window, cx);
+                    } else {
+                        this.retry_fork(&session_id, cx);
+                    }
+                },
+                cx,
+            )
+        };
+        Some(fork_failure_body(
+            title,
+            reason,
+            error,
+            action(false, cx).into_any_element(),
+            action(true, cx).into_any_element(),
+            dark,
+        ))
+    }
+
+    fn render_branch_dialog(
+        &self,
+        state: &BranchDialog,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let dark = self.wiring_dark();
+        let (title, description, hint) = state.copy();
+        let input = state.input.read(cx);
+        let focused = input.focus.is_focused(window);
+        let count = trim_name(&input.text).chars().count();
+        let input = div()
+            .w_full()
+            .h(px(38.))
+            .flex()
+            .items_center()
+            .pl(px(11.))
+            .pr(px(52.))
+            .rounded(px(9.))
+            .border_1()
+            .border_color(if focused {
+                rgb(0x5b9de9)
+            } else if dark {
+                rgb(0x414752)
+            } else {
+                rgb(0xccd2dc)
+            })
+            .when(focused, |input| {
+                input.shadow(vec![BoxShadow {
+                    color: rgba(0x5b9de929).into(),
+                    offset: point(px(0.), px(0.)),
+                    blur_radius: px(0.),
+                    spread_radius: px(3.),
+                }])
+            })
+            .bg(if dark { rgb(0x15171a) } else { rgb(0xf8f9fb) })
+            .when_else(
+                state.submitting,
+                |field| {
+                    field.child(
+                        div()
+                            .truncate()
+                            .text_color(if dark { rgb(0xf2f3f5) } else { rgb(0x252b36) })
+                            .child(input.text.clone()),
+                    )
+                },
+                |field| field.child(state.input.clone()),
+            );
+        let close = fork_dialog_close(dark);
+        let cancel =
+            fork_dialog_button("fork-dialog-cancel", "取消", false, state.submitting, dark);
+        let confirm = fork_dialog_button(
+            "fork-dialog-confirm",
+            "创建分支",
+            true,
+            state.submitting,
+            dark,
+        );
+        let (close, cancel, confirm) = if state.submitting {
+            (close.opacity(0.55).cursor_default(), cancel, confirm)
+        } else {
+            (
+                self.button(close, &self.dialog_controls[0], Self::cancel_fork, cx),
+                self.button(cancel, &self.dialog_controls[1], Self::cancel_fork, cx),
+                self.button(confirm, &self.dialog_controls[2], Self::submit_fork, cx),
+            )
+        };
+        let panel = fork_dialog_panel(
+            window.viewport_size().width,
+            title,
+            &description,
+            hint,
+            state.worktree_mode == ForkWorktreeMode::New,
+            count,
+            state.submitting,
+            state.error.as_deref(),
+            (
+                close.into_any_element(),
+                input.into_any_element(),
+                cancel.into_any_element(),
+                confirm.into_any_element(),
+            ),
+            dark,
+        );
+        tabs_ui::dialog_overlay("fork-dialog-backdrop")
+            .bg(rgba(0x00000070))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    this.cancel_fork(window, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+            .child(panel.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()))
+            .into_any_element()
+    }
+
+    fn tab_overlay(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let dark = self.wiring_dark();
+        if let Some(TabDialog::Branch(state)) = &self.dialog {
+            return Some(self.render_branch_dialog(state, window, cx));
+        }
+        if let Some(TabDialog::SessionLoader(state)) = &self.dialog {
+            return Some(self.render_session_loader(state, window, cx));
+        }
+        if let Some(dialog) = &self.dialog {
+            let (title, body, confirm, show_cancel, disabled): (SharedString, _, SharedString, _, _) = match dialog {
+                TabDialog::SessionLoader(_) | TabDialog::Branch(_) => unreachable!("specialized dialog rendered above"),
+                TabDialog::RenameTask { task_id, input, empty_submitted, failure } => {
+                    let value = trim_name(&input.read(cx).text);
+                    let error = if *empty_submitted && value.is_empty() { Some("工作台名称不能为空".into()) }
+                        else { self.task_rename_error(task_id, value).or_else(|| failure.as_ref().filter(|(title, _)| title == value).map(|(_, message)| message.clone())) };
+                    let mut body = tabs_ui::dialog_body(dark).child(input.clone());
+                    if let Some(error) = &error { body = body.child(tabs_ui::dialog_error(error.clone(), dark)); }
+                    ("重命名".into(), body, "确定".into(), true, error.is_some() && !value.is_empty())
+                }
+                TabDialog::RemoveWorkspace { name, .. } => (
+                    "移出工作空间".into(),
+                    tabs_ui::dialog_body(dark).child(ui_text(format!(
+                        "移出 \"{name}\" 会关闭该空间下的事项和终端会话，本地文件保持原样。 是否继续？"
+                    )).pre_line()),
+                    "移出".into(),
+                    true,
+                    false,
+                ),
+                TabDialog::DeleteTask { title, .. } => (
+                    self.locale.text("提示", "Notice").into(),
+                    tabs_ui::dialog_body(dark).child(ui_text(match self.locale {
+                        InterfaceLocale::Chinese => format!("删除 \"{title}\" 会丢失该事项下所有终端会话，但不会删除本地目录。 是否继续？"),
+                        InterfaceLocale::English => format!("Deleting \"{title}\" discards every terminal session in this task, but does not delete the local directory. Continue?"),
+                    }).pre_line()),
+                    self.locale.text("确定", "OK").into(), true, false,
+                ),
+                // Frozen permission confirmation reuses the native ConfirmDialog
+                // shell verbatim. The generic footer below supplies close, cancel
+                // and confirm, so only the copy is read here.
+                TabDialog::PermissionMode(state) => {
+                    let (title, body, confirm) = state.copy();
+                    (
+                        title.into(),
+                        tabs_ui::dialog_body(dark).child(ui_text(body).pre_line()),
+                        confirm.into(),
+                        true,
+                        false,
+                    )
+                }
+                TabDialog::Rename { scene_id, input } => {
+                    let value = trim_name(&input.read(cx).text);
+                    let error = self.rename_error(scene_id, value);
+                    let mut body = tabs_ui::dialog_body(dark).child(input.clone());
+                    if let Some(error) = &error {
+                        body = body.child(tabs_ui::dialog_error(error.clone(), dark));
+                    }
+                    (
+                        "重命名标签页".into(),
+                        body,
+                        "确定".into(),
+                        true,
+                        error.is_some() && !value.is_empty(),
+                    )
+                }
+                TabDialog::RenameSession { input, failure, .. } => {
+                    let value = trim_name(&input.read(cx).text);
+                    let mut body = tabs_ui::dialog_body(dark).child(input.clone());
+                    if failure.as_deref() == Some(value) {
+                        body = body.child(tabs_ui::dialog_error(
+                            self.locale.text("重命名失败，请稍后重试", "Could not rename the session. Try again."),
+                            dark,
+                        ));
+                    }
+                    (
+                        self.locale.text("重命名会话", "Rename session").into(),
+                        body,
+                        self.locale.text("确定", "Confirm").into(),
+                        true,
+                        value.is_empty(),
+                    )
+                }
+                TabDialog::Close {
+                    scene_id,
+                    graph,
+                    is_last,
+                } => {
+                    let name = self
+                        .scenes
+                        .iter()
+                        .find(|s| &s.id == scene_id)
+                        .map(|s| self.scene_title(s))
+                        .unwrap_or_else(|| "当前画布".into());
+                    let nodes = graph["nodes"].as_array();
+                    let count = nodes.map_or(0, |ns| {
+                        ns.iter().filter(|n| n["archivedAt"].is_null()).count()
+                    });
+                    let running = nodes.map_or(0, |ns| {
+                        ns.iter()
+                            .filter(|n| {
+                                matches!(n["workStatus"].as_str(), Some("running" | "starting"))
+                            })
+                            .count()
+                    });
+                    let needs = nodes.map_or(0, |ns| {
+                        ns.iter()
+                            .filter(|n| n["workStatus"] == "needs-input")
+                            .count()
+                    });
+                    let mut affected = Vec::new();
+                    if running > 0 {
+                        affected.push(format!("{running} 个运行中会话"));
+                    }
+                    if needs > 0 {
+                        affected.push(format!("{needs} 个待输入会话"));
+                    }
+                    let activity = if affected.is_empty() {
+                        String::new()
+                    } else {
+                        format!("其中 {}将停止。", affected.join("和 "))
+                    };
+                    let text = if *is_last {
+                        last_tab_body(self.locale).into()
+                    } else if self.locale == InterfaceLocale::English {
+                        let running_label = (running > 0).then(|| if running == 1 {
+                            "1 running session".into()
+                        } else { format!("{running} running sessions") });
+                        let waiting_label = (needs > 0).then(|| if needs == 1 {
+                            "1 session waiting for input".into()
+                        } else { format!("{needs} sessions waiting for input") });
+                        let activity = [running_label, waiting_label].into_iter().flatten().collect::<Vec<_>>().join(" and ");
+                        let activity = if activity.is_empty() { String::new() } else { format!("{activity} will stop. ") };
+                        let sessions = if count == 1 { "1 session".into() } else { format!("all {count} sessions") };
+                        format!("Closing it removes {sessions} in \"{name}\" from the view. {activity}Project files and worktrees stay as they are.")
+                    } else {
+                        format!(
+                            "关闭后，“{name}”下的 {count} 个会话会全部从界面移除。{activity}项目文件和工作树保持原样。"
+                        )
+                    };
+                    (
+                        if *is_last { self.locale.text("提示", "Notice") } else { self.locale.text("关闭画布", "Close canvas") }.into(),
+                        tabs_ui::dialog_body(dark).child(ui_text(text).pre_line()),
+                        if *is_last {
+                            self.locale.text(LAST_TAB_CONFIRM, "Got it")
+                        } else {
+                            self.locale.text("关闭画布", "Close canvas")
+                        }.into(),
+                        !*is_last,
+                        false,
+                    )
+                }
+                TabDialog::CloseSession { body, .. } => (
+                    STOP_SESSION.into(),
+                    tabs_ui::dialog_body(dark).child(ui_text(body.clone()).pre_line()),
+                    STOP_SESSION.into(),
+                    true,
+                    false,
+                ),
+                TabDialog::LastSession { .. } => (
+                    self.locale.text("提示", "Notice").into(),
+                    tabs_ui::dialog_body(dark).child(ui_text(last_tab_body(self.locale)).pre_line()),
+                    self.locale.text(LAST_TAB_CONFIRM, "Got it").into(),
+                    false,
+                    false,
+                ),
+                TabDialog::RemoveSession { session_id, scope, .. } => {
+                    let text = self.removal_dialog_text(session_id, *scope)?;
+                    let body = div()
+                        .px(px(24.))
+                        .text_color(if dark {
+                            rgba(0xffffffb3)
+                        } else {
+                            rgba(0x000000a6)
+                        })
+                        .text_size(px(13.))
+                        .line_height(relative(1.5))
+                        .flex()
+                        .flex_col()
+                        .when(text.files_unchanged.is_some(), |body| body.pt(px(4.)))
+                        .child(div().mb(px(12.)).child(ui_text(text.body)))
+                        .children(text.files_unchanged.map(|text| div().mb(px(12.)).child(ui_text(text))))
+                        .children(text.choices.map(|[node, branch]| {
+                            div()
+                                .id("remove-node-scope")
+                                .mt(px(2.))
+                                .mb(px(12.))
+                                .flex()
+                                .flex_col()
+                                .gap(px(8.))
+                                .child(self.remove_scope_choice(node, RemoveScope::NodeOnly, *scope, dark, cx))
+                                .child(self.remove_scope_choice(branch, RemoveScope::NodeAndDescendants, *scope, dark, cx))
+                        }))
+                        .children(text.warning.map(|warning| div().mb(px(12.)).text_color(rgb(0xe7aa65)).child(ui_text(warning))));
+                    (text.title.into(), body, text.confirm.into(), true, false)
+                }
+            };
+            let n = self.dialog_controls.len();
+            let mut footer = tabs_ui::dialog_footer();
+            if show_cancel {
+                let cancel = if matches!(dialog, TabDialog::RemoveSession { .. }) {
+                    self.locale.text("取消", "Cancel")
+                } else {
+                    "取消"
+                };
+                footer = footer.child(self.button(
+                    tabs_ui::dialog_button("dialog-cancel", cancel, false, false, dark),
+                    &self.dialog_controls[n - 2],
+                    |this, window, cx| this.close_dialog(window, cx),
+                    cx,
+                ));
+            }
+            let confirm_button =
+                tabs_ui::dialog_button("dialog-confirm", confirm, true, disabled, dark);
+            footer = footer.child(if disabled {
+                confirm_button
+            } else {
+                self.button(
+                    confirm_button,
+                    &self.dialog_controls[n - 1],
+                    |this, window, cx| this.confirm_dialog(window, cx),
+                    cx,
+                )
+            });
+            return Some(
+                tabs_ui::dialog_overlay("tab-dialog-overlay")
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            this.close_dialog(window, cx);
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                    .child(
+                        tabs_ui::dialog_panel(f32::from(window.viewport_size().width), dark)
+                            .id("tab-dialog-panel")
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .child(
+                                tabs_ui::dialog_header()
+                                    .child(tabs_ui::dialog_title(title, dark).when(
+                                        matches!(dialog, TabDialog::RemoveSession { .. }),
+                                        |title| title.min_w_0().whitespace_normal(),
+                                    ))
+                                    .child(self.button(
+                                        tabs_ui::dialog_close("dialog-close", dark),
+                                        &self.dialog_controls[0],
+                                        |this, window, cx| this.close_dialog(window, cx),
+                                        cx,
+                                    )),
+                            )
+                            .child(body)
+                            .child(footer),
+                    )
+                    .into_any_element(),
+            );
+        }
+        if let Some((id, position, controls)) = &self.workspace_menu {
+            let workspace = self.workspaces.iter().find(|w| &w.id == id)?;
+            let invalid = self.workspace_invalid(id);
+            let show_relink = invalid && !workspace.is_default;
+            let show_remove = !workspace.is_default;
+            let pinned = workspace.is_pinned;
+            let root_directory = workspace.root_directory.clone();
+            let name = workspace.name.clone();
+            let count = 3 + usize::from(show_relink) + usize::from(show_remove);
+            let height = 14. + count as f32 * 34.5 + if show_remove { 5. } else { 0. };
+            let top = position.y - px(height / 2.);
+            let text_item = |item_id: &'static str, label: &'static str| {
+                div()
+                    .id(item_id)
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .px(px(12.))
+                    .py(px(8.))
+                    .rounded(px(6.))
+                    .text_size(px(13.))
+                    .line_height(px(18.5))
+                    .whitespace_nowrap()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgb(0xeceef3)))
+                    .child(ui_text(label).normal_line_height())
+            };
+            let relink_id = id.clone();
+            let pin_id = id.clone();
+            let finder_path = root_directory.clone();
+            let copy_path = root_directory;
+            let remove_id = id.clone();
+            let mut next_focus = 0;
+            let mut menu = tabs_ui::context_menu("workspace-context-menu")
+                .w_auto()
+                .min_w(px(120.))
+                .p(px(6.))
+                .rounded(px(10.))
+                .border_1()
+                .border_color(rgba(0x00000000))
+                .left(position.x)
+                .top(top)
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.workspace_menu = None;
+                    cx.notify();
+                }))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+            if show_relink {
+                menu = menu.child(
+                    self.mutation_button(
+                        text_item(
+                            "workspace-menu-relink",
+                            self.locale
+                                .text("重新关联工作空间目录", "Relink workspace directory"),
+                        ),
+                        &controls[next_focus],
+                        move |this, _, cx| {
+                            this.workspace_menu = None;
+                            this.relink_workspace_directory(relink_id.clone(), cx);
+                        },
+                        cx,
+                    ),
+                );
+                next_focus += 1;
+            }
+            menu = menu
+                .child(
+                    self.mutation_button(
+                        div()
+                            .id("workspace-menu-pin")
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .px(px(12.))
+                            .py(px(8.))
+                            .rounded(px(6.))
+                            .text_size(px(13.))
+                            .line_height(px(18.5))
+                            .whitespace_nowrap()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(0xeceef3)))
+                            .child(icon("pin", 13., rgb(0x2f3547)))
+                            .child(ui_text(self.pin_label(pinned)).normal_line_height()),
+                        &controls[next_focus],
+                        move |this, _, cx| {
+                            this.workspace_menu = None;
+                            this.send(
+                                Command::SetWorkspacePinned {
+                                    workspace_id: pin_id.clone(),
+                                    pinned: !pinned,
+                                },
+                                cx,
+                            );
+                        },
+                        cx,
+                    ),
+                )
+                .child(self.button(
+                    text_item(
+                        "workspace-menu-finder",
+                        workspace_file_manager_label(self.locale, cfg!(target_os = "macos")),
+                    ),
+                    &controls[next_focus + 1],
+                    move |this, _, cx| {
+                        this.workspace_menu = None;
+                        cx.open_with_system(&PathBuf::from(&finder_path));
+                        cx.notify();
+                    },
+                    cx,
+                ))
+                .child(self.button(
+                    text_item(
+                        "workspace-menu-copy",
+                        self.locale.text("复制路径", "Copy path"),
+                    ),
+                    &controls[next_focus + 2],
+                    move |this, _, cx| {
+                        this.workspace_menu = None;
+                        cx.write_to_clipboard(ClipboardItem::new_string(copy_path.clone()));
+                        this.show_toast(this.locale.text("路径已复制", "Path copied"), cx);
+                    },
+                    cx,
+                ));
+            if show_remove {
+                menu = menu.child(
+                    self.mutation_button(
+                        div()
+                            .id("workspace-menu-remove")
+                            .mt(px(4.))
+                            .border_t_1()
+                            .border_color(rgb(0xeceef2))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .px(px(12.))
+                            .py(px(8.))
+                            .rounded_b(px(6.))
+                            .text_size(px(13.))
+                            .line_height(px(18.5))
+                            .text_color(rgb(0xc5443e))
+                            .whitespace_nowrap()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(0xfff1f0)).text_color(rgb(0xa8322e)))
+                            .child(icon("trash-2", 14., rgb(0xc5443e)))
+                            .child(
+                                ui_text(self.locale.text("移出码头", "Remove from Matou"))
+                                    .normal_line_height(),
+                            ),
+                        &controls[next_focus + 3],
+                        move |this, window, cx| {
+                            this.open_workspace_remove(remove_id.clone(), name.clone(), window, cx);
+                        },
+                        cx,
+                    ),
+                );
+            }
+            return Some(menu.into_any_element());
+        }
+        if let Some((id, position, controls)) = &self.task_menu {
+            let task = self.tasks.iter().find(|task| &task.id == id)?;
+            let pinned = task.is_pinned;
+            let pin_id = id.clone();
+            let rename_id = id.clone();
+            let delete_id = id.clone();
+            let menu_item = |id: &'static str, label: &'static str, symbol: &'static str| {
+                div()
+                    .id(id)
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .px(px(12.))
+                    .py(px(8.))
+                    .rounded(px(6.))
+                    .text_size(px(13.))
+                    .line_height(px(19.5))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgb(0xeceef3)))
+                    .child(icon(
+                        symbol,
+                        if symbol == "pin" { 13. } else { 14. },
+                        rgb(if symbol == "trash-2" {
+                            0xc5443e
+                        } else {
+                            0x2f3547
+                        }),
+                    ))
+                    .child(ui_text(label))
+            };
+            return Some(
+                tabs_ui::context_menu("task-context-menu")
+                    .w(px(120.))
+                    .p(px(6.))
+                    .rounded(px(10.))
+                    .border_1()
+                    .border_color(rgba(0x00000000))
+                    .left(position.x)
+                    .top(position.y - px(62.25))
+                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                        this.task_menu = None;
+                        cx.notify();
+                    }))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(self.mutation_button(
+                        menu_item("task-pin", self.pin_label(pinned), "pin"),
+                        &controls[0],
+                        move |this, _, cx| {
+                            this.task_menu = None;
+                            this.send(
+                                Command::SetTaskPinned {
+                                    task_id: pin_id.clone(),
+                                    pinned: !pinned,
+                                },
+                                cx,
+                            );
+                        },
+                        cx,
+                    ))
+                    .child(self.mutation_button(
+                        menu_item(
+                            "task-rename",
+                            self.locale.text("重命名", "Rename"),
+                            "pencil",
+                        ),
+                        &controls[1],
+                        move |this, window, cx| {
+                            this.open_task_rename(rename_id.clone(), window, cx)
+                        },
+                        cx,
+                    ))
+                    .child(
+                        self.mutation_button(
+                            menu_item("task-delete", self.locale.text("删除", "Delete"), "trash-2")
+                                .mt(px(4.))
+                                .border_t_1()
+                                .border_color(rgb(0xeceef2))
+                                .text_color(rgb(0xc5443e)),
+                            &controls[2],
+                            move |this, window, cx| {
+                                this.open_task_delete(delete_id.clone(), window, cx)
+                            },
+                            cx,
+                        ),
+                    )
+                    .into_any_element(),
+            );
+        }
+        if let Some((id, position, focus)) = &self.tab_menu {
+            let id = id.clone();
+            return Some(
+                tabs_ui::context_menu("tab-context-menu")
+                    .left(position.x)
+                    .top(position.y)
+                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                        this.tab_menu = None;
+                        cx.notify();
+                    }))
+                    .child(self.mutation_button(
+                        tabs_ui::menu_item(
+                            "tab-rename-menu",
+                            self.locale.text("重命名页签", "Rename tab"),
+                        ),
+                        focus,
+                        move |this, window, cx| this.open_rename(id.clone(), window, cx),
+                        cx,
+                    ))
+                    .into_any_element(),
+            );
+        }
+        if let Some(ids) = &self.hidden_tabs {
+            let bounds = self.tab_scroll.bounds();
+            let size = window.viewport_size();
+            let top = bounds.bottom() + px(4.);
+            // CSS shrink-to-fit width needs an explicit value here so GPUI's
+            // percentage-width rows receive a definite containing block.
+            let font = window.text_style().font();
+            let menu_width = ids
+                .iter()
+                .filter_map(|(id, _)| self.scenes.iter().find(|s| &s.id == id))
+                .map(|scene| {
+                    let text: SharedString = self.scene_title(scene).into();
+                    let run = TextRun {
+                        len: text.len(),
+                        font: font.clone(),
+                        color: rgb(0x2f3547).into(),
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    };
+                    let line = window
+                        .text_system()
+                        .shape_line(text.clone(), px(13.), &[run], None);
+                    f32::from(line.x_for_index(text.len()))
+                        + 24.
+                        + if self
+                            .hierarchy
+                            .as_ref()
+                            .and_then(|h| h.scene.as_ref())
+                            .is_some_and(|s| s.id == scene.id)
+                        {
+                            24.
+                        } else {
+                            0.
+                        }
+                })
+                .fold(200f32, f32::max)
+                .min(360.);
+            let mut panel = tabs_ui::overflow_panel("hidden-tab-panel")
+                .w(px(menu_width))
+                .right(size.width - bounds.right())
+                .top(top)
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+            for (id, focus) in ids {
+                let Some(scene) = self.scenes.iter().find(|s| &s.id == id) else {
+                    continue;
+                };
+                let active = self
+                    .hierarchy
+                    .as_ref()
+                    .and_then(|h| h.scene.as_ref())
+                    .is_some_and(|s| &s.id == id);
+                let id = id.clone();
+                panel = panel.child(
+                    self.button(
+                        tabs_ui::overflow_item(SharedString::from(format!("hidden-{id}")), active)
+                            .child(tabs_ui::overflow_title(self.scene_title(scene), active))
+                            .when(active, |item| item.child(tabs_ui::overflow_check())),
+                        focus,
+                        move |this, _, cx| {
+                            this.hidden_tabs = None;
+                            if let Some(index) = this.scenes.iter().position(|s| s.id == id) {
+                                this.tab_scroll.scroll_to_item(index);
+                            }
+                            this.send(
+                                Command::SelectScene {
+                                    scene_id: id.clone(),
+                                },
+                                cx,
+                            );
+                        },
+                        cx,
+                    ),
+                );
+            }
+            return Some(
+                div()
+                    .id("hidden-tab-overlay")
+                    .occlude()
+                    .absolute()
+                    .inset_0()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.workspace_menu = None;
+                            this.task_menu = None;
+                            this.hidden_tabs = None;
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
+                    )
+                    .child(panel)
+                    .into_any_element(),
+            );
+        }
+        None
+    }
+
+    fn child_badge_button(
+        &self,
+        id: &str,
+        badge: session_levels::ChildBadge,
+        badge_bounds: Entity<Option<Bounds<Pixels>>>,
+        focus: &FocusHandle,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let click_id = id.to_owned();
+        let hover_id = id.to_owned();
+        let (text_color, border_color, background) = if badge.is_idle {
+            (0x777f89, 0xd7dbe1, 0xf3f4f6)
+        } else {
+            (0x2666b1, 0xb9d6ff, 0xe8f2ff)
+        };
+        self.focus_control(
+            div()
+                .id(SharedString::from(format!("child-session-badge-{id}")))
+                .relative()
+                .h(px(24.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(5.))
+                .max_w(relative(1.))
+                .px(px(8.))
+                .border_1()
+                .border_color(rgb(border_color))
+                .rounded(px(999.))
+                .bg(rgb(background))
+                .text_color(rgb(text_color))
+                .text_size(px(10.))
+                .font_weight(FontWeight(650.))
+                .whitespace_nowrap()
+                .cursor_pointer()
+                .on_hover(cx.listener(move |this, hovered, _, cx| {
+                    if *hovered {
+                        this.hovered_child_badge = Some(hover_id.clone());
+                    } else if this.hovered_child_badge.as_deref() == Some(hover_id.as_str()) {
+                        this.hovered_child_badge = None;
+                    }
+                    cx.notify();
+                }))
+                .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                })
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.open_child_level(&click_id, window, cx);
+                }))
+                .child(icon("layers", 14., rgb(text_color)))
+                .child(
+                    div()
+                        .size(px(6.))
+                        .flex_none()
+                        .rounded_full()
+                        .bg(rgb(badge.dot_color)),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(badge.summary),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(px(13.))
+                        .line_height(px(13.))
+                        .child("›"),
+                )
+                .child(
+                    canvas(
+                        |_, _, _| (),
+                        move |bounds, _, _, cx| {
+                            badge_bounds.update(cx, |slot, _| *slot = Some(bounds));
+                        },
+                    )
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full(),
+                ),
+            focus,
+        )
+    }
+
+    fn footer(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        self.terminal_hud(self.level_focus(), false, window, cx)
+    }
+
+    fn terminal_hud(
+        &self,
+        session: Option<&str>,
+        detached: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let palette = self.theme_palette().footer;
+        let background = rgba(palette.background);
+        #[cfg(debug_assertions)]
+        crate::settings_shell::probe_workspace_surfaces(|probe| probe.footer = Some(background));
+        struct ReturnParentTooltip;
+        impl Render for ReturnParentTooltip {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .px(px(9.))
+                    .py(px(7.))
+                    .border_1()
+                    .border_color(rgb(0xd6dae1))
+                    .rounded(px(7.))
+                    .bg(rgb(0xffffff))
+                    .text_color(rgb(0x333b47))
+                    .text_size(px(10.))
+                    .line_height(px(15.))
+                    .whitespace_nowrap()
+                    .shadow(vec![shadow(0x1f2837, 0.16, 8., 24.)])
+                    .child("返回父会话")
+            }
+        }
+
+        let (label, count) = if detached {
+            (String::new(), String::new())
+        } else {
+            self.breadcrumb_labels()
+        };
+        let label = SharedString::from(label.replace(['\r', '\n', '\t'], " "));
+        let count = SharedString::from(count);
+        let viewport_width = window.viewport_size().width;
+        let width = f32::from(viewport_width);
+        let child_level = !detached && self.level_parent().is_some();
+        let breadcrumb_max = (width * 0.44).min(520.);
+        let footer_room = width
+            - 2. * PERMISSION_FOOTER_PADDING_X
+            - if detached {
+                0.
+            } else {
+                FOOTER_SIDEBAR_WIDTH + FOOTER_GAP
+            };
+        // Keep enough room for the count, the first title glyph plus ellipsis,
+        // and the back arrow on child levels.
+        let breadcrumb_chrome = if child_level { 39. } else { 20. };
+        let count_width = footer_text_estimate(&count);
+        // The root breadcrumb keeps its whole item and the status bar shrinks
+        // into the real remainder. Child titles still ellipsize inside their
+        // own capped slot; the count and back arrow stay reserved there.
+        let breadcrumb_width = if detached {
+            0.
+        } else {
+            (footer_text_estimate(&label) + count_width + breadcrumb_chrome).min(breadcrumb_max)
+        };
+        let status_estimate = (footer_room - breadcrumb_width).max(0.);
+        // Child levels keep the old status budget so the HUD's fixed fields
+        // survive a long child title; the title itself still shrinks and
+        // ellipsizes inside its own capped breadcrumb slot.
+        let status_max = if child_level {
+            (footer_room - count_width - breadcrumb_chrome - 34.).max(0.)
+        } else {
+            0.
+        };
+        let locale = self.locale;
+        let fields = session.and_then(|id| self.footer_fields_for(id));
+        let chip = session.and_then(|id| self.permission_chip_for(id));
+        let menu_open =
+            self.permission_menu_open(window) && chip.as_ref().is_some_and(|chip| !chip.disabled);
+        let dark = self.theme.effective() == AppTheme::Dark;
+        let footer_menu = self
+            .footer_popovers
+            .get(&window.window_handle())
+            .filter(|popup| Some(popup.session.as_str()) == session);
+        // The optional cwd/Git slot only gets space the model did not claim. A
+        // cwd needs room for both a recognizable prefix and any Git label that
+        // shares the slot; below that the field is omitted rather than
+        // clipped from the left.
+        let cwd_min_slot = FOOTER_CWD_MIN_WIDTH;
+        let status_measure = window.use_keyed_state("footer-status-measure", cx, |_, _| {
+            None::<FooterStatusMeasure>
+        });
+        let measure_key = (viewport_width, label.clone(), count.clone());
+        let (status_content_width, show_cwd) = {
+            let measured = status_measure.read(cx);
+            let measured = measured
+                .as_ref()
+                .filter(|measure| measure.key == measure_key);
+            let fallback_content = (status_estimate - FOOTER_STATUS_PADDING_LEFT - 1.).max(0.);
+            let fallback_show_cwd = fallback_content > FOOTER_CWD_HIDE_BELOW;
+            let fallback_optional = if fallback_show_cwd {
+                FOOTER_CWD_MAX_WIDTH
+            } else {
+                0.
+            };
+            let (content, optional, show) = measured.map_or(
+                (fallback_content, fallback_optional, fallback_show_cwd),
+                |measure| {
+                    (
+                        measure.status_content_width,
+                        measure.optional_width,
+                        measure.show_cwd,
+                    )
+                },
+            );
+            (content, show && optional >= cwd_min_slot)
+        };
+        let mode = fields.as_ref().map_or("", |fields| fields.mode);
+        let mode = match mode {
+            "claude-code" => "claude-code",
+            "codex" => "codex",
+            "antigravity" => "antigravity",
+            _ => "",
+        };
+        let show_model = codex_hud::shows_model(mode, status_content_width);
+        let show_context = status_content_width > codex_hud::CONTEXT_HIDE_BELOW;
+        let status_gap = if status_content_width < FOOTER_COMPACT_STATUS_WIDTH {
+            FOOTER_GAP / 2.
+        } else {
+            FOOTER_GAP
+        };
+        let content = div()
+            .min_w_0()
+            .flex_1()
+            .flex()
+            .items_center()
+            .child(
+                div()
+                    .children(footer_bounds_probe("label"))
+                    .id("footer-breadcrumb-label")
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(footer_text("label", label.clone())),
+            )
+            .child(
+                div()
+                    .children(footer_bounds_probe("count"))
+                    .id("footer-breadcrumb-count")
+                    .flex_none()
+                    .ml(px(4.))
+                    .whitespace_nowrap()
+                    .text_color(rgba(palette.breadcrumb_count))
+                    .child(footer_text("count", count.clone())),
+            );
+        let breadcrumb = div()
+            .h_full()
+            .when(!child_level, |breadcrumb| breadcrumb.flex_none())
+            .min_w_0()
+            .max_w(px(breadcrumb_max))
+            .flex()
+            .items_center()
+            .text_size(px(11.))
+            .text_color(rgba(palette.breadcrumb));
+        let breadcrumb = if child_level {
+            breadcrumb.child(
+                self.button(
+                    div()
+                        .children(footer_bounds_probe("return"))
+                        .id("session-return-parent")
+                        .h(px(26.))
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .px(px(8.))
+                        .rounded(px(6.))
+                        .cursor_pointer()
+                        .hover(move |style| {
+                            style
+                                .bg(rgba(palette.breadcrumb_hover))
+                                .text_color(rgba(palette.breadcrumb_hover_text))
+                        })
+                        .child(div().flex_none().mr(px(6.)).text_size(px(13.)).child("←"))
+                        .child(content),
+                    &self.control_focus["session-return-parent"],
+                    |this, window, cx| this.return_to_parent(window, cx),
+                    cx,
+                )
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    if matches!(event.keystroke.key.as_str(), "left" | "up") {
+                        cx.stop_propagation();
+                        this.return_to_parent(window, cx);
+                    }
+                }))
+                .tooltip(|_, cx| cx.new(|_| ReturnParentTooltip).into()),
+            )
+        } else {
+            breadcrumb.child(
+                div()
+                    .h(px(26.))
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .px(px(8.))
+                    .child(content),
+            )
+        };
+        let mut footer = div()
+            .h(px(PERMISSION_FOOTER_HEIGHT))
+            .flex_none()
+            .flex()
+            .items_center()
+            .px(px(PERMISSION_FOOTER_PADDING_X))
+            .gap(px(FOOTER_GAP))
+            .border_t_1()
+            .border_color(rgba(palette.top_line))
+            .bg(background)
+            .text_size(px(10.))
+            .text_color(rgba(palette.text))
+            .when(!detached && self.graph.is_object(), |footer| {
+                footer.child(breadcrumb)
+            });
+        if chip.is_none() && fields.is_none() {
+            return footer.child(
+                div()
+                    .ml_auto()
+                    .child(self.egress_trigger_for(session, window, cx)),
+            );
+        }
+        // The dismiss layer is mounted before the status area so the chip and
+        // the deferred menu keep their own input handling above it.
+        if menu_open {
+            footer = footer.child(self.permission_menu_overlay(window, cx));
+        }
+        if footer_menu.is_some() {
+            footer = footer.child(self.footer_popover_overlay(window, cx));
+        }
+
+        // Flatten the old primary wrapper into the status row so the model is
+        // a real flex sibling. AGENTS, permission, context and tools keep their
+        // fixed space; the model takes its intrinsic width and gives up only
+        // the remainder the fixed fields leave behind.
+        let mut optional = div()
+            .children(footer_bounds_probe("secondary"))
+            .flex_basis(px(0.))
+            .flex_grow()
+            .min_w_0()
+            .h_full()
+            .flex()
+            .items_center()
+            .justify_end()
+            .gap(px(FOOTER_GAP))
+            .overflow_hidden();
+        // Measure the real optional slot after layout. The next frame hides
+        // the cwd when this slot cannot show a recognizable path prefix, and
+        // otherwise lets the cwd tail-ellipsize inside its own width.
+        let optional_measure = status_measure.clone();
+        let optional_key = measure_key.clone();
+        optional = optional.child(
+            canvas(
+                |_, _, _| (),
+                move |bounds, _, _, cx| {
+                    let actual_width = f32::from(bounds.size.width);
+                    optional_measure.update(cx, |state, cx| {
+                        let needs_key = state
+                            .as_ref()
+                            .is_none_or(|measure| measure.key != optional_key);
+                        if needs_key {
+                            *state = Some(FooterStatusMeasure {
+                                key: optional_key.clone(),
+                                show_cwd,
+                                status_content_width,
+                                optional_width: actual_width,
+                            });
+                            cx.notify();
+                        } else if let Some(measure) = state.as_mut()
+                            && (measure.optional_width - actual_width).abs() > 0.5
+                        {
+                            measure.optional_width = actual_width;
+                            cx.notify();
+                        }
+                    });
+                },
+            )
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full(),
+        );
+        let mut fixed = div()
+            .flex_none()
+            .h_full()
+            .flex()
+            .items_center()
+            .gap(px(status_gap));
+        if let Some(fields) = fields.as_ref() {
+            if show_cwd && !fields.is_shell && fields.cwd.is_some() {
+                optional = optional.child(
+                    div()
+                        .w(px(1.))
+                        .h(px(12.))
+                        .flex_none()
+                        .bg(rgba(palette.divider)),
+                );
+            }
+            if show_cwd && let Some((full, short)) = fields.cwd.as_ref() {
+                let tooltip: SharedString = SharedString::from((*full).to_owned());
+                optional = optional.child(
+                    div()
+                        .children(footer_bounds_probe("cwd"))
+                        .id("footer-cwd")
+                        .flex_shrink()
+                        .min_w_0()
+                        .max_w(px(FOOTER_CWD_MAX_WIDTH))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(footer_text("cwd", short.as_str().to_owned()))
+                        .tooltip(move |_, cx| cx.new(|_| CardTooltip(tooltip.clone())).into()),
+                );
+            }
+            if let Some(git) = fields.git.as_ref() {
+                let tooltip: SharedString = git.title.clone().into();
+                let git_button = div()
+                    .children(footer_bounds_probe("git"))
+                    .id("footer-git")
+                    .flex_shrink()
+                    .min_w_0()
+                    .max_w(px(FOOTER_GIT_MAX_WIDTH))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_color(rgb(0xff6b35))
+                    .when(!git.available, |element| element.opacity(0.7))
+                    .child(footer_text("git", git.label.clone()))
+                    .tooltip(move |_, cx| cx.new(|_| CardTooltip(tooltip.clone())).into());
+                fixed = fixed.child(if git.available {
+                    self.footer_menu_trigger(git_button, FooterMenu::Git, footer_menu, window, cx)
+                } else {
+                    git_button
+                });
+            }
+            // The environment moves out of the shrinkable optional slot and
+            // into the fixed right group, so a narrow footer can never clip
+            // the 22×22 local icon or its label from the left.
+            if let Some(environment) = fields.environment.as_ref() {
+                let environment_button = div()
+                    .children(footer_bounds_probe("environment"))
+                    .id("footer-environment")
+                    .whitespace_nowrap()
+                    .tooltip(move |_, cx| {
+                        cx.new(|_| CardTooltip(locale.text("运行环境", "Environment").into()))
+                            .into()
+                    });
+                let environment_button = if environment.local_icon {
+                    environment_button
+                        .flex_none()
+                        .size(px(22.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_color(rgba(palette.session_name))
+                        .child(footer_monitor_icon(13., rgba(palette.session_name)))
+                } else {
+                    environment_button
+                        .flex_shrink()
+                        .min_w_0()
+                        .max_w(px(FOOTER_ENVIRONMENT_MAX_WIDTH))
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(environment.color))
+                        .child(footer_text("environment", environment.label))
+                };
+                fixed = fixed.child(self.footer_menu_trigger(
+                    environment_button,
+                    FooterMenu::Environment,
+                    footer_menu,
+                    window,
+                    cx,
+                ));
+            }
+            fixed = fixed.child(self.egress_trigger_for(session, window, cx));
+            if footer_shows_account(fields.mode) {
+                fixed = fixed.child(self.footer_account_trigger(window, cx));
+            }
+        }
+
+        let measure = status_measure.clone();
+        let mut status = div()
+            .id("footer-status")
+            .relative()
+            .flex_1()
+            .when(child_level, |status| {
+                status
+                    .flex_auto()
+                    .flex_shrink_0()
+                    .max_w(px(status_max))
+                    .ml_auto()
+            })
+            .min_w_0()
+            .h_full()
+            .pl(px(FOOTER_STATUS_PADDING_LEFT))
+            .when(!detached, |status| {
+                status.border_l_1().border_color(rgba(palette.divider))
+            })
+            .flex()
+            .items_center()
+            .gap(px(status_gap))
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_size(px(10.))
+            .text_color(rgba(palette.text));
+        let mut primary = div()
+            .id("footer-primary")
+            .min_w_0()
+            .h_full()
+            .flex()
+            .items_center()
+            .gap(px(status_gap))
+            .flex_shrink()
+            .overflow_x_scroll()
+            .when_some(
+                self.project_instructions
+                    .get(&window.window_handle())
+                    .and_then(|state| state.filename_for(session)),
+                |status, filename| {
+                    status.child(
+                        self.button(
+                            project_instructions::entry(
+                                footer_text("instructions", filename),
+                                dark,
+                            )
+                            .children(footer_bounds_probe("instructions")),
+                            &self.control_focus["project-instructions"],
+                            Self::open_project_instructions,
+                            cx,
+                        ),
+                    )
+                },
+            );
+        if let Some(chip) = chip.as_ref() {
+            primary = primary.child(self.permission_primary(chip, menu_open, window, cx));
+        }
+        if let Some(fields) = fields.as_ref() {
+            let live = fields.live.unwrap_or(&Value::Null);
+            if chip.is_none() && !fields.is_shell {
+                let permission = if fields.mode == "dsh" {
+                    trimmed_graph_text(&live["providerPermissionLabel"])
+                        .or_else(|| trimmed_graph_text(&fields.node["providerPermissionLabel"]))
+                } else {
+                    trimmed_graph_text(&live["permissionMode"]).or(fields.projected_permission)
+                };
+                if let Some(permission) = permission {
+                    let (label, color) = if fields.mode == "dsh" {
+                        (permission, 0x8b949e)
+                    } else {
+                        match permission {
+                            "bypassPermissions" | "BP" => ("BP", 0xff6b35),
+                            "plan" => ("PM", 0x58a6ff),
+                            "acceptEdits" => ("AE", 0xd29922),
+                            "auto" => ("A", 0x7ee787),
+                            "default" => ("D", 0x8b949e),
+                            label => (label, 0x8b949e),
+                        }
+                    };
+                    let title = SharedString::from(permission.to_owned());
+                    primary = primary.child(
+                        div()
+                            .id("footer-readonly-permission")
+                            .flex_none()
+                            .px(px(6.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(color))
+                            .children(footer_bounds_probe("permission"))
+                            .child(footer_text("permission", label.to_owned()))
+                            .tooltip(move |_, cx| cx.new(|_| CardTooltip(title.clone())).into()),
+                    );
+                }
+            }
+            if show_model && let Some(name) = fields.name.as_deref().filter(|name| !name.is_empty())
+            {
+                let full_label = fields
+                    .live_hud
+                    .as_ref()
+                    .and_then(|hud| hud.full_model_label())
+                    .or_else(|| fields.codex.as_ref().and_then(|hud| hud.full_model_label()))
+                    .or_else(|| {
+                        (!fields.is_shell)
+                            .then(|| trimmed_graph_text(&fields.node["model"]))
+                            .flatten()
+                            .map(|model| model.to_owned().into())
+                    })
+                    .unwrap_or_else(|| name.to_owned().into());
+                primary = primary.child(codex_hud::model_slot(
+                    name.to_owned().into(),
+                    full_label,
+                    locale,
+                    (fields.mode != "codex").then_some(FOOTER_NAME_MAX_WIDTH),
+                    rgba(if fields.is_shell {
+                        palette.text
+                    } else {
+                        palette.model
+                    }),
+                ));
+            }
+            if show_context {
+                let context = fields
+                    .live_hud
+                    .as_ref()
+                    .filter(|hud| hud.context_percent().is_some() || hud.has_context_window())
+                    .or(fields.codex.as_ref());
+                if let Some(percent) = context.and_then(|hud| hud.context_percent()) {
+                    primary = primary.child(codex_hud::context_ring(percent));
+                } else if codex_hud::supports_details(fields.mode)
+                    && context.is_some_and(|hud| hud.has_context_window())
+                {
+                    primary = primary.child(
+                        div()
+                            .flex_none()
+                            .children(footer_bounds_probe("context"))
+                            .child(footer_text(
+                                "context",
+                                locale.text("等待真实用量", "Awaiting usage"),
+                            )),
+                    );
+                }
+            }
+            if codex_hud::supports_details(fields.mode) {
+                let mut stats = codex_hud::statistics(live, fields.node, locale, dark)
+                    .into_iter()
+                    .peekable();
+                primary = primary.children(
+                    stats
+                        .next_if(|slot| slot.id() == "mcps")
+                        .map(|slot| slot.slot(locale, dark)),
+                );
+                let tools = if live["runningTools"].is_array() || live["toolCounts"].is_array() {
+                    fields.live_hud.as_ref()
+                } else {
+                    fields.codex.as_ref()
+                };
+                primary = primary.children(tools.and_then(|hud| hud.tools_slot(locale, dark)));
+                while let Some(slot) = stats.next_if(|slot| matches!(slot.id(), "agents" | "hooks"))
+                {
+                    primary = primary.child(slot.slot(locale, dark));
+                }
+                if status_content_width > 290. {
+                    primary = primary.children(self.footer_quota(
+                        fields.mode,
+                        live,
+                        footer_menu,
+                        window,
+                        cx,
+                    ));
+                }
+                primary = primary.children(
+                    stats
+                        .filter(|slot| match slot.id() {
+                            "todos" => status_content_width > 380.,
+                            "mcp-errors" => status_content_width > 330.,
+                            _ => true,
+                        })
+                        .map(|slot| slot.slot(locale, dark)),
+                );
+            }
+            status = status.child(primary).child(optional).child(fixed);
+        } else {
+            status = status.child(
+                div()
+                    .ml_auto()
+                    .child(self.egress_trigger_for(session, window, cx)),
+            );
+        }
+        status = status.child(
+            // Measure the real status and optional boxes after layout. The next
+            // frame hides the cwd below the frozen 440pt budget (and when its
+            // slot cannot show a path prefix) plus the model/context cells at
+            // their 210pt/250pt priorities.
+            canvas(
+                |_, _, _| (),
+                move |bounds, _, _, cx| {
+                    record_footer_bounds("status", bounds);
+                    let actual_width = f32::from(bounds.size.width);
+                    let actual_content_width =
+                        actual_width - FOOTER_STATUS_PADDING_LEFT - if detached { 0. } else { 1. };
+                    measure.update(cx, |state, cx| {
+                        let optional_width = state
+                            .as_ref()
+                            .filter(|measure| measure.key == measure_key)
+                            .map_or(0., |measure| measure.optional_width);
+                        let actual_show_cwd = actual_content_width > FOOTER_CWD_HIDE_BELOW
+                            && optional_width >= cwd_min_slot;
+                        let actual_show_model = codex_hud::shows_model(mode, actual_content_width);
+                        let actual_show_context =
+                            actual_content_width > codex_hud::CONTEXT_HIDE_BELOW;
+                        let changed = state
+                            .as_ref()
+                            .is_none_or(|measure| measure.key != measure_key)
+                            || actual_show_cwd != show_cwd
+                            || actual_show_model != show_model
+                            || actual_show_context != show_context
+                            || [290., 330., 380.].into_iter().any(|threshold| {
+                                (actual_content_width > threshold)
+                                    != (status_content_width > threshold)
+                            })
+                            || (actual_content_width < FOOTER_COMPACT_STATUS_WIDTH)
+                                != (status_content_width < FOOTER_COMPACT_STATUS_WIDTH);
+                        *state = Some(FooterStatusMeasure {
+                            key: measure_key.clone(),
+                            show_cwd: actual_show_cwd,
+                            status_content_width: actual_content_width,
+                            optional_width,
+                        });
+                        if changed {
+                            cx.notify();
+                        }
+                    });
+                },
+            )
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full(),
+        );
+        footer.child(status)
+    }
+
+    /// Wrap the permission chip so the menu can be laid out from the chip's
+    /// real bounds instead of a guessed right-hand cell.
+    fn permission_primary(
+        &self,
+        chip: &PermissionChip,
+        menu_open: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let wrapper = div()
+            .id("permission-chip-wrap")
+            .relative()
+            .flex_none()
+            .flex()
+            .items_center()
+            .child(self.permission_chip_view(chip, cx))
+            .children(footer_bounds_probe("permission"));
+        if !menu_open {
+            return wrapper;
+        }
+        wrapper.child(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .child(self.permission_menu_view(chip, window, cx)),
+        )
+    }
+
+    /// `.status-perm-badge` + `.is-clickable` + `.status-field:disabled`.
+    /// Use the frozen abbreviations in the row and the full title in the tooltip.
+    fn permission_chip_view(&self, chip: &PermissionChip, cx: &mut Context<Self>) -> Stateful<Div> {
+        let tooltip: SharedString = chip.title.clone().into();
+        let cell = div()
+            .id("permission-chip")
+            .h(px(PERMISSION_CHIP_HEIGHT))
+            .flex()
+            .items_center()
+            .px(px(6.))
+            .py(px(1.))
+            .rounded(px(4.))
+            .text_size(px(10.))
+            .line_height(px(PERMISSION_CHIP_LINE_HEIGHT))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(rgb(
+                if chip.mode == PermissionMode::Auto && chip.modes == PermissionMode::ANTIGRAVITY {
+                    permission_mode_color(PermissionMode::Default)
+                } else {
+                    permission_mode_color(chip.mode)
+                },
+            ))
+            .whitespace_nowrap()
+            .hover(|style| {
+                style.bg(Rgba {
+                    a: 0.08,
+                    ..rgb(0xffffff)
+                })
+            })
+            .tooltip(move |_, cx| cx.new(|_| CardTooltip(tooltip.clone())).into())
+            .child(permission_tracked_text(
+                if chip.mode == PermissionMode::Auto && chip.modes == PermissionMode::ANTIGRAVITY {
+                    "D".into()
+                } else {
+                    permission_chip_text(chip.mode)
+                },
+                PERMISSION_CHIP_TRACKING,
+            ));
+        if chip.disabled {
+            cell.opacity(PERMISSION_CHIP_DISABLED_OPACITY)
+                .cursor(CursorStyle::Arrow)
+        } else {
+            self.button(
+                cell.cursor_pointer(),
+                &self.control_focus["permission-mode"],
+                |this, window, cx| this.toggle_permission_menu(window, cx),
+                cx,
+            )
+        }
+    }
+
+    /// Full-window dismiss layer shown only while the menu is open. It is a
+    /// sibling mounted before the status cell, so the chip and the deferred
+    /// menu stay hittable above it.
+    fn permission_menu_overlay(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let viewport = window.viewport_size();
+        anchored()
+            .anchor(Corner::TopLeft)
+            .position(point(px(0.), px(0.)))
+            .child(
+                div()
+                    .id("permission-menu-overlay")
+                    .w(viewport.width)
+                    .h(viewport.height)
+                    .occlude()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            this.dismiss_permission_menu(window, cx);
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|this, _, window, cx| {
+                            this.dismiss_permission_menu(window, cx);
+                            cx.stop_propagation();
+                        }),
+                    ),
+            )
+    }
+
+    /// `.perm-menu` in a deferred anchored layer. The anchor is the permission
+    /// wrapper's top-left (local layout), lifted by the frozen 8px gap;
+    /// `BottomLeft` grows the menu upward and left-aligns it with the chip.
+    fn permission_menu_view(
+        &self,
+        chip: &PermissionChip,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let focuses = window
+            .use_keyed_state(
+                SharedString::from("permission-menu-item-focus"),
+                cx,
+                |_, cx| {
+                    (0..PermissionMode::ALL
+                        .len()
+                        .max(PermissionMode::ANTIGRAVITY.len()))
+                        .map(|_| cx.focus_handle().tab_stop(true))
+                        .collect::<Vec<_>>()
+                },
+            )
+            .read(cx)
+            .clone();
+        let items = chip.modes.iter().copied().enumerate().map(|(index, mode)| {
+            let item =
+                permission_menu_item(mode, chip.mode).children(footer_bounds_probe(mode.value()));
+            self.button(
+                item,
+                &focuses[index],
+                move |this, window, cx| this.choose_permission_mode(mode, window, cx),
+                cx,
+            )
+        });
+        let panel = div()
+            .id("permission-menu")
+            .flex()
+            .flex_col()
+            .min_w(px(PERMISSION_MENU_MIN_WIDTH))
+            .p(px(PERMISSION_MENU_PADDING))
+            .border_1()
+            .border_color(rgb(0x30363d))
+            .rounded(px(8.))
+            .occlude()
+            .bg(rgb(0x1c2128))
+            .text_color(rgb(0xc9d1d9))
+            .text_size(px(12.))
+            .shadow(vec![shadow(0x000000, 0.5, 8., 24.)])
+            .child(permission_menu_title())
+            .children(items);
+        deferred(
+            anchored()
+                .anchor(Corner::BottomLeft)
+                .position_mode(AnchoredPositionMode::Local)
+                .position(point(px(0.), px(0.)))
+                .offset(point(px(0.), px(-PERMISSION_MENU_GAP)))
+                .snap_to_window()
+                .child(
+                    div()
+                        .relative()
+                        .child(panel)
+                        .children(footer_bounds_probe("permission-menu")),
+                ),
+        )
+        .with_priority(2)
+    }
+}
+
+impl Workspace {
+    fn workspace_frame(
+        &self,
+        root: Stateful<Div>,
+        _top_drag: bool,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> AnyElement {
+        #[cfg(debug_assertions)]
+        database_recovery_page::probe_root(&root);
+        #[cfg(target_os = "windows")]
+        let root = {
+            let root = if _top_drag {
+                root.child(
+                    div()
+                        .id("windows-fullscreen-drag")
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right(px(WINDOWS_CAPTION_CONTROLS_WIDTH))
+                        .h(px(48.))
+                        .window_control_area(WindowControlArea::Drag)
+                        .occlude(),
+                )
+            } else {
+                root
+            };
+            // Both recovery views have a fixed light background.
+            let dark = !self.invalid_recovery_marker
+                && self.database_recovery.is_none()
+                && self.uses_dark_theme();
+            root.child(
+                windows_caption_controls(48., dark, _window.is_maximized())
+                    .absolute()
+                    .top_0()
+                    .right_0(),
+            )
+        };
+        #[cfg(target_os = "windows")]
+        let root = root.children(self.render_quit_confirmation(_window, _cx));
+        root.into_any_element()
+    }
+
+    #[cfg(target_os = "windows")]
+    fn render_quit_confirmation(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Deferred> {
+        let focus = self.quit_confirmation.focus()?;
+        if !focus.cancel.is_focused(window) && !focus.quit.is_focused(window) {
+            window.focus(&focus.cancel);
+        }
+        let [title, body, cancel_label, quit_label] = quit_dialog_text(self.locale);
+        let dark = self.uses_dark_theme();
+        let cancel = self.button(
+            quit_confirmation_dialog::button("quit-cancel", cancel_label, false, dark),
+            &focus.cancel,
+            Self::cancel_quit_confirmation,
+            cx,
+        );
+        let quit = self.button(
+            quit_confirmation_dialog::button("quit-confirm", quit_label, true, dark),
+            &focus.quit,
+            Self::confirm_quit,
+            cx,
+        );
+        let panel = quit_confirmation_dialog::panel(
+            f32::from(window.viewport_size().width),
+            dark,
+            title,
+            body,
+            cancel,
+            quit,
+        )
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+        let overlay = quit_confirmation_dialog::backdrop()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    this.cancel_quit_confirmation(window, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+            .child(panel);
+        // Settings and nested confirmations also paint through deferred layers.
+        Some(deferred(overlay).with_priority(usize::MAX))
+    }
+}
+
+impl EventEmitter<InterfaceLocale> for Workspace {}
+
+#[cfg(target_os = "windows")]
+impl EventEmitter<QuitConfirmed> for Workspace {}
+
+impl Render for Workspace {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let palette = self.theme_palette();
+        if self.invalid_recovery_marker {
+            return self.workspace_frame(
+                database_recovery_page::render_invalid_marker(
+                    window.viewport_size().height,
+                    self.locale,
+                ),
+                true,
+                window,
+                cx,
+            );
+        }
+        if let Some(state) = &self.database_recovery {
+            let recovery_id = state.details.recovery_id.clone();
+            let page = database_recovery_page::render(
+                Some(&state.details),
+                PagePresentation {
+                    locale: self.locale,
+                    available: state.available,
+                    pending: state.pending.as_ref().map(|(_, operation)| *operation),
+                    selected_backup: state.selected_backup.as_deref(),
+                    error: state.error.as_deref(),
+                    exported_path: state.exported_path.as_deref(),
+                    empty_trigger: Some(&state.empty_trigger),
+                    confirmation: state.confirmation.as_ref().map(|confirmation| {
+                        ConfirmationFocus {
+                            back: &confirmation.back,
+                            confirm: &confirmation.confirm,
+                        }
+                    }),
+                    viewport_height: window.viewport_size().height,
+                },
+                cx.listener(move |this, action: &PageAction, window, cx| {
+                    this.database_recovery_action(&recovery_id, action, window, cx);
+                }),
+            );
+            return self.workspace_frame(page, true, window, cx);
+        }
+        if self.hierarchy.is_none()
+            && self.read_only.is_none()
+            && !matches!(
+                self.commands.connection().1,
+                ConnectionPhase::Blocked(_) | ConnectionPhase::Stopped
+            )
+        {
+            // The bridge can publish Ready before the workspace projection arrives.
+            return self.workspace_frame(
+                div()
+                    .id("startup-neutral")
+                    .size_full()
+                    .bg(rgba(palette.workspace.canvas)),
+                true,
+                window,
+                cx,
+            );
+        }
+        self.finish_terminal_return(window, cx);
+        if self.carousel_has_overlay(window) {
+            self.carousel_drag = None;
+            self.leave_carousel(cx);
+        }
+        let level_focus = self.level_focus().map(str::to_owned);
+        self.refresh_project_instructions(window, cx);
+        let active_level_focus = self.active_level_focus().map(str::to_owned);
+        let viewport_width = self.carousel_viewport_width(window);
+        let split_tree = self.active_split_tree().cloned();
+        let split_widths = split_tree.as_ref().map(|tree| {
+            tree.layout(SplitRect {
+                width: viewport_width.max(0.),
+                height: 1.,
+                ..Default::default()
+            })
+            .panes
+            .into_iter()
+            .map(|pane| (pane.session_id, pane.bounds.width as f32))
+            .collect::<HashMap<_, _>>()
+        });
+        let layout = CarouselLayout::for_viewport(viewport_width);
+        let narrow = layout.narrow;
+        let in_split = split_tree.is_some();
+        if narrow || in_split {
+            self.hovered = None;
+            self.hover_follow_until = None;
+            self.hover_restore_at = None;
+            self.hover_baseline = None;
+            self.stop_edge_browse(false);
+        }
+        let now = self.motion_clock.elapsed().as_secs_f64() * 1000.;
+        let dragging = cx.has_active_drag();
+        if !dragging {
+            self.workspace_drag_source = None;
+            self.workspace_drag_target = None;
+        }
+        for workspace in &self.workspaces {
+            let motion = self
+                .workspace_drag_motion
+                .entry(workspace.id.clone())
+                .or_insert_with(|| WorkspaceDragMotion {
+                    scale: Transition::new(1.),
+                    opacity: Transition::new(1.),
+                    background: Transition::new(0.),
+                });
+            motion.scale.retarget(
+                if dragging && self.workspace_drag_source.as_ref() == Some(&workspace.id) {
+                    0.99
+                } else {
+                    1.
+                },
+                now,
+                140.,
+                Curve::Ease,
+            );
+            motion.opacity.retarget(
+                if dragging && self.workspace_drag_source.as_ref() == Some(&workspace.id) {
+                    0.6
+                } else {
+                    1.
+                },
+                now,
+                140.,
+                Curve::Ease,
+            );
+            motion.background.retarget(
+                if dragging && self.workspace_drag_target.as_ref() == Some(&workspace.id) {
+                    1.
+                } else {
+                    0.
+                },
+                now,
+                140.,
+                Curve::Ease,
+            );
+            if motion.scale.is_running(now)
+                || motion.opacity.is_running(now)
+                || motion.background.is_running(now)
+            {
+                window.request_animation_frame();
+            }
+        }
+
+        let capacity = layout.columns;
+        if self.column_capacity != Some(capacity) {
+            self.column_capacity = Some(capacity);
+            self.restore_geometry = true;
+        }
+        let was_cruising = self.edge_cruising;
+        if !was_cruising {
+            self.advance_edge_browse(now, viewport_width, cx);
+        }
+        let mut widths = HashMap::new();
+        let mut positions = HashMap::new();
+        let mut left = 10.;
+        self.card_geometry.clear();
+        let mut active_geometry = None;
+        let mut preview_geometry = None;
+        let mut moving = false;
+        let width_duration = if reduced_motion() { 1. } else { 380. };
+        for id in &self.order {
+            let selected = level_focus.as_ref() == Some(id);
+            let hovered = self.hovered.as_ref() == Some(id);
+            let rule = layout.width_rule(selected, hovered);
+            let motion = self.card_motion.get_mut(id).expect("mounted card motion");
+            motion.drawn_lift = motion.lift_for_frame(now, in_split);
+            motion.retarget_elevation(CardElevation::for_card(selected, hovered), now);
+            let motion_width = motion.width.get_or_insert_with(|| CardWidth::new(rule));
+            motion_width.retarget(rule, now, width_duration);
+            let width = motion_width.value(viewport_width, now);
+            widths.insert(id.clone(), width);
+            positions.insert(id.clone(), left);
+            self.card_geometry.push((id.clone(), left, width));
+            if level_focus.as_ref() == Some(id) {
+                active_geometry = Some((left, width));
+            }
+            if self.hovered.as_ref() == Some(id) {
+                preview_geometry = Some((left, width));
+            }
+            left += width + 12.;
+            moving |= motion_width.is_running(now)
+                || motion.lift.is_running(now)
+                || motion.hover_elevation.is_running(now);
+        }
+        let total = self
+            .card_geometry
+            .last()
+            .map_or(20., |(_, left, width)| left + width + 10.);
+        let max_scroll = (total - viewport_width).max(0.);
+        if was_cruising {
+            // The next cruise target depends on this frame's hidden cards.
+            self.advance_edge_browse(now, viewport_width, cx);
+        }
+        moving |= self.edge_next_at.is_some();
+        if split_tree.is_none() && self.restore_geometry {
+            self.restore_geometry = moving;
+            if let Some(saved) = self
+                .carousel_owner
+                .as_ref()
+                .and_then(|owner| self.geometry.get(owner))
+            {
+                let value = &saved.geometry;
+                let anchor = value["anchorSessionId"]
+                    .as_str()
+                    .and_then(|id| positions.get(id));
+                let offset = value["anchorViewportOffset"].as_f64();
+                let scroll = match (anchor, offset) {
+                    (Some(left), Some(offset)) => left - offset,
+                    _ => value["scrollLeft"].as_f64().unwrap_or(0.),
+                };
+                self.carousel_scroll
+                    .set_offset(point(px(-scroll.clamp(0., max_scroll) as f32), px(0.)));
+                if scroll > 0. || anchor.is_some() {
+                    self.focus_follow_until = None;
+                }
+            }
+        }
+        if split_tree.is_none()
+            && let (Some(until), Some((left, width))) = (self.hover_follow_until, preview_geometry)
+        {
+            let current =
+                f64::from(-f32::from(self.carousel_scroll.offset().x)).clamp(0., max_scroll);
+            let target = fully_visible_scroll(left, width, current, viewport_width, max_scroll);
+            let next = focus_scroll_step(current, target);
+            self.carousel_scroll
+                .set_offset(point(px(-next as f32), px(0.)));
+            if now < until || (target - next).abs() > 0.5 {
+                moving = true;
+            } else {
+                self.hover_follow_until = None;
+            }
+        }
+        if split_tree.is_none()
+            && let (Some(at), Some(baseline)) = (self.hover_restore_at, self.hover_baseline)
+        {
+            let current =
+                f64::from(-f32::from(self.carousel_scroll.offset().x)).clamp(0., max_scroll);
+            let (next, settled) = hover_restore_step(now, at, current, baseline, max_scroll);
+            if next != current {
+                self.carousel_scroll
+                    .set_offset(point(px(-next as f32), px(0.)));
+            }
+            if settled {
+                self.hover_restore_at = None;
+                self.hover_baseline = None;
+            } else {
+                moving = true;
+            }
+        }
+        if split_tree.is_none()
+            && let (Some(until), Some((left, width))) = (self.focus_follow_until, active_geometry)
+        {
+            let target = centered_scroll(left, width, viewport_width, max_scroll);
+            let current =
+                f64::from(-f32::from(self.carousel_scroll.offset().x)).clamp(0., max_scroll);
+            let next = focus_scroll_step(current, target);
+            self.carousel_scroll
+                .set_offset(point(px(-next as f32), px(0.)));
+            if now < until || (target - next).abs() > 0.5 {
+                moving = true;
+            } else {
+                self.focus_follow_until = None;
+            }
+        }
+        if !self.wiring.board_open
+            && split_tree.is_none()
+            && self.hover_baseline.is_none()
+            && self.hover_follow_until.is_none()
+            && self.focus_follow_until.is_none()
+            && !self.restore_geometry
+            && self.pending_focus.is_none()
+            && active_level_focus.is_some()
+        {
+            let scroll =
+                f64::from(-f32::from(self.carousel_scroll.offset().x)).clamp(0., max_scroll);
+            self.save_geometry(
+                scroll,
+                active_geometry.map(|(left, _)| left),
+                active_level_focus,
+                false,
+                cx,
+            );
+        }
+        if (!in_split && moving)
+            || (in_split
+                && self
+                    .card_motion
+                    .values()
+                    .any(|motion| motion.hover_elevation.is_running(now)))
+        {
+            window.request_animation_frame();
+        }
+        let mut carousel = div()
+            .id("session-carousel")
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .flex()
+            .gap(px(12.))
+            .p(px(10.))
+            .overflow_x_scroll()
+            .track_scroll(&self.carousel_scroll)
+            .bg(rgba(palette.cards.canvas))
+            .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                this.stop_edge_browse(true);
+                if event.button == MouseButton::Left
+                    && !this.carousel_has_overlay(window)
+                    && this.carousel_hit(event.position, false).is_none()
+                {
+                    this.carousel_drag = Some((event.position, this.carousel_scroll.offset().x));
+                }
+                cx.notify();
+            }));
+        let path_valid = self.active_path_valid();
+        #[cfg(target_os = "macos")]
+        let recovery_water_available = !self.wiring.board_open
+            && self.read_only.is_none()
+            && self.recovery_water_available(window);
+        let carousel_left =
+            f64::from(-f32::from(self.carousel_scroll.offset().x)).clamp(0., max_scroll);
+        #[cfg(target_os = "macos")]
+        let mut mounted_water = HashSet::new();
+        let visible_deferred: Vec<_> = self
+            .order
+            .iter()
+            .filter(|_| !self.wiring.board_open)
+            .filter(|&id| {
+                self.is_deferred(id)
+                    && (!narrow || level_focus.as_ref() == Some(id))
+                    && positions[id] < carousel_left + viewport_width
+                    && positions[id] + widths[id] > carousel_left
+            })
+            .cloned()
+            .collect();
+        for id in visible_deferred {
+            self.request_deferred_preview(&id);
+        }
+        let mut badge_tooltip = None;
+        let mut split_cards = HashMap::new();
+        let mut stacked_cards = Vec::new();
+        let dark = self.wiring_dark();
+        for id in self.order.iter().filter(|_| !self.wiring.board_open) {
+            let node = session_levels::node(session_levels::nodes(&self.graph), id);
+            let selected = level_focus.as_ref() == Some(id);
+            let width = match &split_widths {
+                Some(panes) => match panes.get(id.as_str()) {
+                    Some(width) => *width,
+                    None => continue,
+                },
+                None => widths[id] as f32,
+            };
+            let motion = &self.card_motion[id];
+            let weights = motion.shadow_weights(now);
+            let elevation = motion.shadow_target;
+            let lift = motion.drawn_lift;
+            let place_card = |card: Stateful<Div>| {
+                let glass = dark && selected;
+                let card = card.children(
+                    (glass || weights[2] > 0.).then(|| card_reflection(dark, glass, weights[2])),
+                );
+                let shadows = card_shadows(dark, weights);
+                if in_split {
+                    card.shadow(shadows).into_any_element()
+                } else {
+                    div()
+                        .absolute()
+                        .left(px((positions[id] - 10.) as f32))
+                        .top(lift)
+                        .w(px(width))
+                        .h_full()
+                        .child(carousel_card_shadow(shadows))
+                        .child(card)
+                        .into_any_element()
+                }
+            };
+            let background = rgba(palette.cards.background);
+            #[cfg(debug_assertions)]
+            crate::settings_shell::probe_workspace_surfaces(|probe| probe.card = Some(background));
+            let card = div()
+                .id(SharedString::from(format!("card-{id}")))
+                .relative()
+                .w_full()
+                .h_full()
+                .flex_none()
+                .rounded(CARD_RADIUS)
+                .overflow_hidden()
+                .bg(background)
+                .flex()
+                .flex_col();
+            let compact = !in_split && (narrow || self.read_only.is_some()) && !selected;
+            let title = node
+                .and_then(|node| node["title"].as_str())
+                .unwrap_or("Shell");
+            if let Some(node) = node.filter(|node| Self::team_member_node(node)) {
+                let card = place_card(card.child(self.render_team_member(id, node)));
+                stacked_cards.push((elevation, card));
+                continue;
+            }
+            if self.wiring.is_detached(id) {
+                let card = place_card(card.child(self.render_detached_placeholder(id, title, cx)));
+                if in_split {
+                    split_cards.insert(id.clone(), card);
+                } else {
+                    stacked_cards.push((elevation, card));
+                }
+                continue;
+            }
+            if let Some(node) = node.filter(|node| !node["archivedAt"].is_null()) {
+                let card = if compact {
+                    card.child(Self::compact_session_summary_themed(
+                        Some(node),
+                        title,
+                        &palette,
+                    ))
+                } else {
+                    card.child(self.stopped_session_card(id, node, cx))
+                };
+                stacked_cards.push((elevation, place_card(card)));
+                continue;
+            }
+            let Some(terminal) = self.terminals.get(id) else {
+                continue;
+            };
+            // The badge measures its painted bounds so pointer-down can be
+            // excluded from the card's capture-phase activation even before
+            // the first hover event reaches the freshly rendered badge.
+            let badge_bounds = if compact {
+                None
+            } else {
+                Some(window.use_keyed_state(
+                    SharedString::from(format!("child-session-badge-bounds-{id}")),
+                    cx,
+                    |_, _| None::<Bounds<Pixels>>,
+                ))
+            };
+            let badge = badge_bounds.as_ref().and_then(|badge_bounds| {
+                let badge = self.child_badge(id)?;
+                let focus = window.use_keyed_state(
+                    SharedString::from(format!("child-session-badge-focus-{id}")),
+                    cx,
+                    |_, cx| cx.focus_handle().tab_stop(true),
+                );
+                let focus = focus.read(cx).clone();
+                if self.dialog.is_none()
+                    && let Some(bounds) = *badge_bounds.read(cx)
+                    && ((self.hovered_child_badge.as_ref() == Some(id)
+                        && bounds.contains(&window.mouse_position()))
+                        || (self.keyboard_focus && focus.is_focused(window)))
+                {
+                    badge_tooltip = Some(
+                        anchored()
+                            .anchor(Corner::TopRight)
+                            .position(bounds.bottom_right() + point(px(0.), px(7.)))
+                            .snap_to_window()
+                            .child(
+                                div()
+                                    .max_w((window.viewport_size().width - px(24.)).min(px(460.)))
+                                    .px(px(9.))
+                                    .py(px(7.))
+                                    .border_1()
+                                    .border_color(rgb(0xd6dae1))
+                                    .rounded(px(7.))
+                                    .bg(rgb(0xffffff))
+                                    .text_color(rgb(0x333b47))
+                                    .text_size(px(10.))
+                                    .line_height(px(15.))
+                                    .whitespace_nowrap()
+                                    .shadow(vec![shadow(0x1f2837, 0.16, 8., 24.)])
+                                    .child(badge.detail.clone()),
+                            ),
+                    );
+                }
+                Some(self.child_badge_button(id, badge, badge_bounds.clone(), &focus, cx))
+            });
+            let focus = terminal.read(cx).focus.clone();
+            let restore_hidden = self.provider_restore_hides_terminal(id);
+            let capture_terminal = terminal.clone();
+            let capture_session = id.clone();
+            let session_id = id.clone();
+            // Read the bounds from the frame that registered the handlers, including lift and scroll.
+            let card_bounds = Rc::new(Cell::new(None::<Bounds<Pixels>>));
+            let capture_bounds = card_bounds.clone();
+            let measure_bounds = card_bounds.clone();
+            let action_bounds = CardActionBounds::default();
+            let capture_actions = action_bounds.clone();
+            #[cfg(target_os = "macos")]
+            let water = if recovery_water_available
+                && (!narrow || selected)
+                && positions[id] < carousel_left + viewport_width
+                && positions[id] + widths[id] > carousel_left
+                && node.is_some_and(|node| self.recovery_water_needed(id, node))
+            {
+                mounted_water.insert(id.clone());
+                let entity = self.recovery_water.entry(id.clone()).or_insert_with(|| {
+                    #[cfg(debug_assertions)]
+                    if let Some(trace) = &self.motion_trace {
+                        record_motion(
+                            trace,
+                            &serde_json::json!({
+                                "kind": "recovery-water-mount", "session": id,
+                                "at": self.motion_clock.elapsed().as_secs_f64() * 1000.,
+                                "generation": self.runtime_generation,
+                            }),
+                        );
+                    }
+                    cx.new(|cx| {
+                        RecoveryWater::new(
+                            self.runtime_generation,
+                            palette.terminal,
+                            reduced_motion(),
+                            cx,
+                        )
+                        .with_bottom_radius(CARD_RADIUS)
+                    })
+                });
+                Some(RecoveryWater::overlay(entity.clone()))
+            } else {
+                None
+            };
+            // The water owns the card handoff on macOS; Windows uses the
+            // equivalent first-frame state so both platforms label the gap.
+            let loading_badge = node
+                .and_then(|node| {
+                    #[cfg(target_os = "macos")]
+                    let awaiting_first_frame = water.is_some();
+                    #[cfg(not(target_os = "macos"))]
+                    let awaiting_first_frame = self.can_show_loading_badge()
+                        && (!narrow || selected)
+                        && positions[id] < carousel_left + viewport_width
+                        && positions[id] + widths[id] > carousel_left;
+                    self.loading_badge(id, node, awaiting_first_frame)
+                })
+                .map(|badge| {
+                    Self::loading_badge_element(badge.label(&self.locale)).children(
+                        workspace_wiring::wiring_probe_bounds(format!(
+                            "session-loading-badge-{id}"
+                        )),
+                    )
+                });
+            let card = card
+                .capture_any_mouse_down(cx.listener(
+                    move |this, event: &MouseDownEvent, window, cx| {
+                        if event.button != MouseButton::Left
+                            || this.carousel_has_overlay(window)
+                            || this.is_stopped_session(&capture_session)
+                            || !capture_bounds
+                                .get()
+                                .is_some_and(|bounds| session_card_hit(&bounds, event.position))
+                            || capture_actions
+                                .borrow()
+                                .iter()
+                                .any(|bounds| bounds.contains(&event.position))
+                            || (!compact
+                                && !restore_hidden
+                                && capture_terminal.read(cx).scrollbar_hit(event.position))
+                        {
+                            return;
+                        }
+                        if !in_split
+                            && (compact
+                                || restore_hidden
+                                || !capture_terminal.read(cx).contains_position(event.position))
+                        {
+                            this.carousel_drag =
+                                Some((event.position, this.carousel_scroll.offset().x));
+                        }
+                        this.activate_session_card(&capture_session, window, cx);
+                    },
+                ))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, event: &MouseDownEvent, window, _| {
+                        if this.is_stopped_session(&session_id)
+                            || !card_bounds
+                                .get()
+                                .is_some_and(|bounds| session_card_hit(&bounds, event.position))
+                        {
+                            return;
+                        }
+                        if this.active_path_valid()
+                            && !this.recovery_blocked(&session_id)
+                            && !this.provider_restore_hides_terminal(&session_id)
+                        {
+                            window.focus(&focus);
+                        }
+                    }),
+                )
+                .child(
+                    canvas(
+                        move |bounds, _, _| measure_bounds.set(Some(bounds)),
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .inset_0()
+                    .size_full(),
+                );
+            let fork_failure = node
+                .filter(|_| !compact && self.read_only.is_none())
+                .and_then(|node| self.render_fork_failure(id, node, &action_bounds, cx));
+            let fork_progress = node
+                .filter(|_| self.read_only.is_none())
+                .and_then(fork_progress_copy);
+            let provider_banner = node
+                .filter(|_| {
+                    self.read_only.is_none()
+                        && !compact
+                        && fork_failure.is_none()
+                        && fork_progress.is_none()
+                })
+                .and_then(|node| self.provider_restore_banner(id, node));
+            let card = if !compact
+                && !self.environment_unavailable(id)
+                && fork_failure.is_none()
+                && fork_progress.is_none()
+                && provider_banner.is_none()
+                && let Some(RecoveryState::Failed(error)) = self.recovery.get(id)
+            {
+                let retry_id = id.clone();
+                card.child(
+                    div()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .p(px(24.))
+                        .rounded(px(12.))
+                        .bg(rgb(0xfff7f6))
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(
+                            div()
+                                .w(px((width - 72.).min(360.).max(0.)))
+                                .flex()
+                                .flex_col()
+                                .items_center()
+                                .gap(px(9.))
+                                .p(px(22.))
+                                .border_1()
+                                .border_color(rgb(0xc8d4e3))
+                                .rounded(px(12.))
+                                .bg(rgb(0xffffff))
+                                .shadow(vec![shadow(0x1f2d3d, 0.14, 16., 44.)])
+                                .text_center()
+                                .text_color(rgb(0x29364a))
+                                .text_size(px(11.))
+                                .line_height(px(16.5))
+                                .child(div().font_weight(FontWeight::BOLD).child(
+                                    self.locale.text("终端恢复失败", "Terminal recovery failed"),
+                                ))
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .text_color(rgb(0x617086))
+                                        .child(error.clone()),
+                                )
+                                .child(
+                                    self.button(
+                                        measure_card_action(
+                                            div()
+                                                .id(SharedString::from(format!(
+                                                    "retry-recovery-{id}"
+                                                )))
+                                                .px(px(12.))
+                                                .py(px(6.))
+                                                .border_1()
+                                                .border_color(rgb(0x516b8d))
+                                                .rounded(px(7.))
+                                                .text_color(rgb(0xe0ebfa))
+                                                .bg(rgb(0x2a3b51))
+                                                .text_size(px(11.))
+                                                .line_height(px(15.))
+                                                .cursor_pointer()
+                                                .child(self.locale.text("重试", "Retry")),
+                                            &action_bounds,
+                                        ),
+                                        &self.recovery_controls[id],
+                                        move |this, _, cx| {
+                                            this.send(
+                                                Command::RetryRecovery {
+                                                    session_id: retry_id.clone(),
+                                                },
+                                                cx,
+                                            )
+                                        },
+                                        cx,
+                                    ),
+                                ),
+                        ),
+                )
+                .children(badge.map(|badge| badge.absolute().top(px(8.)).right(px(8.))))
+            } else if compact {
+                let target = id.clone();
+                card.on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                        this.open_wiring_card_menu(&target, event.position, window, cx);
+                        cx.stop_propagation();
+                    }),
+                )
+                .child(Self::compact_session_summary_themed(node, title, &palette))
+            } else {
+                let mut actions = Self::session_card_actions()
+                    .on_children_prepainted({
+                        let action_bounds = action_bounds.clone();
+                        move |children, _, _| action_bounds.borrow_mut().extend(children)
+                    })
+                    .children(badge);
+                if let Some(node) = node {
+                    actions = actions.children(
+                        card_header_actions(node, self.scene_membership_count() > 1).filter_map(
+                            |action| match action {
+                                CardHeaderAction::History => self.card_history_button(id, cx),
+                                CardHeaderAction::Load => {
+                                    Some(self.session_loader_button(id, node, cx))
+                                }
+                                CardHeaderAction::ForkChild => {
+                                    self.render_fork_header(id, ForkPlacement::Child, cx)
+                                }
+                                CardHeaderAction::ForkSibling => {
+                                    self.render_fork_header(id, ForkPlacement::Sibling, cx)
+                                }
+                                CardHeaderAction::Remove => {
+                                    Some(self.remove_card_button(id, node, cx))
+                                }
+                            },
+                        ),
+                    );
+                }
+                card.child(
+                    Self::session_card_header_themed(
+                        ui_text(title.replace(['\r', '\n'], " ")),
+                        actions,
+                        &palette,
+                        loading_badge,
+                    )
+                    .id(SharedString::from(format!("session-header-{id}")))
+                    .children(workspace_wiring::wiring_probe_bounds(format!(
+                        "session-header-{id}"
+                    )))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener({
+                            let id = id.clone();
+                            move |this, event: &MouseDownEvent, window, cx| {
+                                this.open_wiring_card_menu(&id, event.position, window, cx);
+                                cx.stop_propagation();
+                            }
+                        }),
+                    ),
+                )
+                .when(!path_valid, |card| {
+                    card.child(
+                        div()
+                            .flex_none()
+                            .w_full()
+                            .px(px(10.))
+                            .py(px(7.))
+                            .bg(rgb(0x2a1e17))
+                            .text_color(rgb(0xe4aa78))
+                            .text_size(px(11.))
+                            .line_height(px(15.4))
+                            .child(self.workspace_path_unavailable()),
+                    )
+                })
+                .children(self.render_card_egress(id, cx))
+                .children(self.render_live_teammates(id))
+                .children(provider_banner.map(|banner| {
+                    self.render_provider_restore_banner(
+                        id,
+                        banner,
+                        palette.terminal,
+                        &action_bounds,
+                        cx,
+                    )
+                }))
+                .children(
+                    (self.read_only.is_none() && fork_failure.is_none() && fork_progress.is_none())
+                        .then(|| {
+                            node.and_then(|node| self.start_failure_card(id, node))
+                                .map(|card| {
+                                    self.render_start_failure_card(
+                                        id,
+                                        card,
+                                        width,
+                                        &action_bounds,
+                                        cx,
+                                    )
+                                })
+                        })
+                        .flatten(),
+                )
+                .child(if let Some(failure) = fork_failure {
+                    failure.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                } else {
+                    let environment_overlay = node
+                        .filter(|_| fork_progress.is_none())
+                        .and_then(|node| self.environment_card_overlay(id, node, window, cx));
+                    let body = div()
+                        .flex_1()
+                        .min_h_0()
+                        .relative()
+                        .children((!restore_hidden).then(|| terminal.clone()))
+                        .children(
+                            self.history_view
+                                .as_ref()
+                                .filter(|_| {
+                                    if self.read_only.is_some() {
+                                        self.focused.as_ref() == Some(id)
+                                    } else {
+                                        self.history_request
+                                            .as_ref()
+                                            .is_some_and(|request| request.session_id == *id)
+                                    }
+                                })
+                                .map(|view| div().absolute().inset_0().child(view.clone())),
+                        )
+                        .children(self.archive_summary(id))
+                        .children(
+                            fork_progress.map(|progress| fork_progress_body(progress, now, dark)),
+                        )
+                        .children(self.deferred_card(id).map(|card| {
+                            self.render_deferred_recovery_card(id, card, width, window, cx)
+                        }))
+                        .children(environment_overlay);
+                    #[cfg(target_os = "macos")]
+                    let body = body.when(water.is_some(), |body| body.opacity(0.));
+                    body
+                })
+                .child(Self::session_card_header_shadow(self.wiring_dark()))
+            };
+            #[cfg(target_os = "macos")]
+            let card = card.children(water);
+            #[cfg(debug_assertions)]
+            let card = if let Some(trace) = self
+                .motion_trace
+                .clone()
+                .filter(|_| self.motion_clock.elapsed() < Duration::from_secs(90))
+            {
+                let clock = self.motion_clock;
+                let session = id.clone();
+                card.child(canvas(|_,_,_|(), move |bounds,_,_,_| {
+                    record_motion(&trace,&serde_json::json!({"kind":"paint","renderAt":now,"paintAt":clock.elapsed().as_secs_f64()*1000.,
+                        "session":session,"focused":selected,"x":f32::from(bounds.origin.x),"y":f32::from(bounds.origin.y),
+                        "width":f32::from(bounds.size.width),"height":f32::from(bounds.size.height),"moving":moving}));
+                }).absolute().top_0().left_0().size_full())
+            } else {
+                card
+            };
+            let card = place_card(card);
+            if in_split {
+                split_cards.insert(id.clone(), card);
+            } else {
+                stacked_cards.push((elevation, card));
+            }
+        }
+        if !in_split && !self.wiring.board_open && !self.order.is_empty() {
+            stacked_cards.sort_by_key(|(elevation, _)| *elevation);
+            let stack = div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .w(px((total - 20.) as f32))
+                .h_full()
+                .children(stacked_cards.into_iter().map(|(_, card)| card));
+            // GPUI tracks the direct children as logical scroll items. The
+            // first slot hosts the painted stack without sizing or clipping it.
+            let mut stack = Some(stack);
+            carousel = carousel.children(self.order.iter().map(|id| {
+                div()
+                    .relative()
+                    .flex_none()
+                    .w(px(widths[id] as f32))
+                    .h_full()
+                    .children(stack.take())
+            }));
+        }
+        if self.order.is_empty() {
+            carousel = carousel.child(
+                div()
+                    .flex_1()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(12.))
+                    .text_color(if palette.terminal == Theme::LIGHT {
+                        rgb(0x8a919b)
+                    } else {
+                        rgba(palette.workspace.muted)
+                    })
+                    .child("当前画布没有活跃会话"),
+            );
+        }
+        #[cfg(target_os = "macos")]
+        {
+            self.retain_recovery_water(window, cx, |_, id| mounted_water.contains(id));
+            self.watch_recovery_water_visibility(window, cx);
+        }
+        let view = cx.entity().downgrade();
+        let direction = self.edge_direction;
+        let cruising = self.edge_cruising;
+        let elapsed = now - self.edge_phase_start;
+        let indicator = canvas(
+            |_, _, _| (),
+            move |bounds, _, window, _| {
+                let pointer_view = view.clone();
+                window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+                    if phase != DispatchPhase::Capture {
+                        return;
+                    }
+                    let _ = pointer_view.update(cx, |this, cx| {
+                        if event.pressed_button == Some(MouseButton::Left)
+                            && let Some((start, offset)) = this.carousel_drag
+                        {
+                            let dx = event.position.x - start.x;
+                            let dy = event.position.y - start.y;
+                            if dx.abs() >= px(3.) && dx.abs() > dy.abs() {
+                                this.move_carousel(offset + dx, event.position, window, cx);
+                                cx.stop_propagation();
+                            }
+                        } else if event.pressed_button.is_none() && bounds.contains(&event.position)
+                            && !this.carousel_has_overlay(window)
+                        {
+                            if this.carousel_viewport_width(window) >= 720. {
+                                this.edge_intent(event.position, window, cx);
+                            }
+                            this.hover_card(this.carousel_hit(event.position, true), cx);
+                        } else if !bounds.contains(&event.position) {
+                            this.leave_carousel(cx);
+                        }
+                    });
+                });
+                let exit_view = view.clone();
+                window.on_mouse_event(move |_: &MouseExitEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Capture {
+                        let _ = exit_view.update(cx, |this, cx| this.leave_carousel(cx));
+                    }
+                });
+                let drag_view = view.clone();
+                window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Capture && event.button == MouseButton::Left {
+                        let _ = drag_view.update(cx, |this, _| this.carousel_drag = None);
+                    }
+                });
+                let view = view.clone();
+                window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
+                    #[cfg(debug_assertions)]
+                    if phase == DispatchPhase::Capture {
+                        let _ = view.update(cx, |this, _| {
+                            if let Some(trace) = &this.motion_trace { record_motion(trace, &serde_json::json!({"kind":"wheel","position":format!("{:?}",event.position),"delta":format!("{:?}",event.delta),"bounds":format!("{:?}",bounds)})); }
+                        });
+                    }
+                    if phase != DispatchPhase::Capture
+                        || !bounds.contains(&event.position)
+                        || event.modifiers.control
+                        || event.modifiers.platform
+                    {
+                        return;
+                    }
+                    let _ = view.update(cx, |this, cx| {
+                        if !this.carousel_has_overlay(window) {
+                            this.scroll_carousel(event, window, cx);
+                        }
+                    });
+                });
+                if direction == 0 {
+                    return;
+                }
+                let x = if direction < 0 {
+                    bounds.left() + px(6.)
+                } else {
+                    bounds.right() - px(9.)
+                };
+                let track = Bounds::new(
+                    point(x, bounds.top() + px(18.)),
+                    size(px(3.), bounds.size.height - px(36.)),
+                );
+                window.paint_quad(fill(track, rgba(0x6faaf024)).corner_radii(px(2.)));
+                let (opacity, scale) = if cruising {
+                    let p = (elapsed % 900.) / 900.;
+                    (
+                        if p < 0.55 {
+                            0.22 + 0.63 * Curve::Edge.ease(p / 0.55)
+                        } else {
+                            0.85 - 0.53 * Curve::Edge.ease((p - 0.55) / 0.45)
+                        },
+                        1.,
+                    )
+                } else {
+                    let p = (elapsed / 180.).clamp(0., 1.);
+                    (0.2 + 0.62 * p, 0.08 + 0.92 * p)
+                };
+                let mut color: Hsla = rgb(0x6faaf0).into();
+                color.a = opacity as f32;
+                let height = track.size.height * scale as f32;
+                window.paint_quad(
+                    fill(
+                        Bounds::new(point(x, track.bottom() - height), size(px(3.), height)),
+                        color,
+                    )
+                    .corner_radii(px(2.)),
+                );
+            },
+        )
+        .absolute()
+        .size_full();
+        let canvas_dialog = matches!(self.dialog, Some(TabDialog::RemoveSession { .. }));
+        let overlay = self.tab_overlay(window, cx);
+        let (carousel_overlay, window_overlay) = if canvas_dialog {
+            (overlay, None)
+        } else {
+            (None, overlay)
+        };
+        let board = self.render_board(cx);
+        let carousel = div()
+            .flex_1()
+            .min_h_0()
+            .relative()
+            .flex()
+            .when(board.is_none(), |stage| {
+                if let Some(tree) = &split_tree {
+                    stage.child(self.render_split_canvas(tree, split_cards, cx))
+                } else {
+                    stage
+                        .overflow_hidden()
+                        .child(carousel)
+                        .children(
+                            (!self.order.is_empty())
+                                .then(|| carousel_shadow_fade(rgba(palette.cards.canvas))),
+                        )
+                        .child(indicator)
+                }
+            })
+            .children(board)
+            .children(carousel_overlay);
+        let toast = self.task_toast.as_ref().map(|text| {
+            let (border, background, color) = if self.task_toast_error {
+                (0xf8514959, 0x2b1718, 0xffa198)
+            } else {
+                (0x67c23a59, 0x1c2518, 0xb3e19d)
+            };
+            div()
+                .absolute()
+                .top(px(20.))
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .px(px(15.))
+                        .py(px(9.))
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(rgba(border))
+                        .bg(rgb(background))
+                        .text_color(rgb(color))
+                        .text_size(px(13.))
+                        .child(text.clone()),
+                )
+        });
+        // `.terminal-toast.is-error`: independent 3s permission failure feedback.
+        let permission_toast = self.permission_toast.as_ref().map(|text| {
+            div()
+                .absolute()
+                .top(px(20.))
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .id("permission-error-toast")
+                        .px(px(15.))
+                        .py(px(9.))
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(rgba(0xf8514959))
+                        .bg(rgb(0x2b1718))
+                        .text_color(rgb(0xffa198))
+                        .text_size(px(13.))
+                        .shadow(vec![shadow(0x000000, 0.3, 6., 18.)])
+                        .child(text.clone()),
+                )
+        });
+        let geometry_view = cx.entity().downgrade();
+        let stage_background = rgba(palette.workspace.canvas);
+        #[cfg(debug_assertions)]
+        crate::settings_shell::probe_workspace_canvas(stage_background);
+        let root = div()
+            .id("workspace-root")
+            .relative()
+            .on_modifiers_changed(
+                cx.listener(|this, event: &ModifiersChangedEvent, window, cx| {
+                    this.standalone_alt(event.modifiers, window, cx);
+                }),
+            )
+            .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                #[cfg(target_os = "windows")]
+                if this.quit_confirmation.focus().is_some() {
+                    return;
+                }
+                this.cancel_hover_restore();
+                if event.button == MouseButton::Left {
+                    this.workspace_drag_gesture = false;
+                    this.carousel_drag = None;
+                }
+                if this.keyboard_focus {
+                    this.keyboard_focus = false;
+                    cx.notify();
+                }
+            }))
+            .capture_key_down(cx.listener(|this, _: &KeyDownEvent, _, _| {
+                this.cancel_hover_restore();
+            }))
+            .size_full()
+            .flex()
+            .font_family(".AppleSystemUIFont")
+            .text_color(rgba(palette.workspace.text))
+            .child(self.sidebar(window, cx))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .bg(stage_background)
+                    .child({
+                        let stage = div().size_full().flex().flex_col().when(
+                            self.settings.is_some(),
+                            |mut stage| {
+                                // Keep the terminal laid out while excluding it from focus and paint.
+                                stage.style().visibility = Some(Visibility::Hidden);
+                                stage
+                            },
+                        );
+                        let dag_error_banner = self.dag_open_error_banner(cx);
+                        // Windows keeps the fused 48px topbar flush with the
+                        // window edge; the DAG failure banner sits below it.
+                        // Other platforms keep the frozen banner-first order.
+                        #[cfg(target_os = "windows")]
+                        let stage = stage
+                            .child(self.topbar(window, cx))
+                            .children(dag_error_banner);
+                        #[cfg(not(target_os = "windows"))]
+                        let stage = stage
+                            .children(dag_error_banner)
+                            .child(self.topbar(window, cx));
+                        stage
+                            .children(self.read_only_banner(cx))
+                            .child(carousel)
+                            .children(self.search_bar(cx))
+                            .child(self.footer(window, cx))
+                    })
+                    .children(self.settings.as_ref().map(|(settings, _)| {
+                        div().absolute().inset_0().occlude().child(settings.clone())
+                    })),
+            )
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |_, _, window, cx| {
+                        #[cfg(all(target_os = "macos", debug_assertions))]
+                        crate::macos::window_diag::workspace_painted(window, cx);
+                        let _ = geometry_view.update(cx, |this, cx| {
+                            let overflow = this.tab_scroll.max_offset().width > px(4.);
+                            if overflow != this.tab_overflow {
+                                this.tab_overflow = overflow;
+                                if !overflow {
+                                    this.hidden_tabs = None;
+                                }
+                                cx.notify();
+                            }
+                            let sidebar_overflow =
+                                this.sidebar_scroll.max_offset().height > px(0.5);
+                            if sidebar_overflow != this.sidebar_overflow {
+                                this.sidebar_overflow = sidebar_overflow;
+                                if !sidebar_overflow {
+                                    this.sidebar_scrollbar.reset();
+                                }
+                                cx.notify();
+                            }
+                            if split_tree.is_none()
+                                && !this.wiring.board_open
+                                && (this.carousel_viewport_width(window) - viewport_width).abs()
+                                    > 0.5
+                            {
+                                cx.notify();
+                            }
+                        });
+                    },
+                )
+                .absolute()
+                .size(px(0.)),
+            )
+            .children(self.notification_panel(window, cx))
+            .children(badge_tooltip.filter(|_| !canvas_dialog))
+            .children(toast)
+            .children(
+                self.fork_readiness
+                    .as_deref()
+                    .filter(|_| self.dialog.is_none())
+                    .map(fork_readiness_toast),
+            )
+            .children(window_overlay)
+            .children(self.project_instructions_overlay(window, cx))
+            .children(self.render_wiring_overlay(window, cx))
+            .children(permission_toast);
+        self.workspace_frame(root, false, window, cx)
+    }
+}
+
+fn fork_submission_key() -> String {
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!("desktop-fork-{}-{time}-{sequence}", std::process::id())
+}
+
+// NotificationCenter.tsx, hierarchy.css:449–500 / 870–875, and i18n/messages/notifications.ts.
+// Panel geometry from `.notification-center`:
+// position fixed; top 49; bottom 5; left 0; width 382; radius 12.
+const NOTIFICATION_UI_PANEL_WIDTH: f32 = 382.;
+const NOTIFICATION_UI_PANEL_TOP: f32 = 49.;
+const NOTIFICATION_UI_PANEL_BOTTOM_GAP: f32 = 5.;
+const NOTIFICATION_UI_PANEL_RADIUS: f32 = 12.;
+const NOTIFICATION_UI_HEADER_HEIGHT: f32 = 44.;
+
+// `.flat-sidebar__notify` is 30x30. The real rect at the fixed sidebar
+// header is x=218..248, y=9..39 (260px sidebar, 48px header); the parent's
+// window-level outside-click capture should use that rect to keep the bell's
+// second click working.
+const NOTIFICATION_UI_BELL_SIZE: f32 = 30.;
+const NOTIFICATION_UI_SIDEBAR_WIDTH: f32 = 260.;
+const NOTIFICATION_UI_SIDEBAR_HEADER_HEIGHT: f32 = 48.;
+const NOTIFICATION_UI_SIDEBAR_RIGHT_PADDING: f32 = 12.;
+const NOTIFICATION_UI_BELL_LEFT: f32 = NOTIFICATION_UI_SIDEBAR_WIDTH
+    - 1.
+    - NOTIFICATION_UI_SIDEBAR_RIGHT_PADDING
+    - NOTIFICATION_UI_BELL_SIZE;
+const NOTIFICATION_UI_BELL_TOP: f32 =
+    (NOTIFICATION_UI_SIDEBAR_HEADER_HEIGHT - NOTIFICATION_UI_BELL_SIZE) / 2.;
+
+// `.notification-item__dismiss`.
+const NOTIFICATION_UI_DISMISS_TOP: f32 = 10.;
+const NOTIFICATION_UI_DISMISS_RIGHT: f32 = 10.;
+const NOTIFICATION_UI_DISMISS_SIZE: f32 = 20.;
+
+// `.notification-center` animation: notification-panel-drop-in .22s
+// cubic-bezier(.16,1,.3,1), from translateY(-8px) + opacity 0.
+const NOTIFICATION_UI_ANIMATION_MS: u64 = 220;
+const NOTIFICATION_UI_ANIMATION_OFFSET: f32 = 8.;
+
+#[derive(Clone, Copy)]
+struct NotificationUiPalette {
+    panel_bg: u32,
+    text: u32,
+    muted: u32,
+    count: u32,
+    item_bg: Rgba,
+    item_hover_bg: Rgba,
+    action: u32,
+    action_hover: u32,
+    action_hover_bg: Rgba,
+    close: u32,
+    close_hover: u32,
+    dismiss: u32,
+    dismiss_hover_bg: Rgba,
+    empty: u32,
+    shadow_alpha: f32,
+    shadow_y: f32,
+    shadow_blur: f32,
+}
+
+impl NotificationUiPalette {
+    /// The panel is the only themed surface in this file. The workspace
+    /// around it keeps its existing light treatment.
+    fn for_appearance(appearance: WindowAppearance) -> Self {
+        let light = matches!(
+            appearance,
+            WindowAppearance::Light | WindowAppearance::VibrantLight
+        );
+        let dark = Self {
+            panel_bg: 0x212121,
+            text: 0xdfdfdf,
+            muted: 0x7b7b7b,
+            count: 0x898989,
+            item_bg: rgba(0xffffff0a),
+            item_hover_bg: rgba(0xffffff0f),
+            action: 0x797979,
+            action_hover: 0xffffff,
+            action_hover_bg: rgba(0xffffff0f),
+            close: 0xdfdfdf,
+            close_hover: 0xffffff,
+            dismiss: 0xffffff,
+            dismiss_hover_bg: rgba(0xffffff1a),
+            empty: 0x8b949e,
+            shadow_alpha: 0.38,
+            shadow_y: 8.,
+            shadow_blur: 24.,
+        };
+        if light {
+            Self {
+                panel_bg: 0xffffff,
+                text: 0x2f3547,
+                item_bg: rgba(0xf7f8faff),
+                item_hover_bg: rgba(0xeceef3ff),
+                shadow_alpha: 0.1,
+                shadow_y: 4.,
+                shadow_blur: 20.,
+                ..dark
+            }
+        } else {
+            dark
+        }
+    }
+}
+
+/// Svg paints from its own computed `text.color`, so a hover colour on the
+/// parent button would not reach it. Bind the icon to the button's group
+/// instead. Used by the two header actions whose frozen hover turns #fff.
+fn notification_ui_icon_with_hover(
+    name: &str,
+    size: f32,
+    color: u32,
+    group: SharedString,
+    hover: u32,
+) -> Svg {
+    icon(name, size, rgb(color)).group_hover(group, move |style| style.text_color(rgb(hover)))
+}
+
+/// One axis of a cubic Bézier with endpoints 0/1.
+fn notification_ui_bezier_axis(t: f32, control_1: f32, control_2: f32) -> f32 {
+    let inverse = 1. - t;
+    3. * inverse * inverse * t * control_1 + 3. * inverse * t * t * control_2 + t * t * t
+}
+
+/// `cubic-bezier(.16, 1, .3, 1)` from the frozen drop-in animation.
+/// GPUI 0.2 ships named easings only, so solve x -> u with a small bisection
+/// and evaluate y(u).
+fn notification_ui_easing(progress: f32) -> f32 {
+    let target = progress.clamp(0., 1.);
+    let mut low = 0.;
+    let mut high = 1.;
+    let mut u = target;
+    for _ in 0..12 {
+        let x = notification_ui_bezier_axis(u, 0.16, 0.3);
+        if x < target {
+            low = u;
+        } else {
+            high = u;
+        }
+        u = (low + high) * 0.5;
+    }
+    notification_ui_bezier_axis(u, 1., 1.).clamp(0., 1.)
+}
+
+/// `.notification-item__dismiss` is `occlude`d so the body underneath does not
+/// also receive the click. Its own `hover` keeps it visible while the pointer
+/// is on it (the parent item's group hover no longer contributes there).
+fn notification_ui_item_dismiss(
+    id: u64,
+    group: SharedString,
+    palette: NotificationUiPalette,
+    cx: &mut Context<Workspace>,
+) -> Stateful<Div> {
+    div()
+        .id(SharedString::from(format!("notification-dismiss-{id}")))
+        .absolute()
+        .top(px(NOTIFICATION_UI_DISMISS_TOP))
+        .right(px(NOTIFICATION_UI_DISMISS_RIGHT))
+        .size(px(NOTIFICATION_UI_DISMISS_SIZE))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.))
+        .text_color(rgb(palette.dismiss))
+        .opacity(0.)
+        .occlude()
+        .cursor_pointer()
+        .focusable()
+        .tab_stop(true)
+        .group_hover(group, |style| style.opacity(1.))
+        .hover(|style| style.opacity(1.).bg(palette.dismiss_hover_bg))
+        .focus(|style| style.opacity(1.))
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(cx.listener(move |this, _, _, cx| {
+            cx.stop_propagation();
+            this.dismiss_notification(id, cx);
+        }))
+        .child(icon("x", 16., rgb(palette.dismiss)))
+}
+
+fn notification_clear_icon() -> impl IntoElement {
+    // Frozen 24×24 ClearIcon, at the header's 14 px icon size.
+    canvas(
+        |_, _, _| (),
+        |bounds, (), window, _| {
+            let at = |x: f32, y: f32| bounds.origin + point(px(x * 14. / 24.), px(y * 14. / 24.));
+            let mut path = PathBuilder::stroke(px(2. * 14. / 24.));
+            path.move_to(at(3., 6.));
+            path.line_to(at(21., 6.));
+            path.move_to(at(8., 6.));
+            path.line_to(at(8., 4.));
+            path.line_to(at(16., 4.));
+            path.line_to(at(16., 6.));
+            path.move_to(at(19., 6.));
+            path.line_to(at(18., 20.));
+            path.line_to(at(6., 20.));
+            path.line_to(at(5., 6.));
+            if let Ok(path) = path.build() {
+                window.paint_path(path, window.text_style().color);
+            }
+        },
+    )
+    .size(px(14.))
+    .flex_none()
+}
+
+fn notification_item_title(
+    entry: &NotificationEntry,
+    palette: NotificationUiPalette,
+) -> Stateful<Div> {
+    div()
+        .id(SharedString::from(format!(
+            "notification-item-title-{}",
+            entry.id
+        )))
+        .text_color(rgb(palette.text))
+        .text_size(px(14.))
+        .line_height(relative(1.4))
+        .font_weight(if entry.read {
+            FontWeight::MEDIUM
+        } else {
+            FontWeight::BOLD
+        })
+        .child(entry.title.clone())
+}
+
+impl Workspace {
+    /// `.flat-sidebar__notify` + the frozen red unread indicator, upgraded from
+    /// the frozen 6px dot to the numeric badge required by this round.
+    fn notification_bell(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let palette = self.theme_palette().sidebar;
+        let unread = self
+            .notifications
+            .entries
+            .iter()
+            .filter(|entry| !entry.read)
+            .count();
+        let badge = (unread > 0).then(|| {
+            div()
+                .id("notification-bell-badge")
+                .absolute()
+                .top(px(1.))
+                .right(px(1.))
+                .h(px(16.))
+                .min_w(px(16.))
+                .px(px(4.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(8.))
+                .border(px(1.5))
+                .border_color(rgba(palette.bell_badge_border))
+                .bg(rgb(0xf24d49))
+                .text_size(px(10.))
+                .line_height(px(12.))
+                .font_weight(FontWeight::BOLD)
+                .text_color(rgb(0xffffff))
+                .child(unread.to_string())
+        });
+        let bell = div()
+            .id("notification-bell")
+            .relative()
+            .size(px(NOTIFICATION_UI_BELL_SIZE))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(7.))
+            .text_color(rgba(palette.bell))
+            .cursor_pointer()
+            .hover(|style| style.bg(rgba(palette.action_hover)))
+            .child(icon("bell", 16., rgba(palette.bell)).opacity(0.9))
+            .children(badge);
+        self.button(
+            bell,
+            &self.control_focus["notifications"],
+            |this, _, cx| this.toggle_notifications(cx),
+            cx,
+        )
+        .tooltip(|_, cx| cx.new(|_| CardTooltip("通知中心".into())).into())
+    }
+
+    /// The panel is mounted by `Render for Workspace` as an absolute root
+    /// child after the main sidebar/content children.
+    fn notification_panel(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
+        if !self.notification_open {
+            return None;
+        }
+
+        let palette = NotificationUiPalette::for_appearance(window.appearance());
+        let viewport = window.viewport_size();
+        let viewport_height = f32::from(viewport.height);
+        let panel_height =
+            (viewport_height - NOTIFICATION_UI_PANEL_TOP - NOTIFICATION_UI_PANEL_BOTTOM_GAP)
+                .max(0.);
+
+        let entries = &self.notifications.entries;
+
+        let close_focus = window
+            .use_keyed_state("notification-close-focus", cx, |_, cx| {
+                cx.focus_handle().tab_stop(true)
+            })
+            .read(cx)
+            .clone();
+        let sound_focus = window
+            .use_keyed_state("notification-sound-focus", cx, |_, cx| {
+                cx.focus_handle().tab_stop(true)
+            })
+            .read(cx)
+            .clone();
+        let clear_focus = (!entries.is_empty()).then(|| {
+            window
+                .use_keyed_state("notification-clear-focus", cx, |_, cx| {
+                    cx.focus_handle().tab_stop(true)
+                })
+                .read(cx)
+                .clone()
+        });
+
+        // `.notification-center__title` + `__title-count`.
+        let title = div()
+            .id("notification-panel-title")
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .text_size(px(13.))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(rgb(palette.text))
+            .child("通知")
+            .child(
+                div()
+                    .id("notification-panel-count")
+                    .text_color(rgb(palette.count))
+                    .child(format!("({})", entries.len())),
+            );
+
+        let mut header_actions = div().flex().items_center().gap(px(8.));
+        if let Some(clear_focus) = clear_focus {
+            let clear = div()
+                .id("notification-clear")
+                .flex()
+                .items_center()
+                .justify_center()
+                .p(px(5.))
+                .rounded(px(6.))
+                .text_color(rgb(palette.action))
+                .cursor_pointer()
+                .hover(|style| {
+                    style
+                        .bg(palette.action_hover_bg)
+                        .text_color(rgb(palette.action_hover))
+                })
+                .child(notification_clear_icon());
+            header_actions = header_actions.child(
+                self.button(
+                    clear,
+                    &clear_focus,
+                    |this, _, cx| this.clear_notifications(cx),
+                    cx,
+                )
+                .tooltip(|_, cx| cx.new(|_| CardTooltip("清空通知".into())).into()),
+            );
+        }
+        // `.notification-center__close-btn`.
+        let close_group = SharedString::from("notification-close-group");
+        let close = div()
+            .id("notification-close")
+            .group(close_group.clone())
+            .flex()
+            .items_center()
+            .justify_center()
+            .p(px(4.))
+            .rounded(px(6.))
+            .text_color(rgb(palette.close))
+            .cursor_pointer()
+            .hover(|style| {
+                style
+                    .bg(palette.action_hover_bg)
+                    .text_color(rgb(palette.close_hover))
+            })
+            .child(notification_ui_icon_with_hover(
+                "x",
+                16.,
+                palette.close,
+                close_group,
+                palette.close_hover,
+            ));
+        header_actions = header_actions.child(
+            self.button(
+                close,
+                &close_focus,
+                |this, _, cx| this.close_notifications(cx),
+                cx,
+            )
+            .tooltip(|_, cx| cx.new(|_| CardTooltip("关闭通知中心".into())).into()),
+        );
+
+        let header = div()
+            .id("notification-panel-header")
+            .flex_none()
+            .h(px(NOTIFICATION_UI_HEADER_HEIGHT))
+            .flex()
+            .items_center()
+            .justify_between()
+            .px(px(12.))
+            .child(title)
+            .child(header_actions);
+
+        let empty = entries.is_empty();
+        let list_content = if empty {
+            // `.notification-center__empty` / `__empty-text`.
+            div()
+                .id("notification-empty")
+                .h_full()
+                .min_h_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .id("notification-empty-text")
+                        .text_size(px(13.))
+                        .text_color(rgb(palette.empty))
+                        .child("暂无通知"),
+                )
+                .into_any_element()
+        } else {
+            let items = entries
+                .iter()
+                .map(|entry| self.notification_item(entry, palette, cx))
+                .collect::<Vec<_>>();
+            // `.notification-center__group { padding: 8px 16px 16px }` and
+            // `.notification-center__items { gap: 8px }`.
+            div()
+                .id("notification-group")
+                .px(px(16.))
+                .pt(px(8.))
+                .pb(px(16.))
+                .child(
+                    div()
+                        .id("notification-items")
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.))
+                        .children(items),
+                )
+                .into_any_element()
+        };
+
+        // `.notification-center__list` is the only scroll container; the panel
+        // is absolute and the list is `min-height: 0` so it cannot push the
+        // workspace (or the footer) around.
+        let scroll = window
+            .use_keyed_state("notification-scroll", cx, |_, _| ScrollHandle::new())
+            .read(cx)
+            .clone();
+        let list = div()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .child(
+                div()
+                    .id("notification-list")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&scroll)
+                    .scrollbar_width(px(4.))
+                    .child(list_content),
+            )
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |bounds, (), window, _| {
+                        let overflow = scroll.max_offset().height;
+                        if overflow <= px(0.) {
+                            return;
+                        }
+                        let height = bounds.size.height;
+                        let thumb = (height * (height / (height + overflow)))
+                            .max(px(10.))
+                            .min(height);
+                        let offset =
+                            (height - thumb) * (-scroll.offset().y / overflow).clamp(0., 1.);
+                        window.paint_quad(
+                            fill(
+                                Bounds::new(
+                                    bounds.origin + point(px(0.), offset),
+                                    size(px(4.), thumb),
+                                ),
+                                rgb(0x30363d),
+                            )
+                            .corner_radii(px(10.)),
+                        );
+                    },
+                )
+                .absolute()
+                .right_0()
+                .top_0()
+                .h_full()
+                .w(px(4.)),
+            );
+
+        // `.notification-center__footer` / `__sound-toggle` / `__switch`.
+        let sound_enabled = self.notifications.sound_enabled;
+        let sound_track = div()
+            .id("notification-sound-track")
+            .relative()
+            .w(px(32.))
+            .h(px(16.))
+            .rounded(px(8.))
+            .bg(if sound_enabled {
+                rgb(0xff684e)
+            } else {
+                rgb(0x30363d)
+            })
+            .child(
+                div()
+                    .id("notification-sound-thumb")
+                    .absolute()
+                    .top(px(2.))
+                    .left(px(if sound_enabled { 18. } else { 2. }))
+                    .size(px(12.))
+                    .rounded_full()
+                    .bg(rgb(0xffffff)),
+            );
+        let sound_toggle = div()
+            .id("notification-sound-toggle")
+            .w_full()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .cursor_pointer()
+            .child(sound_track)
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(rgb(palette.muted))
+                    .child("通知声音"),
+            );
+        let footer = div()
+            .id("notification-footer")
+            .flex_none()
+            .px(px(14.))
+            .py(px(12.))
+            .child(self.mutation_button(
+                sound_toggle,
+                &sound_focus,
+                |this, _, cx| this.toggle_notification_sound(cx),
+                cx,
+            ));
+
+        let panel = div()
+            .id("notification-panel")
+            .absolute()
+            .left(px(0.))
+            .top(px(NOTIFICATION_UI_PANEL_TOP))
+            .w(px(NOTIFICATION_UI_PANEL_WIDTH))
+            .h(px(panel_height))
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .rounded(px(NOTIFICATION_UI_PANEL_RADIUS))
+            .bg(rgb(palette.panel_bg))
+            .text_color(rgb(palette.text))
+            .shadow(vec![shadow(
+                0x000000,
+                palette.shadow_alpha,
+                palette.shadow_y,
+                palette.shadow_blur,
+            )])
+            .occlude()
+            .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                let bell = Bounds::new(
+                    point(px(NOTIFICATION_UI_BELL_LEFT), px(NOTIFICATION_UI_BELL_TOP)),
+                    size(px(NOTIFICATION_UI_BELL_SIZE), px(NOTIFICATION_UI_BELL_SIZE)),
+                );
+                if !bell.contains(&event.position) {
+                    this.close_notifications(cx);
+                }
+            }))
+            .child(header)
+            .child(list)
+            .child(footer);
+
+        let panel: AnyElement = if reduced_motion() {
+            panel.into_any_element()
+        } else {
+            panel
+                .with_animation(
+                    "notification-panel-drop-in",
+                    Animation::new(Duration::from_millis(NOTIFICATION_UI_ANIMATION_MS))
+                        .with_easing(notification_ui_easing),
+                    |panel, delta| {
+                        panel.opacity(delta).top(px(NOTIFICATION_UI_PANEL_TOP
+                            - NOTIFICATION_UI_ANIMATION_OFFSET * (1. - delta)))
+                    },
+                )
+                .into_any_element()
+        };
+
+        Some(panel)
+    }
+
+    /// `.notification-item` + `.notification-item__body`.
+    fn notification_item(
+        &self,
+        entry: &NotificationEntry,
+        palette: NotificationUiPalette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let id = entry.id;
+        let group = SharedString::from(format!("notification-item-group-{id}"));
+
+        let workspace_name = entry
+            .workspace_id
+            .as_deref()
+            .and_then(|id| {
+                self.workspaces
+                    .iter()
+                    .find(|workspace| workspace.id.as_str() == id)
+            })
+            .map_or_else(
+                || "未知工作区".to_string(),
+                |workspace| workspace.name.clone(),
+            );
+        let task_name = entry
+            .task_id
+            .as_deref()
+            .and_then(|id| self.tasks.iter().find(|task| task.id.as_str() == id))
+            .map_or_else(|| "未知工作台".to_string(), |task| task.title.clone());
+
+        let breadcrumb_part = |text: String| {
+            div()
+                .min_w_0()
+                .flex_shrink()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(text)
+        };
+        let breadcrumb = div()
+            .id(SharedString::from(format!(
+                "notification-item-breadcrumb-{id}"
+            )))
+            .w_full()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .text_size(px(12.))
+            .text_color(rgb(palette.muted))
+            .child(breadcrumb_part(workspace_name))
+            .child(div().flex_none().opacity(0.5).child("/"))
+            .child(breadcrumb_part(task_name));
+
+        let title_row = div()
+            .flex()
+            .items_center()
+            .my(px(4.))
+            .child(notification_item_title(entry, palette));
+
+        let body = div()
+            .id(SharedString::from(format!("notification-item-body-{id}")))
+            .w_full()
+            .flex()
+            .flex_col()
+            .focusable()
+            .tab_stop(true)
+            .on_click(cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                this.open_notification(id, window, cx);
+            }))
+            .child(breadcrumb)
+            .child(title_row)
+            .when(!entry.subtitle.is_empty(), |body| {
+                // `.notification-item__subtitle`.
+                body.child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "notification-item-subtitle-{id}"
+                        )))
+                        .mb(px(6.))
+                        .text_color(rgb(palette.muted))
+                        .text_size(px(12.))
+                        .line_height(relative(1.4))
+                        .child(entry.subtitle.clone()),
+                )
+            })
+            .when(!entry.body.is_empty(), |body| {
+                // `.notification-item__content`: pre-wrap + four-line clamp.
+                body.child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "notification-item-content-{id}"
+                        )))
+                        .mb(px(4.))
+                        .text_color(rgb(palette.text))
+                        .text_size(px(12.))
+                        .line_height(relative(1.6))
+                        .line_clamp(4)
+                        .child(entry.body.clone()),
+                )
+            })
+            .child(
+                // `.notification-item__time`; the string is formatted by the
+                // parent's `notification_time`.
+                div()
+                    .id(SharedString::from(format!("notification-item-time-{id}")))
+                    .mt(px(8.))
+                    .text_color(rgb(palette.muted))
+                    .text_size(px(12.))
+                    .child(notification_time(entry.occurred_at)),
+            );
+
+        let dismiss = notification_ui_item_dismiss(id, group.clone(), palette, cx);
+        div()
+            .id(SharedString::from(format!("notification-item-{id}")))
+            .group(group)
+            .relative()
+            .px(px(12.))
+            .py(px(8.))
+            .rounded(px(10.))
+            .bg(palette.item_bg)
+            .hover(|style| style.bg(palette.item_hover_bg))
+            .cursor_pointer()
+            .child(body)
+            .child(dismiss)
+            .into_any_element()
+    }
+}
+
+fn notification_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis() as u64)
+}
+
+fn notification_time(timestamp: u64) -> String {
+    local_date_time(timestamp).1
+}
+
+fn local_date_time(timestamp: u64) -> (String, String) {
+    let (_, date, time) = local_date_time_with_year(timestamp);
+    (date, time)
+}
+
+fn local_date_time_with_year(timestamp: u64) -> (Option<i32>, String, String) {
+    // Use the system's local zone, including its offset at the event time.
+    #[repr(C)]
+    #[derive(Default)]
+    struct LocalTime {
+        second: i32,
+        minute: i32,
+        hour: i32,
+        day: i32,
+        month: i32,
+        year: i32,
+        weekday: i32,
+        year_day: i32,
+        is_dst: i32,
+        #[cfg(target_os = "macos")]
+        utc_offset: std::ffi::c_long,
+        #[cfg(target_os = "macos")]
+        timezone: *const std::ffi::c_char,
+    }
+    #[cfg(target_os = "macos")]
+    unsafe extern "C" {
+        fn localtime_r(seconds: *const i64, output: *mut LocalTime) -> *mut LocalTime;
+    }
+    #[cfg(target_os = "windows")]
+    unsafe extern "C" {
+        fn _localtime64_s(output: *mut LocalTime, seconds: *const i64) -> i32;
+    }
+    let seconds = (timestamp / 1_000) as i64;
+    let mut local = LocalTime::default();
+    // Each function fills the caller-owned C tm for this platform.
+    #[cfg(target_os = "macos")]
+    let valid = unsafe { !localtime_r(&seconds, &mut local).is_null() };
+    #[cfg(target_os = "windows")]
+    let valid = unsafe { _localtime64_s(&mut local, &seconds) == 0 };
+    if valid {
+        (
+            Some(local.year + 1900),
+            format!("{:02}/{:02}", local.month + 1, local.day),
+            format!("{:02}:{:02}", local.hour, local.minute),
+        )
+    } else {
+        (
+            None,
+            "—".into(),
+            format!("{:02}:{:02}", seconds / 3_600 % 24, seconds / 60 % 60),
+        )
+    }
+}
+
+fn play_notification_sound() {
+    #[cfg(target_os = "macos")]
+    {
+        #[link(name = "AppKit", kind = "framework")]
+        unsafe extern "C" {
+            fn NSBeep();
+        }
+        // Workspace handles graph events on the GPUI main thread.
+        unsafe { NSBeep() };
+    }
+    #[cfg(target_os = "windows")]
+    {
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn MessageBeep(kind: u32) -> i32;
+        }
+        // Zero selects the standard system notification sound.
+        unsafe { MessageBeep(0) };
+    }
+}
+
+fn trimmed_graph_text(value: &Value) -> Option<&str> {
+    value
+        .as_str()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+}
+
+fn generic_agent_title(title: &str, short: &str) -> bool {
+    let title = title.trim().to_lowercase();
+    title == short.to_lowercase()
+        || matches!(
+            title.as_str(),
+            "" | "claude"
+                | "claude code"
+                | "antigravity"
+                | "codex"
+                | "shell"
+                | "未命名会话"
+                | "未命名 claude 会话"
+        )
+}
+
+fn loader_catalog_revision(graph: &Value) -> Vec<(String, String, String, String, u64, bool)> {
+    session_levels::nodes(graph)
+        .iter()
+        .filter_map(|node| {
+            (node["currentMode"] == "codex").then(|| {
+                (
+                    node["sessionId"].as_str().unwrap_or_default().to_owned(),
+                    node["title"].as_str().unwrap_or_default().to_owned(),
+                    trimmed_graph_text(&node["providerTitle"])
+                        .unwrap_or_default()
+                        .to_owned(),
+                    node["providerRestoreState"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned(),
+                    node["providerSpawnRevision"].as_u64().unwrap_or_default(),
+                    node["workStatus"] == "exited" || !node["archivedAt"].is_null(),
+                )
+            })
+        })
+        .collect()
+}
+
+fn loader_relative_time(updated_at: i64, locale: InterfaceLocale) -> String {
+    if updated_at == 0 {
+        return locale.text("时间未知", "Time unknown").to_owned();
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis() as i64);
+    let hours = (now - updated_at).max(0) / 3_600_000;
+    if hours < 24 {
+        if hours <= 0 {
+            locale.text("刚刚", "Just now").to_owned()
+        } else {
+            match locale {
+                InterfaceLocale::Chinese => format!("{hours} 小时前"),
+                InterfaceLocale::English if hours == 1 => "1 hour ago".to_owned(),
+                InterfaceLocale::English => format!("{hours} hours ago"),
+            }
+        }
+    } else {
+        let days = hours / 24;
+        match locale {
+            InterfaceLocale::Chinese => format!("{days} 天前"),
+            InterfaceLocale::English if days == 1 => "1 day ago".to_owned(),
+            InterfaceLocale::English => format!("{days} days ago"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Permission chip / menu visuals.
+//
+// Render-only. Frozen sources:
+// - apps/desktop/src/renderer/src/hud/TerminalHud.tsx:137-145,205-260;
+// - apps/desktop/src/renderer/src/i18n/messages/hud.ts:7-18,44-66;
+// - apps/desktop/src/renderer/src/hierarchy/hierarchy.css:317-323,347-362;
+// - apps/desktop/src/renderer/src/hierarchy/hierarchy.css:446-447
+//   (`.terminal-toast.is-error`).
+//
+// State and commands stay with the Workspace wiring; these helpers only
+// encode the frozen geometry, colors and copy so probes can assert them.
+// ---------------------------------------------------------------------------
+
+const TERMINAL_FONT_SIZE_FILE: &str = "terminal-font-size.json";
+
+fn read_terminal_font_size(root: &std::path::Path) -> u8 {
+    use terminal_surface::{
+        DEFAULT_TERMINAL_FONT_SIZE, MAX_TERMINAL_FONT_SIZE, MIN_TERMINAL_FONT_SIZE,
+    };
+    std::fs::read(root.join(TERMINAL_FONT_SIZE_FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<u64>(&bytes).ok())
+        .map(|size| {
+            size.clamp(
+                u64::from(MIN_TERMINAL_FONT_SIZE),
+                u64::from(MAX_TERMINAL_FONT_SIZE),
+            ) as u8
+        })
+        .unwrap_or(DEFAULT_TERMINAL_FONT_SIZE)
+}
+
+fn write_terminal_font_size(root: &std::path::Path, size: u8) -> std::io::Result<()> {
+    use std::io::Write as _;
+    std::fs::create_dir_all(root)?;
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let staged = root.join(format!(
+        ".terminal-font-size-{}-{now}-{sequence}.tmp",
+        std::process::id()
+    ));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staged)?;
+    let result = writeln!(file, "{size}").and_then(|()| file.sync_all());
+    drop(file);
+    let result = result.and_then(|()| std::fs::rename(&staged, root.join(TERMINAL_FONT_SIZE_FILE)));
+    if result.is_err() {
+        let _ = std::fs::remove_file(staged);
+    }
+    result
+}
+
+const PERMISSION_FOOTER_HEIGHT: f32 = 38.;
+const PERMISSION_FOOTER_PADDING_X: f32 = 20.;
+const FOOTER_GAP: f32 = 8.;
+const FOOTER_STATUS_PADDING_LEFT: f32 = 12.;
+const FOOTER_COMPACT_STATUS_WIDTH: f32 = 310.;
+const FOOTER_CWD_MAX_WIDTH: f32 = 130.;
+const FOOTER_GIT_MAX_WIDTH: f32 = 150.;
+const FOOTER_NAME_MAX_WIDTH: f32 = 180.;
+const FOOTER_ENVIRONMENT_MAX_WIDTH: f32 = 150.;
+/// `.status-info` hides the cwd once its layout content box is this narrow.
+/// The comparison uses the measured status width, not the whole window.
+const FOOTER_CWD_HIDE_BELOW: f32 = 440.;
+/// A cwd narrower than this cannot show a recognizable `~/name` prefix even
+/// after tail ellipsis, so the whole field is hidden instead of left-clipped.
+const FOOTER_CWD_MIN_WIDTH: f32 = 64.;
+const FOOTER_SIDEBAR_WIDTH: f32 = 260.;
+const FOOTER_ACCOUNT_LABEL: &str = "Claude 账户";
+
+/// Measured cwd/model/context visibility for the current window width and
+/// breadcrumb. `status_content_width` is the `.status-info` outer box minus its
+/// 12pt left padding and 1pt divider, matching the frozen container queries.
+/// `optional_width` is the real cwd/Git slot after the model has taken its
+/// intrinsic width, so the cwd can be hidden before it loses its path prefix.
+struct FooterStatusMeasure {
+    key: (Pixels, SharedString, SharedString),
+    show_cwd: bool,
+    status_content_width: f32,
+    /// Real width of the cwd/Git overflow slot. The cwd field only renders when
+    /// this slot can still show its own tail-ellipsized path prefix.
+    optional_width: f32,
+}
+
+// Hidden probes install this sink before drawing a frame.
+#[derive(Default)]
+struct FooterReadings {
+    bounds: Rc<std::cell::RefCell<HashMap<&'static str, Bounds<Pixels>>>>,
+    text: std::cell::RefCell<
+        HashMap<&'static str, (SharedString, crate::ui_text::TextGeometryHandle)>,
+    >,
+}
+
+thread_local! {
+    static FOOTER_READINGS: std::cell::RefCell<Option<FooterReadings>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn footer_text(key: &'static str, text: impl Into<SharedString>) -> UiText {
+    let text = text.into();
+    let geometry = FOOTER_READINGS.with_borrow(|readings| {
+        let readings = readings.as_ref()?;
+        let geometry = crate::ui_text::TextGeometryHandle::default();
+        readings
+            .text
+            .borrow_mut()
+            .insert(key, (text.clone(), geometry.clone()));
+        Some(geometry)
+    });
+    match geometry {
+        Some(geometry) => ui_text(text).track_geometry(geometry),
+        None => ui_text(text),
+    }
+}
+
+fn record_footer_bounds(key: &'static str, bounds: Bounds<Pixels>) {
+    FOOTER_READINGS.with_borrow(|readings| {
+        if let Some(readings) = readings.as_ref() {
+            readings.bounds.borrow_mut().insert(key, bounds);
+        }
+    });
+}
+
+fn footer_bounds_probe(key: &'static str) -> Option<Canvas<()>> {
+    let readings = FOOTER_READINGS
+        .with_borrow(|slot| slot.as_ref().map(|readings| readings.bounds.clone()))?;
+    Some(
+        canvas(
+            move |bounds, _, _| {
+                readings.borrow_mut().insert(key, bounds);
+            },
+            |_, _, _, _| (),
+        )
+        .absolute()
+        .inset_0()
+        .size_full(),
+    )
+}
+
+const PERMISSION_MENU_MIN_WIDTH: f32 = 180.;
+const PERMISSION_MENU_PADDING: f32 = 6.;
+/// Frozen item padding (6px) plus a 12px/14px line box: the browser's normal
+/// line-height at 12px. Fixed so probe row centres stay stable.
+const PERMISSION_MENU_ITEM_HEIGHT: f32 = 26.;
+const PERMISSION_CHIP_HEIGHT: f32 = 14.;
+const PERMISSION_CHIP_LINE_HEIGHT: f32 = 12.;
+const PERMISSION_CHIP_TRACKING: f32 = 0.2;
+const PERMISSION_CHIP_DISABLED_OPACITY: f32 = 0.7;
+const PERMISSION_MENU_GAP: f32 = 8.;
+const PERMISSION_MENU_TITLE: &str = "权限模式";
+const PERMISSION_MENU_TITLE_TRACKING: f32 = 0.5;
+const PERMISSION_MENU_TITLE_LINE_HEIGHT: f32 = 13.;
+const PERMISSION_MENU_CHECK: &str = "✓";
+
+/// `.status-perm-badge.perm-<mode>`. `Auto` keeps the frozen green text.
+fn permission_mode_color(mode: PermissionMode) -> u32 {
+    match mode {
+        PermissionMode::Default => 0x8b949e,
+        PermissionMode::Auto => 0x7ee787,
+        PermissionMode::Ask => 0xa371f7,
+        PermissionMode::AcceptEdits => 0xd29922,
+        PermissionMode::Plan => 0x58a6ff,
+        PermissionMode::Bypass => 0xff6b35,
+    }
+}
+
+/// `.perm-menu__dot.perm-<mode>`. The frozen CSS has no `.perm-auto` dot rule;
+/// use the same neutral as Default instead of the chip's green.
+fn permission_menu_dot_color(mode: PermissionMode) -> u32 {
+    match mode {
+        PermissionMode::Auto => 0x8b949e,
+        other => permission_mode_color(other),
+    }
+}
+
+/// Matches the frozen HUD's permissionAbbreviation.
+fn permission_chip_text(mode: PermissionMode) -> SharedString {
+    match mode {
+        PermissionMode::Default => "D",
+        PermissionMode::Auto => "A",
+        PermissionMode::Ask => "AK",
+        PermissionMode::AcceptEdits => "AE",
+        PermissionMode::Plan => "PM",
+        PermissionMode::Bypass => "BP",
+    }
+    .into()
+}
+
+fn permission_mode_slug(mode: PermissionMode) -> &'static str {
+    match mode {
+        PermissionMode::Default => "default",
+        PermissionMode::Auto => "auto",
+        PermissionMode::Ask => "ask",
+        PermissionMode::AcceptEdits => "accept-edits",
+        PermissionMode::Plan => "plan",
+        PermissionMode::Bypass => "bypass-permissions",
+    }
+}
+
+fn permission_menu_item_id(mode: PermissionMode) -> SharedString {
+    format!("permission-menu-item-{}", permission_mode_slug(mode)).into()
+}
+
+fn permission_menu_dot_id(mode: PermissionMode) -> SharedString {
+    format!("permission-menu-dot-{}", permission_mode_slug(mode)).into()
+}
+
+fn permission_menu_label_id(mode: PermissionMode) -> SharedString {
+    format!("permission-menu-label-{}", permission_mode_slug(mode)).into()
+}
+
+fn permission_menu_check_id(mode: PermissionMode) -> SharedString {
+    format!("permission-menu-check-{}", permission_mode_slug(mode)).into()
+}
+
+/// CSS `letter-spacing` substitute: one text cell per glyph with a fractional
+/// flex gap. The trailing zero-width cell contributes the spacing after the
+/// final glyph, matching the browser's included advance.
+fn permission_tracked_text(text: impl Into<SharedString>, tracking: f32) -> Div {
+    let text = text.into();
+    div()
+        .flex()
+        .items_center()
+        .gap(px(tracking))
+        .children(text.chars().map(|ch| ui_text(ch.to_string())))
+        .child(div().w(px(0.)))
+}
+
+/// `.perm-menu__title`.
+fn permission_menu_title() -> Stateful<Div> {
+    div()
+        .id("permission-menu-title")
+        .mb(px(4.))
+        .px(px(10.))
+        .pt(px(6.))
+        .pb(px(8.))
+        .border_b_1()
+        .border_color(rgb(0x30363d))
+        .text_color(rgb(0x6e7681))
+        .text_size(px(11.))
+        .line_height(px(PERMISSION_MENU_TITLE_LINE_HEIGHT))
+        .child(permission_tracked_text(
+            PERMISSION_MENU_TITLE.to_uppercase(),
+            PERMISSION_MENU_TITLE_TRACKING,
+        ))
+}
+
+/// `.perm-menu button.perm-menu__item` (+ `.is-active` / `:hover`).
+fn permission_menu_item(mode: PermissionMode, active: PermissionMode) -> Stateful<Div> {
+    let is_active = mode == active;
+    let item = div()
+        .id(permission_menu_item_id(mode))
+        .flex()
+        .items_center()
+        .h(px(PERMISSION_MENU_ITEM_HEIGHT))
+        .gap(px(8.))
+        .px(px(10.))
+        .py(px(6.))
+        .rounded(px(4.))
+        .text_size(px(12.))
+        .line_height(px(14.))
+        .text_color(rgb(if is_active { 0x58a6ff } else { 0xc9d1d9 }))
+        .bg(if is_active {
+            Rgba {
+                a: 0.1,
+                ..rgb(0x58a6ff)
+            }
+        } else {
+            rgba(0x00000000)
+        })
+        .cursor_pointer()
+        .child(
+            div()
+                .id(permission_menu_dot_id(mode))
+                .flex_none()
+                .size(px(8.))
+                .rounded_full()
+                .bg(rgb(permission_menu_dot_color(mode))),
+        )
+        .child(
+            div()
+                .id(permission_menu_label_id(mode))
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(ui_text(mode.label())),
+        )
+        .when(is_active, |item| {
+            item.child(
+                div()
+                    .id(permission_menu_check_id(mode))
+                    .flex_none()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(rgb(0x58a6ff))
+                    .child(ui_text(PERMISSION_MENU_CHECK)),
+            )
+        });
+    if is_active {
+        // The frozen `.is-active` rule follows `:hover`, so the active row
+        // keeps its blue tint instead of switching to the neutral hover gray.
+        item
+    } else {
+        item.hover(|style| style.bg(rgb(0x21262d)))
+    }
+}
+
+fn footer_text_estimate(text: &str) -> f32 {
+    text.chars()
+        .map(|ch| match ch {
+            ' ' | '·' => 3.,
+            ch if ch.is_ascii() => 6.2,
+            _ => 11.,
+        })
+        .sum()
+}
+
+/// `.status-environment.is-local-icon svg` without adding an asset: the
+/// frozen 16px monitor outline scaled to 13px.
+fn footer_monitor_icon(size: f32, color: Rgba) -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            let scale = f32::from(bounds.size.width) / 16.;
+            let at = |x: f32, y: f32| bounds.origin + point(px(x * scale), px(y * scale));
+            let mut path = PathBuilder::stroke(px(1.3 * scale));
+            path.move_to(at(2.5, 2.5));
+            path.line_to(at(13.5, 2.5));
+            path.line_to(at(13.5, 11.));
+            path.line_to(at(2.5, 11.));
+            path.close();
+            path.move_to(at(5., 13.5));
+            path.line_to(at(11., 13.5));
+            path.move_to(at(8., 11.));
+            path.line_to(at(8., 13.5));
+            if let Ok(path) = path.build() {
+                window.paint_path(path, color);
+            }
+        },
+    )
+    .size(px(size))
+    .flex_none()
+}
+
+/// 14px line user glyph for the account slot, drawn with GPUI's painter.
+fn footer_user_icon(size: f32, color: Rgba) -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            let scale = f32::from(bounds.size.width) / 16.;
+            let at = |x: f32, y: f32| bounds.origin + point(px(x * scale), px(y * scale));
+            let mut path = PathBuilder::stroke(px(1.3 * scale));
+            path.move_to(at(5.5, 4.5));
+            path.arc_to(
+                point(px(2.5 * scale), px(2.5 * scale)),
+                px(0.),
+                false,
+                true,
+                at(10.5, 4.5),
+            );
+            path.arc_to(
+                point(px(2.5 * scale), px(2.5 * scale)),
+                px(0.),
+                false,
+                true,
+                at(5.5, 4.5),
+            );
+            path.move_to(at(2.5, 13.));
+            path.cubic_bezier_to(at(13.5, 13.), at(4.5, 8.5), at(11.5, 8.5));
+            if let Ok(path) = path.build() {
+                window.paint_path(path, color);
+            }
+        },
+    )
+    .size(px(size))
+    .flex_none()
+}
+
+struct FooterFields<'a> {
+    name: Option<String>,
+    is_shell: bool,
+    cwd: Option<(&'a str, String)>,
+    git: Option<FooterGit>,
+    environment: Option<FooterEnvironment>,
+    codex: Option<codex_hud::CodexHud>,
+    live_hud: Option<codex_hud::CodexHud>,
+    live: Option<&'a Value>,
+    mode: &'a str,
+    node: &'a Value,
+    projected_permission: Option<&'a str>,
+}
+
+fn footer_shows_account(mode: &str) -> bool {
+    matches!(mode, "claude-code" | "shell")
+}
+
+fn permission_provider(node: &Value) -> &'static str {
+    match node["currentMode"].as_str() {
+        Some("codex") => "Codex",
+        Some("antigravity") => "Antigravity",
+        _ => "Claude",
+    }
+}
+
+#[derive(Clone)]
+struct FooterGit {
+    label: String,
+    title: String,
+    available: bool,
+    branch: Option<String>,
+    root: Option<PathBuf>,
+    dirty: bool,
+}
+
+impl FooterGit {
+    fn projected(node: &Value, hud: Option<&Value>, locale: InterfaceLocale) -> Option<Self> {
+        let live = hud.unwrap_or(&Value::Null);
+        let git = &node["git"];
+        let branch = trimmed_graph_text(&live["gitBranch"])
+            .or_else(|| trimmed_graph_text(&git["branch"]))
+            .or_else(|| trimmed_graph_text(&node["gitBranch"]));
+        let dirty = live["gitDirty"]
+            .as_bool()
+            .or_else(|| git["dirty"].as_bool())
+            .or_else(|| node["gitDirty"].as_bool())
+            .unwrap_or(false);
+        let root = trimmed_graph_text(&git["root"])
+            .or_else(|| trimmed_graph_text(&git["repositoryRoot"]))
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute());
+        let (mut label, title, available) = if let Some(branch) = branch {
+            (
+                branch.to_owned(),
+                format!("{}{branch}", locale.text("Git 分支：", "Git branch: ")),
+                true,
+            )
+        } else if let Some(revision) = trimmed_graph_text(&git["detachedHead"]) {
+            (
+                format!("HEAD {}", revision.get(..7).unwrap_or(revision)),
+                format!(
+                    "{}{revision}",
+                    locale.text("Git 游离 HEAD：", "Git detached HEAD: ")
+                ),
+                true,
+            )
+        } else if git["state"] == "unavailable" {
+            (
+                locale.text("Git 不可用", "Git unavailable").into(),
+                locale
+                    .text(
+                        "当前目录不是可用的 Git 工作区",
+                        "This directory is not a Git repository",
+                    )
+                    .into(),
+                false,
+            )
+        } else {
+            return None;
+        };
+        if available && dirty {
+            label.push('*');
+        }
+        Some(Self {
+            label,
+            title,
+            available,
+            branch: branch.map(str::to_owned),
+            root,
+            dirty,
+        })
+    }
+}
+
+struct FooterEnvironment {
+    label: &'static str,
+    local_icon: bool,
+    color: u32,
+}
+
+impl FooterEnvironment {
+    fn from_node(environment: &Value) -> Option<Self> {
+        let local = environment["kind"] == "local";
+        let state = environment["state"].as_str()?;
+        let label = match state {
+            "missing" => "待恢复",
+            "recovering" => "恢复中",
+            "handoff" => "交接中",
+            "failed" => "待处理",
+            "ready" if local => "Local",
+            "ready" if environment["kind"] == "worktree" => "Worktree",
+            _ => return None,
+        };
+        Some(Self {
+            label,
+            local_icon: state == "ready" && local,
+            color: match state {
+                "missing" | "failed" => 0xd29922,
+                "recovering" | "handoff" => 0xa5c8f4,
+                _ => 0x79c0ff,
+            },
+        })
+    }
+}
+
+fn footer_shell_name(shell: &str) -> Option<&str> {
+    let name = shell.rsplit(['/', '\\']).find(|part| !part.is_empty())?;
+    Some(
+        if cfg!(windows) && name.eq_ignore_ascii_case("powershell.exe") {
+            "PowerShell"
+        } else {
+            name
+        },
+    )
+}
+
+fn loader_permission_label(mode: &str, locale: InterfaceLocale) -> &str {
+    match mode {
+        "" | "default" => locale.text("默认权限", "Default"),
+        "auto" => locale.text("自动模式", "Auto"),
+        "acceptEdits" => locale.text("自动接受编辑", "Accept Edits"),
+        "plan" => locale.text("计划模式", "Plan Mode"),
+        "bypassPermissions" => locale.text("开放所有权限", "Bypass Permissions"),
+        "ask" => locale.text("逐项确认", "Ask every step"),
+        other => other,
+    }
+}
+
+fn deferred_history_provider(node: &Value) -> Option<&'static str> {
+    match node["currentMode"].as_str() {
+        Some("claude-code") => Some("claude-code"),
+        Some("codex" | "antigravity")
+            if trimmed_graph_text(&node["historyProviderSessionId"]).is_some() =>
+        {
+            card_history_provider(node)
+        }
+        _ => None,
+    }
+}
+
+fn card_history_provider(node: &Value) -> Option<&'static str> {
+    match node["currentMode"].as_str() {
+        Some("claude-code") => Some("claude-code"),
+        Some("codex") => Some("codex"),
+        Some("antigravity") => Some("antigravity"),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CardHeaderAction {
+    History,
+    Load,
+    ForkChild,
+    ForkSibling,
+    Remove,
+}
+
+fn card_header_actions(
+    node: &Value,
+    multiple_cards: bool,
+) -> impl Iterator<Item = CardHeaderAction> {
+    let provider = card_history_provider(node).is_some();
+    let sibling = node["currentMode"] != "shell" && session_levels::parent_id(node).is_some();
+    [
+        provider.then_some(CardHeaderAction::History),
+        Some(CardHeaderAction::Load),
+        provider.then_some(CardHeaderAction::ForkChild),
+        sibling.then_some(CardHeaderAction::ForkSibling),
+        (multiple_cards && node["archivedAt"].is_null()).then_some(CardHeaderAction::Remove),
+    ]
+    .into_iter()
+    .flatten()
+}
+
+fn last_tab_body(locale: InterfaceLocale) -> &'static str {
+    locale.text(LAST_TAB_BODY, "This is the last tab of the last task, so closing it here does not delete the task.\n\nTo delete this workspace, use the delete action in the task panel menu on the left.")
+}
+
+fn loader_search_input(
+    placeholder: &str,
+    dark: bool,
+    cx: &mut Context<RenameInput>,
+) -> RenameInput {
+    let mut input = RenameInput::session_loader_search(placeholder, cx);
+    set_loader_input_colors(&mut input, dark);
+    input
+}
+
+fn set_loader_input_colors(input: &mut RenameInput, dark: bool) {
+    input.text_color = (!dark).then(|| rgba(0x2d3542ff));
+    input.placeholder_color = (!dark).then(|| rgba(0x687587ff));
+}
+
+fn loader_content_count(count: usize, locale: InterfaceLocale) -> String {
+    match (locale, count) {
+        (InterfaceLocale::Chinese, _) => format!("{count} 条内容"),
+        (InterfaceLocale::English, 1) => "1 entry".into(),
+        (InterfaceLocale::English, _) => format!("{count} entries"),
+    }
+}
+
+fn loader_event_label(
+    kind: &str,
+    tool_name: Option<&str>,
+    assistant: &'static str,
+    locale: InterfaceLocale,
+) -> SharedString {
+    match kind {
+        "user" => locale.text("你", "You").into(),
+        "assistant" => assistant.into(),
+        "tool" => tool_name.filter(|name| !name.is_empty()).map_or_else(
+            || locale.text("工具", "Tool").into(),
+            |name| format!("{} · {name}", locale.text("工具", "Tool")).into(),
+        ),
+        _ => locale.text("系统", "System").into(),
+    }
+}
+
+fn workspace_file_manager_label(locale: InterfaceLocale, is_macos: bool) -> &'static str {
+    if is_macos {
+        locale.text("在 Finder 中显示", "Show in Finder")
+    } else {
+        locale.text("在文件管理器中显示", "Reveal in File Manager")
+    }
+}
+
+#[cfg(test)]
+mod workspace_menu_tests {
+    use super::{InterfaceLocale, workspace_file_manager_label};
+
+    #[test]
+    fn file_manager_label_matches_platform_and_locale() {
+        use InterfaceLocale::{Chinese, English};
+
+        assert_eq!(
+            workspace_file_manager_label(Chinese, true),
+            "在 Finder 中显示"
+        );
+        assert_eq!(
+            workspace_file_manager_label(English, true),
+            "Show in Finder"
+        );
+        assert_eq!(
+            workspace_file_manager_label(Chinese, false),
+            "在文件管理器中显示"
+        );
+        assert_eq!(
+            workspace_file_manager_label(English, false),
+            "Reveal in File Manager"
+        );
+    }
+}
+
+fn icon(name: &str, size: f32, color: Rgba) -> Svg {
+    svg()
+        .path(SharedString::from(format!("icons/{name}.svg")))
+        .size(px(size))
+        .flex_none()
+        .text_color(color)
+}
+
+#[cfg(test)]
+mod icon_tests {
+    use gpui::{Styled, rgb, rgba};
+    use serde_json::json;
+
+    #[test]
+    fn card_headers_show_the_expected_actions_by_mode_and_level() {
+        use super::{CardHeaderAction::*, card_header_actions};
+
+        for mode in ["claude-code", "codex", "antigravity"] {
+            let mut node = json!({"currentMode": mode});
+            assert_eq!(
+                card_header_actions(&node, true).collect::<Vec<_>>(),
+                [History, Load, ForkChild, Remove],
+            );
+            assert_eq!(
+                card_header_actions(&node, false).collect::<Vec<_>>(),
+                [History, Load, ForkChild],
+            );
+            node["parentSessionId"] = json!("parent");
+            assert_eq!(
+                card_header_actions(&node, true).collect::<Vec<_>>(),
+                [History, Load, ForkChild, ForkSibling, Remove],
+            );
+        }
+        let shell = json!({"currentMode": "shell", "parentSessionId": "parent"});
+        assert_eq!(
+            card_header_actions(&shell, false).collect::<Vec<_>>(),
+            [Load]
+        );
+        assert_eq!(
+            card_header_actions(&shell, true).collect::<Vec<_>>(),
+            [Load, Remove]
+        );
+    }
+
+    #[test]
+    fn workspace_icons_preserve_channels_and_theme_alpha() {
+        let mut pin = super::icon("pin", 14., rgb(0x2f3547));
+        assert_eq!(
+            pin.style().text.as_ref().and_then(|text| text.color),
+            Some(rgb(0x2f3547).into())
+        );
+        let mut bell = super::icon("bell", 16., rgba(0x8d96a3b8));
+        assert_eq!(
+            bell.style().text.as_ref().and_then(|text| text.color),
+            Some(rgba(0x8d96a3b8).into())
+        );
+    }
+}
+
+#[cfg(test)]
+mod carousel_tests {
+    use super::{CardElevation, CardMotion, Curve, card_shadows, session_card_hit, shadow};
+    use CardElevation::{Focused, Preview, Resting};
+    use gpui::{Bounds, Rgba, point, px, rgb, size};
+
+    #[test]
+    fn card_shadow_layers_match_the_reference_profiles() {
+        for (dark, elevation, expected) in [
+            (
+                false,
+                Resting,
+                &[(0x2a3748, 0.075, 2., 7.), (0x2a3748, 0.07, 13., 30.)][..],
+            ),
+            (
+                false,
+                Preview,
+                &[(0x2a3748, 0.1, 4., 12.), (0x2a3748, 0.12, 17., 36.)][..],
+            ),
+            (
+                false,
+                Focused,
+                &[
+                    (0x32445c, 0.11, 7., 15.),
+                    (0x32445c, 0.19, 24., 52.),
+                    (0x3f82d4, 0.12, 15., 42.),
+                ][..],
+            ),
+            (true, Resting, &[(0, 0.2, 2., 8.), (0, 0.13, 12., 30.)][..]),
+            (true, Preview, &[(0, 0.22, 5., 14.), (0, 0.2, 17., 38.)][..]),
+            (
+                true,
+                Focused,
+                &[
+                    (0, 0.24, 9., 18.),
+                    (0, 0.3, 24., 52.),
+                    (0x528bcd, 0.12, 13., 38.),
+                ][..],
+            ),
+        ] {
+            let shadows = card_shadows(dark, elevation.weights());
+            assert_eq!(shadows.len(), expected.len());
+            for (shadow, &(hex, alpha, y, css_blur)) in shadows.iter().rev().zip(expected) {
+                let color = Rgba::from(shadow.color);
+                let tint = rgb(hex);
+                assert!((color.r - tint.r).abs() < 1e-6);
+                assert!((color.g - tint.g).abs() < 1e-6);
+                assert!((color.b - tint.b).abs() < 1e-6);
+                assert!((color.a - alpha).abs() < 1e-6);
+                assert_eq!(shadow.offset, point(px(0.), px(y)));
+                assert_eq!(shadow.blur_radius, px(css_blur / 2.));
+                assert_eq!(shadow.spread_radius, px(0.));
+            }
+        }
+        assert_eq!(shadow(0, 0.2, 2., 7.).blur_radius, px(7.));
+    }
+
+    #[test]
+    fn elevation_eases_color_blur_and_offset_for_180_ms() {
+        let mut motion = CardMotion::new(false);
+        motion.retarget_elevation(Preview, 20.);
+        assert_eq!(motion.shadow_weights(20.), Resting.weights());
+        let progress = Curve::Ease.ease(0.5) as f32;
+        assert_eq!(motion.shadow_weights(110.), [1. - progress, progress, 0.]);
+        let shadows = card_shadows(false, motion.shadow_weights(110.));
+        let near = shadows.last().unwrap();
+        assert!((near.color.a - (0.075 + 0.025 * progress)).abs() < 1e-6);
+        assert!((near.offset.y - px(2. + 2. * progress)).abs() < px(0.001));
+        assert!((near.blur_radius - px((7. + 5. * progress) / 2.)).abs() < px(0.001));
+        assert_eq!(motion.shadow_weights(200.), Preview.weights());
+        assert!(!motion.hover_elevation.is_running(200.));
+
+        motion.retarget_elevation(Focused, 200.);
+        let midpoint = motion.shadow_weights(290.);
+        let glow = &card_shadows(false, midpoint)[0];
+        assert!((glow.color.a - 0.12 * progress).abs() < 1e-6);
+        assert!((glow.blur_radius - px(21. * progress)).abs() < px(0.001));
+        motion.retarget_elevation(Resting, 290.);
+        assert_eq!(motion.shadow_weights(290.), midpoint);
+        assert_eq!(motion.shadow_weights(470.), Resting.weights());
+    }
+
+    #[test]
+    fn stacking_prioritizes_focus_and_splits_keep_cards_level() {
+        let mut paint = [
+            (CardElevation::for_card(true, true), "left"),
+            (CardElevation::for_card(false, true), "middle"),
+            (CardElevation::for_card(false, false), "right"),
+        ];
+        paint.sort_by_key(|(elevation, _)| *elevation);
+        assert_eq!(
+            paint,
+            [(Resting, "right"), (Preview, "middle"), (Focused, "left")]
+        );
+
+        let motion = CardMotion::new(true);
+        assert_eq!(motion.lift_for_frame(0., false), px(-4.));
+        assert_eq!(motion.lift_for_frame(0., true), px(0.));
+        let bounds = Bounds::new(point(px(10.), px(10.)), size(px(300.), px(420.)));
+        let lifted = bounds + point(px(0.), motion.lift_for_frame(0., false));
+        assert!(session_card_hit(&lifted, point(px(160.), px(7.))));
+        assert!(!session_card_hit(&bounds, point(px(160.), px(7.))));
+        assert!(!session_card_hit(&lifted, lifted.origin));
+    }
+}
+
+const CARD_HEADER_SHADOW_TOP: f32 = 42.;
+const CARD_HEADER_SHADOW_HEIGHT: f32 = 10.;
+/// The CSS spread is `-7px`; the reference fades the shadow back in over the
+/// first few pixels inside each card edge.
+const CARD_HEADER_SHADOW_INSET: f32 = 7.;
+
+/// One tightly stacked slice of the vertical shadow decay. `top`/`height` are
+/// logical pixels below the 42px card header; the two alphas are the gradient
+/// endpoints. Kept as plain data so probes can assert the calibrated curve.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CardHeaderShadowBand {
+    top: f32,
+    height: f32,
+    from_alpha: f32,
+    to_alpha: f32,
+}
+
+fn card_header_shadow_bands(dark: bool) -> [CardHeaderShadowBand; 5] {
+    let stops = [0., 2., 4., 6., 8., CARD_HEADER_SHADOW_HEIGHT];
+    // Match the reference's sampled light-card pixels. The dark CSS shadow
+    // has the same shape with opacity 0.38 instead of 0.25.
+    let strength = if dark { 0.38 / 0.25 } else { 1. };
+    let alphas = [0.125, 0.102, 0.058, 0.029, 0.014, 0.];
+    std::array::from_fn(|index| CardHeaderShadowBand {
+        top: stops[index],
+        height: stops[index + 1] - stops[index],
+        from_alpha: alphas[index] * strength,
+        to_alpha: alphas[index + 1] * strength,
+    })
+}
+
+fn shadow(color: u32, alpha: f32, y: f32, blur: f32) -> BoxShadow {
+    let mut color: Hsla = rgb(color).into();
+    color.a = alpha;
+    BoxShadow {
+        color,
+        offset: point(px(0.), px(y)),
+        blur_radius: px(blur),
+        spread_radius: px(0.),
+    }
+}
+
+fn card_shadows(dark: bool, weights: [f32; 3]) -> Vec<BoxShadow> {
+    // Rows are normal, preview and focused. Each layer is (RGB, alpha, Y, CSS blur).
+    let layers = if dark {
+        [
+            [(0, 0.2, 2., 8.), (0, 0.13, 12., 30.), (0, 0., 0., 0.)],
+            [(0, 0.22, 5., 14.), (0, 0.2, 17., 38.), (0, 0., 0., 0.)],
+            [
+                (0, 0.24, 9., 18.),
+                (0, 0.3, 24., 52.),
+                (0x528bcd, 0.12, 13., 38.),
+            ],
+        ]
+    } else {
+        [
+            [
+                (0x2a3748, 0.075, 2., 7.),
+                (0x2a3748, 0.07, 13., 30.),
+                (0, 0., 0., 0.),
+            ],
+            [
+                (0x2a3748, 0.1, 4., 12.),
+                (0x2a3748, 0.12, 17., 36.),
+                (0, 0., 0., 0.),
+            ],
+            [
+                (0x32445c, 0.11, 7., 15.),
+                (0x32445c, 0.19, 24., 52.),
+                (0x3f82d4, 0.12, 15., 42.),
+            ],
+        ]
+    };
+    // CSS puts the first shadow on top. GPUI draws the later layers over earlier ones.
+    (0..3)
+        .rev()
+        .filter_map(|index| {
+            let mut color = Rgba::default();
+            let mut y = 0.;
+            let mut css_blur = 0.;
+            for (layers, weight) in layers.iter().zip(weights) {
+                let (hex, alpha, offset, blur) = layers[index];
+                let tint = rgb(hex);
+                let alpha = alpha * weight;
+                color.r += tint.r * alpha;
+                color.g += tint.g * alpha;
+                color.b += tint.b * alpha;
+                color.a += alpha;
+                y += offset * weight;
+                css_blur += blur * weight;
+            }
+            if color.a <= 0. {
+                return None;
+            }
+            color.r /= color.a;
+            color.g /= color.a;
+            color.b /= color.a;
+            Some(BoxShadow {
+                color: color.into(),
+                offset: point(px(0.), px(y)),
+                // GPUI takes the Gaussian sigma. CSS blur is twice that value.
+                blur_radius: px(css_blur / 2.),
+                spread_radius: px(0.),
+            })
+        })
+        .collect()
+}
+
+fn carousel_card_shadow(shadows: Vec<BoxShadow>) -> Canvas<()> {
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            // GPUI batches by primitive bounds, while the shader paints out to
+            // three sigmas. Register that footprint so shadows order against neighbors.
+            let layer = shadows.iter().fold(bounds, |layer, shadow| {
+                let extent = shadow.spread_radius + shadow.blur_radius * 3.;
+                layer.union(&(bounds + shadow.offset).dilate(extent))
+            });
+            let radius = CARD_RADIUS
+                .min(bounds.size.width / 2.)
+                .min(bounds.size.height / 2.);
+            window.paint_layer(layer, |window| {
+                window.paint_shadows(bounds, radius.into(), &shadows)
+            });
+        },
+    )
+    .absolute()
+    .inset_0()
+    .size_full()
+}
+
+fn vertical_card_gradient(from: Hsla, to: Hsla) -> Background {
+    linear_gradient(180., linear_color_stop(from, 0.), linear_color_stop(to, 1.))
+}
+
+fn card_reflection(dark: bool, glass: bool, focus_weight: f32) -> Canvas<()> {
+    let white: Hsla = rgb(0xffffff).into();
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            let radius = CARD_RADIUS
+                .min(bounds.size.width / 2.)
+                .min(bounds.size.height / 2.);
+            if glass && bounds.size.height > px(0.) {
+                let height = bounds.size.height * 0.34;
+                let midpoint = height * 0.4;
+                let white_stop = white.alpha(0.14 * 0.7);
+                let blue_stop = Hsla::from(rgb(0xa0c4eb)).alpha(0.045 * 0.7);
+                // GPUI gradients have two stops. Join them at the CSS 40% stop.
+                window.paint_quad(
+                    fill(
+                        Bounds::new(bounds.origin, size(bounds.size.width, midpoint)),
+                        vertical_card_gradient(white_stop, blue_stop),
+                    )
+                    .corner_radii(Corners {
+                        top_left: radius,
+                        top_right: radius,
+                        ..Default::default()
+                    }),
+                );
+                window.paint_quad(fill(
+                    Bounds::new(
+                        bounds.origin + point(px(0.), midpoint),
+                        size(bounds.size.width, height - midpoint),
+                    ),
+                    vertical_card_gradient(blue_stop, blue_stop.alpha(0.)),
+                ));
+            }
+            if focus_weight > 0. {
+                window.paint_quad(quad(
+                    bounds,
+                    radius,
+                    transparent_black(),
+                    Edges {
+                        top: px(focus_weight),
+                        ..Default::default()
+                    },
+                    white.alpha(if dark { 0.12 } else { 0.96 } * focus_weight),
+                    BorderStyle::default(),
+                ));
+            }
+        },
+    )
+    .absolute()
+    .inset_0()
+    .size_full()
+}
+
+fn carousel_shadow_fade(background: Rgba) -> Canvas<()> {
+    let background: Hsla = background.into();
+    let transparent = background.alpha(0.);
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            if bounds.size.height >= px(20.) {
+                // The fades only cover canvas padding, including on the lifted frame.
+                let top = Bounds::new(bounds.origin, size(bounds.size.width, px(6.)));
+                let bottom = Bounds::new(
+                    point(bounds.left(), bounds.bottom() - px(10.)),
+                    size(bounds.size.width, px(10.)),
+                );
+                window.paint_quad(fill(top, vertical_card_gradient(background, transparent)));
+                window.paint_quad(fill(
+                    bottom,
+                    vertical_card_gradient(transparent, background),
+                ));
+            }
+        },
+    )
+    .absolute()
+    .inset_0()
+    .size_full()
+}
+
+fn loading_badge_ring(spread: f32) -> BoxShadow {
+    BoxShadow {
+        color: Hsla::from(rgb(0x4699e7)).alpha(0.12),
+        offset: point(px(0.), px(0.)),
+        blur_radius: px(0.),
+        spread_radius: px(spread),
+    }
+}
+
+fn reduced_motion() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        crate::macos::reduced_motion()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            SPI_GETCLIENTAREAANIMATION, SystemParametersInfoW,
+        };
+        let mut enabled: i32 = 1;
+        // Query only: never changes the user's accessibility preference.
+        unsafe {
+            SystemParametersInfoW(
+                SPI_GETCLIENTAREAANIMATION,
+                0,
+                (&mut enabled as *mut i32).cast(),
+                0,
+            );
+        }
+        enabled == 0
+    }
+}
+
+// Debug-only, opt-in acceptance probe. Records actual GPUI paint bounds; it is
+// not physical input-to-photon latency and is absent from release builds.
+#[cfg(debug_assertions)]
+fn open_motion_trace() -> Option<MotionTrace> {
+    let path = std::env::var_os("MATOU_NATIVE_MOTION_TRACE")?;
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(file) => Some(std::rc::Rc::new(std::cell::RefCell::new(file))),
+        Err(error) => {
+            eprintln!("Open motion acceptance trace: {error}");
+            None
+        }
+    }
+}
+#[cfg(debug_assertions)]
+fn record_motion(trace: &MotionTrace, record: &Value) {
+    use std::io::Write;
+    if let Err(error) = writeln!(trace.borrow_mut(), "{record}") {
+        eprintln!("Write motion acceptance trace: {error}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fork entry points, dialog, progress, failure and readiness views.
+//
+// Render-only: commands, submission keys, graph state and the Workspace
+// callbacks stay in the main view. Frozen sources:
+// - hierarchy/hierarchy.css `.pane-fork` (221-224) and its light-surface
+//   variant (759-761), `.fork-readiness-toast` (225 / 762),
+//   `.fork-failure-card` (767-771);
+// - hierarchy/hierarchy.css `.branch-dialog*` (787-813);
+// - session-canvas/ForkProgressOverlay.tsx and fork-progress-overlay.css;
+// - i18n sessionCanvas.ts `branchDialog`, hierarchyTerminal.ts `pane`.
+//
+// The native card head is a light surface, so the entry icon uses the frozen
+// light-theme `.pane-fork` colors; the dialog, progress and failure surfaces
+// keep their frozen dark colors.
+// ---------------------------------------------------------------------------
+
+/// `sessionCanvas.branchDialog.worktreeSection`.
+const FORK_WORKTREE_SECTION: &str = "工作目录";
+/// `sessionCanvas.branchDialog.useCurrentWorktree`.
+const FORK_USE_CURRENT_WORKTREE: &str = "使用当前工作树";
+/// `sessionCanvas.branchDialog.useNewWorktree`.
+const FORK_USE_NEW_WORKTREE: &str = "从新工作树创建";
+/// `sessionCanvas.branchDialog.newWorktreeHint`.
+const FORK_NEW_WORKTREE_HINT: &str = "创建隔离的 Git worktree，适合多个功能并行开发";
+const FORK_NEEDS_GIT_REPOSITORY: &str = "需要 Git 仓库";
+/// `sessionCanvas.branchDialog.needsGitRepository`.
+/// `sessionCanvas.branchDialog.name`.
+const FORK_DIALOG_NAME: &str = "分支名称";
+/// `sessionCanvas.branchDialog.creating`.
+const FORK_DIALOG_CREATING: &str = "正在创建分支…";
+/// `sessionCanvas.branchDialog.nameTooLong` / the frozen counter denominator.
+const FORK_NAME_LIMIT: usize = 64;
+
+/// `hierarchyTerminal.pane.forkChild` uses lucide `layers-plus`;
+/// `forkSibling` uses `copy-plus`.
+fn fork_header_icon(sibling: bool) -> &'static str {
+    if sibling { "copy-plus" } else { "layers-plus" }
+}
+
+/// `.pane-fork` at 24×24 with a 16px frozen AppIcon (the React default).
+/// `dimmed` means `canFork == false`, `blocked` means the shared action gate is
+/// closed. Both share the frozen `[aria-disabled="true"]` opacity; a blocked
+/// entry shows the not-allowed cursor in place of the browser's `help`.
+fn fork_header_button(
+    id: SharedString,
+    sibling: bool,
+    dimmed: bool,
+    blocked: bool,
+    tooltip: SharedString,
+    palette: matou_native_desktop::theme_tokens::CardPalette,
+) -> Stateful<Div> {
+    let enabled = !dimmed && !blocked;
+    let glyph =
+        icon(fork_header_icon(sibling), 16., rgba(palette.action_text)).when(enabled, |glyph| {
+            glyph.group_hover(id.clone(), move |style| {
+                style.text_color(rgba(palette.action_text_hover))
+            })
+        });
+    let button = div()
+        .id(id.clone())
+        .group(id)
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(px(24.))
+        .rounded(px(5.))
+        .bg(rgba(0x00000000))
+        .text_color(rgba(0x00000085))
+        .child(glyph)
+        .tooltip(move |_, cx| cx.new(|_| CardTooltip(tooltip.clone())).into());
+    if enabled {
+        button
+            .cursor_pointer()
+            .hover(|style| style.text_color(rgba(0x000000d1)).bg(rgba(0x0000000f)))
+    } else {
+        button
+            .opacity(0.38)
+            .cursor(CursorStyle::OperationNotAllowed)
+    }
+}
+
+fn set_branch_input_colors(input: &mut RenameInput, dark: bool) {
+    input.text_color = Some(if dark { rgb(0xf2f3f5) } else { rgb(0x252b36) });
+    input.placeholder_color = Some(if dark { rgb(0x858e9b) } else { rgb(0x8c95a3) });
+}
+
+/// `.branch-dialog__field small`: `n/64`, bottom-right of the input wrapper.
+fn fork_dialog_name_counter(count: usize, dark: bool) -> Div {
+    div()
+        .absolute()
+        .right(px(10.))
+        .bottom(px(12.))
+        .text_color(if dark { rgb(0x747b86) } else { rgb(0x8c95a3) })
+        .text_size(px(12.))
+        .child(format!("{count}/{FORK_NAME_LIMIT}"))
+}
+
+/// `.branch-worktree-card input` (dark accent `#5b9de9`, light `#458bd7`).
+fn fork_worktree_radio(selected: bool, dark: bool) -> Div {
+    let accent = if dark { 0x5b9de9 } else { 0x458bd7 };
+    div()
+        .flex_none()
+        .mt(px(2.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(px(14.))
+        .rounded_full()
+        .border_1()
+        .border_color(if selected {
+            rgb(accent)
+        } else {
+            rgb(if dark { 0x5a616c } else { 0xb4bcc8 })
+        })
+        .when(selected, |radio| {
+            radio.child(div().size(px(6.)).rounded_full().bg(rgb(accent)))
+        })
+}
+
+/// `.branch-worktree-card` (+ `.is-selected` / `.is-disabled`).
+fn fork_worktree_card(
+    selected: bool,
+    disabled: bool,
+    title: &'static str,
+    hint: &str,
+    note: Option<&'static str>,
+    dark: bool,
+) -> Div {
+    let border = if selected {
+        if dark { 0x5b9de9 } else { 0x458bd7 }
+    } else if dark {
+        0x343942
+    } else {
+        0xd8dde5
+    };
+    let background = if selected {
+        if dark {
+            rgba(0x5b9de917)
+        } else {
+            rgb(0xeef6ff)
+        }
+    } else if dark {
+        rgb(0x181a1e)
+    } else {
+        rgb(0xf7f8fa)
+    };
+    let card = div()
+        .flex()
+        .gap(px(10.))
+        .p(px(12.))
+        .border_1()
+        .border_color(rgb(border))
+        .rounded(px(10.))
+        .bg(background)
+        .child(fork_worktree_radio(selected, dark))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .child(div().text_size(px(13.)).child(title))
+                .child(
+                    div()
+                        .text_color(if dark { rgb(0x8f96a1) } else { rgb(0x737b89) })
+                        .text_size(px(11.))
+                        .child(ui_text(hint.to_owned())),
+                )
+                .children(note.map(|note| {
+                    div()
+                        .text_color(if dark { rgb(0xe6a44a) } else { rgb(0xc77c1e) })
+                        .text_size(px(11.))
+                        .child(note)
+                })),
+        );
+    if disabled {
+        card.opacity(0.55)
+    } else {
+        card.cursor_pointer()
+    }
+}
+
+/// `.branch-dialog` panel, excluding the overlay/backdrop owned by the host.
+/// `so` is `(close, input, cancel, confirm)`; the input must be the existing
+/// `RenameInput` entity. The menu entry determines the selected worktree.
+#[allow(clippy::too_many_arguments)]
+fn fork_dialog_panel(
+    viewport_width: Pixels,
+    title: &str,
+    description: &str,
+    current_hint: &str,
+    new_worktree: bool,
+    count: usize,
+    submitting: bool,
+    error: Option<&str>,
+    so: (AnyElement, AnyElement, AnyElement, AnyElement),
+    dark: bool,
+) -> Div {
+    let (close, input, cancel, confirm) = so;
+    let panel_width = 520.0_f32.min((f32::from(viewport_width) - 48.0).max(0.0));
+    // `.branch-dialog__header p`: #9298a3 dark, #737b89 light.
+    let muted = if dark { 0x9298a3 } else { 0x737b89 };
+    // `.branch-dialog__field` / `legend`: #c9cdd4 dark, #4c5564 light.
+    let label = if dark { 0xc9cdd4 } else { 0x4c5564 };
+    let header = div()
+        .flex()
+        .items_start()
+        .justify_between()
+        .gap(px(16.))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .text_size(px(18.))
+                        .font_weight(FontWeight::BOLD)
+                        .child(ui_text(title.to_owned())),
+                )
+                .child(
+                    div()
+                        .mt(px(6.))
+                        .text_color(rgb(muted))
+                        .text_size(px(12.))
+                        .line_height(relative(1.45))
+                        .child(ui_text(description.to_owned())),
+                ),
+        )
+        .child(close);
+    let field = div()
+        .relative()
+        .flex()
+        .flex_col()
+        .gap(px(7.))
+        .mt(px(20.))
+        .text_color(rgb(label))
+        .text_size(px(12.))
+        .child(div().child(FORK_DIALOG_NAME))
+        .child(
+            div()
+                .relative()
+                .w_full()
+                .child(input)
+                .child(fork_dialog_name_counter(count, dark)),
+        );
+    let worktrees = div()
+        .flex()
+        .flex_col()
+        .gap(px(9.))
+        .mt(px(18.))
+        .child(
+            div()
+                .mb(px(8.))
+                .text_color(rgb(label))
+                .text_size(px(12.))
+                .child(FORK_WORKTREE_SECTION),
+        )
+        .child(fork_worktree_card(
+            !new_worktree,
+            new_worktree,
+            FORK_USE_CURRENT_WORKTREE,
+            current_hint,
+            None,
+            dark,
+        ))
+        .child(fork_worktree_card(
+            new_worktree,
+            !new_worktree,
+            FORK_USE_NEW_WORKTREE,
+            FORK_NEW_WORKTREE_HINT,
+            (!new_worktree).then_some(FORK_NEEDS_GIT_REPOSITORY),
+            dark,
+        ));
+    let mut panel = div()
+        .flex()
+        .flex_col()
+        .w(px(panel_width))
+        .p(px(20.))
+        .border_1()
+        .border_color(if dark { rgb(0x343942) } else { rgb(0xd7dbe2) })
+        .rounded(px(16.))
+        .text_color(if dark { rgb(0xe8eaed) } else { rgb(0x252b36) })
+        .bg(if dark { rgb(0x1d1f23) } else { rgb(0xffffff) })
+        .shadow(vec![if dark {
+            shadow(0x000000, 0.46, 24., 40.)
+        } else {
+            shadow(0x232b38, 0.2, 24., 35.)
+        }])
+        .child(header)
+        .child(field)
+        .child(worktrees);
+    if let Some(error) = error {
+        panel = panel.child(
+            div()
+                .mt(px(12.))
+                .text_color(if dark { rgb(0xff8276) } else { rgb(0xd94238) })
+                .text_size(px(12.))
+                .child(ui_text(error.to_owned())),
+        );
+    }
+    if submitting {
+        panel = panel.child(
+            div()
+                .mt(px(12.))
+                .text_color(if dark { rgb(0x8ebcf4) } else { rgb(0x2b6cb8) })
+                .text_size(px(12.))
+                .child(FORK_DIALOG_CREATING),
+        );
+    }
+    panel.child(
+        div()
+            .flex()
+            .justify_end()
+            .gap(px(8.))
+            .mt(px(20.))
+            .child(cancel)
+            .child(confirm),
+    )
+}
+
+/// `.branch-dialog__header button`: the frozen 22px `×` close affordance.
+fn fork_dialog_close(dark: bool) -> Stateful<Div> {
+    div()
+        .id("fork-dialog-close")
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .px(px(6.))
+        .py(px(1.))
+        .text_color(if dark { rgb(0xa5abb4) } else { rgb(0x737b89) })
+        .text_size(px(22.))
+        .line_height(relative(1.))
+        .cursor_pointer()
+        .hover(move |style| style.text_color(if dark { rgb(0xa5abb4) } else { rgb(0x252b36) }))
+        .child("×")
+}
+
+/// `.branch-dialog__footer button` (+ `.primary` / `:disabled`).
+fn fork_dialog_button(
+    id: &'static str,
+    label: &'static str,
+    primary: bool,
+    disabled: bool,
+    dark: bool,
+) -> Stateful<Div> {
+    let (border, text, background) = if primary {
+        (
+            rgb(if dark { 0x4b8edc } else { 0x347bc8 }),
+            rgb(0xffffff),
+            rgb(0x347bc8),
+        )
+    } else if dark {
+        (rgb(0x3b414a), rgb(0xd9dce1), rgb(0x26292e))
+    } else {
+        (rgb(0xccd2dc), rgb(0x394250), rgb(0xf4f5f7))
+    };
+    let button = div()
+        .id(id)
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .h(px(34.))
+        .px(px(16.))
+        .border_1()
+        .border_color(border)
+        .rounded(px(8.))
+        .text_color(text)
+        .bg(background)
+        .text_size(px(16.))
+        .whitespace_nowrap()
+        .child(ui_text(label).normal_line_height());
+    if disabled {
+        button.opacity(0.55).cursor(CursorStyle::Arrow)
+    } else {
+        button.cursor_pointer()
+    }
+}
+
+/// `.fork-failure-card`: fills the card below the retained head, over an opaque
+/// `#181a1e` surface so the terminal cannot show through. The latest
+/// `retry_error` replaces the stale reason on the single frozen reason line.
+fn fork_failure_body(
+    title: &'static str,
+    reason: Option<&str>,
+    retry_error: Option<&str>,
+    retry: AnyElement,
+    remove: AnyElement,
+    dark: bool,
+) -> Div {
+    div()
+        .flex_1()
+        .min_h_0()
+        .w_full()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(px(14.))
+        .p(px(28.))
+        .bg(if dark { rgb(0x181a1e) } else { rgb(0xf7f8fa) })
+        .text_color(if dark { rgb(0xd9dce2) } else { rgb(0x333b48) })
+        .text_center()
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .child(
+                    div()
+                        .text_size(px(14.))
+                        .font_weight(FontWeight::BOLD)
+                        .child(title),
+                )
+                .children(
+                    reason
+                        .into_iter()
+                        .chain(retry_error.filter(|error| Some(*error) != reason))
+                        .map(|error| {
+                            div()
+                                .max_w(px(520.))
+                                .mt(px(8.))
+                                .text_color(if dark { rgb(0xf08a80) } else { rgb(0xd94238) })
+                                .text_size(px(12.))
+                                .line_height(relative(1.5))
+                                .child(ui_text(error.to_owned()))
+                        }),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .justify_center()
+                .gap(px(8.))
+                .child(retry)
+                .child(remove),
+        )
+}
+
+/// `.fork-failure-actions button`; `blocked_reason` disables with a frozen
+/// `CardTooltip`, `pending` only dims while the retry is in flight.
+fn fork_failure_button(
+    id: SharedString,
+    label: &'static str,
+    blocked_reason: Option<&'static str>,
+    pending: bool,
+    dark: bool,
+) -> Stateful<Div> {
+    let button = div()
+        .id(id)
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .h(px(30.))
+        .px(px(13.))
+        .border_1()
+        .border_color(if dark { rgb(0x434955) } else { rgb(0xcbd1da) })
+        .rounded(px(7.))
+        .text_color(if dark { rgb(0xd9dce2) } else { rgb(0x333b48) })
+        .bg(if dark { rgb(0x282b31) } else { rgb(0xffffff) })
+        .text_size(px(12.))
+        .whitespace_nowrap()
+        .child(ui_text(label).normal_line_height());
+    if let Some(reason) = blocked_reason {
+        button
+            .opacity(0.55)
+            .cursor(CursorStyle::OperationNotAllowed)
+            .tooltip(move |_, cx| cx.new(|_| CardTooltip(reason.into())).into())
+    } else if pending {
+        button.opacity(0.55).cursor(CursorStyle::Arrow)
+    } else {
+        button.cursor_pointer()
+    }
+}
+
+/// `.fork-progress-overlay` and its interactive variant for provider prompts.
+fn fork_progress_body(progress: ForkProgressCopy, now: f64, dark: bool) -> Stateful<Div> {
+    let fill = progress.fraction.unwrap_or(0.);
+    let animate = !reduced_motion();
+    let spinner_size = if progress.interactive { 12. } else { 20. };
+    let spinner = div()
+        .flex_none()
+        .size(px(spinner_size))
+        .rounded_full()
+        .border_2()
+        .border_color(rgba(0x7eb1f247))
+        .relative()
+        .child(
+            canvas(
+                |_, _, _| (),
+                move |bounds, _, window, _| {
+                    if !bounds.intersects(&window.content_mask().bounds) {
+                        return;
+                    }
+                    let rotation = if animate {
+                        (now as f32 / 800.).fract() * std::f32::consts::TAU
+                    } else {
+                        0.
+                    };
+                    let radius = px(spinner_size / 2. - 1.);
+                    let at = |angle: f32| {
+                        bounds.center() + point(radius * angle.cos(), radius * angle.sin())
+                    };
+                    let start = rotation - 3. * std::f32::consts::FRAC_PI_4;
+                    let mut arc = PathBuilder::stroke(px(2.));
+                    arc.move_to(at(start));
+                    arc.arc_to(
+                        point(radius, radius),
+                        px(0.),
+                        false,
+                        true,
+                        at(start + std::f32::consts::FRAC_PI_2),
+                    );
+                    if let Ok(arc) = arc.build() {
+                        window.paint_path(arc, rgb(0x7eb1f2));
+                    }
+                    if animate {
+                        window.request_animation_frame();
+                    }
+                },
+            )
+            .absolute()
+            .top(px(-2.))
+            .left(px(-2.))
+            .size(px(spinner_size)),
+        );
+    let content = fork_progress_panel(dark).child(spinner).child(
+        div()
+            .text_size(px(if progress.interactive { 11. } else { 16. }))
+            .font_weight(FontWeight::BOLD)
+            .child(progress.label),
+    );
+    if progress.interactive {
+        return div()
+            .id("fork-progress")
+            .absolute()
+            .right(px(12.))
+            .bottom(px(12.))
+            .child(content.max_w(px(260.)).px(px(12.)).py(px(8.)));
+    }
+    let detail = |label: SharedString| {
+        div()
+            .text_color(if dark { rgb(0xaebdd1) } else { rgb(0x60748d) })
+            .text_size(px(11.))
+            .line_height(relative(1.5))
+            .child(ui_text(label))
+    };
+    let content = content
+        .flex_col()
+        .w_full()
+        .max_w(px(420.))
+        .p(px(22.))
+        .child(detail(progress.description.into()))
+        .children(progress.fraction.map(|_| {
+            div()
+                .w_full()
+                .max_w(px(280.))
+                .h(px(4.))
+                .overflow_hidden()
+                .rounded_full()
+                .bg(rgba(0x7eb1f229))
+                .child(
+                    div()
+                        .h_full()
+                        .w(relative(fill))
+                        .rounded_full()
+                        .bg(rgb(0x7eb1f2)),
+                )
+        }))
+        .children(progress.counter.map(|counter| detail(counter.into())));
+    div()
+        .id("fork-progress")
+        .absolute()
+        .inset_0()
+        .occlude()
+        .flex()
+        .items_center()
+        .justify_center()
+        .p(px(24.))
+        .bg(if dark {
+            rgba(0x111214c7)
+        } else {
+            rgba(0xf6f9fdd1)
+        })
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .child(content)
+}
+
+fn fork_progress_panel(dark: bool) -> Div {
+    let (border, foreground, background, shadow_color) = if dark {
+        (
+            rgba(0x78abef57),
+            rgb(0xe7eef9),
+            rgba(0x1d222bf5),
+            shadow(0x000000, 0.34, 16., 22.),
+        )
+    } else {
+        (
+            rgb(0xc7d9f2),
+            rgb(0x23364f),
+            rgba(0xfffffff7),
+            shadow(0x204470, 0.13, 16., 22.),
+        )
+    };
+    div()
+        .flex()
+        .items_center()
+        .gap(px(9.))
+        .border_1()
+        .border_color(border)
+        .rounded(px(12.))
+        .text_color(foreground)
+        .bg(background)
+        .shadow(vec![shadow_color])
+        .text_center()
+}
+
+#[cfg(test)]
+mod fork_surface_tests {
+    use super::{
+        CARD_HEADER_SHADOW_INSET, CARD_HEADER_SHADOW_TOP, ForkProgressCopy,
+        card_header_shadow_bands, fork_dialog_name_counter, fork_dialog_panel, fork_failure_button,
+        fork_progress_body, fork_progress_panel, fork_worktree_card,
+    };
+    use gpui::{IntoElement, Styled, div, px, rgb, rgba};
+
+    #[test]
+    fn failure_action_text_fits_the_thirty_point_button() {
+        for dark in [false, true] {
+            let mut button = fork_failure_button("retry".into(), "重试创建分支", None, false, dark);
+            let style = button.style();
+            assert_eq!(style.text.as_ref().unwrap().font_size, Some(px(12.).into()));
+            assert_eq!(style.size.height, Some(px(30.).into()));
+        }
+    }
+
+    #[test]
+    fn branch_dialog_surfaces_follow_the_workspace_theme() {
+        for (dark, surface, border, text, selection, counter, blur) in [
+            (
+                false, 0xffffff, 0xd7dbe2, 0x252b36, 0xeef6ffff, 0x8c95a3, 35.,
+            ),
+            (
+                true, 0x1d1f23, 0x343942, 0xe8eaed, 0x5b9de917, 0x747b86, 40.,
+            ),
+        ] {
+            let slot = || div().into_any_element();
+            let mut panel = fork_dialog_panel(
+                px(900.),
+                "",
+                "",
+                "",
+                false,
+                0,
+                false,
+                None,
+                (slot(), slot(), slot(), slot()),
+                dark,
+            );
+            let style = panel.style();
+            assert_eq!(style.background, Some(rgb(surface).into()));
+            assert_eq!(style.border_color, Some(rgb(border).into()));
+            assert_eq!(style.text.as_ref().unwrap().color, Some(rgb(text).into()));
+            assert_eq!(style.box_shadow.as_ref().unwrap()[0].blur_radius, px(blur));
+
+            let mut card = fork_worktree_card(true, false, "", "", None, dark);
+            assert_eq!(card.style().background, Some(rgba(selection).into()));
+            assert_eq!(
+                fork_dialog_name_counter(2, dark)
+                    .style()
+                    .text
+                    .as_ref()
+                    .unwrap()
+                    .color,
+                Some(rgb(counter).into())
+            );
+        }
+    }
+
+    #[test]
+    fn branch_progress_panel_and_scrim_follow_the_workspace_theme() {
+        for (dark, scrim, surface, border, text) in [
+            (false, 0xf6f9fdd1, 0xfffffff7, 0xc7d9f2ff, 0x23364f),
+            (true, 0x111214c7, 0x1d222bf5, 0x78abef57, 0xe7eef9),
+        ] {
+            let progress = |interactive| ForkProgressCopy {
+                label: "Creating branch".into(),
+                description: "Preparing the worktree",
+                counter: Some("1/2".into()),
+                fraction: Some(0.5),
+                interactive,
+            };
+            assert_eq!(
+                fork_progress_body(progress(false), 0., dark)
+                    .style()
+                    .background,
+                Some(rgba(scrim).into())
+            );
+            assert!(
+                fork_progress_body(progress(true), 0., dark)
+                    .style()
+                    .background
+                    .is_none()
+            );
+            let mut panel = fork_progress_panel(dark);
+            let style = panel.style();
+            assert_eq!(style.background, Some(rgba(surface).into()));
+            assert_eq!(style.border_color, Some(rgba(border).into()));
+            assert_eq!(style.text.as_ref().unwrap().color, Some(rgb(text).into()));
+            assert_eq!(style.box_shadow.as_ref().unwrap()[0].blur_radius, px(22.));
+        }
+    }
+
+    #[test]
+    fn card_header_shadow_covers_ten_points_with_continuous_falloff() {
+        assert_eq!(CARD_HEADER_SHADOW_TOP, 42.);
+        assert_eq!(CARD_HEADER_SHADOW_INSET, 7.);
+        for (dark, alphas) in [
+            (false, [0.125, 0.102, 0.058, 0.029, 0.014, 0.]),
+            (true, [0.19, 0.15504, 0.08816, 0.04408, 0.02128, 0.]),
+        ] {
+            let bands = card_header_shadow_bands(dark);
+            let stops = [0., 2., 4., 6., 8., 10.];
+            for (index, band) in bands.into_iter().enumerate() {
+                assert_eq!(band.top, stops[index]);
+                assert_eq!(band.top + band.height, stops[index + 1]);
+                assert!((band.from_alpha - alphas[index]).abs() < 0.00001);
+                assert!((band.to_alpha - alphas[index + 1]).abs() < 0.00001);
+            }
+        }
+    }
+}
+
+/// `.fork-readiness-toast` (frozen light-surface variant): fixed below the card
+/// head, horizontally centered, max 420px. The host owns the 2.8s dismissal.
+fn fork_readiness_toast(message: &str) -> Div {
+    div()
+        .absolute()
+        .top(px(72.))
+        .left_0()
+        .right_0()
+        .flex()
+        .justify_center()
+        .child(
+            div()
+                .max_w(px(420.))
+                .mx(px(16.))
+                .px(px(14.))
+                .py(px(9.))
+                .border_1()
+                .border_color(rgb(0xbdd7f6))
+                .rounded(px(8.))
+                .text_color(rgb(0x365a83))
+                .bg(rgb(0xf3f8ff))
+                .shadow(vec![shadow(0x314660, 0.18, 10., 28.)])
+                .text_size(px(12.))
+                .line_height(relative(1.45))
+                .child(ui_text(message.to_owned())),
+        )
+}

@@ -1,0 +1,31 @@
+[package]
+name = "matou-native-desktop"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow = "1"
+async-channel = "2"
+matou-native-core = { path = "../core" }
+matou-native-terminal = { path = "../terminal" }
+matou-native-runtime = { path = "../runtime" }
+serde_json = "1"
+unicode-segmentation = "1"
+image = { version = "=0.25.10", default-features = false }
+raw-window-handle = "0.6"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+gpui = { version = "=0.2.2", default-features = false, features = ["font-kit", "runtime_shaders"] }
+cocoa = "=0.26.0"
+objc = "=0.2.7"
+core-graphics = "=0.24.0"
+core-foundation = "=0.10.0"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+gpui = { version = "=0.2.2", default-features = false }
+windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
+
+[dev-dependencies]
+uuid = { version = "1", features = ["v4"] }

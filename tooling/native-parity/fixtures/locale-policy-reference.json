@@ -1,0 +1,1983 @@
+{
+  "source": {
+    "commit": "924de28da27999543aeef7a7c9797334fca45d97",
+    "inventory": [
+      "SET-07",
+      "SET-08",
+      "HUD-16"
+    ]
+  },
+  "cases": [
+    {
+      "id": "desktop-env-over-preference",
+      "description": "有效环境覆盖优先于保存的具体语言",
+      "input": {
+        "operation": "resolve-desktop-locale",
+        "category": "normal",
+        "requiresSystemEnvironment": false,
+        "env": "en",
+        "preference": "zh-CN",
+        "system": "zh-Hant-TW"
+      },
+      "expected": {
+        "locale": "en"
+      },
+      "source": [
+        "packages/contracts/src/locale.ts:1",
+        "packages/contracts/src/locale.ts:6",
+        "packages/contracts/src/locale.ts:25"
+      ]
+    },
+    {
+      "id": "desktop-preference-over-system",
+      "description": "具体语言优先于系统语言",
+      "input": {
+        "operation": "resolve-desktop-locale",
+        "category": "normal",
+        "requiresSystemEnvironment": false,
+        "preference": "zh-CN",
+        "system": "en-US"
+      },
+      "expected": {
+        "locale": "zh-CN"
+      },
+      "source": [
+        "packages/contracts/src/locale.ts:1",
+        "packages/contracts/src/locale.ts:6",
+        "packages/contracts/src/locale.ts:26"
+      ]
+    },
+    {
+      "id": "desktop-system-chinese-prefix",
+      "description": "跟随系统时识别大小写不同的中文前缀",
+      "input": {
+        "operation": "resolve-desktop-locale",
+        "category": "boundary",
+        "requiresSystemEnvironment": false,
+        "preference": "system",
+        "system": "ZH-Hant-TW"
+      },
+      "expected": {
+        "locale": "zh-CN"
+      },
+      "source": [
+        "packages/contracts/src/locale.ts:15",
+        "packages/contracts/src/locale.ts:17",
+        "packages/contracts/src/locale.ts:26",
+        "packages/contracts/src/locale.ts:27"
+      ]
+    },
+    {
+      "id": "desktop-system-non-chinese",
+      "description": "非中文系统语言映射到英文",
+      "input": {
+        "operation": "resolve-desktop-locale",
+        "category": "normal",
+        "requiresSystemEnvironment": false,
+        "preference": "system",
+        "system": "ja-JP"
+      },
+      "expected": {
+        "locale": "en"
+      },
+      "source": [
+        "packages/contracts/src/locale.ts:15",
+        "packages/contracts/src/locale.ts:17",
+        "packages/contracts/src/locale.ts:27"
+      ]
+    },
+    {
+      "id": "desktop-locale-missing",
+      "description": "系统语言与保存偏好缺省时使用默认语言",
+      "input": {
+        "operation": "resolve-desktop-locale",
+        "category": "boundary",
+        "requiresSystemEnvironment": false
+      },
+      "expected": {
+        "locale": "zh-CN"
+      },
+      "source": [
+        "packages/contracts/src/locale.ts:4",
+        "packages/contracts/src/locale.ts:15",
+        "packages/contracts/src/locale.ts:16",
+        "packages/contracts/src/locale.ts:25",
+        "packages/contracts/src/locale.ts:27"
+      ]
+    },
+    {
+      "id": "desktop-invalid-env-exact-match",
+      "description": "含空格的环境值无效，继续使用明确偏好",
+      "input": {
+        "operation": "resolve-desktop-locale",
+        "category": "failure",
+        "requiresSystemEnvironment": false,
+        "env": " en ",
+        "preference": "zh-CN",
+        "system": "en-US"
+      },
+      "expected": {
+        "locale": "zh-CN"
+      },
+      "source": [
+        "packages/contracts/src/locale.ts:1",
+        "packages/contracts/src/locale.ts:6",
+        "packages/contracts/src/locale.ts:25",
+        "packages/contracts/src/locale.ts:26"
+      ]
+    },
+    {
+      "id": "locale-store-missing",
+      "description": "首次启动时偏好文件不存在，跟随系统",
+      "input": {
+        "operation": "desktop-locale-store",
+        "category": "boundary",
+        "requiresSystemEnvironment": false,
+        "system": "fr-FR"
+      },
+      "expected": {
+        "initial": {
+          "preference": "system",
+          "locale": "en"
+        }
+      },
+      "source": [
+        "apps/desktop/src/main/locale-store.ts:19",
+        "apps/desktop/src/main/locale-store.ts:21",
+        "apps/desktop/src/main/locale-store.ts:25",
+        "apps/desktop/src/main/locale-store.ts:29",
+        "packages/contracts/src/locale.ts:10",
+        "packages/contracts/src/locale.ts:25",
+        "packages/contracts/src/locale.ts:26",
+        "packages/contracts/src/locale.ts:27",
+        "apps/desktop/src/main/index.ts:687",
+        "apps/desktop/src/main/index.ts:689",
+        "apps/desktop/src/main/index.ts:690",
+        "apps/desktop/src/main/index.ts:691"
+      ]
+    },
+    {
+      "id": "locale-store-broken-json",
+      "description": "损坏的 JSON 回退为跟随系统，读取不会改写原值",
+      "input": {
+        "operation": "desktop-locale-store",
+        "category": "failure",
+        "requiresSystemEnvironment": false,
+        "fileJson": "{",
+        "system": "en-US"
+      },
+      "expected": {
+        "initial": {
+          "preference": "system",
+          "locale": "en"
+        },
+        "fileJson": "{"
+      },
+      "source": [
+        "apps/desktop/src/main/locale-store.ts:19",
+        "apps/desktop/src/main/locale-store.ts:21",
+        "apps/desktop/src/main/locale-store.ts:25",
+        "apps/desktop/src/main/locale-store.ts:29",
+        "packages/contracts/src/locale.ts:10",
+        "packages/contracts/src/locale.ts:25",
+        "packages/contracts/src/locale.ts:26",
+        "packages/contracts/src/locale.ts:27",
+        "apps/desktop/src/main/index.ts:687",
+        "apps/desktop/src/main/index.ts:689",
+        "apps/desktop/src/main/index.ts:690",
+        "apps/desktop/src/main/index.ts:691"
+      ]
+    },
+    {
+      "id": "locale-store-unsupported-preference",
+      "description": "合法 JSON 中的未支持语言回退为跟随系统",
+      "input": {
+        "operation": "desktop-locale-store",
+        "category": "failure",
+        "requiresSystemEnvironment": false,
+        "fileJson": "{\"preference\":\"fr-FR\"}",
+        "system": "zh-Hans"
+      },
+      "expected": {
+        "initial": {
+          "preference": "system",
+          "locale": "zh-CN"
+        },
+        "fileJson": "{\"preference\":\"fr-FR\"}"
+      },
+      "source": [
+        "apps/desktop/src/main/locale-store.ts:21",
+        "apps/desktop/src/main/locale-store.ts:22",
+        "apps/desktop/src/main/locale-store.ts:23",
+        "apps/desktop/src/main/locale-store.ts:29",
+        "packages/contracts/src/locale.ts:10",
+        "packages/contracts/src/locale.ts:25",
+        "packages/contracts/src/locale.ts:26",
+        "packages/contracts/src/locale.ts:27",
+        "apps/desktop/src/main/index.ts:687",
+        "apps/desktop/src/main/index.ts:689",
+        "apps/desktop/src/main/index.ts:690",
+        "apps/desktop/src/main/index.ts:691"
+      ]
+    },
+    {
+      "id": "locale-store-change-and-follow",
+      "description": "保存英文再切回跟随系统，逐次返回并通知有效语言",
+      "input": {
+        "operation": "desktop-locale-store",
+        "category": "normal",
+        "requiresSystemEnvironment": false,
+        "fileJson": "{\"preference\":\"zh-CN\"}",
+        "system": "zh-Hant",
+        "choices": [
+          "en",
+          "system"
+        ]
+      },
+      "expected": {
+        "initial": {
+          "preference": "zh-CN",
+          "locale": "zh-CN"
+        },
+        "changes": [
+          {
+            "locale": "en",
+            "preference": "en"
+          },
+          {
+            "locale": "zh-CN",
+            "preference": "system"
+          }
+        ],
+        "notifications": [
+          "en",
+          "zh-CN"
+        ],
+        "fileJson": "{\"preference\":\"system\"}"
+      },
+      "source": [
+        "apps/desktop/src/main/locale-store.ts:21",
+        "apps/desktop/src/main/locale-store.ts:23",
+        "apps/desktop/src/main/locale-store.ts:29",
+        "apps/desktop/src/main/locale-store.ts:33",
+        "apps/desktop/src/main/locale-store.ts:35",
+        "apps/desktop/src/main/locale-store.ts:37",
+        "apps/desktop/src/main/locale-store.ts:38",
+        "apps/desktop/src/main/locale-store.ts:41",
+        "packages/contracts/src/locale.ts:10",
+        "packages/contracts/src/locale.ts:25",
+        "packages/contracts/src/locale.ts:26",
+        "packages/contracts/src/locale.ts:27",
+        "apps/desktop/src/main/index.ts:687",
+        "apps/desktop/src/main/index.ts:689",
+        "apps/desktop/src/main/index.ts:690",
+        "apps/desktop/src/main/index.ts:691"
+      ]
+    },
+    {
+      "id": "locale-store-invalid-ipc-write",
+      "description": "IPC 拒绝不支持的语言，保留保存值且不发变更通知",
+      "input": {
+        "operation": "desktop-locale-store",
+        "category": "failure",
+        "requiresSystemEnvironment": false,
+        "fileJson": "{\"preference\":\"en\"}",
+        "system": "zh-Hant",
+        "choices": [
+          "en-US"
+        ]
+      },
+      "expected": {
+        "initial": {
+          "preference": "en",
+          "locale": "en"
+        },
+        "changes": [
+          {
+            "error": "Invalid locale preference",
+            "preference": "en",
+            "locale": "en"
+          }
+        ],
+        "notifications": [],
+        "fileJson": "{\"preference\":\"en\"}"
+      },
+      "source": [
+        "apps/desktop/src/main/locale-store.ts:19",
+        "apps/desktop/src/main/locale-store.ts:23",
+        "apps/desktop/src/main/locale-store.ts:29",
+        "apps/desktop/src/main/locale-store.ts:33",
+        "apps/desktop/src/main/locale-store.ts:41",
+        "packages/contracts/src/locale.ts:10",
+        "packages/contracts/src/locale.ts:25",
+        "packages/contracts/src/locale.ts:26",
+        "packages/contracts/src/locale.ts:27",
+        "apps/desktop/src/main/index.ts:687",
+        "apps/desktop/src/main/index.ts:689",
+        "apps/desktop/src/main/index.ts:690",
+        "apps/desktop/src/main/index.ts:691"
+      ]
+    },
+    {
+      "id": "tray-locale-env-forced",
+      "description": "托盘标记已保存语言，禁用语言选项并显示英文覆盖提示",
+      "input": {
+        "operation": "desktop-tray-language",
+        "category": "boundary",
+        "requiresSystemEnvironment": false,
+        "env": "en",
+        "system": "en-US",
+        "preference": "zh-CN"
+      },
+      "expected": {
+        "menu": "Language",
+        "radios": [
+          {
+            "label": "Follow system",
+            "checked": false,
+            "enabled": false
+          },
+          {
+            "label": "中文",
+            "checked": true,
+            "enabled": false
+          },
+          {
+            "label": "English",
+            "checked": false,
+            "enabled": false
+          }
+        ],
+        "notices": [
+          "Language is set by the MATOU_LOCALE environment variable",
+          "Runtime messages switch after a restart"
+        ]
+      },
+      "source": [
+        "apps/desktop/src/main/index.ts:416",
+        "apps/desktop/src/main/index.ts:421",
+        "apps/desktop/src/main/index.ts:423",
+        "apps/desktop/src/main/index.ts:429",
+        "apps/desktop/src/main/index.ts:430",
+        "apps/desktop/src/main/index.ts:432",
+        "apps/desktop/src/main/index.ts:433",
+        "apps/desktop/src/main/messages.ts:48",
+        "apps/desktop/src/main/messages.ts:49",
+        "apps/desktop/src/main/messages.ts:50",
+        "apps/desktop/src/main/messages.ts:51",
+        "apps/desktop/src/main/messages.ts:52",
+        "apps/desktop/src/main/messages.ts:53",
+        "apps/desktop/src/main/messages.ts:66",
+        "packages/contracts/src/locale.ts:25"
+      ]
+    },
+    {
+      "id": "renderer-forced-language-choice",
+      "description": "明确选择与有效语言冲突时显示覆盖提示，随后选择跟随系统时清除提示",
+      "input": {
+        "operation": "renderer-language-settings",
+        "category": "boundary",
+        "requiresSystemEnvironment": false,
+        "locale": "en",
+        "storedPreference": "system",
+        "setResults": [
+          {
+            "choice": "zh-CN",
+            "effectiveLocale": "en"
+          },
+          {
+            "choice": "system",
+            "effectiveLocale": "en"
+          }
+        ]
+      },
+      "expected": {
+        "initial": "system",
+        "options": [
+          [
+            "system",
+            "Follow system"
+          ],
+          [
+            "zh-CN",
+            "中文"
+          ],
+          [
+            "en",
+            "English"
+          ]
+        ],
+        "note": "The interface switches immediately; runtime messages switch after a restart",
+        "writes": [
+          "zh-CN",
+          "system"
+        ],
+        "afterChoices": [
+          {
+            "selected": "zh-CN",
+            "status": "Currently fixed to English by the MATOU_LOCALE environment variable"
+          },
+          {
+            "selected": "system"
+          }
+        ]
+      },
+      "source": [
+        "apps/desktop/src/renderer/src/hierarchy/ModelSwitchSettings.tsx:351",
+        "apps/desktop/src/renderer/src/hierarchy/ModelSwitchSettings.tsx:352",
+        "apps/desktop/src/renderer/src/hierarchy/ModelSwitchSettings.tsx:435",
+        "apps/desktop/src/renderer/src/hierarchy/ModelSwitchSettings.tsx:442",
+        "apps/desktop/src/renderer/src/hierarchy/ModelSwitchSettings.tsx:443",
+        "apps/desktop/src/renderer/src/hierarchy/ModelSwitchSettings.tsx:449",
+        "apps/desktop/src/renderer/src/hierarchy/ModelSwitchSettings.tsx:450",
+        "apps/desktop/src/renderer/src/hierarchy/ModelSwitchSettings.tsx:454",
+        "apps/desktop/src/renderer/src/hierarchy/ModelSwitchSettings.tsx:456",
+        "apps/desktop/src/renderer/src/hierarchy/ModelSwitchSettings.tsx:462",
+        "apps/desktop/src/renderer/src/hierarchy/ModelSwitchSettings.tsx:469",
+        "apps/desktop/src/renderer/src/hierarchy/ModelSwitchSettings.tsx:474",
+        "apps/desktop/src/renderer/src/hierarchy/ModelSwitchSettings.tsx:475",
+        "apps/desktop/src/renderer/src/i18n/messages/hierarchyShell.ts:270",
+        "apps/desktop/src/renderer/src/i18n/messages/hierarchyShell.ts:271",
+        "apps/desktop/src/renderer/src/i18n/messages/hierarchyShell.ts:272",
+        "apps/desktop/src/renderer/src/i18n/messages/hierarchyShell.ts:273",
+        "apps/desktop/src/renderer/src/i18n/messages/hierarchyShell.ts:274",
+        "apps/desktop/src/renderer/src/i18n/messages/hierarchyShell.ts:542",
+        "apps/desktop/src/renderer/src/i18n/messages/hierarchyShell.ts:543",
+        "apps/desktop/src/renderer/src/i18n/messages/hierarchyShell.ts:544",
+        "apps/desktop/src/renderer/src/i18n/messages/hierarchyShell.ts:545",
+        "apps/desktop/src/renderer/src/i18n/messages/hierarchyShell.ts:546",
+        "apps/desktop/src/renderer/src/i18n/messages/hierarchyShell.ts:547"
+      ]
+    },
+    {
+      "id": "renderer-language-bridge-errors",
+      "description": "语言偏好读写失败后，仍可选择语言且保留本地选择",
+      "input": {
+        "operation": "renderer-language-settings",
+        "category": "failure",
+        "requiresSystemEnvironment": false,
+        "locale": "zh-CN",
+        "readError": true,
+        "setResults": [
+          {
+            "choice": "en",
+            "error": true
+          }
+        ]
+      },
+      "expected": {
+        "initial": "system",
+        "options": [
+          [
+            "system",
+            "跟随系统"
+          ],
+          [
+            "zh-CN",
+            "中文"
+          ],
+          [
+            "en",
+            "English"
+          ]
+        ],
+        "note": "界面立即切换；运行时消息在重启后切换",
+        "writes": [
+          "en"
+        ],
+        "afterChoices": [
+          {
+            "selected": "en"
+          }
+        ]
+      },
+      "source": [
+        "apps/desktop/src/renderer/src/hierarchy/ModelSwitchSettings.tsx:351",
+        "apps/desktop/src/renderer/src/hierarchy/ModelSwitchSettings.tsx:352",
+        "apps/desktop/src/renderer/src/hierarchy/ModelSwitchSettings.tsx:435",
+        "apps/desktop/src/renderer/src/hierarchy/ModelSwitchSettings.tsx:442",
+        "apps/desktop/src/renderer/src/hierarchy/ModelSwitchSettings.tsx:445",
+        "apps/desktop/src/renderer/src/hierarchy/ModelSwitchSettings.tsx:449",
+        "apps/desktop/src/renderer/src/hierarchy/ModelSwitchSettings.tsx:450",
+        "apps/desktop/src/renderer/src/hierarchy/ModelSwitchSettings.tsx:454",
+        "apps/desktop/src/renderer/src/hierarchy/ModelSwitchSettings.tsx:457",
+        "apps/desktop/src/renderer/src/hierarchy/ModelSwitchSettings.tsx:469",
+        "apps/desktop/src/renderer/src/hierarchy/ModelSwitchSettings.tsx:474",
+        "apps/desktop/src/renderer/src/hierarchy/ModelSwitchSettings.tsx:475",
+        "apps/desktop/src/renderer/src/i18n/messages/hierarchyShell.ts:270",
+        "apps/desktop/src/renderer/src/i18n/messages/hierarchyShell.ts:271",
+        "apps/desktop/src/renderer/src/i18n/messages/hierarchyShell.ts:272",
+        "apps/desktop/src/renderer/src/i18n/messages/hierarchyShell.ts:273",
+        "apps/desktop/src/renderer/src/i18n/messages/hierarchyShell.ts:274",
+        "apps/desktop/src/renderer/src/i18n/messages/hierarchyShell.ts:542",
+        "apps/desktop/src/renderer/src/i18n/messages/hierarchyShell.ts:543",
+        "apps/desktop/src/renderer/src/i18n/messages/hierarchyShell.ts:544",
+        "apps/desktop/src/renderer/src/i18n/messages/hierarchyShell.ts:545",
+        "apps/desktop/src/renderer/src/i18n/messages/hierarchyShell.ts:546",
+        "apps/desktop/src/renderer/src/i18n/messages/hierarchyShell.ts:547"
+      ]
+    },
+    {
+      "id": "renderer-live-localized-hierarchy",
+      "description": "桌面桥接初值与后续事件切换工作区菜单、标签和底部工具条，原样保留用户标题",
+      "input": {
+        "operation": "renderer-hierarchy-locale",
+        "category": "normal",
+        "requiresSystemEnvironment": false,
+        "bridgeInitialLocale": "en",
+        "bridgeChanges": [
+          "zh-CN"
+        ],
+        "workspaceName": "Project 示例",
+        "taskTitle": "Task 甲",
+        "sceneName": "Canvas 乙",
+        "gitBranch": "demo-branch"
+      },
+      "expected": {
+        "states": [
+          {
+            "locale": "en",
+            "workspaceTitle": "Project 示例",
+            "taskTitle": "Task 甲",
+            "sceneTitle": "Canvas 乙",
+            "closeTab": "Close tab: Canvas 乙",
+            "sidebarToolbar": [
+              "Workspace views",
+              "Board",
+              "Settings"
+            ],
+            "git": {
+              "label": "Open Git",
+              "title": "Git branch: demo-branch",
+              "branch": "demo-branch"
+            },
+            "taskMenu": [
+              "Pin",
+              "Rename",
+              "Delete"
+            ],
+            "tabMenu": "Rename tab"
+          },
+          {
+            "locale": "zh-CN",
+            "workspaceTitle": "Project 示例",
+            "taskTitle": "Task 甲",
+            "sceneTitle": "Canvas 乙",
+            "closeTab": "关闭页签：Canvas 乙",
+            "sidebarToolbar": [
+              "工作空间视图",
+              "看板",
+              "设置"
+            ],
+            "git": {
+              "label": "打开 Git",
+              "title": "Git 分支：demo-branch",
+              "branch": "demo-branch"
+            },
+            "taskMenu": [
+              "置顶",
+              "重命名",
+              "删除"
+            ],
+            "tabMenu": "重命名页签"
+          }
+        ],
+        "unsubscribed": true
+      },
+      "source": [
+        "apps/desktop/src/renderer/src/i18n/LocaleProvider.tsx:10",
+        "apps/desktop/src/renderer/src/i18n/LocaleProvider.tsx:14",
+        "apps/desktop/src/renderer/src/i18n/LocaleProvider.tsx:18",
+        "apps/desktop/src/renderer/src/i18n/LocaleProvider.tsx:19",
+        "apps/desktop/src/renderer/src/i18n/LocaleProvider.tsx:20",
+        "apps/desktop/src/renderer/src/i18n/LocaleProvider.tsx:21",
+        "apps/desktop/src/renderer/src/i18n/LocaleProvider.tsx:23",
+        "apps/desktop/src/renderer/src/i18n/LocaleProvider.tsx:28",
+        "apps/desktop/src/renderer/src/hierarchy/TaskSidebar.tsx:61",
+        "apps/desktop/src/renderer/src/hierarchy/TaskSidebar.tsx:236",
+        "apps/desktop/src/renderer/src/hierarchy/TaskSidebar.tsx:284",
+        "apps/desktop/src/renderer/src/hierarchy/TaskSidebar.tsx:302",
+        "apps/desktop/src/renderer/src/hierarchy/TaskSidebar.tsx:303",
+        "apps/desktop/src/renderer/src/hierarchy/TaskSidebar.tsx:310",
+        "apps/desktop/src/renderer/src/hierarchy/TaskSidebar.tsx:342",
+        "apps/desktop/src/renderer/src/hierarchy/SceneTabBar.tsx:33",
+        "apps/desktop/src/renderer/src/hierarchy/SceneTabBar.tsx:38",
+        "apps/desktop/src/renderer/src/hierarchy/SceneTabBar.tsx:176",
+        "apps/desktop/src/renderer/src/hierarchy/SceneTabBar.tsx:181",
+        "apps/desktop/src/renderer/src/hierarchy/SceneTabBar.tsx:225",
+        "apps/desktop/src/renderer/src/hierarchy/SceneTabBar.tsx:293",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1111",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1421",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:58",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:151",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:224",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:225",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:226",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:227",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:528",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:530",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:533",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:535",
+        "apps/desktop/src/renderer/src/i18n/messages/hud.ts:41",
+        "apps/desktop/src/renderer/src/i18n/messages/hud.ts:44",
+        "apps/desktop/src/renderer/src/i18n/messages/hud.ts:226",
+        "apps/desktop/src/renderer/src/i18n/messages/hud.ts:229",
+        "apps/desktop/src/renderer/src/i18n/messages/hierarchyShell.ts:32",
+        "apps/desktop/src/renderer/src/i18n/messages/hierarchyShell.ts:33",
+        "apps/desktop/src/renderer/src/i18n/messages/hierarchyShell.ts:34",
+        "apps/desktop/src/renderer/src/i18n/messages/hierarchyShell.ts:41",
+        "apps/desktop/src/renderer/src/i18n/messages/hierarchyShell.ts:93",
+        "apps/desktop/src/renderer/src/i18n/messages/hierarchyShell.ts:101",
+        "apps/desktop/src/renderer/src/i18n/messages/hierarchyShell.ts:306",
+        "apps/desktop/src/renderer/src/i18n/messages/hierarchyShell.ts:307",
+        "apps/desktop/src/renderer/src/i18n/messages/hierarchyShell.ts:308",
+        "apps/desktop/src/renderer/src/i18n/messages/hierarchyShell.ts:315",
+        "apps/desktop/src/renderer/src/i18n/messages/hierarchyShell.ts:367",
+        "apps/desktop/src/renderer/src/i18n/messages/hierarchyShell.ts:375"
+      ]
+    },
+    {
+      "id": "renderer-invalid-workspace-menu",
+      "description": "工作区目录不可用时禁用新增事项，随有效语言显示错误原因",
+      "input": {
+        "operation": "renderer-hierarchy-locale",
+        "category": "failure",
+        "requiresSystemEnvironment": false,
+        "bridgeInitialLocale": "en",
+        "workspaceName": "Project 示例",
+        "taskTitle": "Task 甲",
+        "sceneName": "Canvas 乙",
+        "workspacePathInvalid": true
+      },
+      "expected": {
+        "locale": "en",
+        "pathMarker": "Invalid path",
+        "addTask": {
+          "label": "New task in Project 示例",
+          "title": "The workspace directory is unavailable. Restore the original path locally, or remove the workspace.",
+          "disabled": true
+        }
+      },
+      "source": [
+        "apps/desktop/src/renderer/src/i18n/LocaleProvider.tsx:18",
+        "apps/desktop/src/renderer/src/i18n/LocaleProvider.tsx:19",
+        "apps/desktop/src/renderer/src/i18n/LocaleProvider.tsx:28",
+        "apps/desktop/src/renderer/src/hierarchy/TaskSidebar.tsx:61",
+        "apps/desktop/src/renderer/src/hierarchy/TaskSidebar.tsx:208",
+        "apps/desktop/src/renderer/src/hierarchy/TaskSidebar.tsx:240",
+        "apps/desktop/src/renderer/src/hierarchy/TaskSidebar.tsx:243",
+        "apps/desktop/src/renderer/src/hierarchy/TaskSidebar.tsx:244",
+        "apps/desktop/src/renderer/src/hierarchy/TaskSidebar.tsx:245",
+        "apps/desktop/src/renderer/src/i18n/messages/hierarchyShell.ts:281",
+        "apps/desktop/src/renderer/src/i18n/messages/hierarchyShell.ts:285",
+        "apps/desktop/src/renderer/src/i18n/messages/hierarchyShell.ts:298"
+      ]
+    },
+    {
+      "id": "runtime-locale-fork-and-cache",
+      "description": "桌面将解析后的语言传给 Runtime，同进程锁定首次语言，新进程重新读取",
+      "input": {
+        "operation": "runtime-locale-lifecycle",
+        "category": "boundary",
+        "requiresSystemEnvironment": false,
+        "env": "en-US",
+        "system": "ja-JP",
+        "initialPreference": "system",
+        "laterPreference": "zh-CN"
+      },
+      "expected": {
+        "forwardedInitially": "en",
+        "runtimeInitially": "en",
+        "desktopAfterChange": "zh-CN",
+        "runtimeBeforeRestart": "en",
+        "forwardedOnNextFork": "zh-CN",
+        "runtimeAfterRestart": "zh-CN"
+      },
+      "source": [
+        "apps/desktop/src/main/runtime-host.ts:248",
+        "apps/desktop/src/main/runtime-host.ts:251",
+        "apps/desktop/src/main/runtime-host.ts:252",
+        "apps/desktop/src/main/runtime-host.ts:255",
+        "apps/desktop/src/main/index.ts:125",
+        "apps/desktop/src/main/index.ts:128",
+        "apps/desktop/src/main/index.ts:461",
+        "apps/desktop/src/main/index.ts:537",
+        "apps/desktop/src/main/index.ts:543",
+        "apps/desktop/src/main/index.ts:544",
+        "apps/desktop/src/main/locale-store.ts:29",
+        "apps/desktop/src/main/locale-store.ts:30",
+        "apps/desktop/src/main/locale-store.ts:33",
+        "apps/desktop/src/main/locale-store.ts:35",
+        "packages/contracts/src/locale.ts:25",
+        "packages/contracts/src/locale.ts:26",
+        "packages/contracts/src/locale.ts:27",
+        "apps/runtime/src/i18n/locale.ts:5",
+        "apps/runtime/src/i18n/locale.ts:10",
+        "apps/runtime/src/i18n/locale.ts:11",
+        "apps/runtime/src/i18n/locale.ts:12"
+      ]
+    },
+    {
+      "id": "runtime-locale-invalid-or-missing",
+      "description": "Runtime 未收到受支持的语言时直接用中文默认值",
+      "input": {
+        "operation": "runtime-locale-direct",
+        "category": "failure",
+        "requiresSystemEnvironment": false,
+        "runs": [
+          {
+            "env": "en-US"
+          },
+          {}
+        ]
+      },
+      "expected": {
+        "locales": [
+          "zh-CN",
+          "zh-CN"
+        ]
+      },
+      "source": [
+        "apps/runtime/src/i18n/locale.ts:5",
+        "apps/runtime/src/i18n/locale.ts:6",
+        "apps/runtime/src/i18n/locale.ts:10",
+        "apps/runtime/src/i18n/locale.ts:11",
+        "packages/contracts/src/locale.ts:1",
+        "packages/contracts/src/locale.ts:4",
+        "packages/contracts/src/locale.ts:6"
+      ]
+    },
+    {
+      "id": "zone-unset-shanghai",
+      "description": "无保存值时默认为自动，上海的设置预览候选为新加坡",
+      "input": {
+        "operation": "time-zone-settings-snapshot",
+        "category": "normal",
+        "requiresSystemEnvironment": false,
+        "hostTz": "Asia/Shanghai"
+      },
+      "expected": {
+        "timeZone": "auto",
+        "systemTimeZone": "Asia/Shanghai",
+        "autoTimeZone": "Asia/Singapore"
+      },
+      "source": [
+        "apps/runtime/src/session/claude-settings.ts:17",
+        "apps/runtime/src/session/claude-settings.ts:21",
+        "apps/runtime/src/session/claude-settings.ts:23",
+        "apps/runtime/src/session/claude-settings.ts:25",
+        "apps/runtime/src/session/claude-settings.ts:32",
+        "apps/runtime/src/session/claude-settings.ts:36",
+        "apps/runtime/src/session/claude-settings.ts:40",
+        "apps/runtime/src/session/claude-settings.ts:43",
+        "apps/runtime/src/session/claude-settings.ts:44",
+        "apps/runtime/src/session/claude-settings.ts:45",
+        "apps/runtime/src/session/claude-settings.ts:46",
+        "apps/runtime/src/session/claude-settings.ts:50",
+        "apps/runtime/src/egress/time-zone-policy.ts:3",
+        "apps/runtime/src/egress/time-zone-policy.ts:11",
+        "apps/runtime/src/egress/time-zone-policy.ts:23",
+        "apps/runtime/src/egress/time-zone-policy.ts:27",
+        "apps/runtime/src/egress/time-zone-policy.ts:29"
+      ]
+    },
+    {
+      "id": "zone-broken-stored-json",
+      "description": "保存的 JSON 损坏时回退为自动，其它系统时区不带自动候选",
+      "input": {
+        "operation": "time-zone-settings-snapshot",
+        "category": "failure",
+        "requiresSystemEnvironment": false,
+        "valueJson": "{",
+        "hostTz": "Europe/Berlin"
+      },
+      "expected": {
+        "timeZone": "auto",
+        "systemTimeZone": "Europe/Berlin"
+      },
+      "source": [
+        "apps/runtime/src/session/claude-settings.ts:17",
+        "apps/runtime/src/session/claude-settings.ts:21",
+        "apps/runtime/src/session/claude-settings.ts:23",
+        "apps/runtime/src/session/claude-settings.ts:25",
+        "apps/runtime/src/session/claude-settings.ts:32",
+        "apps/runtime/src/session/claude-settings.ts:36",
+        "apps/runtime/src/session/claude-settings.ts:40",
+        "apps/runtime/src/session/claude-settings.ts:43",
+        "apps/runtime/src/session/claude-settings.ts:44",
+        "apps/runtime/src/session/claude-settings.ts:45",
+        "apps/runtime/src/session/claude-settings.ts:46",
+        "apps/runtime/src/session/claude-settings.ts:50",
+        "apps/runtime/src/egress/time-zone-policy.ts:3",
+        "apps/runtime/src/egress/time-zone-policy.ts:11",
+        "apps/runtime/src/egress/time-zone-policy.ts:23",
+        "apps/runtime/src/egress/time-zone-policy.ts:27",
+        "apps/runtime/src/egress/time-zone-policy.ts:29"
+      ]
+    },
+    {
+      "id": "zone-fixed-snapshot-keeps-auto-preview",
+      "description": "保存固定区时，上海仍另给自动模式的预览候选",
+      "input": {
+        "operation": "time-zone-settings-snapshot",
+        "category": "boundary",
+        "requiresSystemEnvironment": false,
+        "valueJson": "\"UTC\"",
+        "hostTz": "Asia/Shanghai"
+      },
+      "expected": {
+        "timeZone": "UTC",
+        "systemTimeZone": "Asia/Shanghai",
+        "autoTimeZone": "Asia/Singapore"
+      },
+      "source": [
+        "apps/runtime/src/session/claude-settings.ts:17",
+        "apps/runtime/src/session/claude-settings.ts:21",
+        "apps/runtime/src/session/claude-settings.ts:23",
+        "apps/runtime/src/session/claude-settings.ts:25",
+        "apps/runtime/src/session/claude-settings.ts:32",
+        "apps/runtime/src/session/claude-settings.ts:36",
+        "apps/runtime/src/session/claude-settings.ts:40",
+        "apps/runtime/src/session/claude-settings.ts:43",
+        "apps/runtime/src/session/claude-settings.ts:44",
+        "apps/runtime/src/session/claude-settings.ts:45",
+        "apps/runtime/src/session/claude-settings.ts:46",
+        "apps/runtime/src/session/claude-settings.ts:50",
+        "apps/runtime/src/egress/time-zone-policy.ts:3",
+        "apps/runtime/src/egress/time-zone-policy.ts:11",
+        "apps/runtime/src/egress/time-zone-policy.ts:23",
+        "apps/runtime/src/egress/time-zone-policy.ts:27",
+        "apps/runtime/src/egress/time-zone-policy.ts:29"
+      ]
+    },
+    {
+      "id": "zone-rpc-store-named-zone",
+      "description": "接受固定 IANA 时区并返回保存后快照",
+      "input": {
+        "operation": "time-zone-settings-rpc-set",
+        "category": "normal",
+        "requiresSystemEnvironment": false,
+        "valueJson": "\"auto\"",
+        "hostTz": "Europe/Berlin",
+        "request": {
+          "timeZone": "America/Los_Angeles"
+        }
+      },
+      "expected": {
+        "snapshot": {
+          "timeZone": "America/Los_Angeles",
+          "systemTimeZone": "Europe/Berlin"
+        },
+        "storedValueJson": "\"America/Los_Angeles\"",
+        "writes": 1
+      },
+      "source": [
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:63",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:67",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:196",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:197",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:198",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:199",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:200",
+        "apps/runtime/src/session/claude-settings.ts:17",
+        "apps/runtime/src/session/claude-settings.ts:21",
+        "apps/runtime/src/session/claude-settings.ts:23",
+        "apps/runtime/src/session/claude-settings.ts:40",
+        "apps/runtime/src/session/claude-settings.ts:43",
+        "apps/runtime/src/session/claude-settings.ts:45",
+        "apps/runtime/src/session/claude-settings.ts:50",
+        "apps/runtime/src/session/claude-settings.ts:54",
+        "apps/runtime/src/session/claude-settings.ts:56",
+        "apps/runtime/src/session/claude-settings.ts:59",
+        "apps/runtime/src/session/claude-settings.ts:61"
+      ]
+    },
+    {
+      "id": "zone-rpc-reject-offset",
+      "description": "拒绝数字偏移写法，保留原配置",
+      "input": {
+        "operation": "time-zone-settings-rpc-set",
+        "category": "failure",
+        "requiresSystemEnvironment": false,
+        "valueJson": "\"system\"",
+        "hostTz": "Asia/Shanghai",
+        "request": {
+          "timeZone": "+08:00"
+        }
+      },
+      "expected": {
+        "snapshot": {
+          "timeZone": "system",
+          "systemTimeZone": "Asia/Shanghai",
+          "autoTimeZone": "Asia/Singapore"
+        },
+        "storedValueJson": "\"system\"",
+        "writes": 0,
+        "error": {
+          "code": "INVALID_REQUEST",
+          "message": "Invalid Claude Code time zone",
+          "retryable": false
+        }
+      },
+      "source": [
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:63",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:67",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:196",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:197",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:198",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:199",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:200",
+        "apps/runtime/src/session/claude-settings.ts:17",
+        "apps/runtime/src/session/claude-settings.ts:21",
+        "apps/runtime/src/session/claude-settings.ts:40",
+        "apps/runtime/src/session/claude-settings.ts:43",
+        "apps/runtime/src/session/claude-settings.ts:45",
+        "apps/runtime/src/session/claude-settings.ts:46",
+        "apps/runtime/src/session/claude-settings.ts:50",
+        "apps/runtime/src/session/claude-settings.ts:54"
+      ]
+    },
+    {
+      "id": "zone-rpc-reject-unknown",
+      "description": "名称格式合法但时区不存在，返回参数错误且保留原配置",
+      "input": {
+        "operation": "time-zone-settings-rpc-set",
+        "category": "failure",
+        "requiresSystemEnvironment": false,
+        "valueJson": "\"UTC\"",
+        "hostTz": "Asia/Shanghai",
+        "request": {
+          "timeZone": "Mars/Olympus"
+        }
+      },
+      "expected": {
+        "snapshot": {
+          "timeZone": "UTC",
+          "systemTimeZone": "Asia/Shanghai",
+          "autoTimeZone": "Asia/Singapore"
+        },
+        "storedValueJson": "\"UTC\"",
+        "writes": 0,
+        "error": {
+          "code": "INVALID_REQUEST",
+          "message": "Invalid Claude Code time zone",
+          "retryable": false
+        }
+      },
+      "source": [
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:63",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:67",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:196",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:197",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:198",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:199",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:200",
+        "apps/runtime/src/session/claude-settings.ts:17",
+        "apps/runtime/src/session/claude-settings.ts:21",
+        "apps/runtime/src/session/claude-settings.ts:23",
+        "apps/runtime/src/session/claude-settings.ts:25",
+        "apps/runtime/src/session/claude-settings.ts:40",
+        "apps/runtime/src/session/claude-settings.ts:43",
+        "apps/runtime/src/session/claude-settings.ts:45",
+        "apps/runtime/src/session/claude-settings.ts:46",
+        "apps/runtime/src/session/claude-settings.ts:50",
+        "apps/runtime/src/session/claude-settings.ts:54"
+      ]
+    },
+    {
+      "id": "cli-claude-fixed-precedence",
+      "description": "Claude Code 固定时区覆盖控制层、供应商层和父进程的 TZ",
+      "input": {
+        "operation": "cli-launch-time-zone",
+        "category": "normal",
+        "requiresSystemEnvironment": false,
+        "profile": "claude-code",
+        "timeZone": "UTC",
+        "hostEnv": {
+          "TZ": "Asia/Shanghai"
+        },
+        "providerEnv": {
+          "TZ": "Asia/Tokyo"
+        },
+        "controlEnv": {
+          "TZ": "Europe/Berlin"
+        }
+      },
+      "expected": {
+        "routeEnablesAutomaticPolicy": true,
+        "policyEnv": {
+          "TZ": "UTC"
+        },
+        "launchEnv": {
+          "TZ": "UTC"
+        },
+        "parentEnv": {
+          "TZ": "Asia/Shanghai"
+        }
+      },
+      "source": [
+        "apps/runtime/src/session/claude-settings.ts:33",
+        "apps/runtime/src/session/claude-settings.ts:64",
+        "apps/runtime/src/session/claude-settings.ts:66",
+        "apps/runtime/src/session/claude-settings.ts:68",
+        "apps/runtime/src/session/claude-settings.ts:69",
+        "apps/runtime/src/session/claude-settings.ts:70",
+        "apps/runtime/src/session/claude-settings.ts:71",
+        "apps/runtime/src/session/claude-settings.ts:73",
+        "apps/runtime/src/session/claude-settings.ts:79",
+        "apps/runtime/src/egress/time-zone-policy.ts:38",
+        "apps/runtime/src/egress/time-zone-policy.ts:45",
+        "packages/domain/src/agent-manifest.ts:139",
+        "apps/runtime/src/egress/egress-monitor.ts:41",
+        "apps/runtime/src/egress/egress-monitor.ts:43",
+        "apps/runtime/src/egress/egress-monitor.ts:45",
+        "apps/runtime/src/egress/egress-monitor.ts:62",
+        "apps/runtime/src/egress/egress-monitor.ts:67",
+        "apps/runtime/src/egress/egress-monitor.ts:72",
+        "apps/runtime/src/egress/egress-monitor.ts:96",
+        "apps/runtime/src/egress/egress-monitor.ts:99",
+        "apps/runtime/src/runtime-server.ts:2260",
+        "apps/runtime/src/runtime-server.ts:2265",
+        "apps/runtime/src/runtime-server.ts:2563",
+        "apps/runtime/src/runtime-server.ts:2564",
+        "apps/runtime/src/runtime-server.ts:2565",
+        "apps/runtime/src/runtime-server.ts:2567",
+        "apps/runtime/src/session/pty-session.ts:290",
+        "apps/runtime/src/session/pty-session.ts:295",
+        "apps/runtime/src/session/pty-session.ts:298",
+        "apps/runtime/src/session/pty-session.ts:324",
+        "apps/runtime/src/session/pty-session.ts:402",
+        "apps/runtime/src/session/pty-session.ts:410"
+      ]
+    },
+    {
+      "id": "cli-claude-system-inherits-parent",
+      "description": "Claude Code 跟随系统时由父进程的 TZ 传给 CLI",
+      "input": {
+        "operation": "cli-launch-time-zone",
+        "category": "normal",
+        "requiresSystemEnvironment": false,
+        "profile": "claude-code",
+        "timeZone": "system",
+        "hostEnv": {
+          "TZ": "Asia/Shanghai"
+        }
+      },
+      "expected": {
+        "routeEnablesAutomaticPolicy": true,
+        "policyEnv": {},
+        "launchEnv": {
+          "TZ": "Asia/Shanghai"
+        },
+        "parentEnv": {
+          "TZ": "Asia/Shanghai"
+        }
+      },
+      "source": [
+        "apps/runtime/src/session/claude-settings.ts:33",
+        "apps/runtime/src/session/claude-settings.ts:64",
+        "apps/runtime/src/session/claude-settings.ts:66",
+        "apps/runtime/src/session/claude-settings.ts:68",
+        "apps/runtime/src/session/claude-settings.ts:69",
+        "apps/runtime/src/session/claude-settings.ts:70",
+        "apps/runtime/src/session/claude-settings.ts:71",
+        "apps/runtime/src/session/claude-settings.ts:73",
+        "apps/runtime/src/session/claude-settings.ts:79",
+        "apps/runtime/src/egress/time-zone-policy.ts:38",
+        "apps/runtime/src/egress/time-zone-policy.ts:41",
+        "packages/domain/src/agent-manifest.ts:139",
+        "apps/runtime/src/egress/egress-monitor.ts:41",
+        "apps/runtime/src/egress/egress-monitor.ts:43",
+        "apps/runtime/src/egress/egress-monitor.ts:45",
+        "apps/runtime/src/egress/egress-monitor.ts:62",
+        "apps/runtime/src/egress/egress-monitor.ts:67",
+        "apps/runtime/src/egress/egress-monitor.ts:72",
+        "apps/runtime/src/egress/egress-monitor.ts:96",
+        "apps/runtime/src/egress/egress-monitor.ts:99",
+        "apps/runtime/src/runtime-server.ts:2260",
+        "apps/runtime/src/runtime-server.ts:2265",
+        "apps/runtime/src/runtime-server.ts:2563",
+        "apps/runtime/src/runtime-server.ts:2564",
+        "apps/runtime/src/runtime-server.ts:2565",
+        "apps/runtime/src/runtime-server.ts:2567",
+        "apps/runtime/src/session/pty-session.ts:290",
+        "apps/runtime/src/session/pty-session.ts:295",
+        "apps/runtime/src/session/pty-session.ts:298",
+        "apps/runtime/src/session/pty-session.ts:324",
+        "apps/runtime/src/session/pty-session.ts:402",
+        "apps/runtime/src/session/pty-session.ts:410"
+      ]
+    },
+    {
+      "id": "cli-claude-system-without-tz",
+      "description": "跟随系统且各层都没有 TZ，启动参数也省略 TZ",
+      "input": {
+        "operation": "cli-launch-time-zone",
+        "category": "boundary",
+        "requiresSystemEnvironment": false,
+        "profile": "claude-code",
+        "timeZone": "system",
+        "hostEnv": {}
+      },
+      "expected": {
+        "routeEnablesAutomaticPolicy": true,
+        "policyEnv": {},
+        "launchEnv": {},
+        "parentEnv": {}
+      },
+      "source": [
+        "apps/runtime/src/session/claude-settings.ts:33",
+        "apps/runtime/src/session/claude-settings.ts:64",
+        "apps/runtime/src/session/claude-settings.ts:66",
+        "apps/runtime/src/session/claude-settings.ts:68",
+        "apps/runtime/src/session/claude-settings.ts:69",
+        "apps/runtime/src/session/claude-settings.ts:70",
+        "apps/runtime/src/session/claude-settings.ts:71",
+        "apps/runtime/src/session/claude-settings.ts:73",
+        "apps/runtime/src/session/claude-settings.ts:79",
+        "apps/runtime/src/egress/time-zone-policy.ts:38",
+        "apps/runtime/src/egress/time-zone-policy.ts:41",
+        "packages/domain/src/agent-manifest.ts:139",
+        "apps/runtime/src/egress/egress-monitor.ts:41",
+        "apps/runtime/src/egress/egress-monitor.ts:43",
+        "apps/runtime/src/egress/egress-monitor.ts:45",
+        "apps/runtime/src/egress/egress-monitor.ts:62",
+        "apps/runtime/src/egress/egress-monitor.ts:67",
+        "apps/runtime/src/egress/egress-monitor.ts:72",
+        "apps/runtime/src/egress/egress-monitor.ts:96",
+        "apps/runtime/src/egress/egress-monitor.ts:99",
+        "apps/runtime/src/runtime-server.ts:2260",
+        "apps/runtime/src/runtime-server.ts:2265",
+        "apps/runtime/src/runtime-server.ts:2563",
+        "apps/runtime/src/runtime-server.ts:2564",
+        "apps/runtime/src/runtime-server.ts:2565",
+        "apps/runtime/src/runtime-server.ts:2567",
+        "apps/runtime/src/session/pty-session.ts:290",
+        "apps/runtime/src/session/pty-session.ts:295",
+        "apps/runtime/src/session/pty-session.ts:298",
+        "apps/runtime/src/session/pty-session.ts:324",
+        "apps/runtime/src/session/pty-session.ts:402",
+        "apps/runtime/src/session/pty-session.ts:410"
+      ]
+    },
+    {
+      "id": "cli-claude-system-keeps-provider-tz",
+      "description": "跟随系统不注入 TZ，已有的供应商环境值仍覆盖父进程",
+      "input": {
+        "operation": "cli-launch-time-zone",
+        "category": "boundary",
+        "requiresSystemEnvironment": false,
+        "profile": "claude-code",
+        "timeZone": "system",
+        "hostEnv": {
+          "TZ": "Asia/Shanghai"
+        },
+        "providerEnv": {
+          "TZ": "Asia/Tokyo"
+        }
+      },
+      "expected": {
+        "routeEnablesAutomaticPolicy": true,
+        "policyEnv": {},
+        "launchEnv": {
+          "TZ": "Asia/Tokyo"
+        },
+        "parentEnv": {
+          "TZ": "Asia/Shanghai"
+        }
+      },
+      "source": [
+        "apps/runtime/src/session/claude-settings.ts:33",
+        "apps/runtime/src/session/claude-settings.ts:64",
+        "apps/runtime/src/session/claude-settings.ts:66",
+        "apps/runtime/src/session/claude-settings.ts:68",
+        "apps/runtime/src/session/claude-settings.ts:69",
+        "apps/runtime/src/session/claude-settings.ts:70",
+        "apps/runtime/src/session/claude-settings.ts:71",
+        "apps/runtime/src/session/claude-settings.ts:73",
+        "apps/runtime/src/session/claude-settings.ts:79",
+        "apps/runtime/src/egress/time-zone-policy.ts:38",
+        "apps/runtime/src/egress/time-zone-policy.ts:41",
+        "packages/domain/src/agent-manifest.ts:139",
+        "apps/runtime/src/egress/egress-monitor.ts:41",
+        "apps/runtime/src/egress/egress-monitor.ts:43",
+        "apps/runtime/src/egress/egress-monitor.ts:45",
+        "apps/runtime/src/egress/egress-monitor.ts:62",
+        "apps/runtime/src/egress/egress-monitor.ts:67",
+        "apps/runtime/src/egress/egress-monitor.ts:72",
+        "apps/runtime/src/egress/egress-monitor.ts:96",
+        "apps/runtime/src/egress/egress-monitor.ts:99",
+        "apps/runtime/src/runtime-server.ts:2260",
+        "apps/runtime/src/runtime-server.ts:2265",
+        "apps/runtime/src/runtime-server.ts:2563",
+        "apps/runtime/src/runtime-server.ts:2564",
+        "apps/runtime/src/runtime-server.ts:2565",
+        "apps/runtime/src/runtime-server.ts:2567",
+        "apps/runtime/src/session/pty-session.ts:290",
+        "apps/runtime/src/session/pty-session.ts:295",
+        "apps/runtime/src/session/pty-session.ts:298",
+        "apps/runtime/src/session/pty-session.ts:324",
+        "apps/runtime/src/session/pty-session.ts:402",
+        "apps/runtime/src/session/pty-session.ts:410"
+      ]
+    },
+    {
+      "id": "cli-claude-auto-region-override",
+      "description": "自动模式按识别到的港区时区和匿名地区样本选择启动区",
+      "input": {
+        "operation": "cli-launch-time-zone",
+        "category": "normal",
+        "requiresSystemEnvironment": false,
+        "profile": "claude-code",
+        "timeZone": "auto",
+        "hostEnv": {
+          "TZ": "Asia/Hong_Kong"
+        },
+        "exitCountry": "tw"
+      },
+      "expected": {
+        "routeEnablesAutomaticPolicy": true,
+        "policyEnv": {
+          "TZ": "Asia/Taipei"
+        },
+        "launchEnv": {
+          "TZ": "Asia/Taipei"
+        },
+        "parentEnv": {
+          "TZ": "Asia/Hong_Kong"
+        }
+      },
+      "source": [
+        "apps/runtime/src/session/claude-settings.ts:33",
+        "apps/runtime/src/session/claude-settings.ts:64",
+        "apps/runtime/src/session/claude-settings.ts:66",
+        "apps/runtime/src/session/claude-settings.ts:68",
+        "apps/runtime/src/session/claude-settings.ts:69",
+        "apps/runtime/src/session/claude-settings.ts:70",
+        "apps/runtime/src/session/claude-settings.ts:71",
+        "apps/runtime/src/session/claude-settings.ts:73",
+        "apps/runtime/src/session/claude-settings.ts:79",
+        "apps/runtime/src/egress/time-zone-policy.ts:11",
+        "apps/runtime/src/egress/time-zone-policy.ts:18",
+        "apps/runtime/src/egress/time-zone-policy.ts:23",
+        "apps/runtime/src/egress/time-zone-policy.ts:27",
+        "apps/runtime/src/egress/time-zone-policy.ts:28",
+        "apps/runtime/src/egress/time-zone-policy.ts:29",
+        "apps/runtime/src/egress/time-zone-policy.ts:42",
+        "apps/runtime/src/egress/time-zone-policy.ts:43",
+        "packages/domain/src/agent-manifest.ts:139",
+        "apps/runtime/src/egress/egress-monitor.ts:41",
+        "apps/runtime/src/egress/egress-monitor.ts:43",
+        "apps/runtime/src/egress/egress-monitor.ts:45",
+        "apps/runtime/src/egress/egress-monitor.ts:62",
+        "apps/runtime/src/egress/egress-monitor.ts:67",
+        "apps/runtime/src/egress/egress-monitor.ts:72",
+        "apps/runtime/src/egress/egress-monitor.ts:96",
+        "apps/runtime/src/egress/egress-monitor.ts:99",
+        "apps/runtime/src/runtime-server.ts:2260",
+        "apps/runtime/src/runtime-server.ts:2265",
+        "apps/runtime/src/runtime-server.ts:2563",
+        "apps/runtime/src/runtime-server.ts:2564",
+        "apps/runtime/src/runtime-server.ts:2565",
+        "apps/runtime/src/runtime-server.ts:2567",
+        "apps/runtime/src/session/pty-session.ts:290",
+        "apps/runtime/src/session/pty-session.ts:295",
+        "apps/runtime/src/session/pty-session.ts:298",
+        "apps/runtime/src/session/pty-session.ts:324",
+        "apps/runtime/src/session/pty-session.ts:402",
+        "apps/runtime/src/session/pty-session.ts:410"
+      ]
+    },
+    {
+      "id": "cli-claude-auto-unlisted-host",
+      "description": "官方会话自动模式在未命中名单时保留父进程 TZ",
+      "input": {
+        "operation": "cli-launch-time-zone",
+        "category": "boundary",
+        "requiresSystemEnvironment": false,
+        "profile": "claude-code",
+        "timeZone": "auto",
+        "hostEnv": {
+          "TZ": "Asia/Tokyo"
+        },
+        "exitCountry": "TW"
+      },
+      "expected": {
+        "routeEnablesAutomaticPolicy": true,
+        "policyEnv": {},
+        "launchEnv": {
+          "TZ": "Asia/Tokyo"
+        },
+        "parentEnv": {
+          "TZ": "Asia/Tokyo"
+        }
+      },
+      "source": [
+        "apps/runtime/src/session/claude-settings.ts:33",
+        "apps/runtime/src/session/claude-settings.ts:64",
+        "apps/runtime/src/session/claude-settings.ts:66",
+        "apps/runtime/src/session/claude-settings.ts:68",
+        "apps/runtime/src/session/claude-settings.ts:69",
+        "apps/runtime/src/session/claude-settings.ts:70",
+        "apps/runtime/src/session/claude-settings.ts:71",
+        "apps/runtime/src/session/claude-settings.ts:73",
+        "apps/runtime/src/session/claude-settings.ts:79",
+        "apps/runtime/src/egress/time-zone-policy.ts:3",
+        "apps/runtime/src/egress/time-zone-policy.ts:14",
+        "apps/runtime/src/egress/time-zone-policy.ts:23",
+        "apps/runtime/src/egress/time-zone-policy.ts:42",
+        "apps/runtime/src/egress/time-zone-policy.ts:43",
+        "packages/domain/src/agent-manifest.ts:139",
+        "apps/runtime/src/egress/egress-monitor.ts:41",
+        "apps/runtime/src/egress/egress-monitor.ts:43",
+        "apps/runtime/src/egress/egress-monitor.ts:45",
+        "apps/runtime/src/egress/egress-monitor.ts:62",
+        "apps/runtime/src/egress/egress-monitor.ts:67",
+        "apps/runtime/src/egress/egress-monitor.ts:72",
+        "apps/runtime/src/egress/egress-monitor.ts:96",
+        "apps/runtime/src/egress/egress-monitor.ts:99",
+        "apps/runtime/src/runtime-server.ts:2260",
+        "apps/runtime/src/runtime-server.ts:2265",
+        "apps/runtime/src/runtime-server.ts:2563",
+        "apps/runtime/src/runtime-server.ts:2564",
+        "apps/runtime/src/runtime-server.ts:2565",
+        "apps/runtime/src/runtime-server.ts:2567",
+        "apps/runtime/src/session/pty-session.ts:290",
+        "apps/runtime/src/session/pty-session.ts:295",
+        "apps/runtime/src/session/pty-session.ts:298",
+        "apps/runtime/src/session/pty-session.ts:324",
+        "apps/runtime/src/session/pty-session.ts:402",
+        "apps/runtime/src/session/pty-session.ts:410"
+      ]
+    },
+    {
+      "id": "cli-claude-third-party-auto",
+      "description": "第三方 Claude Code 的自动模式不注入设置层 TZ",
+      "input": {
+        "operation": "cli-launch-time-zone",
+        "category": "boundary",
+        "requiresSystemEnvironment": false,
+        "profile": "claude-code",
+        "timeZone": "auto",
+        "hostEnv": {
+          "TZ": "Asia/Shanghai"
+        },
+        "providerEnv": {
+          "ANTHROPIC_BASE_URL": "https://provider.example"
+        }
+      },
+      "expected": {
+        "routeEnablesAutomaticPolicy": false,
+        "policyEnv": {},
+        "launchEnv": {
+          "TZ": "Asia/Shanghai"
+        },
+        "parentEnv": {
+          "TZ": "Asia/Shanghai"
+        }
+      },
+      "source": [
+        "apps/runtime/src/session/claude-settings.ts:33",
+        "apps/runtime/src/session/claude-settings.ts:64",
+        "apps/runtime/src/session/claude-settings.ts:66",
+        "apps/runtime/src/session/claude-settings.ts:68",
+        "apps/runtime/src/session/claude-settings.ts:69",
+        "apps/runtime/src/session/claude-settings.ts:70",
+        "apps/runtime/src/session/claude-settings.ts:71",
+        "apps/runtime/src/session/claude-settings.ts:73",
+        "apps/runtime/src/session/claude-settings.ts:79",
+        "packages/domain/src/agent-manifest.ts:139",
+        "apps/runtime/src/egress/egress-monitor.ts:41",
+        "apps/runtime/src/egress/egress-monitor.ts:43",
+        "apps/runtime/src/egress/egress-monitor.ts:45",
+        "apps/runtime/src/egress/egress-monitor.ts:62",
+        "apps/runtime/src/egress/egress-monitor.ts:67",
+        "apps/runtime/src/egress/egress-monitor.ts:72",
+        "apps/runtime/src/egress/egress-monitor.ts:96",
+        "apps/runtime/src/egress/egress-monitor.ts:99",
+        "apps/runtime/src/runtime-server.ts:2260",
+        "apps/runtime/src/runtime-server.ts:2265",
+        "apps/runtime/src/runtime-server.ts:2563",
+        "apps/runtime/src/runtime-server.ts:2564",
+        "apps/runtime/src/runtime-server.ts:2565",
+        "apps/runtime/src/runtime-server.ts:2567",
+        "apps/runtime/src/session/pty-session.ts:290",
+        "apps/runtime/src/session/pty-session.ts:295",
+        "apps/runtime/src/session/pty-session.ts:298",
+        "apps/runtime/src/session/pty-session.ts:324",
+        "apps/runtime/src/session/pty-session.ts:402",
+        "apps/runtime/src/session/pty-session.ts:410"
+      ]
+    },
+    {
+      "id": "cli-claude-third-party-fixed",
+      "description": "第三方 Claude Code 仍应用用户指定的固定时区",
+      "input": {
+        "operation": "cli-launch-time-zone",
+        "category": "boundary",
+        "requiresSystemEnvironment": false,
+        "profile": "claude-code",
+        "timeZone": "Europe/London",
+        "hostEnv": {
+          "TZ": "Asia/Shanghai"
+        },
+        "providerEnv": {
+          "ANTHROPIC_BASE_URL": "https://provider.example"
+        }
+      },
+      "expected": {
+        "routeEnablesAutomaticPolicy": false,
+        "policyEnv": {
+          "TZ": "Europe/London"
+        },
+        "launchEnv": {
+          "TZ": "Europe/London"
+        },
+        "parentEnv": {
+          "TZ": "Asia/Shanghai"
+        }
+      },
+      "source": [
+        "apps/runtime/src/session/claude-settings.ts:33",
+        "apps/runtime/src/session/claude-settings.ts:64",
+        "apps/runtime/src/session/claude-settings.ts:66",
+        "apps/runtime/src/session/claude-settings.ts:68",
+        "apps/runtime/src/session/claude-settings.ts:69",
+        "apps/runtime/src/session/claude-settings.ts:70",
+        "apps/runtime/src/session/claude-settings.ts:71",
+        "apps/runtime/src/session/claude-settings.ts:73",
+        "apps/runtime/src/session/claude-settings.ts:79",
+        "packages/domain/src/agent-manifest.ts:139",
+        "apps/runtime/src/egress/egress-monitor.ts:41",
+        "apps/runtime/src/egress/egress-monitor.ts:43",
+        "apps/runtime/src/egress/egress-monitor.ts:45",
+        "apps/runtime/src/egress/egress-monitor.ts:62",
+        "apps/runtime/src/egress/egress-monitor.ts:67",
+        "apps/runtime/src/egress/egress-monitor.ts:72",
+        "apps/runtime/src/egress/egress-monitor.ts:96",
+        "apps/runtime/src/egress/egress-monitor.ts:99",
+        "apps/runtime/src/runtime-server.ts:2260",
+        "apps/runtime/src/runtime-server.ts:2265",
+        "apps/runtime/src/runtime-server.ts:2563",
+        "apps/runtime/src/runtime-server.ts:2564",
+        "apps/runtime/src/runtime-server.ts:2565",
+        "apps/runtime/src/runtime-server.ts:2567",
+        "apps/runtime/src/session/pty-session.ts:290",
+        "apps/runtime/src/session/pty-session.ts:295",
+        "apps/runtime/src/session/pty-session.ts:298",
+        "apps/runtime/src/session/pty-session.ts:324",
+        "apps/runtime/src/session/pty-session.ts:402",
+        "apps/runtime/src/session/pty-session.ts:410"
+      ]
+    },
+    {
+      "id": "cli-codex-fixed-uses-auto",
+      "description": "官方 Codex 在固定设置下仍走自动分支，无地区样本时用新加坡",
+      "input": {
+        "operation": "cli-launch-time-zone",
+        "category": "boundary",
+        "requiresSystemEnvironment": false,
+        "profile": "codex",
+        "timeZone": "UTC",
+        "hostEnv": {
+          "TZ": "Asia/Shanghai"
+        }
+      },
+      "expected": {
+        "routeEnablesAutomaticPolicy": true,
+        "policyEnv": {
+          "TZ": "Asia/Singapore"
+        },
+        "launchEnv": {
+          "TZ": "Asia/Singapore"
+        },
+        "parentEnv": {
+          "TZ": "Asia/Shanghai"
+        }
+      },
+      "source": [
+        "apps/runtime/src/session/claude-settings.ts:33",
+        "apps/runtime/src/session/claude-settings.ts:64",
+        "apps/runtime/src/session/claude-settings.ts:66",
+        "apps/runtime/src/session/claude-settings.ts:68",
+        "apps/runtime/src/session/claude-settings.ts:69",
+        "apps/runtime/src/session/claude-settings.ts:70",
+        "apps/runtime/src/session/claude-settings.ts:71",
+        "apps/runtime/src/session/claude-settings.ts:73",
+        "apps/runtime/src/session/claude-settings.ts:79",
+        "apps/runtime/src/egress/time-zone-policy.ts:3",
+        "apps/runtime/src/egress/time-zone-policy.ts:4",
+        "apps/runtime/src/egress/time-zone-policy.ts:23",
+        "apps/runtime/src/egress/time-zone-policy.ts:27",
+        "apps/runtime/src/egress/time-zone-policy.ts:29",
+        "apps/runtime/src/egress/time-zone-policy.ts:38",
+        "apps/runtime/src/egress/time-zone-policy.ts:40",
+        "apps/runtime/src/egress/time-zone-policy.ts:43",
+        "packages/domain/src/agent-manifest.ts:199",
+        "apps/runtime/src/egress/egress-monitor.ts:41",
+        "apps/runtime/src/egress/egress-monitor.ts:43",
+        "apps/runtime/src/egress/egress-monitor.ts:45",
+        "apps/runtime/src/egress/egress-monitor.ts:62",
+        "apps/runtime/src/egress/egress-monitor.ts:67",
+        "apps/runtime/src/egress/egress-monitor.ts:72",
+        "apps/runtime/src/egress/egress-monitor.ts:96",
+        "apps/runtime/src/egress/egress-monitor.ts:99",
+        "apps/runtime/src/runtime-server.ts:2260",
+        "apps/runtime/src/runtime-server.ts:2265",
+        "apps/runtime/src/runtime-server.ts:2563",
+        "apps/runtime/src/runtime-server.ts:2564",
+        "apps/runtime/src/runtime-server.ts:2565",
+        "apps/runtime/src/runtime-server.ts:2567",
+        "apps/runtime/src/session/pty-session.ts:290",
+        "apps/runtime/src/session/pty-session.ts:295",
+        "apps/runtime/src/session/pty-session.ts:298",
+        "apps/runtime/src/session/pty-session.ts:324",
+        "apps/runtime/src/session/pty-session.ts:402",
+        "apps/runtime/src/session/pty-session.ts:410"
+      ]
+    },
+    {
+      "id": "cli-antigravity-system-uses-auto",
+      "description": "Antigravity 在跟随系统设置下仍走自动分支",
+      "input": {
+        "operation": "cli-launch-time-zone",
+        "category": "boundary",
+        "requiresSystemEnvironment": false,
+        "profile": "antigravity",
+        "timeZone": "system",
+        "hostEnv": {
+          "TZ": "Asia/Shanghai"
+        },
+        "exitCountry": "MY"
+      },
+      "expected": {
+        "routeEnablesAutomaticPolicy": true,
+        "policyEnv": {
+          "TZ": "Asia/Kuala_Lumpur"
+        },
+        "launchEnv": {
+          "TZ": "Asia/Kuala_Lumpur"
+        },
+        "parentEnv": {
+          "TZ": "Asia/Shanghai"
+        }
+      },
+      "source": [
+        "apps/runtime/src/session/claude-settings.ts:33",
+        "apps/runtime/src/session/claude-settings.ts:64",
+        "apps/runtime/src/session/claude-settings.ts:66",
+        "apps/runtime/src/session/claude-settings.ts:68",
+        "apps/runtime/src/session/claude-settings.ts:69",
+        "apps/runtime/src/session/claude-settings.ts:70",
+        "apps/runtime/src/session/claude-settings.ts:71",
+        "apps/runtime/src/session/claude-settings.ts:73",
+        "apps/runtime/src/session/claude-settings.ts:79",
+        "apps/runtime/src/egress/time-zone-policy.ts:4",
+        "apps/runtime/src/egress/time-zone-policy.ts:19",
+        "apps/runtime/src/egress/time-zone-policy.ts:23",
+        "apps/runtime/src/egress/time-zone-policy.ts:27",
+        "apps/runtime/src/egress/time-zone-policy.ts:29",
+        "apps/runtime/src/egress/time-zone-policy.ts:38",
+        "apps/runtime/src/egress/time-zone-policy.ts:40",
+        "apps/runtime/src/egress/time-zone-policy.ts:43",
+        "packages/domain/src/agent-manifest.ts:274",
+        "apps/runtime/src/egress/egress-monitor.ts:41",
+        "apps/runtime/src/egress/egress-monitor.ts:43",
+        "apps/runtime/src/egress/egress-monitor.ts:45",
+        "apps/runtime/src/egress/egress-monitor.ts:62",
+        "apps/runtime/src/egress/egress-monitor.ts:67",
+        "apps/runtime/src/egress/egress-monitor.ts:72",
+        "apps/runtime/src/egress/egress-monitor.ts:96",
+        "apps/runtime/src/egress/egress-monitor.ts:99",
+        "apps/runtime/src/runtime-server.ts:2260",
+        "apps/runtime/src/runtime-server.ts:2265",
+        "apps/runtime/src/runtime-server.ts:2563",
+        "apps/runtime/src/runtime-server.ts:2564",
+        "apps/runtime/src/runtime-server.ts:2565",
+        "apps/runtime/src/runtime-server.ts:2567",
+        "apps/runtime/src/session/pty-session.ts:290",
+        "apps/runtime/src/session/pty-session.ts:295",
+        "apps/runtime/src/session/pty-session.ts:298",
+        "apps/runtime/src/session/pty-session.ts:324",
+        "apps/runtime/src/session/pty-session.ts:402",
+        "apps/runtime/src/session/pty-session.ts:410"
+      ]
+    },
+    {
+      "id": "cli-shell-keeps-parent-tz",
+      "description": "Shell 的启动不应用 Claude 时区设置",
+      "input": {
+        "operation": "cli-launch-time-zone",
+        "category": "boundary",
+        "requiresSystemEnvironment": false,
+        "profile": "shell",
+        "timeZone": "UTC",
+        "hostEnv": {
+          "TZ": "Asia/Shanghai"
+        }
+      },
+      "expected": {
+        "routeEnablesAutomaticPolicy": false,
+        "policyEnv": {},
+        "launchEnv": {
+          "TZ": "Asia/Shanghai"
+        },
+        "parentEnv": {
+          "TZ": "Asia/Shanghai"
+        }
+      },
+      "source": [
+        "apps/runtime/src/session/claude-settings.ts:33",
+        "apps/runtime/src/session/claude-settings.ts:64",
+        "apps/runtime/src/session/claude-settings.ts:66",
+        "apps/runtime/src/session/claude-settings.ts:68",
+        "apps/runtime/src/session/claude-settings.ts:69",
+        "apps/runtime/src/session/claude-settings.ts:70",
+        "apps/runtime/src/session/claude-settings.ts:71",
+        "apps/runtime/src/session/claude-settings.ts:73",
+        "apps/runtime/src/session/claude-settings.ts:79",
+        "packages/domain/src/agent-manifest.ts:297",
+        "apps/runtime/src/egress/egress-monitor.ts:41",
+        "apps/runtime/src/egress/egress-monitor.ts:43",
+        "apps/runtime/src/egress/egress-monitor.ts:45",
+        "apps/runtime/src/egress/egress-monitor.ts:62",
+        "apps/runtime/src/egress/egress-monitor.ts:67",
+        "apps/runtime/src/egress/egress-monitor.ts:72",
+        "apps/runtime/src/egress/egress-monitor.ts:96",
+        "apps/runtime/src/egress/egress-monitor.ts:99",
+        "apps/runtime/src/runtime-server.ts:2260",
+        "apps/runtime/src/runtime-server.ts:2265",
+        "apps/runtime/src/runtime-server.ts:2563",
+        "apps/runtime/src/runtime-server.ts:2564",
+        "apps/runtime/src/runtime-server.ts:2565",
+        "apps/runtime/src/runtime-server.ts:2567",
+        "apps/runtime/src/session/pty-session.ts:290",
+        "apps/runtime/src/session/pty-session.ts:295",
+        "apps/runtime/src/session/pty-session.ts:298",
+        "apps/runtime/src/session/pty-session.ts:324",
+        "apps/runtime/src/session/pty-session.ts:402",
+        "apps/runtime/src/session/pty-session.ts:410"
+      ]
+    },
+    {
+      "id": "cli-zone-save-next-launch",
+      "description": "保存时区后，新一轮启动使用新值，前一次启动交付的环境保持原值",
+      "input": {
+        "operation": "cli-time-zone-save-and-launch",
+        "category": "normal",
+        "requiresSystemEnvironment": false,
+        "profile": "claude-code",
+        "timeZone": "system",
+        "hostEnv": {
+          "TZ": "Asia/Shanghai"
+        },
+        "choice": "UTC"
+      },
+      "expected": {
+        "firstLaunchEnv": {
+          "TZ": "Asia/Shanghai"
+        },
+        "snapshotAfterSave": {
+          "timeZone": "UTC",
+          "systemTimeZone": "Asia/Shanghai",
+          "autoTimeZone": "Asia/Singapore"
+        },
+        "nextLaunchEnv": {
+          "TZ": "UTC"
+        },
+        "parentEnv": {
+          "TZ": "Asia/Shanghai"
+        }
+      },
+      "source": [
+        "apps/runtime/src/session/claude-settings.ts:28",
+        "apps/runtime/src/session/claude-settings.ts:33",
+        "apps/runtime/src/session/claude-settings.ts:36",
+        "apps/runtime/src/session/claude-settings.ts:43",
+        "apps/runtime/src/session/claude-settings.ts:54",
+        "apps/runtime/src/session/claude-settings.ts:56",
+        "apps/runtime/src/session/claude-settings.ts:59",
+        "apps/runtime/src/session/claude-settings.ts:64",
+        "apps/runtime/src/session/claude-settings.ts:67",
+        "apps/runtime/src/session/claude-settings.ts:73",
+        "apps/runtime/src/session/claude-settings.ts:79",
+        "apps/runtime/src/egress/time-zone-policy.ts:38",
+        "apps/runtime/src/egress/time-zone-policy.ts:41",
+        "apps/runtime/src/egress/time-zone-policy.ts:45",
+        "packages/domain/src/agent-manifest.ts:139",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:197",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:199",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:200",
+        "apps/runtime/src/egress/egress-monitor.ts:43",
+        "apps/runtime/src/egress/egress-monitor.ts:62",
+        "apps/runtime/src/egress/egress-monitor.ts:96",
+        "apps/runtime/src/egress/egress-monitor.ts:99",
+        "apps/runtime/src/runtime-server.ts:2562",
+        "apps/runtime/src/runtime-server.ts:2565",
+        "apps/runtime/src/runtime-server.ts:2567",
+        "apps/runtime/src/session/pty-session.ts:290",
+        "apps/runtime/src/session/pty-session.ts:295",
+        "apps/runtime/src/session/pty-session.ts:298",
+        "apps/runtime/src/session/pty-session.ts:324",
+        "apps/runtime/src/session/pty-session.ts:402",
+        "apps/runtime/src/session/pty-session.ts:410"
+      ]
+    },
+    {
+      "id": "renderer-zone-preview-and-save",
+      "description": "自动、跟随和固定预览分别取值，保存后显示应答文案与适用范围",
+      "input": {
+        "operation": "renderer-time-zone-settings",
+        "category": "normal",
+        "requiresSystemEnvironment": false,
+        "locale": "en",
+        "snapshot": {
+          "timeZone": "auto",
+          "systemTimeZone": "Asia/Shanghai",
+          "autoTimeZone": "Asia/Singapore"
+        },
+        "choices": [
+          "system",
+          "UTC"
+        ],
+        "save": "resolve"
+      },
+      "expected": {
+        "initial": {
+          "selected": "auto",
+          "selectDisabled": false,
+          "saveDisabled": true,
+          "previewZone": "Asia/Singapore"
+        },
+        "modeLabels": [
+          "Automatic (hide mainland China time zone, recommended)",
+          "Follow system (Asia/Shanghai)"
+        ],
+        "afterChoices": [
+          {
+            "selected": "system",
+            "selectDisabled": false,
+            "saveDisabled": false,
+            "previewZone": "Asia/Shanghai"
+          },
+          {
+            "selected": "UTC",
+            "selectDisabled": false,
+            "saveDisabled": false,
+            "previewZone": "UTC"
+          }
+        ],
+        "afterSave": {
+          "selected": "UTC",
+          "selectDisabled": false,
+          "saveDisabled": true,
+          "previewZone": "UTC",
+          "status": "Saved. Applies automatically on the next Claude Code launch."
+        },
+        "requests": [
+          {
+            "method": "claude-settings.get",
+            "payload": {}
+          },
+          {
+            "method": "claude-settings.set",
+            "payload": {
+              "timeZone": "UTC"
+            }
+          }
+        ],
+        "scope": "Applies only to Claude Code, Codex, Antigravity and their child processes launched by Matou. New, resumed and restarted sessions use the saved zone automatically. Running sessions need a restart; saving does not interrupt tasks."
+      },
+      "source": [
+        "apps/desktop/src/renderer/src/hierarchy/ModelSwitchSettings.tsx:351",
+        "apps/desktop/src/renderer/src/hierarchy/ModelSwitchSettings.tsx:354",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:8",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:17",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:19",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:21",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:23",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:24",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:25",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:37",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:38",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:39",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:40",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:41",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:42",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:50",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:51",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:52",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:53",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:64",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:65",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:66",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:69",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:75",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:78",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:80",
+        "apps/desktop/src/renderer/src/i18n/LocaleProvider.tsx:10",
+        "apps/desktop/src/renderer/src/i18n/LocaleProvider.tsx:11",
+        "apps/desktop/src/renderer/src/i18n/LocaleProvider.tsx:27",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:70",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:71",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:72"
+      ]
+    },
+    {
+      "id": "renderer-zone-preview-no-auto-zone",
+      "description": "没有自动候选时显示系统区，保存失败后仍可保留草稿并重试",
+      "input": {
+        "operation": "renderer-time-zone-settings",
+        "category": "failure",
+        "requiresSystemEnvironment": false,
+        "locale": "zh-CN",
+        "snapshot": {
+          "timeZone": "auto",
+          "systemTimeZone": "Europe/Berlin"
+        },
+        "choices": [
+          "UTC"
+        ],
+        "save": "reject"
+      },
+      "expected": {
+        "initial": {
+          "selected": "auto",
+          "selectDisabled": false,
+          "saveDisabled": true,
+          "previewZone": "Europe/Berlin"
+        },
+        "modeLabels": [
+          "自动（隐藏大陆时区，推荐）",
+          "跟随系统 (Europe/Berlin)"
+        ],
+        "afterChoices": [
+          {
+            "selected": "UTC",
+            "selectDisabled": false,
+            "saveDisabled": false,
+            "previewZone": "UTC"
+          }
+        ],
+        "afterSave": {
+          "selected": "UTC",
+          "selectDisabled": false,
+          "saveDisabled": false,
+          "previewZone": "UTC",
+          "error": "保存未确认，请重试。"
+        },
+        "requests": [
+          {
+            "method": "claude-settings.get",
+            "payload": {}
+          },
+          {
+            "method": "claude-settings.set",
+            "payload": {
+              "timeZone": "UTC"
+            }
+          }
+        ]
+      },
+      "source": [
+        "apps/desktop/src/renderer/src/hierarchy/ModelSwitchSettings.tsx:351",
+        "apps/desktop/src/renderer/src/hierarchy/ModelSwitchSettings.tsx:354",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:8",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:17",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:19",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:21",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:23",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:24",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:25",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:37",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:38",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:39",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:40",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:41",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:42",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:50",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:51",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:52",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:53",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:64",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:65",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:66",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:69",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:75",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:78",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:80",
+        "apps/desktop/src/renderer/src/i18n/LocaleProvider.tsx:10",
+        "apps/desktop/src/renderer/src/i18n/LocaleProvider.tsx:11",
+        "apps/desktop/src/renderer/src/i18n/LocaleProvider.tsx:27"
+      ]
+    },
+    {
+      "id": "renderer-zone-load-error-retry",
+      "description": "时区读取失败时禁用选择与保存，重试可重新发起读取",
+      "input": {
+        "operation": "renderer-time-zone-settings",
+        "category": "failure",
+        "requiresSystemEnvironment": false,
+        "locale": "en",
+        "read": "reject",
+        "retry": true
+      },
+      "expected": {
+        "initial": {
+          "selected": "auto",
+          "selectDisabled": true,
+          "saveDisabled": true,
+          "error": "Could not load the time zone. Please retry."
+        },
+        "retryLabel": "Retry",
+        "afterRetry": {
+          "selected": "auto",
+          "selectDisabled": true,
+          "saveDisabled": true,
+          "error": "Could not load the time zone. Please retry."
+        },
+        "requests": [
+          {
+            "method": "claude-settings.get",
+            "payload": {}
+          },
+          {
+            "method": "claude-settings.get",
+            "payload": {}
+          }
+        ]
+      },
+      "source": [
+        "apps/desktop/src/renderer/src/hierarchy/ModelSwitchSettings.tsx:351",
+        "apps/desktop/src/renderer/src/hierarchy/ModelSwitchSettings.tsx:354",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:8",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:17",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:19",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:21",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:23",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:24",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:25",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:37",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:38",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:39",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:40",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:41",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:42",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:50",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:51",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:52",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:53",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:64",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:65",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:66",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:69",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:75",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:78",
+        "apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx:80",
+        "apps/desktop/src/renderer/src/i18n/LocaleProvider.tsx:10",
+        "apps/desktop/src/renderer/src/i18n/LocaleProvider.tsx:11",
+        "apps/desktop/src/renderer/src/i18n/LocaleProvider.tsx:27"
+      ]
+    }
+  ]
+}

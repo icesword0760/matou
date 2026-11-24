@@ -1,0 +1,106 @@
+{
+  "chromium": "150.0.7871.224",
+  "upstream": "https://raw.githubusercontent.com/chromium/chromium/150.0.7871.224/",
+  "sources": {
+    "layout_box": {
+      "path": "third_party/blink/renderer/core/layout/layout_box.cc",
+      "sha256": "3766280557e6369c97e3affe6dd03061837f9fb50733667f23da504a04d87f99"
+    },
+    "layout_object": {
+      "path": "third_party/blink/renderer/core/layout/layout_object.cc",
+      "sha256": "a9a195f88a3fb401a6407b5675d1f61e4d47cf193f44f4daee7bc7a3fe866b4b"
+    },
+    "selection": {
+      "path": "third_party/blink/renderer/core/page/autoscroll_controller.cc",
+      "sha256": "bf45d0ab4f9072c742f9d4091ca7d5b9b66f0108e8c5490ffe07121b242ec290"
+    },
+    "mouse": {
+      "path": "third_party/blink/renderer/core/input/mouse_event_manager.cc",
+      "sha256": "7f61f28463edc018cb3583c6c632f96a56047011abe4eacc48eec5b795218198"
+    },
+    "scroll_into_view": {
+      "path": "third_party/blink/renderer/core/scroll/scroll_into_view_util.cc",
+      "sha256": "eac74c20af401f92c1625fcbe3a0bd452bbf71369a180c6804c47c3a4f07a20e"
+    },
+    "alignment": {
+      "path": "third_party/blink/renderer/core/scroll/scroll_alignment.cc",
+      "sha256": "009ecd7326c139c06f47b8684d0c7a804d818b948f8752acb598a2245d1a438d"
+    },
+    "layer": {
+      "path": "third_party/blink/renderer/core/paint/paint_layer_scrollable_area.cc",
+      "sha256": "144f1b23473e7fa8b9638c585c3026cdb9ea0e674a0497e2170bc5b14bd13933"
+    },
+    "scrollable_area": {
+      "path": "third_party/blink/renderer/core/scroll/scrollable_area.cc",
+      "sha256": "05a6088cc30684813199ddf80a3fbefd6f96a6eae5a3805fb9d6732469831605"
+    },
+    "widget": {
+      "path": "third_party/blink/renderer/platform/widget/widget_base.cc",
+      "sha256": "2f2fa6817969b0e1afd80930b96a75c847017d3af3095bb78167127f126ecd25"
+    },
+    "frame_widget": {
+      "path": "third_party/blink/renderer/core/frame/web_frame_widget_impl.cc",
+      "sha256": "8b8efbd4cd321ada2b1ffaa340e01423f53ea7a6d3eeaf42817a9a657a66514b"
+    },
+    "offset": {
+      "path": "third_party/blink/renderer/platform/geometry/physical_offset.h",
+      "sha256": "334ba070f9618a4cc51db081c1d1f89e4ee8513d5373ae03dac7495b33f83732"
+    },
+    "unit": {
+      "path": "third_party/blink/renderer/platform/geometry/layout_unit.h",
+      "sha256": "fdc4e8d9386923943ec92a6868dcf59b34c741d52b19d0ee41c255092ff23624"
+    },
+    "point": {
+      "path": "ui/gfx/geometry/point_conversions.cc",
+      "sha256": "9c44669caea726950abbfd99937d7b191deafbec79c4b9ed9743642aa02a9200"
+    },
+    "vector": {
+      "path": "ui/gfx/geometry/vector2d_conversions.cc",
+      "sha256": "78847937a49c6674396a9cdcf8a4077bdcf11c9bbf306ad2026b9d8ce10def79"
+    }
+  },
+  "cases": [
+    {"name": "interior-1x", "viewport": [30, 40, 230, 180], "pointer": [110, 135], "offset": [-70, -90], "maximum": [300, 250], "scale": 1, "next": [-70.0, -90.0]},
+    {"name": "top-at-20-logical-1x", "viewport": [30, 40, 230, 180], "pointer": [110, 60], "offset": [-70, -90], "maximum": [300, 250], "scale": 1, "next": [-70.0, -90.0]},
+    {"name": "top-just-inside-20-logical-1x", "viewport": [30, 40, 230, 180], "pointer": [110, 59.75], "offset": [-70, -90], "maximum": [300, 250], "scale": 1, "next": [-70.0, -89.0]},
+    {"name": "top-at-10-logical-1x", "viewport": [30, 40, 230, 180], "pointer": [110, 50], "offset": [-70, -90], "maximum": [300, 250], "scale": 1, "next": [-70.0, -80.0]},
+    {"name": "top-just-inside-10-logical-1x", "viewport": [30, 40, 230, 180], "pointer": [110, 49.75], "offset": [-70, -90], "maximum": [300, 250], "scale": 1, "next": [-70.0, -79.0]},
+    {"name": "bottom-at-20-logical-1x", "viewport": [30, 40, 230, 180], "pointer": [110, 200], "offset": [-70, -90], "maximum": [300, 250], "scale": 1, "next": [-70.0, -90.0]},
+    {"name": "bottom-fractional-20-logical-1x", "viewport": [30, 40, 230, 180], "pointer": [110, 200.75], "offset": [-70, -90], "maximum": [300, 250], "scale": 1, "next": [-70.0, -90.0]},
+    {"name": "bottom-just-inside-20-logical-1x", "viewport": [30, 40, 230, 180], "pointer": [110, 201], "offset": [-70, -90], "maximum": [300, 250], "scale": 1, "next": [-70.0, -92.0]},
+    {"name": "bottom-at-10-logical-1x", "viewport": [30, 40, 230, 180], "pointer": [110, 210], "offset": [-70, -90], "maximum": [300, 250], "scale": 1, "next": [-70.0, -101.0]},
+    {"name": "bottom-just-inside-10-logical-1x", "viewport": [30, 40, 230, 180], "pointer": [110, 210.5], "offset": [-70, -90], "maximum": [300, 250], "scale": 1, "next": [-70.0, -101.0]},
+    {"name": "left-belt-1x", "viewport": [30, 40, 230, 180], "pointer": [37, 135], "offset": [-70, -90], "maximum": [300, 250], "scale": 1, "next": [-57.0, -90.0]},
+    {"name": "right-belt-1x", "viewport": [30, 40, 230, 180], "pointer": [251, 135], "offset": [-70, -90], "maximum": [300, 250], "scale": 1, "next": [-82.0, -90.0]},
+    {"name": "far-bottom-right-1x", "viewport": [30, 40, 230, 180], "pointer": [298.5, 284.5], "offset": [-70, -90], "maximum": [300, 250], "scale": 1, "next": [-129.0, -175.0]},
+    {"name": "far-top-left-1x", "viewport": [30, 40, 230, 180], "pointer": [-16, -70], "offset": [-205, -200], "maximum": [300, 250], "scale": 1, "next": [-139.0, -70.0]},
+    {"name": "clamp-to-start-1x", "viewport": [30, 40, 230, 180], "pointer": [-16, -70], "offset": [-6, -5], "maximum": [300, 250], "scale": 1, "next": [0.0, 0.0]},
+    {"name": "clamp-to-end-1x", "viewport": [30, 40, 230, 180], "pointer": [298.5, 284.5], "offset": [-296, -247], "maximum": [300, 250], "scale": 1, "next": [-300.0, -250.0]},
+    {"name": "horizontal-axis-without-overflow-1x", "viewport": [30, 40, 230, 180], "pointer": [298.5, 284.5], "offset": [0, -90], "maximum": [0, 250], "scale": 1, "next": [0.0, -175.0]},
+    {"name": "fractional-origin-top-left-1x", "viewport": [30.375, 40.375, 230.375, 180.375], "pointer": [37.25, 49.25], "offset": [-70, -90], "maximum": [300, 250], "scale": 1, "next": [-57.0, -79.0]},
+    {"name": "fractional-size-bottom-right-1x", "viewport": [30.375, 40.375, 230.375, 180.375], "pointer": [271, 211.5], "offset": [-70, -90], "maximum": [300, 250], "scale": 1, "next": [-101.0, -101.0]},
+    {"name": "fractional-scroll-interior-1x", "viewport": [30, 40, 230, 180], "pointer": [110, 135], "offset": [-70.25, -90.75], "maximum": [300, 250], "scale": 1, "next": [-70.0, -91.0]},
+    {"name": "fractional-scroll-near-edges-1x", "viewport": [30.375, 40.375, 230.375, 180.375], "pointer": [272, 211.5], "offset": [-70.25, -90.75], "maximum": [300, 250], "scale": 1, "next": [-103.0, -102.0]},
+    {"name": "interior-2x", "viewport": [30, 40, 230, 180], "pointer": [110, 135], "offset": [-70, -90], "maximum": [300, 250], "scale": 2, "next": [-70.0, -90.0]},
+    {"name": "top-at-20-logical-2x", "viewport": [30, 40, 230, 180], "pointer": [110, 60], "offset": [-70, -90], "maximum": [300, 250], "scale": 2, "next": [-70.0, -90.0]},
+    {"name": "top-just-inside-20-logical-2x", "viewport": [30, 40, 230, 180], "pointer": [110, 59.75], "offset": [-70, -90], "maximum": [300, 250], "scale": 2, "next": [-70.0, -90.0]},
+    {"name": "top-at-10-logical-2x", "viewport": [30, 40, 230, 180], "pointer": [110, 50], "offset": [-70, -90], "maximum": [300, 250], "scale": 2, "next": [-70.0, -90.0]},
+    {"name": "top-just-inside-10-logical-2x", "viewport": [30, 40, 230, 180], "pointer": [110, 49.75], "offset": [-70, -90], "maximum": [300, 250], "scale": 2, "next": [-70.0, -89.5]},
+    {"name": "bottom-at-20-logical-2x", "viewport": [30, 40, 230, 180], "pointer": [110, 200], "offset": [-70, -90], "maximum": [300, 250], "scale": 2, "next": [-70.0, -90.0]},
+    {"name": "bottom-fractional-20-logical-2x", "viewport": [30, 40, 230, 180], "pointer": [110, 200.75], "offset": [-70, -90], "maximum": [300, 250], "scale": 2, "next": [-70.0, -90.0]},
+    {"name": "bottom-just-inside-20-logical-2x", "viewport": [30, 40, 230, 180], "pointer": [110, 201], "offset": [-70, -90], "maximum": [300, 250], "scale": 2, "next": [-70.0, -90.0]},
+    {"name": "bottom-at-10-logical-2x", "viewport": [30, 40, 230, 180], "pointer": [110, 210], "offset": [-70, -90], "maximum": [300, 250], "scale": 2, "next": [-70.0, -90.0]},
+    {"name": "bottom-just-inside-10-logical-2x", "viewport": [30, 40, 230, 180], "pointer": [110, 210.5], "offset": [-70, -90], "maximum": [300, 250], "scale": 2, "next": [-70.0, -91.0]},
+    {"name": "left-belt-2x", "viewport": [30, 40, 230, 180], "pointer": [37, 135], "offset": [-70, -90], "maximum": [300, 250], "scale": 2, "next": [-67.0, -90.0]},
+    {"name": "right-belt-2x", "viewport": [30, 40, 230, 180], "pointer": [251, 135], "offset": [-70, -90], "maximum": [300, 250], "scale": 2, "next": [-71.5, -90.0]},
+    {"name": "far-bottom-right-2x", "viewport": [30, 40, 230, 180], "pointer": [298.5, 284.5], "offset": [-70, -90], "maximum": [300, 250], "scale": 2, "next": [-119.0, -165.0]},
+    {"name": "far-top-left-2x", "viewport": [30, 40, 230, 180], "pointer": [-16, -70], "offset": [-205, -200], "maximum": [300, 250], "scale": 2, "next": [-149.0, -80.0]},
+    {"name": "clamp-to-start-2x", "viewport": [30, 40, 230, 180], "pointer": [-16, -70], "offset": [-6, -5], "maximum": [300, 250], "scale": 2, "next": [0.0, 0.0]},
+    {"name": "clamp-to-end-2x", "viewport": [30, 40, 230, 180], "pointer": [298.5, 284.5], "offset": [-296, -247], "maximum": [300, 250], "scale": 2, "next": [-300.0, -250.0]},
+    {"name": "horizontal-axis-without-overflow-2x", "viewport": [30, 40, 230, 180], "pointer": [298.5, 284.5], "offset": [0, -90], "maximum": [0, 250], "scale": 2, "next": [0.0, -165.0]},
+    {"name": "fractional-origin-top-left-2x", "viewport": [30.375, 40.375, 230.375, 180.375], "pointer": [37.25, 49.25], "offset": [-70, -90], "maximum": [300, 250], "scale": 2, "next": [-66.5, -88.5]},
+    {"name": "fractional-size-bottom-right-2x", "viewport": [30.375, 40.375, 230.375, 180.375], "pointer": [271, 211.5], "offset": [-70, -90], "maximum": [300, 250], "scale": 2, "next": [-91.0, -91.5]},
+    {"name": "fractional-scroll-interior-2x", "viewport": [30, 40, 230, 180], "pointer": [110, 135], "offset": [-70.25, -90.75], "maximum": [300, 250], "scale": 2, "next": [-70.5, -91.0]},
+    {"name": "fractional-scroll-near-edges-2x", "viewport": [30.375, 40.375, 230.375, 180.375], "pointer": [272, 211.5], "offset": [-70.25, -90.75], "maximum": [300, 250], "scale": 2, "next": [-92.0, -92.0]}
+  ]
+}

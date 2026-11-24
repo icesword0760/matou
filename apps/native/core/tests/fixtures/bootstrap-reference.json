@@ -1,0 +1,2268 @@
+{
+  "source": "Frozen hierarchy source, real SQLite; zh-CN. UUIDs and commit times captured for native replay, no source behavior altered.",
+  "versions": {
+    "node": "24.18.1",
+    "acorn": "8.16.0",
+    "ada": "3.4.4",
+    "amaro": "1.1.9",
+    "ares": "1.34.6",
+    "brotli": "1.2.0",
+    "cldr": "48.0",
+    "icu": "78.2",
+    "llhttp": "9.4.3",
+    "merve": "1.2.2",
+    "modules": "148",
+    "napi": "10",
+    "nbytes": "0.1.4",
+    "ncrypto": "0.0.1",
+    "nghttp2": "1.69.0",
+    "nghttp3": "",
+    "ngtcp2": "",
+    "openssl": "0.0.0",
+    "simdjson": "4.6.4",
+    "simdutf": "7.7.0",
+    "sqlite": "3.53.1",
+    "tz": "2025c",
+    "undici": "7.29.0",
+    "unicode": "17.0",
+    "uv": "1.52.1",
+    "uvwasi": "0.0.23",
+    "v8": "15.0.245.28-electron.0",
+    "zlib": "1.3.2.1-motley",
+    "zstd": "1.6.0",
+    "electron": "43.4.1",
+    "chrome": "150.0.7871.224"
+  },
+  "tables": [
+    "workspaces",
+    "execution_contexts",
+    "tasks",
+    "scenes",
+    "scene_nodes",
+    "sessions",
+    "session_mounts",
+    "app_windows",
+    "window_task_placements",
+    "window_navigation",
+    "window_workspace_focus",
+    "window_task_focus",
+    "window_scene_focus",
+    "bootstrap_state",
+    "session_canvas_memberships"
+  ],
+  "steps": [
+    {
+      "name": "fresh",
+      "input": {
+        "windowId": "main-window-1",
+        "defaultRootDirectory": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+        "defaultName": "workspace",
+        "now": 1000
+      },
+      "command": {
+        "commandId": "initial",
+        "commandType": "hierarchy.bootstrap-window",
+        "requestHash": "bootstrap-initial"
+      },
+      "ids": {
+        "workspaceId": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+        "executionContextId": "6288d186-b183-4b2a-a09e-eda8d207be81",
+        "taskId": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+        "sceneId": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+        "rootNodeId": "8ff39bde-bead-441a-8889-d40090806a37",
+        "sessionId": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+        "mountId": "35fbc48c-04d0-4885-a28a-96483368447b"
+      },
+      "result": {
+        "workspace": {
+          "id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "name": "workspace",
+          "rootDirectory": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+          "pathIdentity": "path:/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+          "taskOrder": [
+            "a3e6e652-eb66-4a70-a19b-6cb9dd907766"
+          ],
+          "isDefault": true,
+          "isPinned": true,
+          "pinSortKey": "a0",
+          "lastOpenedAt": 1000,
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "version": 2
+        },
+        "executionContext": {
+          "kind": "plain-directory",
+          "id": "6288d186-b183-4b2a-a09e-eda8d207be81",
+          "workspaceId": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "cwd": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+          "createdAt": 1000
+        },
+        "task": {
+          "id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+          "workspaceId": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "title": "默认",
+          "status": "planned",
+          "executionContextId": "6288d186-b183-4b2a-a09e-eda8d207be81",
+          "sortKey": "a0",
+          "isPinned": false,
+          "pinSortKey": "",
+          "lastOpenedAt": 1000,
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "version": 1
+        },
+        "scene": {
+          "id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+          "taskId": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+          "name": "Shell · /var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+          "mode": "tile",
+          "rootNodeId": "8ff39bde-bead-441a-8889-d40090806a37",
+          "titlePinned": false,
+          "sortKey": "a0",
+          "layoutRevision": 1,
+          "createdAt": 1000,
+          "updatedAt": 1000
+        },
+        "session": {
+          "id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+          "taskId": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+          "executionContextId": "6288d186-b183-4b2a-a09e-eda8d207be81",
+          "kind": "shell",
+          "status": "created",
+          "title": "Shell",
+          "titleSource": "default",
+          "cwd": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "lastActivityAt": 1000,
+          "version": 1
+        },
+        "mount": {
+          "id": "35fbc48c-04d0-4885-a28a-96483368447b",
+          "sceneId": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+          "sceneNodeId": "8ff39bde-bead-441a-8889-d40090806a37",
+          "sessionId": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+          "createdAt": 1000
+        },
+        "navigation": {
+          "windowId": "main-window-1",
+          "activeWorkspaceId": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "taskByWorkspace": {
+            "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a": "a3e6e652-eb66-4a70-a19b-6cb9dd907766"
+          },
+          "sceneByTask": {
+            "a3e6e652-eb66-4a70-a19b-6cb9dd907766": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c"
+          },
+          "sessionByScene": {
+            "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a"
+          }
+        }
+      },
+      "snapshot": {
+        "workspaces": [
+          {
+            "id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+            "name": "workspace",
+            "root_directory": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+            "task_order_json": "[\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\"]",
+            "created_at": 1000,
+            "updated_at": 1000,
+            "archived_at": null,
+            "path_identity": "path:/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+            "version": 2,
+            "is_default": 1,
+            "is_pinned": 1,
+            "pin_sort_key": "a0",
+            "last_opened_at": 1000
+          }
+        ],
+        "execution_contexts": [
+          {
+            "id": "6288d186-b183-4b2a-a09e-eda8d207be81",
+            "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+            "kind": "plain-directory",
+            "cwd": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+            "created_at": 1000,
+            "archived_at": null
+          }
+        ],
+        "tasks": [
+          {
+            "id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+            "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+            "parent_task_id": null,
+            "execution_context_id": "6288d186-b183-4b2a-a09e-eda8d207be81",
+            "title": "默认",
+            "status": "planned",
+            "created_at": 1000,
+            "updated_at": 1000,
+            "archived_at": null,
+            "sort_key": "a0",
+            "version": 1,
+            "is_pinned": 0,
+            "pin_sort_key": "",
+            "last_opened_at": 1000
+          }
+        ],
+        "scenes": [
+          {
+            "id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+            "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+            "name": "Shell · /var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+            "mode": "tile",
+            "root_node_id": "8ff39bde-bead-441a-8889-d40090806a37",
+            "created_at": 1000,
+            "updated_at": 1000,
+            "archived_at": null,
+            "title_pinned": 0,
+            "sort_key": "a0",
+            "layout_revision": 1
+          }
+        ],
+        "scene_nodes": [
+          {
+            "id": "8ff39bde-bead-441a-8889-d40090806a37",
+            "scene_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+            "parent_node_id": null,
+            "kind": "root",
+            "direction": null,
+            "ordinal": 0,
+            "created_at": 1000
+          }
+        ],
+        "sessions": [
+          {
+            "id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+            "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+            "execution_context_id": "6288d186-b183-4b2a-a09e-eda8d207be81",
+            "kind": "shell",
+            "status": "created",
+            "created_at": 1000,
+            "updated_at": 1000,
+            "last_activity_at": 1000,
+            "archived_at": null,
+            "title": "Shell",
+            "version": 1,
+            "cwd": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+            "work_status": "idle",
+            "title_source": "default",
+            "provider_title": null
+          }
+        ],
+        "session_mounts": [
+          {
+            "id": "35fbc48c-04d0-4885-a28a-96483368447b",
+            "scene_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+            "scene_node_id": "8ff39bde-bead-441a-8889-d40090806a37",
+            "session_id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+            "created_at": 1000,
+            "scene_window_id": null
+          }
+        ],
+        "app_windows": [
+          {
+            "id": "main-window-1",
+            "kind": "main",
+            "state": "visible",
+            "created_at": 1000,
+            "updated_at": 1000
+          }
+        ],
+        "window_task_placements": [
+          {
+            "window_id": "main-window-1",
+            "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+            "ordinal": 0,
+            "updated_at": 1000
+          }
+        ],
+        "window_navigation": [
+          {
+            "window_id": "main-window-1",
+            "active_workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+            "updated_at": 1000
+          }
+        ],
+        "window_workspace_focus": [
+          {
+            "window_id": "main-window-1",
+            "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+            "active_task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+            "updated_at": 1000
+          }
+        ],
+        "window_task_focus": [
+          {
+            "window_id": "main-window-1",
+            "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+            "active_scene_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+            "updated_at": 1000
+          }
+        ],
+        "window_scene_focus": [
+          {
+            "window_id": "main-window-1",
+            "scene_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+            "active_session_id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+            "updated_at": 1000
+          }
+        ],
+        "bootstrap_state": [
+          {
+            "key": "default-workspace-created",
+            "value_json": "\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\"",
+            "updated_at": 1000
+          }
+        ],
+        "session_canvas_memberships": [
+          {
+            "session_id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+            "scene_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+            "sibling_created_seq": 1,
+            "last_user_interaction_seq": 0,
+            "created_at": 1000,
+            "updated_at": 1000,
+            "pending_user_interaction_seq": 0
+          }
+        ]
+      },
+      "events": [
+        {
+          "seq": 1,
+          "event_id": "initial:5ca57e55-7b2f-4898-b31c-3c6dfcf7652a:created",
+          "event_type": "workspace.created",
+          "aggregate_type": "workspace",
+          "aggregate_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "task_id": null,
+          "session_id": null,
+          "payload_json": "{\"id\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"name\":\"workspace\",\"rootDirectory\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"pathIdentity\":\"path:/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"taskOrder\":[\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\"],\"isDefault\":true,\"isPinned\":true,\"pinSortKey\":\"a0\",\"lastOpenedAt\":1000,\"createdAt\":1000,\"updatedAt\":1000,\"version\":2}",
+          "schema_version": 1,
+          "required_terminal_sequence": null,
+          "command_id": "initial",
+          "causation_id": null,
+          "correlation_id": null,
+          "occurred_at": 1000
+        },
+        {
+          "seq": 2,
+          "event_id": "initial:a3e6e652-eb66-4a70-a19b-6cb9dd907766:created",
+          "event_type": "task.created",
+          "aggregate_type": "task",
+          "aggregate_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+          "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+          "session_id": null,
+          "payload_json": "{\"id\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"workspaceId\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"title\":\"默认\",\"status\":\"planned\",\"executionContextId\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"sortKey\":\"a0\",\"isPinned\":false,\"pinSortKey\":\"\",\"lastOpenedAt\":1000,\"createdAt\":1000,\"updatedAt\":1000,\"version\":1}",
+          "schema_version": 1,
+          "required_terminal_sequence": null,
+          "command_id": "initial",
+          "causation_id": null,
+          "correlation_id": null,
+          "occurred_at": 1000
+        },
+        {
+          "seq": 3,
+          "event_id": "initial:b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c:created",
+          "event_type": "scene.created",
+          "aggregate_type": "scene",
+          "aggregate_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+          "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+          "session_id": null,
+          "payload_json": "{\"id\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\",\"taskId\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"name\":\"Shell · /var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"mode\":\"tile\",\"rootNodeId\":\"8ff39bde-bead-441a-8889-d40090806a37\",\"titlePinned\":false,\"sortKey\":\"a0\",\"layoutRevision\":1,\"createdAt\":1000,\"updatedAt\":1000}",
+          "schema_version": 1,
+          "required_terminal_sequence": null,
+          "command_id": "initial",
+          "causation_id": null,
+          "correlation_id": null,
+          "occurred_at": 1000
+        },
+        {
+          "seq": 4,
+          "event_id": "initial:d1e0ed20-4e3b-464f-a55b-d144b2c8f72a:created",
+          "event_type": "session.created",
+          "aggregate_type": "session",
+          "aggregate_id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+          "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+          "session_id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+          "payload_json": "{\"id\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\",\"taskId\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"executionContextId\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"kind\":\"shell\",\"status\":\"created\",\"title\":\"Shell\",\"titleSource\":\"default\",\"cwd\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"createdAt\":1000,\"updatedAt\":1000,\"lastActivityAt\":1000,\"version\":1}",
+          "schema_version": 1,
+          "required_terminal_sequence": null,
+          "command_id": "initial",
+          "causation_id": null,
+          "correlation_id": null,
+          "occurred_at": 1000
+        },
+        {
+          "seq": 5,
+          "event_id": "initial:35fbc48c-04d0-4885-a28a-96483368447b:created",
+          "event_type": "scene.session-mounted",
+          "aggregate_type": "scene",
+          "aggregate_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+          "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+          "session_id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+          "payload_json": "{\"id\":\"35fbc48c-04d0-4885-a28a-96483368447b\",\"sceneId\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\",\"sceneNodeId\":\"8ff39bde-bead-441a-8889-d40090806a37\",\"sessionId\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\",\"createdAt\":1000}",
+          "schema_version": 1,
+          "required_terminal_sequence": null,
+          "command_id": "initial",
+          "causation_id": null,
+          "correlation_id": null,
+          "occurred_at": 1000
+        }
+      ],
+      "receipts": [
+        {
+          "command_id": "initial",
+          "command_type": "hierarchy.bootstrap-window",
+          "request_hash": "bootstrap-initial",
+          "response_json": "{\"workspace\":{\"id\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"name\":\"workspace\",\"rootDirectory\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"pathIdentity\":\"path:/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"taskOrder\":[\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\"],\"isDefault\":true,\"isPinned\":true,\"pinSortKey\":\"a0\",\"lastOpenedAt\":1000,\"createdAt\":1000,\"updatedAt\":1000,\"version\":2},\"executionContext\":{\"kind\":\"plain-directory\",\"id\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"workspaceId\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"cwd\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"createdAt\":1000},\"task\":{\"id\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"workspaceId\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"title\":\"默认\",\"status\":\"planned\",\"executionContextId\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"sortKey\":\"a0\",\"isPinned\":false,\"pinSortKey\":\"\",\"lastOpenedAt\":1000,\"createdAt\":1000,\"updatedAt\":1000,\"version\":1},\"scene\":{\"id\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\",\"taskId\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"name\":\"Shell · /var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"mode\":\"tile\",\"rootNodeId\":\"8ff39bde-bead-441a-8889-d40090806a37\",\"titlePinned\":false,\"sortKey\":\"a0\",\"layoutRevision\":1,\"createdAt\":1000,\"updatedAt\":1000},\"session\":{\"id\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\",\"taskId\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"executionContextId\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"kind\":\"shell\",\"status\":\"created\",\"title\":\"Shell\",\"titleSource\":\"default\",\"cwd\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"createdAt\":1000,\"updatedAt\":1000,\"lastActivityAt\":1000,\"version\":1},\"mount\":{\"id\":\"35fbc48c-04d0-4885-a28a-96483368447b\",\"sceneId\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\",\"sceneNodeId\":\"8ff39bde-bead-441a-8889-d40090806a37\",\"sessionId\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\",\"createdAt\":1000},\"navigation\":{\"windowId\":\"main-window-1\",\"activeWorkspaceId\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"taskByWorkspace\":{\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\"},\"sceneByTask\":{\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\"},\"sessionByScene\":{\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\"}}}",
+          "first_event_seq": 1,
+          "last_event_seq": 5,
+          "committed_at": 1794716578943
+        }
+      ]
+    },
+    {
+      "name": "replay",
+      "input": {
+        "windowId": "main-window-1",
+        "defaultRootDirectory": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+        "defaultName": "workspace",
+        "now": 1000
+      },
+      "command": {
+        "commandId": "initial",
+        "commandType": "hierarchy.bootstrap-window",
+        "requestHash": "bootstrap-initial"
+      },
+      "ids": {
+        "workspaceId": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+        "executionContextId": "6288d186-b183-4b2a-a09e-eda8d207be81",
+        "taskId": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+        "sceneId": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+        "rootNodeId": "8ff39bde-bead-441a-8889-d40090806a37",
+        "sessionId": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+        "mountId": "35fbc48c-04d0-4885-a28a-96483368447b"
+      },
+      "result": {
+        "workspace": {
+          "id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "name": "workspace",
+          "rootDirectory": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+          "pathIdentity": "path:/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+          "taskOrder": [
+            "a3e6e652-eb66-4a70-a19b-6cb9dd907766"
+          ],
+          "isDefault": true,
+          "isPinned": true,
+          "pinSortKey": "a0",
+          "lastOpenedAt": 1000,
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "version": 2
+        },
+        "executionContext": {
+          "kind": "plain-directory",
+          "id": "6288d186-b183-4b2a-a09e-eda8d207be81",
+          "workspaceId": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "cwd": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+          "createdAt": 1000
+        },
+        "task": {
+          "id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+          "workspaceId": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "title": "默认",
+          "status": "planned",
+          "executionContextId": "6288d186-b183-4b2a-a09e-eda8d207be81",
+          "sortKey": "a0",
+          "isPinned": false,
+          "pinSortKey": "",
+          "lastOpenedAt": 1000,
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "version": 1
+        },
+        "scene": {
+          "id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+          "taskId": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+          "name": "Shell · /var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+          "mode": "tile",
+          "rootNodeId": "8ff39bde-bead-441a-8889-d40090806a37",
+          "titlePinned": false,
+          "sortKey": "a0",
+          "layoutRevision": 1,
+          "createdAt": 1000,
+          "updatedAt": 1000
+        },
+        "session": {
+          "id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+          "taskId": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+          "executionContextId": "6288d186-b183-4b2a-a09e-eda8d207be81",
+          "kind": "shell",
+          "status": "created",
+          "title": "Shell",
+          "titleSource": "default",
+          "cwd": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "lastActivityAt": 1000,
+          "version": 1
+        },
+        "mount": {
+          "id": "35fbc48c-04d0-4885-a28a-96483368447b",
+          "sceneId": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+          "sceneNodeId": "8ff39bde-bead-441a-8889-d40090806a37",
+          "sessionId": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+          "createdAt": 1000
+        },
+        "navigation": {
+          "windowId": "main-window-1",
+          "activeWorkspaceId": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "taskByWorkspace": {
+            "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a": "a3e6e652-eb66-4a70-a19b-6cb9dd907766"
+          },
+          "sceneByTask": {
+            "a3e6e652-eb66-4a70-a19b-6cb9dd907766": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c"
+          },
+          "sessionByScene": {
+            "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a"
+          }
+        }
+      },
+      "snapshot": {
+        "workspaces": [
+          {
+            "id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+            "name": "workspace",
+            "root_directory": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+            "task_order_json": "[\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\"]",
+            "created_at": 1000,
+            "updated_at": 1000,
+            "archived_at": null,
+            "path_identity": "path:/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+            "version": 2,
+            "is_default": 1,
+            "is_pinned": 1,
+            "pin_sort_key": "a0",
+            "last_opened_at": 1000
+          }
+        ],
+        "execution_contexts": [
+          {
+            "id": "6288d186-b183-4b2a-a09e-eda8d207be81",
+            "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+            "kind": "plain-directory",
+            "cwd": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+            "created_at": 1000,
+            "archived_at": null
+          }
+        ],
+        "tasks": [
+          {
+            "id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+            "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+            "parent_task_id": null,
+            "execution_context_id": "6288d186-b183-4b2a-a09e-eda8d207be81",
+            "title": "默认",
+            "status": "planned",
+            "created_at": 1000,
+            "updated_at": 1000,
+            "archived_at": null,
+            "sort_key": "a0",
+            "version": 1,
+            "is_pinned": 0,
+            "pin_sort_key": "",
+            "last_opened_at": 1000
+          }
+        ],
+        "scenes": [
+          {
+            "id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+            "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+            "name": "Shell · /var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+            "mode": "tile",
+            "root_node_id": "8ff39bde-bead-441a-8889-d40090806a37",
+            "created_at": 1000,
+            "updated_at": 1000,
+            "archived_at": null,
+            "title_pinned": 0,
+            "sort_key": "a0",
+            "layout_revision": 1
+          }
+        ],
+        "scene_nodes": [
+          {
+            "id": "8ff39bde-bead-441a-8889-d40090806a37",
+            "scene_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+            "parent_node_id": null,
+            "kind": "root",
+            "direction": null,
+            "ordinal": 0,
+            "created_at": 1000
+          }
+        ],
+        "sessions": [
+          {
+            "id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+            "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+            "execution_context_id": "6288d186-b183-4b2a-a09e-eda8d207be81",
+            "kind": "shell",
+            "status": "created",
+            "created_at": 1000,
+            "updated_at": 1000,
+            "last_activity_at": 1000,
+            "archived_at": null,
+            "title": "Shell",
+            "version": 1,
+            "cwd": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+            "work_status": "idle",
+            "title_source": "default",
+            "provider_title": null
+          }
+        ],
+        "session_mounts": [
+          {
+            "id": "35fbc48c-04d0-4885-a28a-96483368447b",
+            "scene_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+            "scene_node_id": "8ff39bde-bead-441a-8889-d40090806a37",
+            "session_id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+            "created_at": 1000,
+            "scene_window_id": null
+          }
+        ],
+        "app_windows": [
+          {
+            "id": "main-window-1",
+            "kind": "main",
+            "state": "visible",
+            "created_at": 1000,
+            "updated_at": 1000
+          }
+        ],
+        "window_task_placements": [
+          {
+            "window_id": "main-window-1",
+            "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+            "ordinal": 0,
+            "updated_at": 1000
+          }
+        ],
+        "window_navigation": [
+          {
+            "window_id": "main-window-1",
+            "active_workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+            "updated_at": 1000
+          }
+        ],
+        "window_workspace_focus": [
+          {
+            "window_id": "main-window-1",
+            "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+            "active_task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+            "updated_at": 1000
+          }
+        ],
+        "window_task_focus": [
+          {
+            "window_id": "main-window-1",
+            "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+            "active_scene_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+            "updated_at": 1000
+          }
+        ],
+        "window_scene_focus": [
+          {
+            "window_id": "main-window-1",
+            "scene_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+            "active_session_id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+            "updated_at": 1000
+          }
+        ],
+        "bootstrap_state": [
+          {
+            "key": "default-workspace-created",
+            "value_json": "\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\"",
+            "updated_at": 1000
+          }
+        ],
+        "session_canvas_memberships": [
+          {
+            "session_id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+            "scene_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+            "sibling_created_seq": 1,
+            "last_user_interaction_seq": 0,
+            "created_at": 1000,
+            "updated_at": 1000,
+            "pending_user_interaction_seq": 0
+          }
+        ]
+      },
+      "events": [
+        {
+          "seq": 1,
+          "event_id": "initial:5ca57e55-7b2f-4898-b31c-3c6dfcf7652a:created",
+          "event_type": "workspace.created",
+          "aggregate_type": "workspace",
+          "aggregate_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "task_id": null,
+          "session_id": null,
+          "payload_json": "{\"id\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"name\":\"workspace\",\"rootDirectory\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"pathIdentity\":\"path:/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"taskOrder\":[\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\"],\"isDefault\":true,\"isPinned\":true,\"pinSortKey\":\"a0\",\"lastOpenedAt\":1000,\"createdAt\":1000,\"updatedAt\":1000,\"version\":2}",
+          "schema_version": 1,
+          "required_terminal_sequence": null,
+          "command_id": "initial",
+          "causation_id": null,
+          "correlation_id": null,
+          "occurred_at": 1000
+        },
+        {
+          "seq": 2,
+          "event_id": "initial:a3e6e652-eb66-4a70-a19b-6cb9dd907766:created",
+          "event_type": "task.created",
+          "aggregate_type": "task",
+          "aggregate_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+          "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+          "session_id": null,
+          "payload_json": "{\"id\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"workspaceId\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"title\":\"默认\",\"status\":\"planned\",\"executionContextId\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"sortKey\":\"a0\",\"isPinned\":false,\"pinSortKey\":\"\",\"lastOpenedAt\":1000,\"createdAt\":1000,\"updatedAt\":1000,\"version\":1}",
+          "schema_version": 1,
+          "required_terminal_sequence": null,
+          "command_id": "initial",
+          "causation_id": null,
+          "correlation_id": null,
+          "occurred_at": 1000
+        },
+        {
+          "seq": 3,
+          "event_id": "initial:b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c:created",
+          "event_type": "scene.created",
+          "aggregate_type": "scene",
+          "aggregate_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+          "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+          "session_id": null,
+          "payload_json": "{\"id\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\",\"taskId\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"name\":\"Shell · /var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"mode\":\"tile\",\"rootNodeId\":\"8ff39bde-bead-441a-8889-d40090806a37\",\"titlePinned\":false,\"sortKey\":\"a0\",\"layoutRevision\":1,\"createdAt\":1000,\"updatedAt\":1000}",
+          "schema_version": 1,
+          "required_terminal_sequence": null,
+          "command_id": "initial",
+          "causation_id": null,
+          "correlation_id": null,
+          "occurred_at": 1000
+        },
+        {
+          "seq": 4,
+          "event_id": "initial:d1e0ed20-4e3b-464f-a55b-d144b2c8f72a:created",
+          "event_type": "session.created",
+          "aggregate_type": "session",
+          "aggregate_id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+          "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+          "session_id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+          "payload_json": "{\"id\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\",\"taskId\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"executionContextId\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"kind\":\"shell\",\"status\":\"created\",\"title\":\"Shell\",\"titleSource\":\"default\",\"cwd\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"createdAt\":1000,\"updatedAt\":1000,\"lastActivityAt\":1000,\"version\":1}",
+          "schema_version": 1,
+          "required_terminal_sequence": null,
+          "command_id": "initial",
+          "causation_id": null,
+          "correlation_id": null,
+          "occurred_at": 1000
+        },
+        {
+          "seq": 5,
+          "event_id": "initial:35fbc48c-04d0-4885-a28a-96483368447b:created",
+          "event_type": "scene.session-mounted",
+          "aggregate_type": "scene",
+          "aggregate_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+          "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+          "session_id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+          "payload_json": "{\"id\":\"35fbc48c-04d0-4885-a28a-96483368447b\",\"sceneId\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\",\"sceneNodeId\":\"8ff39bde-bead-441a-8889-d40090806a37\",\"sessionId\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\",\"createdAt\":1000}",
+          "schema_version": 1,
+          "required_terminal_sequence": null,
+          "command_id": "initial",
+          "causation_id": null,
+          "correlation_id": null,
+          "occurred_at": 1000
+        }
+      ],
+      "receipts": [
+        {
+          "command_id": "initial",
+          "command_type": "hierarchy.bootstrap-window",
+          "request_hash": "bootstrap-initial",
+          "response_json": "{\"workspace\":{\"id\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"name\":\"workspace\",\"rootDirectory\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"pathIdentity\":\"path:/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"taskOrder\":[\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\"],\"isDefault\":true,\"isPinned\":true,\"pinSortKey\":\"a0\",\"lastOpenedAt\":1000,\"createdAt\":1000,\"updatedAt\":1000,\"version\":2},\"executionContext\":{\"kind\":\"plain-directory\",\"id\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"workspaceId\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"cwd\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"createdAt\":1000},\"task\":{\"id\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"workspaceId\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"title\":\"默认\",\"status\":\"planned\",\"executionContextId\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"sortKey\":\"a0\",\"isPinned\":false,\"pinSortKey\":\"\",\"lastOpenedAt\":1000,\"createdAt\":1000,\"updatedAt\":1000,\"version\":1},\"scene\":{\"id\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\",\"taskId\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"name\":\"Shell · /var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"mode\":\"tile\",\"rootNodeId\":\"8ff39bde-bead-441a-8889-d40090806a37\",\"titlePinned\":false,\"sortKey\":\"a0\",\"layoutRevision\":1,\"createdAt\":1000,\"updatedAt\":1000},\"session\":{\"id\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\",\"taskId\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"executionContextId\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"kind\":\"shell\",\"status\":\"created\",\"title\":\"Shell\",\"titleSource\":\"default\",\"cwd\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"createdAt\":1000,\"updatedAt\":1000,\"lastActivityAt\":1000,\"version\":1},\"mount\":{\"id\":\"35fbc48c-04d0-4885-a28a-96483368447b\",\"sceneId\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\",\"sceneNodeId\":\"8ff39bde-bead-441a-8889-d40090806a37\",\"sessionId\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\",\"createdAt\":1000},\"navigation\":{\"windowId\":\"main-window-1\",\"activeWorkspaceId\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"taskByWorkspace\":{\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\"},\"sceneByTask\":{\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\"},\"sessionByScene\":{\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\"}}}",
+          "first_event_seq": 1,
+          "last_event_seq": 5,
+          "committed_at": 1794716578943
+        }
+      ]
+    },
+    {
+      "name": "reopen",
+      "input": {
+        "windowId": "main-window-1",
+        "defaultRootDirectory": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+        "defaultName": "workspace",
+        "now": 2000
+      },
+      "command": {
+        "commandId": "reopened",
+        "commandType": "hierarchy.bootstrap-window",
+        "requestHash": "bootstrap-reopened"
+      },
+      "ids": {
+        "workspaceId": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+        "executionContextId": "6288d186-b183-4b2a-a09e-eda8d207be81",
+        "taskId": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+        "sceneId": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+        "rootNodeId": "8ff39bde-bead-441a-8889-d40090806a37",
+        "sessionId": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+        "mountId": "35fbc48c-04d0-4885-a28a-96483368447b"
+      },
+      "result": {
+        "workspace": {
+          "id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "name": "workspace",
+          "rootDirectory": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+          "pathIdentity": "path:/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+          "taskOrder": [
+            "a3e6e652-eb66-4a70-a19b-6cb9dd907766"
+          ],
+          "isDefault": true,
+          "isPinned": true,
+          "pinSortKey": "a0",
+          "lastOpenedAt": 1000,
+          "createdAt": 1000,
+          "updatedAt": 2000,
+          "version": 3
+        },
+        "executionContext": {
+          "kind": "plain-directory",
+          "id": "6288d186-b183-4b2a-a09e-eda8d207be81",
+          "workspaceId": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "cwd": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+          "createdAt": 1000
+        },
+        "task": {
+          "id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+          "workspaceId": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "title": "默认",
+          "status": "planned",
+          "executionContextId": "6288d186-b183-4b2a-a09e-eda8d207be81",
+          "sortKey": "a0",
+          "isPinned": false,
+          "pinSortKey": "",
+          "lastOpenedAt": 1000,
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "version": 1
+        },
+        "scene": {
+          "id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+          "taskId": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+          "name": "Shell · /var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+          "mode": "tile",
+          "rootNodeId": "8ff39bde-bead-441a-8889-d40090806a37",
+          "titlePinned": false,
+          "sortKey": "a0",
+          "layoutRevision": 1,
+          "createdAt": 1000,
+          "updatedAt": 1000
+        },
+        "session": {
+          "id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+          "taskId": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+          "executionContextId": "6288d186-b183-4b2a-a09e-eda8d207be81",
+          "kind": "shell",
+          "status": "created",
+          "title": "Shell",
+          "titleSource": "default",
+          "cwd": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "lastActivityAt": 1000,
+          "version": 1
+        },
+        "mount": {
+          "id": "35fbc48c-04d0-4885-a28a-96483368447b",
+          "sceneId": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+          "sceneNodeId": "8ff39bde-bead-441a-8889-d40090806a37",
+          "sessionId": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+          "createdAt": 1000
+        },
+        "navigation": {
+          "windowId": "main-window-1",
+          "activeWorkspaceId": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "taskByWorkspace": {
+            "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a": "a3e6e652-eb66-4a70-a19b-6cb9dd907766"
+          },
+          "sceneByTask": {
+            "a3e6e652-eb66-4a70-a19b-6cb9dd907766": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c"
+          },
+          "sessionByScene": {
+            "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a"
+          }
+        }
+      },
+      "snapshot": {
+        "workspaces": [
+          {
+            "id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+            "name": "workspace",
+            "root_directory": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+            "task_order_json": "[\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\"]",
+            "created_at": 1000,
+            "updated_at": 2000,
+            "archived_at": null,
+            "path_identity": "path:/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+            "version": 3,
+            "is_default": 1,
+            "is_pinned": 1,
+            "pin_sort_key": "a0",
+            "last_opened_at": 1000
+          }
+        ],
+        "execution_contexts": [
+          {
+            "id": "6288d186-b183-4b2a-a09e-eda8d207be81",
+            "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+            "kind": "plain-directory",
+            "cwd": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+            "created_at": 1000,
+            "archived_at": null
+          }
+        ],
+        "tasks": [
+          {
+            "id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+            "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+            "parent_task_id": null,
+            "execution_context_id": "6288d186-b183-4b2a-a09e-eda8d207be81",
+            "title": "默认",
+            "status": "planned",
+            "created_at": 1000,
+            "updated_at": 1000,
+            "archived_at": null,
+            "sort_key": "a0",
+            "version": 1,
+            "is_pinned": 0,
+            "pin_sort_key": "",
+            "last_opened_at": 1000
+          }
+        ],
+        "scenes": [
+          {
+            "id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+            "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+            "name": "Shell · /var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+            "mode": "tile",
+            "root_node_id": "8ff39bde-bead-441a-8889-d40090806a37",
+            "created_at": 1000,
+            "updated_at": 1000,
+            "archived_at": null,
+            "title_pinned": 0,
+            "sort_key": "a0",
+            "layout_revision": 1
+          }
+        ],
+        "scene_nodes": [
+          {
+            "id": "8ff39bde-bead-441a-8889-d40090806a37",
+            "scene_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+            "parent_node_id": null,
+            "kind": "root",
+            "direction": null,
+            "ordinal": 0,
+            "created_at": 1000
+          }
+        ],
+        "sessions": [
+          {
+            "id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+            "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+            "execution_context_id": "6288d186-b183-4b2a-a09e-eda8d207be81",
+            "kind": "shell",
+            "status": "created",
+            "created_at": 1000,
+            "updated_at": 1000,
+            "last_activity_at": 1000,
+            "archived_at": null,
+            "title": "Shell",
+            "version": 1,
+            "cwd": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+            "work_status": "idle",
+            "title_source": "default",
+            "provider_title": null
+          }
+        ],
+        "session_mounts": [
+          {
+            "id": "35fbc48c-04d0-4885-a28a-96483368447b",
+            "scene_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+            "scene_node_id": "8ff39bde-bead-441a-8889-d40090806a37",
+            "session_id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+            "created_at": 1000,
+            "scene_window_id": null
+          }
+        ],
+        "app_windows": [
+          {
+            "id": "main-window-1",
+            "kind": "main",
+            "state": "visible",
+            "created_at": 1000,
+            "updated_at": 2000
+          }
+        ],
+        "window_task_placements": [
+          {
+            "window_id": "main-window-1",
+            "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+            "ordinal": 0,
+            "updated_at": 1000
+          }
+        ],
+        "window_navigation": [
+          {
+            "window_id": "main-window-1",
+            "active_workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+            "updated_at": 2000
+          }
+        ],
+        "window_workspace_focus": [
+          {
+            "window_id": "main-window-1",
+            "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+            "active_task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+            "updated_at": 2000
+          }
+        ],
+        "window_task_focus": [
+          {
+            "window_id": "main-window-1",
+            "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+            "active_scene_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+            "updated_at": 2000
+          }
+        ],
+        "window_scene_focus": [
+          {
+            "window_id": "main-window-1",
+            "scene_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+            "active_session_id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+            "updated_at": 2000
+          }
+        ],
+        "bootstrap_state": [
+          {
+            "key": "default-workspace-created",
+            "value_json": "\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\"",
+            "updated_at": 1000
+          }
+        ],
+        "session_canvas_memberships": [
+          {
+            "session_id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+            "scene_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+            "sibling_created_seq": 1,
+            "last_user_interaction_seq": 0,
+            "created_at": 1000,
+            "updated_at": 1000,
+            "pending_user_interaction_seq": 0
+          }
+        ]
+      },
+      "events": [
+        {
+          "seq": 1,
+          "event_id": "initial:5ca57e55-7b2f-4898-b31c-3c6dfcf7652a:created",
+          "event_type": "workspace.created",
+          "aggregate_type": "workspace",
+          "aggregate_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "task_id": null,
+          "session_id": null,
+          "payload_json": "{\"id\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"name\":\"workspace\",\"rootDirectory\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"pathIdentity\":\"path:/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"taskOrder\":[\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\"],\"isDefault\":true,\"isPinned\":true,\"pinSortKey\":\"a0\",\"lastOpenedAt\":1000,\"createdAt\":1000,\"updatedAt\":1000,\"version\":2}",
+          "schema_version": 1,
+          "required_terminal_sequence": null,
+          "command_id": "initial",
+          "causation_id": null,
+          "correlation_id": null,
+          "occurred_at": 1000
+        },
+        {
+          "seq": 2,
+          "event_id": "initial:a3e6e652-eb66-4a70-a19b-6cb9dd907766:created",
+          "event_type": "task.created",
+          "aggregate_type": "task",
+          "aggregate_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+          "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+          "session_id": null,
+          "payload_json": "{\"id\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"workspaceId\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"title\":\"默认\",\"status\":\"planned\",\"executionContextId\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"sortKey\":\"a0\",\"isPinned\":false,\"pinSortKey\":\"\",\"lastOpenedAt\":1000,\"createdAt\":1000,\"updatedAt\":1000,\"version\":1}",
+          "schema_version": 1,
+          "required_terminal_sequence": null,
+          "command_id": "initial",
+          "causation_id": null,
+          "correlation_id": null,
+          "occurred_at": 1000
+        },
+        {
+          "seq": 3,
+          "event_id": "initial:b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c:created",
+          "event_type": "scene.created",
+          "aggregate_type": "scene",
+          "aggregate_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+          "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+          "session_id": null,
+          "payload_json": "{\"id\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\",\"taskId\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"name\":\"Shell · /var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"mode\":\"tile\",\"rootNodeId\":\"8ff39bde-bead-441a-8889-d40090806a37\",\"titlePinned\":false,\"sortKey\":\"a0\",\"layoutRevision\":1,\"createdAt\":1000,\"updatedAt\":1000}",
+          "schema_version": 1,
+          "required_terminal_sequence": null,
+          "command_id": "initial",
+          "causation_id": null,
+          "correlation_id": null,
+          "occurred_at": 1000
+        },
+        {
+          "seq": 4,
+          "event_id": "initial:d1e0ed20-4e3b-464f-a55b-d144b2c8f72a:created",
+          "event_type": "session.created",
+          "aggregate_type": "session",
+          "aggregate_id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+          "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+          "session_id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+          "payload_json": "{\"id\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\",\"taskId\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"executionContextId\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"kind\":\"shell\",\"status\":\"created\",\"title\":\"Shell\",\"titleSource\":\"default\",\"cwd\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"createdAt\":1000,\"updatedAt\":1000,\"lastActivityAt\":1000,\"version\":1}",
+          "schema_version": 1,
+          "required_terminal_sequence": null,
+          "command_id": "initial",
+          "causation_id": null,
+          "correlation_id": null,
+          "occurred_at": 1000
+        },
+        {
+          "seq": 5,
+          "event_id": "initial:35fbc48c-04d0-4885-a28a-96483368447b:created",
+          "event_type": "scene.session-mounted",
+          "aggregate_type": "scene",
+          "aggregate_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+          "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+          "session_id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+          "payload_json": "{\"id\":\"35fbc48c-04d0-4885-a28a-96483368447b\",\"sceneId\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\",\"sceneNodeId\":\"8ff39bde-bead-441a-8889-d40090806a37\",\"sessionId\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\",\"createdAt\":1000}",
+          "schema_version": 1,
+          "required_terminal_sequence": null,
+          "command_id": "initial",
+          "causation_id": null,
+          "correlation_id": null,
+          "occurred_at": 1000
+        }
+      ],
+      "receipts": [
+        {
+          "command_id": "initial",
+          "command_type": "hierarchy.bootstrap-window",
+          "request_hash": "bootstrap-initial",
+          "response_json": "{\"workspace\":{\"id\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"name\":\"workspace\",\"rootDirectory\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"pathIdentity\":\"path:/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"taskOrder\":[\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\"],\"isDefault\":true,\"isPinned\":true,\"pinSortKey\":\"a0\",\"lastOpenedAt\":1000,\"createdAt\":1000,\"updatedAt\":1000,\"version\":2},\"executionContext\":{\"kind\":\"plain-directory\",\"id\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"workspaceId\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"cwd\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"createdAt\":1000},\"task\":{\"id\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"workspaceId\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"title\":\"默认\",\"status\":\"planned\",\"executionContextId\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"sortKey\":\"a0\",\"isPinned\":false,\"pinSortKey\":\"\",\"lastOpenedAt\":1000,\"createdAt\":1000,\"updatedAt\":1000,\"version\":1},\"scene\":{\"id\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\",\"taskId\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"name\":\"Shell · /var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"mode\":\"tile\",\"rootNodeId\":\"8ff39bde-bead-441a-8889-d40090806a37\",\"titlePinned\":false,\"sortKey\":\"a0\",\"layoutRevision\":1,\"createdAt\":1000,\"updatedAt\":1000},\"session\":{\"id\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\",\"taskId\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"executionContextId\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"kind\":\"shell\",\"status\":\"created\",\"title\":\"Shell\",\"titleSource\":\"default\",\"cwd\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"createdAt\":1000,\"updatedAt\":1000,\"lastActivityAt\":1000,\"version\":1},\"mount\":{\"id\":\"35fbc48c-04d0-4885-a28a-96483368447b\",\"sceneId\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\",\"sceneNodeId\":\"8ff39bde-bead-441a-8889-d40090806a37\",\"sessionId\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\",\"createdAt\":1000},\"navigation\":{\"windowId\":\"main-window-1\",\"activeWorkspaceId\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"taskByWorkspace\":{\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\"},\"sceneByTask\":{\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\"},\"sessionByScene\":{\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\"}}}",
+          "first_event_seq": 1,
+          "last_event_seq": 5,
+          "committed_at": 1794716578943
+        },
+        {
+          "command_id": "reopened",
+          "command_type": "hierarchy.bootstrap-window",
+          "request_hash": "bootstrap-reopened",
+          "response_json": "{\"workspace\":{\"id\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"name\":\"workspace\",\"rootDirectory\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"pathIdentity\":\"path:/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"taskOrder\":[\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\"],\"isDefault\":true,\"isPinned\":true,\"pinSortKey\":\"a0\",\"lastOpenedAt\":1000,\"createdAt\":1000,\"updatedAt\":2000,\"version\":3},\"executionContext\":{\"kind\":\"plain-directory\",\"id\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"workspaceId\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"cwd\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"createdAt\":1000},\"task\":{\"id\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"workspaceId\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"title\":\"默认\",\"status\":\"planned\",\"executionContextId\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"sortKey\":\"a0\",\"isPinned\":false,\"pinSortKey\":\"\",\"lastOpenedAt\":1000,\"createdAt\":1000,\"updatedAt\":1000,\"version\":1},\"scene\":{\"id\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\",\"taskId\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"name\":\"Shell · /var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"mode\":\"tile\",\"rootNodeId\":\"8ff39bde-bead-441a-8889-d40090806a37\",\"titlePinned\":false,\"sortKey\":\"a0\",\"layoutRevision\":1,\"createdAt\":1000,\"updatedAt\":1000},\"session\":{\"id\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\",\"taskId\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"executionContextId\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"kind\":\"shell\",\"status\":\"created\",\"title\":\"Shell\",\"titleSource\":\"default\",\"cwd\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"createdAt\":1000,\"updatedAt\":1000,\"lastActivityAt\":1000,\"version\":1},\"mount\":{\"id\":\"35fbc48c-04d0-4885-a28a-96483368447b\",\"sceneId\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\",\"sceneNodeId\":\"8ff39bde-bead-441a-8889-d40090806a37\",\"sessionId\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\",\"createdAt\":1000},\"navigation\":{\"windowId\":\"main-window-1\",\"activeWorkspaceId\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"taskByWorkspace\":{\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\"},\"sceneByTask\":{\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\"},\"sessionByScene\":{\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\"}}}",
+          "first_event_seq": null,
+          "last_event_seq": null,
+          "committed_at": 1794716578976
+        }
+      ]
+    },
+    {
+      "name": "second-window",
+      "input": {
+        "windowId": "main-window-2",
+        "defaultRootDirectory": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+        "defaultName": "workspace",
+        "now": 3000
+      },
+      "command": {
+        "commandId": "second-window",
+        "commandType": "hierarchy.bootstrap-window",
+        "requestHash": "bootstrap-second-window"
+      },
+      "ids": {
+        "workspaceId": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+        "executionContextId": "6288d186-b183-4b2a-a09e-eda8d207be81",
+        "taskId": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+        "sceneId": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+        "rootNodeId": "8ff39bde-bead-441a-8889-d40090806a37",
+        "sessionId": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+        "mountId": "35fbc48c-04d0-4885-a28a-96483368447b"
+      },
+      "result": {
+        "workspace": {
+          "id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "name": "workspace",
+          "rootDirectory": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+          "pathIdentity": "path:/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+          "taskOrder": [
+            "a3e6e652-eb66-4a70-a19b-6cb9dd907766"
+          ],
+          "isDefault": true,
+          "isPinned": true,
+          "pinSortKey": "a0",
+          "lastOpenedAt": 1000,
+          "createdAt": 1000,
+          "updatedAt": 3000,
+          "version": 4
+        },
+        "executionContext": {
+          "kind": "plain-directory",
+          "id": "6288d186-b183-4b2a-a09e-eda8d207be81",
+          "workspaceId": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "cwd": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+          "createdAt": 1000
+        },
+        "task": {
+          "id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+          "workspaceId": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "title": "默认",
+          "status": "planned",
+          "executionContextId": "6288d186-b183-4b2a-a09e-eda8d207be81",
+          "sortKey": "a0",
+          "isPinned": false,
+          "pinSortKey": "",
+          "lastOpenedAt": 1000,
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "version": 1
+        },
+        "scene": {
+          "id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+          "taskId": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+          "name": "Shell · /var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+          "mode": "tile",
+          "rootNodeId": "8ff39bde-bead-441a-8889-d40090806a37",
+          "titlePinned": false,
+          "sortKey": "a0",
+          "layoutRevision": 1,
+          "createdAt": 1000,
+          "updatedAt": 1000
+        },
+        "session": {
+          "id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+          "taskId": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+          "executionContextId": "6288d186-b183-4b2a-a09e-eda8d207be81",
+          "kind": "shell",
+          "status": "created",
+          "title": "Shell",
+          "titleSource": "default",
+          "cwd": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "lastActivityAt": 1000,
+          "version": 1
+        },
+        "mount": {
+          "id": "35fbc48c-04d0-4885-a28a-96483368447b",
+          "sceneId": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+          "sceneNodeId": "8ff39bde-bead-441a-8889-d40090806a37",
+          "sessionId": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+          "createdAt": 1000
+        },
+        "navigation": {
+          "windowId": "main-window-2",
+          "activeWorkspaceId": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "taskByWorkspace": {
+            "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a": "a3e6e652-eb66-4a70-a19b-6cb9dd907766"
+          },
+          "sceneByTask": {
+            "a3e6e652-eb66-4a70-a19b-6cb9dd907766": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c"
+          },
+          "sessionByScene": {
+            "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a"
+          }
+        }
+      },
+      "snapshot": {
+        "workspaces": [
+          {
+            "id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+            "name": "workspace",
+            "root_directory": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+            "task_order_json": "[\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\"]",
+            "created_at": 1000,
+            "updated_at": 3000,
+            "archived_at": null,
+            "path_identity": "path:/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+            "version": 4,
+            "is_default": 1,
+            "is_pinned": 1,
+            "pin_sort_key": "a0",
+            "last_opened_at": 1000
+          }
+        ],
+        "execution_contexts": [
+          {
+            "id": "6288d186-b183-4b2a-a09e-eda8d207be81",
+            "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+            "kind": "plain-directory",
+            "cwd": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+            "created_at": 1000,
+            "archived_at": null
+          }
+        ],
+        "tasks": [
+          {
+            "id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+            "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+            "parent_task_id": null,
+            "execution_context_id": "6288d186-b183-4b2a-a09e-eda8d207be81",
+            "title": "默认",
+            "status": "planned",
+            "created_at": 1000,
+            "updated_at": 1000,
+            "archived_at": null,
+            "sort_key": "a0",
+            "version": 1,
+            "is_pinned": 0,
+            "pin_sort_key": "",
+            "last_opened_at": 1000
+          }
+        ],
+        "scenes": [
+          {
+            "id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+            "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+            "name": "Shell · /var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+            "mode": "tile",
+            "root_node_id": "8ff39bde-bead-441a-8889-d40090806a37",
+            "created_at": 1000,
+            "updated_at": 1000,
+            "archived_at": null,
+            "title_pinned": 0,
+            "sort_key": "a0",
+            "layout_revision": 1
+          }
+        ],
+        "scene_nodes": [
+          {
+            "id": "8ff39bde-bead-441a-8889-d40090806a37",
+            "scene_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+            "parent_node_id": null,
+            "kind": "root",
+            "direction": null,
+            "ordinal": 0,
+            "created_at": 1000
+          }
+        ],
+        "sessions": [
+          {
+            "id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+            "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+            "execution_context_id": "6288d186-b183-4b2a-a09e-eda8d207be81",
+            "kind": "shell",
+            "status": "created",
+            "created_at": 1000,
+            "updated_at": 1000,
+            "last_activity_at": 1000,
+            "archived_at": null,
+            "title": "Shell",
+            "version": 1,
+            "cwd": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+            "work_status": "idle",
+            "title_source": "default",
+            "provider_title": null
+          }
+        ],
+        "session_mounts": [
+          {
+            "id": "35fbc48c-04d0-4885-a28a-96483368447b",
+            "scene_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+            "scene_node_id": "8ff39bde-bead-441a-8889-d40090806a37",
+            "session_id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+            "created_at": 1000,
+            "scene_window_id": null
+          }
+        ],
+        "app_windows": [
+          {
+            "id": "main-window-1",
+            "kind": "main",
+            "state": "visible",
+            "created_at": 1000,
+            "updated_at": 2000
+          },
+          {
+            "id": "main-window-2",
+            "kind": "main",
+            "state": "visible",
+            "created_at": 3000,
+            "updated_at": 3000
+          }
+        ],
+        "window_task_placements": [
+          {
+            "window_id": "main-window-1",
+            "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+            "ordinal": 0,
+            "updated_at": 1000
+          }
+        ],
+        "window_navigation": [
+          {
+            "window_id": "main-window-1",
+            "active_workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+            "updated_at": 2000
+          },
+          {
+            "window_id": "main-window-2",
+            "active_workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+            "updated_at": 3000
+          }
+        ],
+        "window_workspace_focus": [
+          {
+            "window_id": "main-window-1",
+            "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+            "active_task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+            "updated_at": 2000
+          },
+          {
+            "window_id": "main-window-2",
+            "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+            "active_task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+            "updated_at": 3000
+          }
+        ],
+        "window_task_focus": [
+          {
+            "window_id": "main-window-1",
+            "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+            "active_scene_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+            "updated_at": 2000
+          },
+          {
+            "window_id": "main-window-2",
+            "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+            "active_scene_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+            "updated_at": 3000
+          }
+        ],
+        "window_scene_focus": [
+          {
+            "window_id": "main-window-1",
+            "scene_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+            "active_session_id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+            "updated_at": 2000
+          },
+          {
+            "window_id": "main-window-2",
+            "scene_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+            "active_session_id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+            "updated_at": 3000
+          }
+        ],
+        "bootstrap_state": [
+          {
+            "key": "default-workspace-created",
+            "value_json": "\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\"",
+            "updated_at": 1000
+          }
+        ],
+        "session_canvas_memberships": [
+          {
+            "session_id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+            "scene_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+            "sibling_created_seq": 1,
+            "last_user_interaction_seq": 0,
+            "created_at": 1000,
+            "updated_at": 1000,
+            "pending_user_interaction_seq": 0
+          }
+        ]
+      },
+      "events": [
+        {
+          "seq": 1,
+          "event_id": "initial:5ca57e55-7b2f-4898-b31c-3c6dfcf7652a:created",
+          "event_type": "workspace.created",
+          "aggregate_type": "workspace",
+          "aggregate_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "task_id": null,
+          "session_id": null,
+          "payload_json": "{\"id\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"name\":\"workspace\",\"rootDirectory\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"pathIdentity\":\"path:/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"taskOrder\":[\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\"],\"isDefault\":true,\"isPinned\":true,\"pinSortKey\":\"a0\",\"lastOpenedAt\":1000,\"createdAt\":1000,\"updatedAt\":1000,\"version\":2}",
+          "schema_version": 1,
+          "required_terminal_sequence": null,
+          "command_id": "initial",
+          "causation_id": null,
+          "correlation_id": null,
+          "occurred_at": 1000
+        },
+        {
+          "seq": 2,
+          "event_id": "initial:a3e6e652-eb66-4a70-a19b-6cb9dd907766:created",
+          "event_type": "task.created",
+          "aggregate_type": "task",
+          "aggregate_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+          "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+          "session_id": null,
+          "payload_json": "{\"id\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"workspaceId\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"title\":\"默认\",\"status\":\"planned\",\"executionContextId\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"sortKey\":\"a0\",\"isPinned\":false,\"pinSortKey\":\"\",\"lastOpenedAt\":1000,\"createdAt\":1000,\"updatedAt\":1000,\"version\":1}",
+          "schema_version": 1,
+          "required_terminal_sequence": null,
+          "command_id": "initial",
+          "causation_id": null,
+          "correlation_id": null,
+          "occurred_at": 1000
+        },
+        {
+          "seq": 3,
+          "event_id": "initial:b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c:created",
+          "event_type": "scene.created",
+          "aggregate_type": "scene",
+          "aggregate_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+          "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+          "session_id": null,
+          "payload_json": "{\"id\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\",\"taskId\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"name\":\"Shell · /var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"mode\":\"tile\",\"rootNodeId\":\"8ff39bde-bead-441a-8889-d40090806a37\",\"titlePinned\":false,\"sortKey\":\"a0\",\"layoutRevision\":1,\"createdAt\":1000,\"updatedAt\":1000}",
+          "schema_version": 1,
+          "required_terminal_sequence": null,
+          "command_id": "initial",
+          "causation_id": null,
+          "correlation_id": null,
+          "occurred_at": 1000
+        },
+        {
+          "seq": 4,
+          "event_id": "initial:d1e0ed20-4e3b-464f-a55b-d144b2c8f72a:created",
+          "event_type": "session.created",
+          "aggregate_type": "session",
+          "aggregate_id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+          "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+          "session_id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+          "payload_json": "{\"id\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\",\"taskId\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"executionContextId\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"kind\":\"shell\",\"status\":\"created\",\"title\":\"Shell\",\"titleSource\":\"default\",\"cwd\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"createdAt\":1000,\"updatedAt\":1000,\"lastActivityAt\":1000,\"version\":1}",
+          "schema_version": 1,
+          "required_terminal_sequence": null,
+          "command_id": "initial",
+          "causation_id": null,
+          "correlation_id": null,
+          "occurred_at": 1000
+        },
+        {
+          "seq": 5,
+          "event_id": "initial:35fbc48c-04d0-4885-a28a-96483368447b:created",
+          "event_type": "scene.session-mounted",
+          "aggregate_type": "scene",
+          "aggregate_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+          "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+          "session_id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+          "payload_json": "{\"id\":\"35fbc48c-04d0-4885-a28a-96483368447b\",\"sceneId\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\",\"sceneNodeId\":\"8ff39bde-bead-441a-8889-d40090806a37\",\"sessionId\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\",\"createdAt\":1000}",
+          "schema_version": 1,
+          "required_terminal_sequence": null,
+          "command_id": "initial",
+          "causation_id": null,
+          "correlation_id": null,
+          "occurred_at": 1000
+        }
+      ],
+      "receipts": [
+        {
+          "command_id": "initial",
+          "command_type": "hierarchy.bootstrap-window",
+          "request_hash": "bootstrap-initial",
+          "response_json": "{\"workspace\":{\"id\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"name\":\"workspace\",\"rootDirectory\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"pathIdentity\":\"path:/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"taskOrder\":[\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\"],\"isDefault\":true,\"isPinned\":true,\"pinSortKey\":\"a0\",\"lastOpenedAt\":1000,\"createdAt\":1000,\"updatedAt\":1000,\"version\":2},\"executionContext\":{\"kind\":\"plain-directory\",\"id\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"workspaceId\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"cwd\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"createdAt\":1000},\"task\":{\"id\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"workspaceId\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"title\":\"默认\",\"status\":\"planned\",\"executionContextId\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"sortKey\":\"a0\",\"isPinned\":false,\"pinSortKey\":\"\",\"lastOpenedAt\":1000,\"createdAt\":1000,\"updatedAt\":1000,\"version\":1},\"scene\":{\"id\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\",\"taskId\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"name\":\"Shell · /var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"mode\":\"tile\",\"rootNodeId\":\"8ff39bde-bead-441a-8889-d40090806a37\",\"titlePinned\":false,\"sortKey\":\"a0\",\"layoutRevision\":1,\"createdAt\":1000,\"updatedAt\":1000},\"session\":{\"id\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\",\"taskId\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"executionContextId\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"kind\":\"shell\",\"status\":\"created\",\"title\":\"Shell\",\"titleSource\":\"default\",\"cwd\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"createdAt\":1000,\"updatedAt\":1000,\"lastActivityAt\":1000,\"version\":1},\"mount\":{\"id\":\"35fbc48c-04d0-4885-a28a-96483368447b\",\"sceneId\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\",\"sceneNodeId\":\"8ff39bde-bead-441a-8889-d40090806a37\",\"sessionId\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\",\"createdAt\":1000},\"navigation\":{\"windowId\":\"main-window-1\",\"activeWorkspaceId\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"taskByWorkspace\":{\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\"},\"sceneByTask\":{\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\"},\"sessionByScene\":{\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\"}}}",
+          "first_event_seq": 1,
+          "last_event_seq": 5,
+          "committed_at": 1794716578943
+        },
+        {
+          "command_id": "reopened",
+          "command_type": "hierarchy.bootstrap-window",
+          "request_hash": "bootstrap-reopened",
+          "response_json": "{\"workspace\":{\"id\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"name\":\"workspace\",\"rootDirectory\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"pathIdentity\":\"path:/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"taskOrder\":[\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\"],\"isDefault\":true,\"isPinned\":true,\"pinSortKey\":\"a0\",\"lastOpenedAt\":1000,\"createdAt\":1000,\"updatedAt\":2000,\"version\":3},\"executionContext\":{\"kind\":\"plain-directory\",\"id\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"workspaceId\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"cwd\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"createdAt\":1000},\"task\":{\"id\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"workspaceId\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"title\":\"默认\",\"status\":\"planned\",\"executionContextId\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"sortKey\":\"a0\",\"isPinned\":false,\"pinSortKey\":\"\",\"lastOpenedAt\":1000,\"createdAt\":1000,\"updatedAt\":1000,\"version\":1},\"scene\":{\"id\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\",\"taskId\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"name\":\"Shell · /var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"mode\":\"tile\",\"rootNodeId\":\"8ff39bde-bead-441a-8889-d40090806a37\",\"titlePinned\":false,\"sortKey\":\"a0\",\"layoutRevision\":1,\"createdAt\":1000,\"updatedAt\":1000},\"session\":{\"id\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\",\"taskId\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"executionContextId\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"kind\":\"shell\",\"status\":\"created\",\"title\":\"Shell\",\"titleSource\":\"default\",\"cwd\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"createdAt\":1000,\"updatedAt\":1000,\"lastActivityAt\":1000,\"version\":1},\"mount\":{\"id\":\"35fbc48c-04d0-4885-a28a-96483368447b\",\"sceneId\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\",\"sceneNodeId\":\"8ff39bde-bead-441a-8889-d40090806a37\",\"sessionId\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\",\"createdAt\":1000},\"navigation\":{\"windowId\":\"main-window-1\",\"activeWorkspaceId\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"taskByWorkspace\":{\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\"},\"sceneByTask\":{\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\"},\"sessionByScene\":{\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\"}}}",
+          "first_event_seq": null,
+          "last_event_seq": null,
+          "committed_at": 1794716578976
+        },
+        {
+          "command_id": "second-window",
+          "command_type": "hierarchy.bootstrap-window",
+          "request_hash": "bootstrap-second-window",
+          "response_json": "{\"workspace\":{\"id\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"name\":\"workspace\",\"rootDirectory\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"pathIdentity\":\"path:/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"taskOrder\":[\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\"],\"isDefault\":true,\"isPinned\":true,\"pinSortKey\":\"a0\",\"lastOpenedAt\":1000,\"createdAt\":1000,\"updatedAt\":3000,\"version\":4},\"executionContext\":{\"kind\":\"plain-directory\",\"id\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"workspaceId\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"cwd\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"createdAt\":1000},\"task\":{\"id\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"workspaceId\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"title\":\"默认\",\"status\":\"planned\",\"executionContextId\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"sortKey\":\"a0\",\"isPinned\":false,\"pinSortKey\":\"\",\"lastOpenedAt\":1000,\"createdAt\":1000,\"updatedAt\":1000,\"version\":1},\"scene\":{\"id\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\",\"taskId\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"name\":\"Shell · /var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"mode\":\"tile\",\"rootNodeId\":\"8ff39bde-bead-441a-8889-d40090806a37\",\"titlePinned\":false,\"sortKey\":\"a0\",\"layoutRevision\":1,\"createdAt\":1000,\"updatedAt\":1000},\"session\":{\"id\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\",\"taskId\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"executionContextId\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"kind\":\"shell\",\"status\":\"created\",\"title\":\"Shell\",\"titleSource\":\"default\",\"cwd\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"createdAt\":1000,\"updatedAt\":1000,\"lastActivityAt\":1000,\"version\":1},\"mount\":{\"id\":\"35fbc48c-04d0-4885-a28a-96483368447b\",\"sceneId\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\",\"sceneNodeId\":\"8ff39bde-bead-441a-8889-d40090806a37\",\"sessionId\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\",\"createdAt\":1000},\"navigation\":{\"windowId\":\"main-window-2\",\"activeWorkspaceId\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"taskByWorkspace\":{\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\"},\"sceneByTask\":{\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\"},\"sessionByScene\":{\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\"}}}",
+          "first_event_seq": null,
+          "last_event_seq": null,
+          "committed_at": 1794716578976
+        }
+      ]
+    },
+    {
+      "name": "new-default-root",
+      "input": {
+        "windowId": "main-window-1",
+        "defaultRootDirectory": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/second",
+        "defaultName": "second",
+        "now": 4000
+      },
+      "command": {
+        "commandId": "new-root",
+        "commandType": "hierarchy.bootstrap-window",
+        "requestHash": "bootstrap-new-root"
+      },
+      "ids": null,
+      "error": "UNIQUE constraint failed: workspaces.is_default",
+      "snapshot": {
+        "workspaces": [
+          {
+            "id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+            "name": "workspace",
+            "root_directory": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+            "task_order_json": "[\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\"]",
+            "created_at": 1000,
+            "updated_at": 3000,
+            "archived_at": null,
+            "path_identity": "path:/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+            "version": 4,
+            "is_default": 1,
+            "is_pinned": 1,
+            "pin_sort_key": "a0",
+            "last_opened_at": 1000
+          }
+        ],
+        "execution_contexts": [
+          {
+            "id": "6288d186-b183-4b2a-a09e-eda8d207be81",
+            "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+            "kind": "plain-directory",
+            "cwd": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+            "created_at": 1000,
+            "archived_at": null
+          }
+        ],
+        "tasks": [
+          {
+            "id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+            "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+            "parent_task_id": null,
+            "execution_context_id": "6288d186-b183-4b2a-a09e-eda8d207be81",
+            "title": "默认",
+            "status": "planned",
+            "created_at": 1000,
+            "updated_at": 1000,
+            "archived_at": null,
+            "sort_key": "a0",
+            "version": 1,
+            "is_pinned": 0,
+            "pin_sort_key": "",
+            "last_opened_at": 1000
+          }
+        ],
+        "scenes": [
+          {
+            "id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+            "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+            "name": "Shell · /var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+            "mode": "tile",
+            "root_node_id": "8ff39bde-bead-441a-8889-d40090806a37",
+            "created_at": 1000,
+            "updated_at": 1000,
+            "archived_at": null,
+            "title_pinned": 0,
+            "sort_key": "a0",
+            "layout_revision": 1
+          }
+        ],
+        "scene_nodes": [
+          {
+            "id": "8ff39bde-bead-441a-8889-d40090806a37",
+            "scene_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+            "parent_node_id": null,
+            "kind": "root",
+            "direction": null,
+            "ordinal": 0,
+            "created_at": 1000
+          }
+        ],
+        "sessions": [
+          {
+            "id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+            "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+            "execution_context_id": "6288d186-b183-4b2a-a09e-eda8d207be81",
+            "kind": "shell",
+            "status": "created",
+            "created_at": 1000,
+            "updated_at": 1000,
+            "last_activity_at": 1000,
+            "archived_at": null,
+            "title": "Shell",
+            "version": 1,
+            "cwd": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+            "work_status": "idle",
+            "title_source": "default",
+            "provider_title": null
+          }
+        ],
+        "session_mounts": [
+          {
+            "id": "35fbc48c-04d0-4885-a28a-96483368447b",
+            "scene_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+            "scene_node_id": "8ff39bde-bead-441a-8889-d40090806a37",
+            "session_id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+            "created_at": 1000,
+            "scene_window_id": null
+          }
+        ],
+        "app_windows": [
+          {
+            "id": "main-window-1",
+            "kind": "main",
+            "state": "visible",
+            "created_at": 1000,
+            "updated_at": 2000
+          },
+          {
+            "id": "main-window-2",
+            "kind": "main",
+            "state": "visible",
+            "created_at": 3000,
+            "updated_at": 3000
+          }
+        ],
+        "window_task_placements": [
+          {
+            "window_id": "main-window-1",
+            "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+            "ordinal": 0,
+            "updated_at": 1000
+          }
+        ],
+        "window_navigation": [
+          {
+            "window_id": "main-window-1",
+            "active_workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+            "updated_at": 2000
+          },
+          {
+            "window_id": "main-window-2",
+            "active_workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+            "updated_at": 3000
+          }
+        ],
+        "window_workspace_focus": [
+          {
+            "window_id": "main-window-1",
+            "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+            "active_task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+            "updated_at": 2000
+          },
+          {
+            "window_id": "main-window-2",
+            "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+            "active_task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+            "updated_at": 3000
+          }
+        ],
+        "window_task_focus": [
+          {
+            "window_id": "main-window-1",
+            "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+            "active_scene_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+            "updated_at": 2000
+          },
+          {
+            "window_id": "main-window-2",
+            "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+            "active_scene_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+            "updated_at": 3000
+          }
+        ],
+        "window_scene_focus": [
+          {
+            "window_id": "main-window-1",
+            "scene_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+            "active_session_id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+            "updated_at": 2000
+          },
+          {
+            "window_id": "main-window-2",
+            "scene_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+            "active_session_id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+            "updated_at": 3000
+          }
+        ],
+        "bootstrap_state": [
+          {
+            "key": "default-workspace-created",
+            "value_json": "\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\"",
+            "updated_at": 1000
+          }
+        ],
+        "session_canvas_memberships": [
+          {
+            "session_id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+            "scene_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+            "sibling_created_seq": 1,
+            "last_user_interaction_seq": 0,
+            "created_at": 1000,
+            "updated_at": 1000,
+            "pending_user_interaction_seq": 0
+          }
+        ]
+      },
+      "events": [
+        {
+          "seq": 1,
+          "event_id": "initial:5ca57e55-7b2f-4898-b31c-3c6dfcf7652a:created",
+          "event_type": "workspace.created",
+          "aggregate_type": "workspace",
+          "aggregate_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "task_id": null,
+          "session_id": null,
+          "payload_json": "{\"id\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"name\":\"workspace\",\"rootDirectory\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"pathIdentity\":\"path:/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"taskOrder\":[\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\"],\"isDefault\":true,\"isPinned\":true,\"pinSortKey\":\"a0\",\"lastOpenedAt\":1000,\"createdAt\":1000,\"updatedAt\":1000,\"version\":2}",
+          "schema_version": 1,
+          "required_terminal_sequence": null,
+          "command_id": "initial",
+          "causation_id": null,
+          "correlation_id": null,
+          "occurred_at": 1000
+        },
+        {
+          "seq": 2,
+          "event_id": "initial:a3e6e652-eb66-4a70-a19b-6cb9dd907766:created",
+          "event_type": "task.created",
+          "aggregate_type": "task",
+          "aggregate_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+          "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+          "session_id": null,
+          "payload_json": "{\"id\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"workspaceId\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"title\":\"默认\",\"status\":\"planned\",\"executionContextId\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"sortKey\":\"a0\",\"isPinned\":false,\"pinSortKey\":\"\",\"lastOpenedAt\":1000,\"createdAt\":1000,\"updatedAt\":1000,\"version\":1}",
+          "schema_version": 1,
+          "required_terminal_sequence": null,
+          "command_id": "initial",
+          "causation_id": null,
+          "correlation_id": null,
+          "occurred_at": 1000
+        },
+        {
+          "seq": 3,
+          "event_id": "initial:b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c:created",
+          "event_type": "scene.created",
+          "aggregate_type": "scene",
+          "aggregate_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+          "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+          "session_id": null,
+          "payload_json": "{\"id\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\",\"taskId\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"name\":\"Shell · /var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"mode\":\"tile\",\"rootNodeId\":\"8ff39bde-bead-441a-8889-d40090806a37\",\"titlePinned\":false,\"sortKey\":\"a0\",\"layoutRevision\":1,\"createdAt\":1000,\"updatedAt\":1000}",
+          "schema_version": 1,
+          "required_terminal_sequence": null,
+          "command_id": "initial",
+          "causation_id": null,
+          "correlation_id": null,
+          "occurred_at": 1000
+        },
+        {
+          "seq": 4,
+          "event_id": "initial:d1e0ed20-4e3b-464f-a55b-d144b2c8f72a:created",
+          "event_type": "session.created",
+          "aggregate_type": "session",
+          "aggregate_id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+          "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+          "session_id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+          "payload_json": "{\"id\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\",\"taskId\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"executionContextId\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"kind\":\"shell\",\"status\":\"created\",\"title\":\"Shell\",\"titleSource\":\"default\",\"cwd\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"createdAt\":1000,\"updatedAt\":1000,\"lastActivityAt\":1000,\"version\":1}",
+          "schema_version": 1,
+          "required_terminal_sequence": null,
+          "command_id": "initial",
+          "causation_id": null,
+          "correlation_id": null,
+          "occurred_at": 1000
+        },
+        {
+          "seq": 5,
+          "event_id": "initial:35fbc48c-04d0-4885-a28a-96483368447b:created",
+          "event_type": "scene.session-mounted",
+          "aggregate_type": "scene",
+          "aggregate_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+          "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+          "session_id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+          "payload_json": "{\"id\":\"35fbc48c-04d0-4885-a28a-96483368447b\",\"sceneId\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\",\"sceneNodeId\":\"8ff39bde-bead-441a-8889-d40090806a37\",\"sessionId\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\",\"createdAt\":1000}",
+          "schema_version": 1,
+          "required_terminal_sequence": null,
+          "command_id": "initial",
+          "causation_id": null,
+          "correlation_id": null,
+          "occurred_at": 1000
+        }
+      ],
+      "receipts": [
+        {
+          "command_id": "initial",
+          "command_type": "hierarchy.bootstrap-window",
+          "request_hash": "bootstrap-initial",
+          "response_json": "{\"workspace\":{\"id\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"name\":\"workspace\",\"rootDirectory\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"pathIdentity\":\"path:/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"taskOrder\":[\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\"],\"isDefault\":true,\"isPinned\":true,\"pinSortKey\":\"a0\",\"lastOpenedAt\":1000,\"createdAt\":1000,\"updatedAt\":1000,\"version\":2},\"executionContext\":{\"kind\":\"plain-directory\",\"id\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"workspaceId\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"cwd\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"createdAt\":1000},\"task\":{\"id\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"workspaceId\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"title\":\"默认\",\"status\":\"planned\",\"executionContextId\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"sortKey\":\"a0\",\"isPinned\":false,\"pinSortKey\":\"\",\"lastOpenedAt\":1000,\"createdAt\":1000,\"updatedAt\":1000,\"version\":1},\"scene\":{\"id\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\",\"taskId\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"name\":\"Shell · /var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"mode\":\"tile\",\"rootNodeId\":\"8ff39bde-bead-441a-8889-d40090806a37\",\"titlePinned\":false,\"sortKey\":\"a0\",\"layoutRevision\":1,\"createdAt\":1000,\"updatedAt\":1000},\"session\":{\"id\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\",\"taskId\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"executionContextId\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"kind\":\"shell\",\"status\":\"created\",\"title\":\"Shell\",\"titleSource\":\"default\",\"cwd\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"createdAt\":1000,\"updatedAt\":1000,\"lastActivityAt\":1000,\"version\":1},\"mount\":{\"id\":\"35fbc48c-04d0-4885-a28a-96483368447b\",\"sceneId\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\",\"sceneNodeId\":\"8ff39bde-bead-441a-8889-d40090806a37\",\"sessionId\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\",\"createdAt\":1000},\"navigation\":{\"windowId\":\"main-window-1\",\"activeWorkspaceId\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"taskByWorkspace\":{\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\"},\"sceneByTask\":{\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\"},\"sessionByScene\":{\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\"}}}",
+          "first_event_seq": 1,
+          "last_event_seq": 5,
+          "committed_at": 1794716578943
+        },
+        {
+          "command_id": "reopened",
+          "command_type": "hierarchy.bootstrap-window",
+          "request_hash": "bootstrap-reopened",
+          "response_json": "{\"workspace\":{\"id\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"name\":\"workspace\",\"rootDirectory\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"pathIdentity\":\"path:/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"taskOrder\":[\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\"],\"isDefault\":true,\"isPinned\":true,\"pinSortKey\":\"a0\",\"lastOpenedAt\":1000,\"createdAt\":1000,\"updatedAt\":2000,\"version\":3},\"executionContext\":{\"kind\":\"plain-directory\",\"id\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"workspaceId\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"cwd\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"createdAt\":1000},\"task\":{\"id\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"workspaceId\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"title\":\"默认\",\"status\":\"planned\",\"executionContextId\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"sortKey\":\"a0\",\"isPinned\":false,\"pinSortKey\":\"\",\"lastOpenedAt\":1000,\"createdAt\":1000,\"updatedAt\":1000,\"version\":1},\"scene\":{\"id\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\",\"taskId\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"name\":\"Shell · /var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"mode\":\"tile\",\"rootNodeId\":\"8ff39bde-bead-441a-8889-d40090806a37\",\"titlePinned\":false,\"sortKey\":\"a0\",\"layoutRevision\":1,\"createdAt\":1000,\"updatedAt\":1000},\"session\":{\"id\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\",\"taskId\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"executionContextId\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"kind\":\"shell\",\"status\":\"created\",\"title\":\"Shell\",\"titleSource\":\"default\",\"cwd\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"createdAt\":1000,\"updatedAt\":1000,\"lastActivityAt\":1000,\"version\":1},\"mount\":{\"id\":\"35fbc48c-04d0-4885-a28a-96483368447b\",\"sceneId\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\",\"sceneNodeId\":\"8ff39bde-bead-441a-8889-d40090806a37\",\"sessionId\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\",\"createdAt\":1000},\"navigation\":{\"windowId\":\"main-window-1\",\"activeWorkspaceId\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"taskByWorkspace\":{\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\"},\"sceneByTask\":{\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\"},\"sessionByScene\":{\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\"}}}",
+          "first_event_seq": null,
+          "last_event_seq": null,
+          "committed_at": 1794716578976
+        },
+        {
+          "command_id": "second-window",
+          "command_type": "hierarchy.bootstrap-window",
+          "request_hash": "bootstrap-second-window",
+          "response_json": "{\"workspace\":{\"id\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"name\":\"workspace\",\"rootDirectory\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"pathIdentity\":\"path:/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"taskOrder\":[\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\"],\"isDefault\":true,\"isPinned\":true,\"pinSortKey\":\"a0\",\"lastOpenedAt\":1000,\"createdAt\":1000,\"updatedAt\":3000,\"version\":4},\"executionContext\":{\"kind\":\"plain-directory\",\"id\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"workspaceId\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"cwd\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"createdAt\":1000},\"task\":{\"id\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"workspaceId\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"title\":\"默认\",\"status\":\"planned\",\"executionContextId\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"sortKey\":\"a0\",\"isPinned\":false,\"pinSortKey\":\"\",\"lastOpenedAt\":1000,\"createdAt\":1000,\"updatedAt\":1000,\"version\":1},\"scene\":{\"id\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\",\"taskId\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"name\":\"Shell · /var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"mode\":\"tile\",\"rootNodeId\":\"8ff39bde-bead-441a-8889-d40090806a37\",\"titlePinned\":false,\"sortKey\":\"a0\",\"layoutRevision\":1,\"createdAt\":1000,\"updatedAt\":1000},\"session\":{\"id\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\",\"taskId\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"executionContextId\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"kind\":\"shell\",\"status\":\"created\",\"title\":\"Shell\",\"titleSource\":\"default\",\"cwd\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"createdAt\":1000,\"updatedAt\":1000,\"lastActivityAt\":1000,\"version\":1},\"mount\":{\"id\":\"35fbc48c-04d0-4885-a28a-96483368447b\",\"sceneId\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\",\"sceneNodeId\":\"8ff39bde-bead-441a-8889-d40090806a37\",\"sessionId\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\",\"createdAt\":1000},\"navigation\":{\"windowId\":\"main-window-2\",\"activeWorkspaceId\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"taskByWorkspace\":{\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\"},\"sceneByTask\":{\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\"},\"sessionByScene\":{\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\"}}}",
+          "first_event_seq": null,
+          "last_event_seq": null,
+          "committed_at": 1794716578976
+        }
+      ]
+    },
+    {
+      "name": "invalid-name",
+      "input": {
+        "windowId": "main-window-1",
+        "defaultRootDirectory": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/invalid",
+        "defaultName": "  ",
+        "now": 5000
+      },
+      "command": {
+        "commandId": "invalid",
+        "commandType": "hierarchy.bootstrap-window",
+        "requestHash": "bootstrap-invalid"
+      },
+      "ids": null,
+      "error": "Workspace name must not be empty",
+      "snapshot": {
+        "workspaces": [
+          {
+            "id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+            "name": "workspace",
+            "root_directory": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+            "task_order_json": "[\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\"]",
+            "created_at": 1000,
+            "updated_at": 3000,
+            "archived_at": null,
+            "path_identity": "path:/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+            "version": 4,
+            "is_default": 1,
+            "is_pinned": 1,
+            "pin_sort_key": "a0",
+            "last_opened_at": 1000
+          }
+        ],
+        "execution_contexts": [
+          {
+            "id": "6288d186-b183-4b2a-a09e-eda8d207be81",
+            "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+            "kind": "plain-directory",
+            "cwd": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+            "created_at": 1000,
+            "archived_at": null
+          }
+        ],
+        "tasks": [
+          {
+            "id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+            "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+            "parent_task_id": null,
+            "execution_context_id": "6288d186-b183-4b2a-a09e-eda8d207be81",
+            "title": "默认",
+            "status": "planned",
+            "created_at": 1000,
+            "updated_at": 1000,
+            "archived_at": null,
+            "sort_key": "a0",
+            "version": 1,
+            "is_pinned": 0,
+            "pin_sort_key": "",
+            "last_opened_at": 1000
+          }
+        ],
+        "scenes": [
+          {
+            "id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+            "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+            "name": "Shell · /var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+            "mode": "tile",
+            "root_node_id": "8ff39bde-bead-441a-8889-d40090806a37",
+            "created_at": 1000,
+            "updated_at": 1000,
+            "archived_at": null,
+            "title_pinned": 0,
+            "sort_key": "a0",
+            "layout_revision": 1
+          }
+        ],
+        "scene_nodes": [
+          {
+            "id": "8ff39bde-bead-441a-8889-d40090806a37",
+            "scene_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+            "parent_node_id": null,
+            "kind": "root",
+            "direction": null,
+            "ordinal": 0,
+            "created_at": 1000
+          }
+        ],
+        "sessions": [
+          {
+            "id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+            "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+            "execution_context_id": "6288d186-b183-4b2a-a09e-eda8d207be81",
+            "kind": "shell",
+            "status": "created",
+            "created_at": 1000,
+            "updated_at": 1000,
+            "last_activity_at": 1000,
+            "archived_at": null,
+            "title": "Shell",
+            "version": 1,
+            "cwd": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace",
+            "work_status": "idle",
+            "title_source": "default",
+            "provider_title": null
+          }
+        ],
+        "session_mounts": [
+          {
+            "id": "35fbc48c-04d0-4885-a28a-96483368447b",
+            "scene_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+            "scene_node_id": "8ff39bde-bead-441a-8889-d40090806a37",
+            "session_id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+            "created_at": 1000,
+            "scene_window_id": null
+          }
+        ],
+        "app_windows": [
+          {
+            "id": "main-window-1",
+            "kind": "main",
+            "state": "visible",
+            "created_at": 1000,
+            "updated_at": 2000
+          },
+          {
+            "id": "main-window-2",
+            "kind": "main",
+            "state": "visible",
+            "created_at": 3000,
+            "updated_at": 3000
+          }
+        ],
+        "window_task_placements": [
+          {
+            "window_id": "main-window-1",
+            "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+            "ordinal": 0,
+            "updated_at": 1000
+          }
+        ],
+        "window_navigation": [
+          {
+            "window_id": "main-window-1",
+            "active_workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+            "updated_at": 2000
+          },
+          {
+            "window_id": "main-window-2",
+            "active_workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+            "updated_at": 3000
+          }
+        ],
+        "window_workspace_focus": [
+          {
+            "window_id": "main-window-1",
+            "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+            "active_task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+            "updated_at": 2000
+          },
+          {
+            "window_id": "main-window-2",
+            "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+            "active_task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+            "updated_at": 3000
+          }
+        ],
+        "window_task_focus": [
+          {
+            "window_id": "main-window-1",
+            "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+            "active_scene_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+            "updated_at": 2000
+          },
+          {
+            "window_id": "main-window-2",
+            "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+            "active_scene_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+            "updated_at": 3000
+          }
+        ],
+        "window_scene_focus": [
+          {
+            "window_id": "main-window-1",
+            "scene_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+            "active_session_id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+            "updated_at": 2000
+          },
+          {
+            "window_id": "main-window-2",
+            "scene_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+            "active_session_id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+            "updated_at": 3000
+          }
+        ],
+        "bootstrap_state": [
+          {
+            "key": "default-workspace-created",
+            "value_json": "\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\"",
+            "updated_at": 1000
+          }
+        ],
+        "session_canvas_memberships": [
+          {
+            "session_id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+            "scene_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+            "sibling_created_seq": 1,
+            "last_user_interaction_seq": 0,
+            "created_at": 1000,
+            "updated_at": 1000,
+            "pending_user_interaction_seq": 0
+          }
+        ]
+      },
+      "events": [
+        {
+          "seq": 1,
+          "event_id": "initial:5ca57e55-7b2f-4898-b31c-3c6dfcf7652a:created",
+          "event_type": "workspace.created",
+          "aggregate_type": "workspace",
+          "aggregate_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "task_id": null,
+          "session_id": null,
+          "payload_json": "{\"id\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"name\":\"workspace\",\"rootDirectory\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"pathIdentity\":\"path:/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"taskOrder\":[\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\"],\"isDefault\":true,\"isPinned\":true,\"pinSortKey\":\"a0\",\"lastOpenedAt\":1000,\"createdAt\":1000,\"updatedAt\":1000,\"version\":2}",
+          "schema_version": 1,
+          "required_terminal_sequence": null,
+          "command_id": "initial",
+          "causation_id": null,
+          "correlation_id": null,
+          "occurred_at": 1000
+        },
+        {
+          "seq": 2,
+          "event_id": "initial:a3e6e652-eb66-4a70-a19b-6cb9dd907766:created",
+          "event_type": "task.created",
+          "aggregate_type": "task",
+          "aggregate_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+          "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+          "session_id": null,
+          "payload_json": "{\"id\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"workspaceId\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"title\":\"默认\",\"status\":\"planned\",\"executionContextId\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"sortKey\":\"a0\",\"isPinned\":false,\"pinSortKey\":\"\",\"lastOpenedAt\":1000,\"createdAt\":1000,\"updatedAt\":1000,\"version\":1}",
+          "schema_version": 1,
+          "required_terminal_sequence": null,
+          "command_id": "initial",
+          "causation_id": null,
+          "correlation_id": null,
+          "occurred_at": 1000
+        },
+        {
+          "seq": 3,
+          "event_id": "initial:b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c:created",
+          "event_type": "scene.created",
+          "aggregate_type": "scene",
+          "aggregate_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+          "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+          "session_id": null,
+          "payload_json": "{\"id\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\",\"taskId\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"name\":\"Shell · /var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"mode\":\"tile\",\"rootNodeId\":\"8ff39bde-bead-441a-8889-d40090806a37\",\"titlePinned\":false,\"sortKey\":\"a0\",\"layoutRevision\":1,\"createdAt\":1000,\"updatedAt\":1000}",
+          "schema_version": 1,
+          "required_terminal_sequence": null,
+          "command_id": "initial",
+          "causation_id": null,
+          "correlation_id": null,
+          "occurred_at": 1000
+        },
+        {
+          "seq": 4,
+          "event_id": "initial:d1e0ed20-4e3b-464f-a55b-d144b2c8f72a:created",
+          "event_type": "session.created",
+          "aggregate_type": "session",
+          "aggregate_id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+          "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+          "session_id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+          "payload_json": "{\"id\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\",\"taskId\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"executionContextId\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"kind\":\"shell\",\"status\":\"created\",\"title\":\"Shell\",\"titleSource\":\"default\",\"cwd\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"createdAt\":1000,\"updatedAt\":1000,\"lastActivityAt\":1000,\"version\":1}",
+          "schema_version": 1,
+          "required_terminal_sequence": null,
+          "command_id": "initial",
+          "causation_id": null,
+          "correlation_id": null,
+          "occurred_at": 1000
+        },
+        {
+          "seq": 5,
+          "event_id": "initial:35fbc48c-04d0-4885-a28a-96483368447b:created",
+          "event_type": "scene.session-mounted",
+          "aggregate_type": "scene",
+          "aggregate_id": "b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c",
+          "workspace_id": "5ca57e55-7b2f-4898-b31c-3c6dfcf7652a",
+          "task_id": "a3e6e652-eb66-4a70-a19b-6cb9dd907766",
+          "session_id": "d1e0ed20-4e3b-464f-a55b-d144b2c8f72a",
+          "payload_json": "{\"id\":\"35fbc48c-04d0-4885-a28a-96483368447b\",\"sceneId\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\",\"sceneNodeId\":\"8ff39bde-bead-441a-8889-d40090806a37\",\"sessionId\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\",\"createdAt\":1000}",
+          "schema_version": 1,
+          "required_terminal_sequence": null,
+          "command_id": "initial",
+          "causation_id": null,
+          "correlation_id": null,
+          "occurred_at": 1000
+        }
+      ],
+      "receipts": [
+        {
+          "command_id": "initial",
+          "command_type": "hierarchy.bootstrap-window",
+          "request_hash": "bootstrap-initial",
+          "response_json": "{\"workspace\":{\"id\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"name\":\"workspace\",\"rootDirectory\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"pathIdentity\":\"path:/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"taskOrder\":[\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\"],\"isDefault\":true,\"isPinned\":true,\"pinSortKey\":\"a0\",\"lastOpenedAt\":1000,\"createdAt\":1000,\"updatedAt\":1000,\"version\":2},\"executionContext\":{\"kind\":\"plain-directory\",\"id\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"workspaceId\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"cwd\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"createdAt\":1000},\"task\":{\"id\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"workspaceId\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"title\":\"默认\",\"status\":\"planned\",\"executionContextId\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"sortKey\":\"a0\",\"isPinned\":false,\"pinSortKey\":\"\",\"lastOpenedAt\":1000,\"createdAt\":1000,\"updatedAt\":1000,\"version\":1},\"scene\":{\"id\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\",\"taskId\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"name\":\"Shell · /var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"mode\":\"tile\",\"rootNodeId\":\"8ff39bde-bead-441a-8889-d40090806a37\",\"titlePinned\":false,\"sortKey\":\"a0\",\"layoutRevision\":1,\"createdAt\":1000,\"updatedAt\":1000},\"session\":{\"id\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\",\"taskId\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"executionContextId\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"kind\":\"shell\",\"status\":\"created\",\"title\":\"Shell\",\"titleSource\":\"default\",\"cwd\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"createdAt\":1000,\"updatedAt\":1000,\"lastActivityAt\":1000,\"version\":1},\"mount\":{\"id\":\"35fbc48c-04d0-4885-a28a-96483368447b\",\"sceneId\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\",\"sceneNodeId\":\"8ff39bde-bead-441a-8889-d40090806a37\",\"sessionId\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\",\"createdAt\":1000},\"navigation\":{\"windowId\":\"main-window-1\",\"activeWorkspaceId\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"taskByWorkspace\":{\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\"},\"sceneByTask\":{\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\"},\"sessionByScene\":{\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\"}}}",
+          "first_event_seq": 1,
+          "last_event_seq": 5,
+          "committed_at": 1794716578943
+        },
+        {
+          "command_id": "reopened",
+          "command_type": "hierarchy.bootstrap-window",
+          "request_hash": "bootstrap-reopened",
+          "response_json": "{\"workspace\":{\"id\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"name\":\"workspace\",\"rootDirectory\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"pathIdentity\":\"path:/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"taskOrder\":[\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\"],\"isDefault\":true,\"isPinned\":true,\"pinSortKey\":\"a0\",\"lastOpenedAt\":1000,\"createdAt\":1000,\"updatedAt\":2000,\"version\":3},\"executionContext\":{\"kind\":\"plain-directory\",\"id\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"workspaceId\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"cwd\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"createdAt\":1000},\"task\":{\"id\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"workspaceId\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"title\":\"默认\",\"status\":\"planned\",\"executionContextId\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"sortKey\":\"a0\",\"isPinned\":false,\"pinSortKey\":\"\",\"lastOpenedAt\":1000,\"createdAt\":1000,\"updatedAt\":1000,\"version\":1},\"scene\":{\"id\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\",\"taskId\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"name\":\"Shell · /var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"mode\":\"tile\",\"rootNodeId\":\"8ff39bde-bead-441a-8889-d40090806a37\",\"titlePinned\":false,\"sortKey\":\"a0\",\"layoutRevision\":1,\"createdAt\":1000,\"updatedAt\":1000},\"session\":{\"id\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\",\"taskId\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"executionContextId\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"kind\":\"shell\",\"status\":\"created\",\"title\":\"Shell\",\"titleSource\":\"default\",\"cwd\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"createdAt\":1000,\"updatedAt\":1000,\"lastActivityAt\":1000,\"version\":1},\"mount\":{\"id\":\"35fbc48c-04d0-4885-a28a-96483368447b\",\"sceneId\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\",\"sceneNodeId\":\"8ff39bde-bead-441a-8889-d40090806a37\",\"sessionId\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\",\"createdAt\":1000},\"navigation\":{\"windowId\":\"main-window-1\",\"activeWorkspaceId\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"taskByWorkspace\":{\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\"},\"sceneByTask\":{\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\"},\"sessionByScene\":{\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\"}}}",
+          "first_event_seq": null,
+          "last_event_seq": null,
+          "committed_at": 1794716578976
+        },
+        {
+          "command_id": "second-window",
+          "command_type": "hierarchy.bootstrap-window",
+          "request_hash": "bootstrap-second-window",
+          "response_json": "{\"workspace\":{\"id\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"name\":\"workspace\",\"rootDirectory\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"pathIdentity\":\"path:/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"taskOrder\":[\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\"],\"isDefault\":true,\"isPinned\":true,\"pinSortKey\":\"a0\",\"lastOpenedAt\":1000,\"createdAt\":1000,\"updatedAt\":3000,\"version\":4},\"executionContext\":{\"kind\":\"plain-directory\",\"id\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"workspaceId\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"cwd\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"createdAt\":1000},\"task\":{\"id\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"workspaceId\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"title\":\"默认\",\"status\":\"planned\",\"executionContextId\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"sortKey\":\"a0\",\"isPinned\":false,\"pinSortKey\":\"\",\"lastOpenedAt\":1000,\"createdAt\":1000,\"updatedAt\":1000,\"version\":1},\"scene\":{\"id\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\",\"taskId\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"name\":\"Shell · /var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"mode\":\"tile\",\"rootNodeId\":\"8ff39bde-bead-441a-8889-d40090806a37\",\"titlePinned\":false,\"sortKey\":\"a0\",\"layoutRevision\":1,\"createdAt\":1000,\"updatedAt\":1000},\"session\":{\"id\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\",\"taskId\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\",\"executionContextId\":\"6288d186-b183-4b2a-a09e-eda8d207be81\",\"kind\":\"shell\",\"status\":\"created\",\"title\":\"Shell\",\"titleSource\":\"default\",\"cwd\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-bootstrap-contract-xXOhw8/workspace\",\"createdAt\":1000,\"updatedAt\":1000,\"lastActivityAt\":1000,\"version\":1},\"mount\":{\"id\":\"35fbc48c-04d0-4885-a28a-96483368447b\",\"sceneId\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\",\"sceneNodeId\":\"8ff39bde-bead-441a-8889-d40090806a37\",\"sessionId\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\",\"createdAt\":1000},\"navigation\":{\"windowId\":\"main-window-2\",\"activeWorkspaceId\":\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\",\"taskByWorkspace\":{\"5ca57e55-7b2f-4898-b31c-3c6dfcf7652a\":\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\"},\"sceneByTask\":{\"a3e6e652-eb66-4a70-a19b-6cb9dd907766\":\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\"},\"sessionByScene\":{\"b6c07a91-6d9e-4d9a-8519-11cdcc5ee67c\":\"d1e0ed20-4e3b-464f-a55b-d144b2c8f72a\"}}}",
+          "first_event_seq": null,
+          "last_event_seq": null,
+          "committed_at": 1794716578976
+        }
+      ]
+    }
+  ]
+}

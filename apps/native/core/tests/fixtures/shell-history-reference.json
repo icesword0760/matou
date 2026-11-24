@@ -1,0 +1,2408 @@
+{
+  "source": "Frozen shell-history.ts on captured Electron; original completion IDs for native replay. Output hashes use UTF-8; limits count UTF-16 units.",
+  "collectorCases": [
+    {
+      "name": "split-markers",
+      "steps": [
+        {
+          "parts": [
+            "\u001b]633;E;c"
+          ],
+          "now": 10,
+          "completed": []
+        },
+        {
+          "parts": [
+            "HJpbnRmICLkvaDlpb0g8J+ZgiI=\u0007",
+            "你好\r\n"
+          ],
+          "now": 11,
+          "completed": []
+        },
+        {
+          "parts": [
+            "\u001b]133;D;"
+          ],
+          "now": 12,
+          "completed": []
+        },
+        {
+          "parts": [
+            "0\u0007\u001b]133;A\u0007"
+          ],
+          "now": 13,
+          "completed": [
+            {
+              "command": "printf \"你好 🙂\"",
+              "exitCode": 0,
+              "startedAt": 10,
+              "completedAt": 13,
+              "output": {
+                "sha256": "659764dc18bf51c18d50c25bb6335e72fc5c78dac81217f9b3c13114ecbb876d",
+                "utf16Length": 4,
+                "lines": 2,
+                "prefix": "你好\r\n",
+                "suffix": "你好\r\n"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "unfinished-replaced",
+      "steps": [
+        {
+          "parts": [
+            "\u001b]633;E;c2xlZXAgMTA=\u0007",
+            "partial"
+          ],
+          "now": 1,
+          "completed": []
+        },
+        {
+          "parts": [
+            "\u001b]633;E;ZWNobyBuZXh0\u0007",
+            "next\r\n",
+            "\u001b]133;D;0\u0007"
+          ],
+          "now": 2,
+          "completed": [
+            {
+              "command": "echo next",
+              "exitCode": 0,
+              "startedAt": 2,
+              "completedAt": 2,
+              "output": {
+                "sha256": "e67763cadfe7831022d87f091ec2182c408f76662705cbc8f0848f15aeb54ab2",
+                "utf16Length": 6,
+                "lines": 2,
+                "prefix": "next\r\n",
+                "suffix": "next\r\n"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "st-and-style",
+      "steps": [
+        {
+          "parts": [
+            "\u001b]633;E;ZmFsc2U=\u001b\\",
+            "\u001b]133;C\u0007",
+            "\u001b[31mred\u001b[0m\n",
+            "\u001b]2;title\u0007",
+            "\u001b]133;D;7\u001b\\"
+          ],
+          "now": 3,
+          "completed": [
+            {
+              "command": "false",
+              "exitCode": 7,
+              "startedAt": 3,
+              "completedAt": 3,
+              "output": {
+                "sha256": "e776fefd92e33e9fa4b494cc5ddca5f98df593a1da9bfb315103ced8c3028075",
+                "utf16Length": 23,
+                "lines": 2,
+                "prefix": "\u001b[31mred\u001b[0m\n\u001b]2;title\u0007",
+                "suffix": "\u001b[31mred\u001b[0m\n\u001b]2;title\u0007"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "stream-line-limit",
+      "steps": [
+        {
+          "parts": [
+            "\u001b]633;E;bGFyZ2Ugb3V0cHV0\u0007"
+          ],
+          "now": 1,
+          "completed": []
+        },
+        {
+          "parts": [
+            {
+              "lines": 3000,
+              "start": 0,
+              "trailing": true
+            }
+          ],
+          "now": 2,
+          "completed": []
+        },
+        {
+          "parts": [
+            {
+              "lines": 3005,
+              "start": 3000,
+              "trailing": true
+            }
+          ],
+          "now": 3,
+          "completed": []
+        },
+        {
+          "parts": [
+            "\u001b]133;D;0\u0007"
+          ],
+          "now": 4,
+          "completed": [
+            {
+              "command": "large output",
+              "exitCode": 0,
+              "startedAt": 1,
+              "completedAt": 4,
+              "output": {
+                "sha256": "1a5f1643befe7c7b792ca76667ca4ed610b40f41fd8a86ec24aa04d7217a583d",
+                "utf16Length": 49990,
+                "lines": 5000,
+                "prefix": "line-1006\nline-1007\nline-1008\nline-1009\n",
+                "suffix": "line-6001\nline-6002\nline-6003\nline-6004\n"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "stream-character-limit",
+      "steps": [
+        {
+          "parts": [
+            "\u001b]633;E;bGFyZ2U=\u0007",
+            "old-",
+            {
+              "repeat": "🙂",
+              "count": 600000
+            },
+            "-new",
+            "\u001b]133;D;0\u0007"
+          ],
+          "now": 5,
+          "completed": [
+            {
+              "command": "large",
+              "exitCode": 0,
+              "startedAt": 5,
+              "completedAt": 5,
+              "output": {
+                "sha256": "d69364b46de1cd4166d179efb31c0009608e315b3ce77835b699abd173ec4cf2",
+                "utf16Length": 1048576,
+                "lines": 1,
+                "prefix": "🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂",
+                "suffix": "🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂-new"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "unterminated-osc-limit",
+      "steps": [
+        {
+          "parts": [
+            "\u001b]633;E;Zmlyc3Q=\u0007",
+            "\u001b]title;",
+            {
+              "repeat": "x",
+              "count": 2097152
+            }
+          ],
+          "now": 1,
+          "completed": []
+        },
+        {
+          "parts": [
+            "\u0007",
+            "\u001b]633;E;c2Vjb25k\u0007",
+            "done\r\n",
+            "\u001b]133;D;0\u0007"
+          ],
+          "now": 2,
+          "completed": [
+            {
+              "command": "second",
+              "exitCode": 0,
+              "startedAt": 2,
+              "completedAt": 2,
+              "output": {
+                "sha256": "12e5cb1d6521d6a9f0369978cca6ec93c52582896608bf12882764ae21a0c6e4",
+                "utf16Length": 6,
+                "lines": 2,
+                "prefix": "done\r\n",
+                "suffix": "done\r\n"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "interrupted-not-complete",
+      "steps": [
+        {
+          "parts": [
+            "\u001b]633;E;c2xlZXAgMTA=\u0007",
+            "partial"
+          ],
+          "now": 6,
+          "completed": []
+        }
+      ]
+    }
+  ],
+  "repository": {
+    "seed": [
+      "INSERT INTO workspaces (id,name,root_directory,created_at,updated_at) VALUES ('w','Workspace','/tmp/workspace',1,1)",
+      "INSERT INTO execution_contexts (id,workspace_id,kind,cwd,created_at) VALUES ('e','w','plain-directory','/tmp/workspace',1)",
+      "INSERT INTO tasks (id,workspace_id,execution_context_id,title,status,sort_key,created_at,updated_at) VALUES ('t','w','e','Task','active','a',1,1)",
+      "INSERT INTO sessions (id,task_id,execution_context_id,kind,status,title,created_at,updated_at,last_activity_at) VALUES ('s','t','e','shell','running','Shell',1,1,1)"
+    ],
+    "inputs": [
+      {
+        "sessionId": "s",
+        "command": "printf command-1",
+        "cwd": "/tmp/workspace",
+        "output": "output-1\r\n",
+        "exitCode": 0,
+        "startedAt": 10,
+        "completedAt": 11
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-2",
+        "cwd": "/tmp/workspace",
+        "output": "output-2\r\n",
+        "exitCode": 0,
+        "startedAt": 20,
+        "completedAt": 21
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-3",
+        "cwd": "/tmp/workspace",
+        "output": "output-3\r\n",
+        "exitCode": 0,
+        "startedAt": 30,
+        "completedAt": 31
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-4",
+        "cwd": "/tmp/workspace",
+        "output": "output-4\r\n",
+        "exitCode": 0,
+        "startedAt": 40,
+        "completedAt": 41
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-5",
+        "cwd": "/tmp/workspace",
+        "output": "output-5\r\n",
+        "exitCode": 0,
+        "startedAt": 50,
+        "completedAt": 51
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-6",
+        "cwd": "/tmp/workspace",
+        "output": "output-6\r\n",
+        "exitCode": 0,
+        "startedAt": 60,
+        "completedAt": 61
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-7",
+        "cwd": "/tmp/workspace",
+        "output": "output-7\r\n",
+        "exitCode": 0,
+        "startedAt": 70,
+        "completedAt": 71
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-8",
+        "cwd": "/tmp/workspace",
+        "output": "output-8\r\n",
+        "exitCode": 0,
+        "startedAt": 80,
+        "completedAt": 81
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-9",
+        "cwd": "/tmp/workspace",
+        "output": "output-9\r\n",
+        "exitCode": 0,
+        "startedAt": 90,
+        "completedAt": 91
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-10",
+        "cwd": "/tmp/workspace",
+        "output": "output-10\r\n",
+        "exitCode": 0,
+        "startedAt": 100,
+        "completedAt": 101
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-11",
+        "cwd": "/tmp/workspace",
+        "output": "output-11\r\n",
+        "exitCode": 0,
+        "startedAt": 110,
+        "completedAt": 111
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-12",
+        "cwd": "/tmp/workspace",
+        "output": "output-12\r\n",
+        "exitCode": 0,
+        "startedAt": 120,
+        "completedAt": 121
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-13",
+        "cwd": "/tmp/workspace",
+        "output": "output-13\r\n",
+        "exitCode": 0,
+        "startedAt": 130,
+        "completedAt": 131
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-14",
+        "cwd": "/tmp/workspace",
+        "output": "output-14\r\n",
+        "exitCode": 0,
+        "startedAt": 140,
+        "completedAt": 141
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-15",
+        "cwd": "/tmp/workspace",
+        "output": "output-15\r\n",
+        "exitCode": 0,
+        "startedAt": 150,
+        "completedAt": 151
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-16",
+        "cwd": "/tmp/workspace",
+        "output": "output-16\r\n",
+        "exitCode": 0,
+        "startedAt": 160,
+        "completedAt": 161
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-17",
+        "cwd": "/tmp/workspace",
+        "output": "output-17\r\n",
+        "exitCode": 0,
+        "startedAt": 170,
+        "completedAt": 171
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-18",
+        "cwd": "/tmp/workspace",
+        "output": "output-18\r\n",
+        "exitCode": 0,
+        "startedAt": 180,
+        "completedAt": 181
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-19",
+        "cwd": "/tmp/workspace",
+        "output": "output-19\r\n",
+        "exitCode": 0,
+        "startedAt": 190,
+        "completedAt": 191
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-20",
+        "cwd": "/tmp/workspace",
+        "output": "output-20\r\n",
+        "exitCode": 0,
+        "startedAt": 200,
+        "completedAt": 201
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-21",
+        "cwd": "/tmp/workspace",
+        "output": "output-21\r\n",
+        "exitCode": 0,
+        "startedAt": 210,
+        "completedAt": 211
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-22",
+        "cwd": "/tmp/workspace",
+        "output": "output-22\r\n",
+        "exitCode": 0,
+        "startedAt": 220,
+        "completedAt": 221
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-23",
+        "cwd": "/tmp/workspace",
+        "output": "output-23\r\n",
+        "exitCode": 0,
+        "startedAt": 230,
+        "completedAt": 231
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-24",
+        "cwd": "/tmp/workspace",
+        "output": "output-24\r\n",
+        "exitCode": 0,
+        "startedAt": 240,
+        "completedAt": 241
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-25",
+        "cwd": "/tmp/workspace",
+        "output": "output-25\r\n",
+        "exitCode": 0,
+        "startedAt": 250,
+        "completedAt": 251
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-26",
+        "cwd": "/tmp/workspace",
+        "output": "output-26\r\n",
+        "exitCode": 0,
+        "startedAt": 260,
+        "completedAt": 261
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-27",
+        "cwd": "/tmp/workspace",
+        "output": "output-27\r\n",
+        "exitCode": 0,
+        "startedAt": 270,
+        "completedAt": 271
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-28",
+        "cwd": "/tmp/workspace",
+        "output": "output-28\r\n",
+        "exitCode": 0,
+        "startedAt": 280,
+        "completedAt": 281
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-29",
+        "cwd": "/tmp/workspace",
+        "output": "output-29\r\n",
+        "exitCode": 0,
+        "startedAt": 290,
+        "completedAt": 291
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-30",
+        "cwd": "/tmp/workspace",
+        "output": "output-30\r\n",
+        "exitCode": 0,
+        "startedAt": 300,
+        "completedAt": 301
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-31",
+        "cwd": "/tmp/workspace",
+        "output": "output-31\r\n",
+        "exitCode": 0,
+        "startedAt": 310,
+        "completedAt": 311
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-32",
+        "cwd": "/tmp/workspace",
+        "output": "output-32\r\n",
+        "exitCode": 0,
+        "startedAt": 320,
+        "completedAt": 321
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-33",
+        "cwd": "/tmp/workspace",
+        "output": "output-33\r\n",
+        "exitCode": 0,
+        "startedAt": 330,
+        "completedAt": 331
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-34",
+        "cwd": "/tmp/workspace",
+        "output": "output-34\r\n",
+        "exitCode": 0,
+        "startedAt": 340,
+        "completedAt": 341
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-35",
+        "cwd": "/tmp/workspace",
+        "output": "output-35\r\n",
+        "exitCode": 0,
+        "startedAt": 350,
+        "completedAt": 351
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-36",
+        "cwd": "/tmp/workspace",
+        "output": "output-36\r\n",
+        "exitCode": 0,
+        "startedAt": 360,
+        "completedAt": 361
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-37",
+        "cwd": "/tmp/workspace",
+        "output": "output-37\r\n",
+        "exitCode": 0,
+        "startedAt": 370,
+        "completedAt": 371
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-38",
+        "cwd": "/tmp/workspace",
+        "output": "output-38\r\n",
+        "exitCode": 0,
+        "startedAt": 380,
+        "completedAt": 381
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-39",
+        "cwd": "/tmp/workspace",
+        "output": "output-39\r\n",
+        "exitCode": 0,
+        "startedAt": 390,
+        "completedAt": 391
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-40",
+        "cwd": "/tmp/workspace",
+        "output": "output-40\r\n",
+        "exitCode": 0,
+        "startedAt": 400,
+        "completedAt": 401
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-41",
+        "cwd": "/tmp/workspace",
+        "output": "output-41\r\n",
+        "exitCode": 0,
+        "startedAt": 410,
+        "completedAt": 411
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-42",
+        "cwd": "/tmp/workspace",
+        "output": "output-42\r\n",
+        "exitCode": 0,
+        "startedAt": 420,
+        "completedAt": 421
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-43",
+        "cwd": "/tmp/workspace",
+        "output": "output-43\r\n",
+        "exitCode": 0,
+        "startedAt": 430,
+        "completedAt": 431
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-44",
+        "cwd": "/tmp/workspace",
+        "output": "output-44\r\n",
+        "exitCode": 0,
+        "startedAt": 440,
+        "completedAt": 441
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-45",
+        "cwd": "/tmp/workspace",
+        "output": "output-45\r\n",
+        "exitCode": 0,
+        "startedAt": 450,
+        "completedAt": 451
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-46",
+        "cwd": "/tmp/workspace",
+        "output": "output-46\r\n",
+        "exitCode": 0,
+        "startedAt": 460,
+        "completedAt": 461
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-47",
+        "cwd": "/tmp/workspace",
+        "output": "output-47\r\n",
+        "exitCode": 0,
+        "startedAt": 470,
+        "completedAt": 471
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-48",
+        "cwd": "/tmp/workspace",
+        "output": "output-48\r\n",
+        "exitCode": 0,
+        "startedAt": 480,
+        "completedAt": 481
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-49",
+        "cwd": "/tmp/workspace",
+        "output": "output-49\r\n",
+        "exitCode": 0,
+        "startedAt": 490,
+        "completedAt": 491
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-50",
+        "cwd": "/tmp/workspace",
+        "output": "output-50\r\n",
+        "exitCode": 0,
+        "startedAt": 500,
+        "completedAt": 501
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-51",
+        "cwd": "/tmp/workspace",
+        "output": "output-51\r\n",
+        "exitCode": 0,
+        "startedAt": 510,
+        "completedAt": 511
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-52",
+        "cwd": "/tmp/workspace",
+        "output": "output-52\r\n",
+        "exitCode": 0,
+        "startedAt": 520,
+        "completedAt": 521
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-53",
+        "cwd": "/tmp/workspace",
+        "output": "output-53\r\n",
+        "exitCode": 0,
+        "startedAt": 530,
+        "completedAt": 531
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-54",
+        "cwd": "/tmp/workspace",
+        "output": "output-54\r\n",
+        "exitCode": 0,
+        "startedAt": 540,
+        "completedAt": 541
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-55",
+        "cwd": "/tmp/workspace",
+        "output": "output-55\r\n",
+        "exitCode": 0,
+        "startedAt": 550,
+        "completedAt": 551
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-56",
+        "cwd": "/tmp/workspace",
+        "output": "output-56\r\n",
+        "exitCode": 0,
+        "startedAt": 560,
+        "completedAt": 561
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-57",
+        "cwd": "/tmp/workspace",
+        "output": "output-57\r\n",
+        "exitCode": 0,
+        "startedAt": 570,
+        "completedAt": 571
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-58",
+        "cwd": "/tmp/workspace",
+        "output": "output-58\r\n",
+        "exitCode": 0,
+        "startedAt": 580,
+        "completedAt": 581
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-59",
+        "cwd": "/tmp/workspace",
+        "output": "output-59\r\n",
+        "exitCode": 0,
+        "startedAt": 590,
+        "completedAt": 591
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-60",
+        "cwd": "/tmp/workspace",
+        "output": "output-60\r\n",
+        "exitCode": 0,
+        "startedAt": 600,
+        "completedAt": 601
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-61",
+        "cwd": "/tmp/workspace",
+        "output": "output-61\r\n",
+        "exitCode": 0,
+        "startedAt": 610,
+        "completedAt": 611
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-62",
+        "cwd": "/tmp/workspace",
+        "output": "output-62\r\n",
+        "exitCode": 0,
+        "startedAt": 620,
+        "completedAt": 621
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-63",
+        "cwd": "/tmp/workspace",
+        "output": "output-63\r\n",
+        "exitCode": 0,
+        "startedAt": 630,
+        "completedAt": 631
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-64",
+        "cwd": "/tmp/workspace",
+        "output": "output-64\r\n",
+        "exitCode": 0,
+        "startedAt": 640,
+        "completedAt": 641
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-65",
+        "cwd": "/tmp/workspace",
+        "output": "output-65\r\n",
+        "exitCode": 0,
+        "startedAt": 650,
+        "completedAt": 651
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-66",
+        "cwd": "/tmp/workspace",
+        "output": "output-66\r\n",
+        "exitCode": 0,
+        "startedAt": 660,
+        "completedAt": 661
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-67",
+        "cwd": "/tmp/workspace",
+        "output": "output-67\r\n",
+        "exitCode": 0,
+        "startedAt": 670,
+        "completedAt": 671
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-68",
+        "cwd": "/tmp/workspace",
+        "output": "output-68\r\n",
+        "exitCode": 0,
+        "startedAt": 680,
+        "completedAt": 681
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-69",
+        "cwd": "/tmp/workspace",
+        "output": "output-69\r\n",
+        "exitCode": 0,
+        "startedAt": 690,
+        "completedAt": 691
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-70",
+        "cwd": "/tmp/workspace",
+        "output": "output-70\r\n",
+        "exitCode": 0,
+        "startedAt": 700,
+        "completedAt": 701
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-71",
+        "cwd": "/tmp/workspace",
+        "output": "output-71\r\n",
+        "exitCode": 0,
+        "startedAt": 710,
+        "completedAt": 711
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-72",
+        "cwd": "/tmp/workspace",
+        "output": "output-72\r\n",
+        "exitCode": 0,
+        "startedAt": 720,
+        "completedAt": 721
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-73",
+        "cwd": "/tmp/workspace",
+        "output": "output-73\r\n",
+        "exitCode": 0,
+        "startedAt": 730,
+        "completedAt": 731
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-74",
+        "cwd": "/tmp/workspace",
+        "output": "output-74\r\n",
+        "exitCode": 0,
+        "startedAt": 740,
+        "completedAt": 741
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-75",
+        "cwd": "/tmp/workspace",
+        "output": "output-75\r\n",
+        "exitCode": 0,
+        "startedAt": 750,
+        "completedAt": 751
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-76",
+        "cwd": "/tmp/workspace",
+        "output": "output-76\r\n",
+        "exitCode": 0,
+        "startedAt": 760,
+        "completedAt": 761
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-77",
+        "cwd": "/tmp/workspace",
+        "output": "output-77\r\n",
+        "exitCode": 0,
+        "startedAt": 770,
+        "completedAt": 771
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-78",
+        "cwd": "/tmp/workspace",
+        "output": "output-78\r\n",
+        "exitCode": 0,
+        "startedAt": 780,
+        "completedAt": 781
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-79",
+        "cwd": "/tmp/workspace",
+        "output": "output-79\r\n",
+        "exitCode": 0,
+        "startedAt": 790,
+        "completedAt": 791
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-80",
+        "cwd": "/tmp/workspace",
+        "output": "output-80\r\n",
+        "exitCode": 0,
+        "startedAt": 800,
+        "completedAt": 801
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-81",
+        "cwd": "/tmp/workspace",
+        "output": "output-81\r\n",
+        "exitCode": 0,
+        "startedAt": 810,
+        "completedAt": 811
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-82",
+        "cwd": "/tmp/workspace",
+        "output": "output-82\r\n",
+        "exitCode": 0,
+        "startedAt": 820,
+        "completedAt": 821
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-83",
+        "cwd": "/tmp/workspace",
+        "output": "output-83\r\n",
+        "exitCode": 0,
+        "startedAt": 830,
+        "completedAt": 831
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-84",
+        "cwd": "/tmp/workspace",
+        "output": "output-84\r\n",
+        "exitCode": 0,
+        "startedAt": 840,
+        "completedAt": 841
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-85",
+        "cwd": "/tmp/workspace",
+        "output": "output-85\r\n",
+        "exitCode": 0,
+        "startedAt": 850,
+        "completedAt": 851
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-86",
+        "cwd": "/tmp/workspace",
+        "output": "output-86\r\n",
+        "exitCode": 0,
+        "startedAt": 860,
+        "completedAt": 861
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-87",
+        "cwd": "/tmp/workspace",
+        "output": "output-87\r\n",
+        "exitCode": 0,
+        "startedAt": 870,
+        "completedAt": 871
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-88",
+        "cwd": "/tmp/workspace",
+        "output": "output-88\r\n",
+        "exitCode": 0,
+        "startedAt": 880,
+        "completedAt": 881
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-89",
+        "cwd": "/tmp/workspace",
+        "output": "output-89\r\n",
+        "exitCode": 0,
+        "startedAt": 890,
+        "completedAt": 891
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-90",
+        "cwd": "/tmp/workspace",
+        "output": "output-90\r\n",
+        "exitCode": 0,
+        "startedAt": 900,
+        "completedAt": 901
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-91",
+        "cwd": "/tmp/workspace",
+        "output": "output-91\r\n",
+        "exitCode": 0,
+        "startedAt": 910,
+        "completedAt": 911
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-92",
+        "cwd": "/tmp/workspace",
+        "output": "output-92\r\n",
+        "exitCode": 0,
+        "startedAt": 920,
+        "completedAt": 921
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-93",
+        "cwd": "/tmp/workspace",
+        "output": "output-93\r\n",
+        "exitCode": 0,
+        "startedAt": 930,
+        "completedAt": 931
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-94",
+        "cwd": "/tmp/workspace",
+        "output": "output-94\r\n",
+        "exitCode": 0,
+        "startedAt": 940,
+        "completedAt": 941
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-95",
+        "cwd": "/tmp/workspace",
+        "output": "output-95\r\n",
+        "exitCode": 0,
+        "startedAt": 950,
+        "completedAt": 951
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-96",
+        "cwd": "/tmp/workspace",
+        "output": "output-96\r\n",
+        "exitCode": 0,
+        "startedAt": 960,
+        "completedAt": 961
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-97",
+        "cwd": "/tmp/workspace",
+        "output": "output-97\r\n",
+        "exitCode": 0,
+        "startedAt": 970,
+        "completedAt": 971
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-98",
+        "cwd": "/tmp/workspace",
+        "output": "output-98\r\n",
+        "exitCode": 0,
+        "startedAt": 980,
+        "completedAt": 981
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-99",
+        "cwd": "/tmp/workspace",
+        "output": "output-99\r\n",
+        "exitCode": 0,
+        "startedAt": 990,
+        "completedAt": 991
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-100",
+        "cwd": "/tmp/workspace",
+        "output": "output-100\r\n",
+        "exitCode": 0,
+        "startedAt": 1000,
+        "completedAt": 1001
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-101",
+        "cwd": "/tmp/workspace",
+        "output": "output-101\r\n",
+        "exitCode": 0,
+        "startedAt": 1010,
+        "completedAt": 1011
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-102",
+        "cwd": "/tmp/workspace",
+        "output": "output-102\r\n",
+        "exitCode": 0,
+        "startedAt": 1020,
+        "completedAt": 1021
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-103",
+        "cwd": "/tmp/workspace",
+        "output": "output-103\r\n",
+        "exitCode": 0,
+        "startedAt": 1030,
+        "completedAt": 1031
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-104",
+        "cwd": "/tmp/workspace",
+        "output": "output-104\r\n",
+        "exitCode": 0,
+        "startedAt": 1040,
+        "completedAt": 1041
+      },
+      {
+        "sessionId": "s",
+        "command": "printf command-105",
+        "cwd": "/tmp/workspace",
+        "output": "output-105\r\n",
+        "exitCode": 0,
+        "startedAt": 1050,
+        "completedAt": 1051
+      }
+    ],
+    "ids": [
+      "3e67b588-d2be-4c03-8226-9ab8f43b55de",
+      "a711a132-f15a-4601-8f9e-e601bf9e8f39",
+      "e3342a10-0fd0-4307-8a82-51766d3e9cc5",
+      "d9a74036-f3ca-4b25-96e4-33ba81e704ea",
+      "e9693886-c792-4ff0-add2-93af69604ecd",
+      "06e7c98f-b209-44f6-8ae1-7a5b8df8d09b",
+      "760ef7a2-423b-499d-b728-d6642a471ebb",
+      "4b270624-4beb-4cec-94ab-4b6e6b110302",
+      "908e6ba6-e3d7-45c6-a268-2508c042a77f",
+      "fc5b7968-c104-4223-b605-81af2397e2d8",
+      "cfb16db1-ed42-40bc-88ab-8c94d8dfd237",
+      "bf702d03-81ac-4c6e-aeea-8677a4591dbb",
+      "cbd55315-3218-4efb-b709-81628e695249",
+      "2689e96e-1074-4972-a03c-029a4c3daf60",
+      "107fe1f5-9c71-4214-9879-e582d038e639",
+      "8a37e8f7-8eea-41c9-a301-743601777ec9",
+      "b00463ea-268a-40fc-ad4b-60c2394d6947",
+      "0a360f28-4817-4bbc-aac2-4983c977e3aa",
+      "0cc4754b-149c-404d-8ac1-1f8178a3a0d5",
+      "62872ae6-d43d-4779-a082-4dbc7b88375c",
+      "9d93096e-17c1-4a21-a206-1ea5e62f8977",
+      "0bcf5d6d-832e-4c2f-a79d-b3c6eb752c47",
+      "efcac247-9e48-46d4-ad87-7469428dc3d7",
+      "f6d89050-381a-4123-8019-3f350a3dced7",
+      "03074869-aa79-4dd5-8ece-1d112f6dfcbb",
+      "97d0c4c3-2242-4897-89fd-a6a6d806f7e8",
+      "a8a1954f-6b83-4f2e-8eed-58f18646ae2b",
+      "c2517ed3-926d-4016-ab06-e4308e88efc3",
+      "f710aeb6-c683-4941-9f0d-3b900f5b31f0",
+      "74702f16-8647-416a-bea8-edf5d878e806",
+      "7814ba61-ba17-414f-91a3-807e29fb78e0",
+      "369bd658-cca0-4bff-b446-1c2542329936",
+      "7d1b2b7a-fac8-4c51-99de-15e52307e5fa",
+      "2f1954cb-7dda-4cbe-b689-fca4e09a143a",
+      "de267033-a580-4796-864d-74628e67ae09",
+      "414a6fac-99f0-499f-ba42-2ec94da51c71",
+      "db6fd756-13c3-4297-bfdc-2ec75f0e1bbf",
+      "241bbbb6-f729-493b-91fd-7cf2b316a0a5",
+      "756d9b75-f325-47b9-9f26-5ce37e16ce19",
+      "093ce49a-2536-47ba-a67c-67afbcd736fe",
+      "39a8dd51-0430-4c84-8d6f-ca705d49df93",
+      "d4017de0-90cf-4e70-916f-1f79be7a21f4",
+      "1b9ef3c8-5d57-4c6c-8066-dc21c8e391db",
+      "5ad5749b-cd68-4863-ae4c-924b9137d6e8",
+      "93e1bc50-19e2-41aa-9a14-07ee489743cf",
+      "01fc1561-4260-43a7-acc6-58f83e659d62",
+      "575de1a1-df7f-439d-a182-4a861399be44",
+      "93e81a7e-415c-44c9-bf5d-53ea84376f6a",
+      "9faa6fb7-8ed6-47b4-b68a-199af9a4ae2c",
+      "3c55f2b7-2aa7-41c0-995d-b329d851c5cd",
+      "1dbdb911-492b-467a-8316-a9fea57744b4",
+      "f47f8869-54cc-4157-b572-e7353f3868f3",
+      "27799b6e-b624-467f-b931-f308592ffd07",
+      "0cf0d9e7-d096-4669-93f8-2fea5d5de9f9",
+      "64c157b5-d18e-4f80-bcfc-81104d71e41b",
+      "1a966866-cbf5-4731-921d-55efa0aedea4",
+      "2f8815fd-540a-46a3-8459-08dbac323c2c",
+      "aee98862-bb2a-4b6e-8d7b-2b0ef9c19bb2",
+      "e04f060a-26c4-4f77-88be-07cd6861d4af",
+      "b001869c-268a-4fc2-b34e-4de6a6cb5aa8",
+      "aae647dd-4a63-4bd5-84a3-7c97d3f174dd",
+      "fe7fd24c-efad-4a7f-9dd3-c3ccbe4d1545",
+      "b0497d25-e5cb-477c-8f01-cc3a1d61d9ac",
+      "56bf291f-a081-4bef-bfab-017afb898b0e",
+      "8e3cabc4-01fc-4801-b2f1-cdc8ba166a23",
+      "9a4e9e0b-cf69-4268-a240-f8f93d83f5d3",
+      "9c683096-15c5-4caa-9b46-418d30437d64",
+      "668d76dc-f904-43f5-808e-32b34caa1aea",
+      "ca6f09f0-9e6a-4e2f-bf5b-a3f6176dabdf",
+      "ff6a2b43-c0c8-4fb9-9562-8c2aa9d0de60",
+      "082ee486-3f76-4a49-a9f2-67c7c6f0f914",
+      "54ea06f4-cb20-4198-96a3-b53122f9b311",
+      "c8142482-c670-4d46-8c24-86b7ba7a5869",
+      "a246a008-978c-40da-9215-206a1aca847f",
+      "65bd2932-bcd6-4e71-9c0d-c4e2413755f2",
+      "a8dbf5a4-72e7-4c39-bf35-a2d663728350",
+      "a3f575e6-bd3c-450d-9d6b-5f6979a0f229",
+      "83dea0b3-946a-4066-b299-cca19b485d74",
+      "27813d0d-6856-4d7a-81ca-a790bdd9b7b5",
+      "43512196-6fc3-4c05-a22e-9f2999bc63b3",
+      "2bcbf246-180f-42b7-a869-bf7f63292468",
+      "ae946581-a070-4968-b524-d4a4757c8371",
+      "b623fcb8-d325-4b73-af7c-35ccd3b4a4a2",
+      "efc33399-d323-4f2c-9242-667003c1792d",
+      "fa92a0c5-8aff-49cf-88ee-fc89bfaccbf8",
+      "20567a3c-aaea-4dee-93f7-a2e40ac389a0",
+      "218baa4a-42c0-4442-92af-ce6d329d2586",
+      "0ef3e288-ffc4-4c02-b4c1-cba3b7fd9eec",
+      "0609829d-87ca-4a6d-8163-128cfab96512",
+      "365b0ca2-08f1-44f6-b947-8dcef0e660a0",
+      "ccf93f6c-fafe-404e-98ca-cc8d5042755f",
+      "7dfa004c-7f0a-43ff-8057-1babbadd3aa2",
+      "360b9d95-0221-47ad-928e-9ef1ac3c5ce5",
+      "1bca01f1-c765-4136-b0d5-3221bf7f71c3",
+      "ee155457-4793-4b74-a4e1-b56860f6abad",
+      "e2b82a2e-18ac-4e74-b1e3-12152a1c2a0a",
+      "d4cbcfce-791a-4c6f-8282-1837098147fe",
+      "c5e7d3a9-9675-400a-8c25-4344496c7c55",
+      "d17678eb-63ff-49ab-9655-7c422a922ac4",
+      "6e31e8e3-b296-4885-b418-ca1bdb0ebf50",
+      "f8c4a130-fc67-4ad6-9dbe-9f32d3b45579",
+      "be8c0845-d0be-48d3-880f-de309bf909b3",
+      "2c1679a6-c328-4118-864c-3bdd390cc0a0",
+      "41ba6488-845b-469d-83f2-568b477999a3",
+      "4e833b96-5a74-4338-b629-031a7fcdc11b"
+    ],
+    "reopened": [
+      {
+        "id": "06e7c98f-b209-44f6-8ae1-7a5b8df8d09b",
+        "sessionId": "s",
+        "command": "printf command-6",
+        "cwd": "/tmp/workspace",
+        "output": "output-6\r\n",
+        "exitCode": 0,
+        "startedAt": 60,
+        "completedAt": 61
+      },
+      {
+        "id": "760ef7a2-423b-499d-b728-d6642a471ebb",
+        "sessionId": "s",
+        "command": "printf command-7",
+        "cwd": "/tmp/workspace",
+        "output": "output-7\r\n",
+        "exitCode": 0,
+        "startedAt": 70,
+        "completedAt": 71
+      },
+      {
+        "id": "4b270624-4beb-4cec-94ab-4b6e6b110302",
+        "sessionId": "s",
+        "command": "printf command-8",
+        "cwd": "/tmp/workspace",
+        "output": "output-8\r\n",
+        "exitCode": 0,
+        "startedAt": 80,
+        "completedAt": 81
+      },
+      {
+        "id": "908e6ba6-e3d7-45c6-a268-2508c042a77f",
+        "sessionId": "s",
+        "command": "printf command-9",
+        "cwd": "/tmp/workspace",
+        "output": "output-9\r\n",
+        "exitCode": 0,
+        "startedAt": 90,
+        "completedAt": 91
+      },
+      {
+        "id": "fc5b7968-c104-4223-b605-81af2397e2d8",
+        "sessionId": "s",
+        "command": "printf command-10",
+        "cwd": "/tmp/workspace",
+        "output": "output-10\r\n",
+        "exitCode": 0,
+        "startedAt": 100,
+        "completedAt": 101
+      },
+      {
+        "id": "cfb16db1-ed42-40bc-88ab-8c94d8dfd237",
+        "sessionId": "s",
+        "command": "printf command-11",
+        "cwd": "/tmp/workspace",
+        "output": "output-11\r\n",
+        "exitCode": 0,
+        "startedAt": 110,
+        "completedAt": 111
+      },
+      {
+        "id": "bf702d03-81ac-4c6e-aeea-8677a4591dbb",
+        "sessionId": "s",
+        "command": "printf command-12",
+        "cwd": "/tmp/workspace",
+        "output": "output-12\r\n",
+        "exitCode": 0,
+        "startedAt": 120,
+        "completedAt": 121
+      },
+      {
+        "id": "cbd55315-3218-4efb-b709-81628e695249",
+        "sessionId": "s",
+        "command": "printf command-13",
+        "cwd": "/tmp/workspace",
+        "output": "output-13\r\n",
+        "exitCode": 0,
+        "startedAt": 130,
+        "completedAt": 131
+      },
+      {
+        "id": "2689e96e-1074-4972-a03c-029a4c3daf60",
+        "sessionId": "s",
+        "command": "printf command-14",
+        "cwd": "/tmp/workspace",
+        "output": "output-14\r\n",
+        "exitCode": 0,
+        "startedAt": 140,
+        "completedAt": 141
+      },
+      {
+        "id": "107fe1f5-9c71-4214-9879-e582d038e639",
+        "sessionId": "s",
+        "command": "printf command-15",
+        "cwd": "/tmp/workspace",
+        "output": "output-15\r\n",
+        "exitCode": 0,
+        "startedAt": 150,
+        "completedAt": 151
+      },
+      {
+        "id": "8a37e8f7-8eea-41c9-a301-743601777ec9",
+        "sessionId": "s",
+        "command": "printf command-16",
+        "cwd": "/tmp/workspace",
+        "output": "output-16\r\n",
+        "exitCode": 0,
+        "startedAt": 160,
+        "completedAt": 161
+      },
+      {
+        "id": "b00463ea-268a-40fc-ad4b-60c2394d6947",
+        "sessionId": "s",
+        "command": "printf command-17",
+        "cwd": "/tmp/workspace",
+        "output": "output-17\r\n",
+        "exitCode": 0,
+        "startedAt": 170,
+        "completedAt": 171
+      },
+      {
+        "id": "0a360f28-4817-4bbc-aac2-4983c977e3aa",
+        "sessionId": "s",
+        "command": "printf command-18",
+        "cwd": "/tmp/workspace",
+        "output": "output-18\r\n",
+        "exitCode": 0,
+        "startedAt": 180,
+        "completedAt": 181
+      },
+      {
+        "id": "0cc4754b-149c-404d-8ac1-1f8178a3a0d5",
+        "sessionId": "s",
+        "command": "printf command-19",
+        "cwd": "/tmp/workspace",
+        "output": "output-19\r\n",
+        "exitCode": 0,
+        "startedAt": 190,
+        "completedAt": 191
+      },
+      {
+        "id": "62872ae6-d43d-4779-a082-4dbc7b88375c",
+        "sessionId": "s",
+        "command": "printf command-20",
+        "cwd": "/tmp/workspace",
+        "output": "output-20\r\n",
+        "exitCode": 0,
+        "startedAt": 200,
+        "completedAt": 201
+      },
+      {
+        "id": "9d93096e-17c1-4a21-a206-1ea5e62f8977",
+        "sessionId": "s",
+        "command": "printf command-21",
+        "cwd": "/tmp/workspace",
+        "output": "output-21\r\n",
+        "exitCode": 0,
+        "startedAt": 210,
+        "completedAt": 211
+      },
+      {
+        "id": "0bcf5d6d-832e-4c2f-a79d-b3c6eb752c47",
+        "sessionId": "s",
+        "command": "printf command-22",
+        "cwd": "/tmp/workspace",
+        "output": "output-22\r\n",
+        "exitCode": 0,
+        "startedAt": 220,
+        "completedAt": 221
+      },
+      {
+        "id": "efcac247-9e48-46d4-ad87-7469428dc3d7",
+        "sessionId": "s",
+        "command": "printf command-23",
+        "cwd": "/tmp/workspace",
+        "output": "output-23\r\n",
+        "exitCode": 0,
+        "startedAt": 230,
+        "completedAt": 231
+      },
+      {
+        "id": "f6d89050-381a-4123-8019-3f350a3dced7",
+        "sessionId": "s",
+        "command": "printf command-24",
+        "cwd": "/tmp/workspace",
+        "output": "output-24\r\n",
+        "exitCode": 0,
+        "startedAt": 240,
+        "completedAt": 241
+      },
+      {
+        "id": "03074869-aa79-4dd5-8ece-1d112f6dfcbb",
+        "sessionId": "s",
+        "command": "printf command-25",
+        "cwd": "/tmp/workspace",
+        "output": "output-25\r\n",
+        "exitCode": 0,
+        "startedAt": 250,
+        "completedAt": 251
+      },
+      {
+        "id": "97d0c4c3-2242-4897-89fd-a6a6d806f7e8",
+        "sessionId": "s",
+        "command": "printf command-26",
+        "cwd": "/tmp/workspace",
+        "output": "output-26\r\n",
+        "exitCode": 0,
+        "startedAt": 260,
+        "completedAt": 261
+      },
+      {
+        "id": "a8a1954f-6b83-4f2e-8eed-58f18646ae2b",
+        "sessionId": "s",
+        "command": "printf command-27",
+        "cwd": "/tmp/workspace",
+        "output": "output-27\r\n",
+        "exitCode": 0,
+        "startedAt": 270,
+        "completedAt": 271
+      },
+      {
+        "id": "c2517ed3-926d-4016-ab06-e4308e88efc3",
+        "sessionId": "s",
+        "command": "printf command-28",
+        "cwd": "/tmp/workspace",
+        "output": "output-28\r\n",
+        "exitCode": 0,
+        "startedAt": 280,
+        "completedAt": 281
+      },
+      {
+        "id": "f710aeb6-c683-4941-9f0d-3b900f5b31f0",
+        "sessionId": "s",
+        "command": "printf command-29",
+        "cwd": "/tmp/workspace",
+        "output": "output-29\r\n",
+        "exitCode": 0,
+        "startedAt": 290,
+        "completedAt": 291
+      },
+      {
+        "id": "74702f16-8647-416a-bea8-edf5d878e806",
+        "sessionId": "s",
+        "command": "printf command-30",
+        "cwd": "/tmp/workspace",
+        "output": "output-30\r\n",
+        "exitCode": 0,
+        "startedAt": 300,
+        "completedAt": 301
+      },
+      {
+        "id": "7814ba61-ba17-414f-91a3-807e29fb78e0",
+        "sessionId": "s",
+        "command": "printf command-31",
+        "cwd": "/tmp/workspace",
+        "output": "output-31\r\n",
+        "exitCode": 0,
+        "startedAt": 310,
+        "completedAt": 311
+      },
+      {
+        "id": "369bd658-cca0-4bff-b446-1c2542329936",
+        "sessionId": "s",
+        "command": "printf command-32",
+        "cwd": "/tmp/workspace",
+        "output": "output-32\r\n",
+        "exitCode": 0,
+        "startedAt": 320,
+        "completedAt": 321
+      },
+      {
+        "id": "7d1b2b7a-fac8-4c51-99de-15e52307e5fa",
+        "sessionId": "s",
+        "command": "printf command-33",
+        "cwd": "/tmp/workspace",
+        "output": "output-33\r\n",
+        "exitCode": 0,
+        "startedAt": 330,
+        "completedAt": 331
+      },
+      {
+        "id": "2f1954cb-7dda-4cbe-b689-fca4e09a143a",
+        "sessionId": "s",
+        "command": "printf command-34",
+        "cwd": "/tmp/workspace",
+        "output": "output-34\r\n",
+        "exitCode": 0,
+        "startedAt": 340,
+        "completedAt": 341
+      },
+      {
+        "id": "de267033-a580-4796-864d-74628e67ae09",
+        "sessionId": "s",
+        "command": "printf command-35",
+        "cwd": "/tmp/workspace",
+        "output": "output-35\r\n",
+        "exitCode": 0,
+        "startedAt": 350,
+        "completedAt": 351
+      },
+      {
+        "id": "414a6fac-99f0-499f-ba42-2ec94da51c71",
+        "sessionId": "s",
+        "command": "printf command-36",
+        "cwd": "/tmp/workspace",
+        "output": "output-36\r\n",
+        "exitCode": 0,
+        "startedAt": 360,
+        "completedAt": 361
+      },
+      {
+        "id": "db6fd756-13c3-4297-bfdc-2ec75f0e1bbf",
+        "sessionId": "s",
+        "command": "printf command-37",
+        "cwd": "/tmp/workspace",
+        "output": "output-37\r\n",
+        "exitCode": 0,
+        "startedAt": 370,
+        "completedAt": 371
+      },
+      {
+        "id": "241bbbb6-f729-493b-91fd-7cf2b316a0a5",
+        "sessionId": "s",
+        "command": "printf command-38",
+        "cwd": "/tmp/workspace",
+        "output": "output-38\r\n",
+        "exitCode": 0,
+        "startedAt": 380,
+        "completedAt": 381
+      },
+      {
+        "id": "756d9b75-f325-47b9-9f26-5ce37e16ce19",
+        "sessionId": "s",
+        "command": "printf command-39",
+        "cwd": "/tmp/workspace",
+        "output": "output-39\r\n",
+        "exitCode": 0,
+        "startedAt": 390,
+        "completedAt": 391
+      },
+      {
+        "id": "093ce49a-2536-47ba-a67c-67afbcd736fe",
+        "sessionId": "s",
+        "command": "printf command-40",
+        "cwd": "/tmp/workspace",
+        "output": "output-40\r\n",
+        "exitCode": 0,
+        "startedAt": 400,
+        "completedAt": 401
+      },
+      {
+        "id": "39a8dd51-0430-4c84-8d6f-ca705d49df93",
+        "sessionId": "s",
+        "command": "printf command-41",
+        "cwd": "/tmp/workspace",
+        "output": "output-41\r\n",
+        "exitCode": 0,
+        "startedAt": 410,
+        "completedAt": 411
+      },
+      {
+        "id": "d4017de0-90cf-4e70-916f-1f79be7a21f4",
+        "sessionId": "s",
+        "command": "printf command-42",
+        "cwd": "/tmp/workspace",
+        "output": "output-42\r\n",
+        "exitCode": 0,
+        "startedAt": 420,
+        "completedAt": 421
+      },
+      {
+        "id": "1b9ef3c8-5d57-4c6c-8066-dc21c8e391db",
+        "sessionId": "s",
+        "command": "printf command-43",
+        "cwd": "/tmp/workspace",
+        "output": "output-43\r\n",
+        "exitCode": 0,
+        "startedAt": 430,
+        "completedAt": 431
+      },
+      {
+        "id": "5ad5749b-cd68-4863-ae4c-924b9137d6e8",
+        "sessionId": "s",
+        "command": "printf command-44",
+        "cwd": "/tmp/workspace",
+        "output": "output-44\r\n",
+        "exitCode": 0,
+        "startedAt": 440,
+        "completedAt": 441
+      },
+      {
+        "id": "93e1bc50-19e2-41aa-9a14-07ee489743cf",
+        "sessionId": "s",
+        "command": "printf command-45",
+        "cwd": "/tmp/workspace",
+        "output": "output-45\r\n",
+        "exitCode": 0,
+        "startedAt": 450,
+        "completedAt": 451
+      },
+      {
+        "id": "01fc1561-4260-43a7-acc6-58f83e659d62",
+        "sessionId": "s",
+        "command": "printf command-46",
+        "cwd": "/tmp/workspace",
+        "output": "output-46\r\n",
+        "exitCode": 0,
+        "startedAt": 460,
+        "completedAt": 461
+      },
+      {
+        "id": "575de1a1-df7f-439d-a182-4a861399be44",
+        "sessionId": "s",
+        "command": "printf command-47",
+        "cwd": "/tmp/workspace",
+        "output": "output-47\r\n",
+        "exitCode": 0,
+        "startedAt": 470,
+        "completedAt": 471
+      },
+      {
+        "id": "93e81a7e-415c-44c9-bf5d-53ea84376f6a",
+        "sessionId": "s",
+        "command": "printf command-48",
+        "cwd": "/tmp/workspace",
+        "output": "output-48\r\n",
+        "exitCode": 0,
+        "startedAt": 480,
+        "completedAt": 481
+      },
+      {
+        "id": "9faa6fb7-8ed6-47b4-b68a-199af9a4ae2c",
+        "sessionId": "s",
+        "command": "printf command-49",
+        "cwd": "/tmp/workspace",
+        "output": "output-49\r\n",
+        "exitCode": 0,
+        "startedAt": 490,
+        "completedAt": 491
+      },
+      {
+        "id": "3c55f2b7-2aa7-41c0-995d-b329d851c5cd",
+        "sessionId": "s",
+        "command": "printf command-50",
+        "cwd": "/tmp/workspace",
+        "output": "output-50\r\n",
+        "exitCode": 0,
+        "startedAt": 500,
+        "completedAt": 501
+      },
+      {
+        "id": "1dbdb911-492b-467a-8316-a9fea57744b4",
+        "sessionId": "s",
+        "command": "printf command-51",
+        "cwd": "/tmp/workspace",
+        "output": "output-51\r\n",
+        "exitCode": 0,
+        "startedAt": 510,
+        "completedAt": 511
+      },
+      {
+        "id": "f47f8869-54cc-4157-b572-e7353f3868f3",
+        "sessionId": "s",
+        "command": "printf command-52",
+        "cwd": "/tmp/workspace",
+        "output": "output-52\r\n",
+        "exitCode": 0,
+        "startedAt": 520,
+        "completedAt": 521
+      },
+      {
+        "id": "27799b6e-b624-467f-b931-f308592ffd07",
+        "sessionId": "s",
+        "command": "printf command-53",
+        "cwd": "/tmp/workspace",
+        "output": "output-53\r\n",
+        "exitCode": 0,
+        "startedAt": 530,
+        "completedAt": 531
+      },
+      {
+        "id": "0cf0d9e7-d096-4669-93f8-2fea5d5de9f9",
+        "sessionId": "s",
+        "command": "printf command-54",
+        "cwd": "/tmp/workspace",
+        "output": "output-54\r\n",
+        "exitCode": 0,
+        "startedAt": 540,
+        "completedAt": 541
+      },
+      {
+        "id": "64c157b5-d18e-4f80-bcfc-81104d71e41b",
+        "sessionId": "s",
+        "command": "printf command-55",
+        "cwd": "/tmp/workspace",
+        "output": "output-55\r\n",
+        "exitCode": 0,
+        "startedAt": 550,
+        "completedAt": 551
+      },
+      {
+        "id": "1a966866-cbf5-4731-921d-55efa0aedea4",
+        "sessionId": "s",
+        "command": "printf command-56",
+        "cwd": "/tmp/workspace",
+        "output": "output-56\r\n",
+        "exitCode": 0,
+        "startedAt": 560,
+        "completedAt": 561
+      },
+      {
+        "id": "2f8815fd-540a-46a3-8459-08dbac323c2c",
+        "sessionId": "s",
+        "command": "printf command-57",
+        "cwd": "/tmp/workspace",
+        "output": "output-57\r\n",
+        "exitCode": 0,
+        "startedAt": 570,
+        "completedAt": 571
+      },
+      {
+        "id": "aee98862-bb2a-4b6e-8d7b-2b0ef9c19bb2",
+        "sessionId": "s",
+        "command": "printf command-58",
+        "cwd": "/tmp/workspace",
+        "output": "output-58\r\n",
+        "exitCode": 0,
+        "startedAt": 580,
+        "completedAt": 581
+      },
+      {
+        "id": "e04f060a-26c4-4f77-88be-07cd6861d4af",
+        "sessionId": "s",
+        "command": "printf command-59",
+        "cwd": "/tmp/workspace",
+        "output": "output-59\r\n",
+        "exitCode": 0,
+        "startedAt": 590,
+        "completedAt": 591
+      },
+      {
+        "id": "b001869c-268a-4fc2-b34e-4de6a6cb5aa8",
+        "sessionId": "s",
+        "command": "printf command-60",
+        "cwd": "/tmp/workspace",
+        "output": "output-60\r\n",
+        "exitCode": 0,
+        "startedAt": 600,
+        "completedAt": 601
+      },
+      {
+        "id": "aae647dd-4a63-4bd5-84a3-7c97d3f174dd",
+        "sessionId": "s",
+        "command": "printf command-61",
+        "cwd": "/tmp/workspace",
+        "output": "output-61\r\n",
+        "exitCode": 0,
+        "startedAt": 610,
+        "completedAt": 611
+      },
+      {
+        "id": "fe7fd24c-efad-4a7f-9dd3-c3ccbe4d1545",
+        "sessionId": "s",
+        "command": "printf command-62",
+        "cwd": "/tmp/workspace",
+        "output": "output-62\r\n",
+        "exitCode": 0,
+        "startedAt": 620,
+        "completedAt": 621
+      },
+      {
+        "id": "b0497d25-e5cb-477c-8f01-cc3a1d61d9ac",
+        "sessionId": "s",
+        "command": "printf command-63",
+        "cwd": "/tmp/workspace",
+        "output": "output-63\r\n",
+        "exitCode": 0,
+        "startedAt": 630,
+        "completedAt": 631
+      },
+      {
+        "id": "56bf291f-a081-4bef-bfab-017afb898b0e",
+        "sessionId": "s",
+        "command": "printf command-64",
+        "cwd": "/tmp/workspace",
+        "output": "output-64\r\n",
+        "exitCode": 0,
+        "startedAt": 640,
+        "completedAt": 641
+      },
+      {
+        "id": "8e3cabc4-01fc-4801-b2f1-cdc8ba166a23",
+        "sessionId": "s",
+        "command": "printf command-65",
+        "cwd": "/tmp/workspace",
+        "output": "output-65\r\n",
+        "exitCode": 0,
+        "startedAt": 650,
+        "completedAt": 651
+      },
+      {
+        "id": "9a4e9e0b-cf69-4268-a240-f8f93d83f5d3",
+        "sessionId": "s",
+        "command": "printf command-66",
+        "cwd": "/tmp/workspace",
+        "output": "output-66\r\n",
+        "exitCode": 0,
+        "startedAt": 660,
+        "completedAt": 661
+      },
+      {
+        "id": "9c683096-15c5-4caa-9b46-418d30437d64",
+        "sessionId": "s",
+        "command": "printf command-67",
+        "cwd": "/tmp/workspace",
+        "output": "output-67\r\n",
+        "exitCode": 0,
+        "startedAt": 670,
+        "completedAt": 671
+      },
+      {
+        "id": "668d76dc-f904-43f5-808e-32b34caa1aea",
+        "sessionId": "s",
+        "command": "printf command-68",
+        "cwd": "/tmp/workspace",
+        "output": "output-68\r\n",
+        "exitCode": 0,
+        "startedAt": 680,
+        "completedAt": 681
+      },
+      {
+        "id": "ca6f09f0-9e6a-4e2f-bf5b-a3f6176dabdf",
+        "sessionId": "s",
+        "command": "printf command-69",
+        "cwd": "/tmp/workspace",
+        "output": "output-69\r\n",
+        "exitCode": 0,
+        "startedAt": 690,
+        "completedAt": 691
+      },
+      {
+        "id": "ff6a2b43-c0c8-4fb9-9562-8c2aa9d0de60",
+        "sessionId": "s",
+        "command": "printf command-70",
+        "cwd": "/tmp/workspace",
+        "output": "output-70\r\n",
+        "exitCode": 0,
+        "startedAt": 700,
+        "completedAt": 701
+      },
+      {
+        "id": "082ee486-3f76-4a49-a9f2-67c7c6f0f914",
+        "sessionId": "s",
+        "command": "printf command-71",
+        "cwd": "/tmp/workspace",
+        "output": "output-71\r\n",
+        "exitCode": 0,
+        "startedAt": 710,
+        "completedAt": 711
+      },
+      {
+        "id": "54ea06f4-cb20-4198-96a3-b53122f9b311",
+        "sessionId": "s",
+        "command": "printf command-72",
+        "cwd": "/tmp/workspace",
+        "output": "output-72\r\n",
+        "exitCode": 0,
+        "startedAt": 720,
+        "completedAt": 721
+      },
+      {
+        "id": "c8142482-c670-4d46-8c24-86b7ba7a5869",
+        "sessionId": "s",
+        "command": "printf command-73",
+        "cwd": "/tmp/workspace",
+        "output": "output-73\r\n",
+        "exitCode": 0,
+        "startedAt": 730,
+        "completedAt": 731
+      },
+      {
+        "id": "a246a008-978c-40da-9215-206a1aca847f",
+        "sessionId": "s",
+        "command": "printf command-74",
+        "cwd": "/tmp/workspace",
+        "output": "output-74\r\n",
+        "exitCode": 0,
+        "startedAt": 740,
+        "completedAt": 741
+      },
+      {
+        "id": "65bd2932-bcd6-4e71-9c0d-c4e2413755f2",
+        "sessionId": "s",
+        "command": "printf command-75",
+        "cwd": "/tmp/workspace",
+        "output": "output-75\r\n",
+        "exitCode": 0,
+        "startedAt": 750,
+        "completedAt": 751
+      },
+      {
+        "id": "a8dbf5a4-72e7-4c39-bf35-a2d663728350",
+        "sessionId": "s",
+        "command": "printf command-76",
+        "cwd": "/tmp/workspace",
+        "output": "output-76\r\n",
+        "exitCode": 0,
+        "startedAt": 760,
+        "completedAt": 761
+      },
+      {
+        "id": "a3f575e6-bd3c-450d-9d6b-5f6979a0f229",
+        "sessionId": "s",
+        "command": "printf command-77",
+        "cwd": "/tmp/workspace",
+        "output": "output-77\r\n",
+        "exitCode": 0,
+        "startedAt": 770,
+        "completedAt": 771
+      },
+      {
+        "id": "83dea0b3-946a-4066-b299-cca19b485d74",
+        "sessionId": "s",
+        "command": "printf command-78",
+        "cwd": "/tmp/workspace",
+        "output": "output-78\r\n",
+        "exitCode": 0,
+        "startedAt": 780,
+        "completedAt": 781
+      },
+      {
+        "id": "27813d0d-6856-4d7a-81ca-a790bdd9b7b5",
+        "sessionId": "s",
+        "command": "printf command-79",
+        "cwd": "/tmp/workspace",
+        "output": "output-79\r\n",
+        "exitCode": 0,
+        "startedAt": 790,
+        "completedAt": 791
+      },
+      {
+        "id": "43512196-6fc3-4c05-a22e-9f2999bc63b3",
+        "sessionId": "s",
+        "command": "printf command-80",
+        "cwd": "/tmp/workspace",
+        "output": "output-80\r\n",
+        "exitCode": 0,
+        "startedAt": 800,
+        "completedAt": 801
+      },
+      {
+        "id": "2bcbf246-180f-42b7-a869-bf7f63292468",
+        "sessionId": "s",
+        "command": "printf command-81",
+        "cwd": "/tmp/workspace",
+        "output": "output-81\r\n",
+        "exitCode": 0,
+        "startedAt": 810,
+        "completedAt": 811
+      },
+      {
+        "id": "ae946581-a070-4968-b524-d4a4757c8371",
+        "sessionId": "s",
+        "command": "printf command-82",
+        "cwd": "/tmp/workspace",
+        "output": "output-82\r\n",
+        "exitCode": 0,
+        "startedAt": 820,
+        "completedAt": 821
+      },
+      {
+        "id": "b623fcb8-d325-4b73-af7c-35ccd3b4a4a2",
+        "sessionId": "s",
+        "command": "printf command-83",
+        "cwd": "/tmp/workspace",
+        "output": "output-83\r\n",
+        "exitCode": 0,
+        "startedAt": 830,
+        "completedAt": 831
+      },
+      {
+        "id": "efc33399-d323-4f2c-9242-667003c1792d",
+        "sessionId": "s",
+        "command": "printf command-84",
+        "cwd": "/tmp/workspace",
+        "output": "output-84\r\n",
+        "exitCode": 0,
+        "startedAt": 840,
+        "completedAt": 841
+      },
+      {
+        "id": "fa92a0c5-8aff-49cf-88ee-fc89bfaccbf8",
+        "sessionId": "s",
+        "command": "printf command-85",
+        "cwd": "/tmp/workspace",
+        "output": "output-85\r\n",
+        "exitCode": 0,
+        "startedAt": 850,
+        "completedAt": 851
+      },
+      {
+        "id": "20567a3c-aaea-4dee-93f7-a2e40ac389a0",
+        "sessionId": "s",
+        "command": "printf command-86",
+        "cwd": "/tmp/workspace",
+        "output": "output-86\r\n",
+        "exitCode": 0,
+        "startedAt": 860,
+        "completedAt": 861
+      },
+      {
+        "id": "218baa4a-42c0-4442-92af-ce6d329d2586",
+        "sessionId": "s",
+        "command": "printf command-87",
+        "cwd": "/tmp/workspace",
+        "output": "output-87\r\n",
+        "exitCode": 0,
+        "startedAt": 870,
+        "completedAt": 871
+      },
+      {
+        "id": "0ef3e288-ffc4-4c02-b4c1-cba3b7fd9eec",
+        "sessionId": "s",
+        "command": "printf command-88",
+        "cwd": "/tmp/workspace",
+        "output": "output-88\r\n",
+        "exitCode": 0,
+        "startedAt": 880,
+        "completedAt": 881
+      },
+      {
+        "id": "0609829d-87ca-4a6d-8163-128cfab96512",
+        "sessionId": "s",
+        "command": "printf command-89",
+        "cwd": "/tmp/workspace",
+        "output": "output-89\r\n",
+        "exitCode": 0,
+        "startedAt": 890,
+        "completedAt": 891
+      },
+      {
+        "id": "365b0ca2-08f1-44f6-b947-8dcef0e660a0",
+        "sessionId": "s",
+        "command": "printf command-90",
+        "cwd": "/tmp/workspace",
+        "output": "output-90\r\n",
+        "exitCode": 0,
+        "startedAt": 900,
+        "completedAt": 901
+      },
+      {
+        "id": "ccf93f6c-fafe-404e-98ca-cc8d5042755f",
+        "sessionId": "s",
+        "command": "printf command-91",
+        "cwd": "/tmp/workspace",
+        "output": "output-91\r\n",
+        "exitCode": 0,
+        "startedAt": 910,
+        "completedAt": 911
+      },
+      {
+        "id": "7dfa004c-7f0a-43ff-8057-1babbadd3aa2",
+        "sessionId": "s",
+        "command": "printf command-92",
+        "cwd": "/tmp/workspace",
+        "output": "output-92\r\n",
+        "exitCode": 0,
+        "startedAt": 920,
+        "completedAt": 921
+      },
+      {
+        "id": "360b9d95-0221-47ad-928e-9ef1ac3c5ce5",
+        "sessionId": "s",
+        "command": "printf command-93",
+        "cwd": "/tmp/workspace",
+        "output": "output-93\r\n",
+        "exitCode": 0,
+        "startedAt": 930,
+        "completedAt": 931
+      },
+      {
+        "id": "1bca01f1-c765-4136-b0d5-3221bf7f71c3",
+        "sessionId": "s",
+        "command": "printf command-94",
+        "cwd": "/tmp/workspace",
+        "output": "output-94\r\n",
+        "exitCode": 0,
+        "startedAt": 940,
+        "completedAt": 941
+      },
+      {
+        "id": "ee155457-4793-4b74-a4e1-b56860f6abad",
+        "sessionId": "s",
+        "command": "printf command-95",
+        "cwd": "/tmp/workspace",
+        "output": "output-95\r\n",
+        "exitCode": 0,
+        "startedAt": 950,
+        "completedAt": 951
+      },
+      {
+        "id": "e2b82a2e-18ac-4e74-b1e3-12152a1c2a0a",
+        "sessionId": "s",
+        "command": "printf command-96",
+        "cwd": "/tmp/workspace",
+        "output": "output-96\r\n",
+        "exitCode": 0,
+        "startedAt": 960,
+        "completedAt": 961
+      },
+      {
+        "id": "d4cbcfce-791a-4c6f-8282-1837098147fe",
+        "sessionId": "s",
+        "command": "printf command-97",
+        "cwd": "/tmp/workspace",
+        "output": "output-97\r\n",
+        "exitCode": 0,
+        "startedAt": 970,
+        "completedAt": 971
+      },
+      {
+        "id": "c5e7d3a9-9675-400a-8c25-4344496c7c55",
+        "sessionId": "s",
+        "command": "printf command-98",
+        "cwd": "/tmp/workspace",
+        "output": "output-98\r\n",
+        "exitCode": 0,
+        "startedAt": 980,
+        "completedAt": 981
+      },
+      {
+        "id": "d17678eb-63ff-49ab-9655-7c422a922ac4",
+        "sessionId": "s",
+        "command": "printf command-99",
+        "cwd": "/tmp/workspace",
+        "output": "output-99\r\n",
+        "exitCode": 0,
+        "startedAt": 990,
+        "completedAt": 991
+      },
+      {
+        "id": "6e31e8e3-b296-4885-b418-ca1bdb0ebf50",
+        "sessionId": "s",
+        "command": "printf command-100",
+        "cwd": "/tmp/workspace",
+        "output": "output-100\r\n",
+        "exitCode": 0,
+        "startedAt": 1000,
+        "completedAt": 1001
+      },
+      {
+        "id": "f8c4a130-fc67-4ad6-9dbe-9f32d3b45579",
+        "sessionId": "s",
+        "command": "printf command-101",
+        "cwd": "/tmp/workspace",
+        "output": "output-101\r\n",
+        "exitCode": 0,
+        "startedAt": 1010,
+        "completedAt": 1011
+      },
+      {
+        "id": "be8c0845-d0be-48d3-880f-de309bf909b3",
+        "sessionId": "s",
+        "command": "printf command-102",
+        "cwd": "/tmp/workspace",
+        "output": "output-102\r\n",
+        "exitCode": 0,
+        "startedAt": 1020,
+        "completedAt": 1021
+      },
+      {
+        "id": "2c1679a6-c328-4118-864c-3bdd390cc0a0",
+        "sessionId": "s",
+        "command": "printf command-103",
+        "cwd": "/tmp/workspace",
+        "output": "output-103\r\n",
+        "exitCode": 0,
+        "startedAt": 1030,
+        "completedAt": 1031
+      },
+      {
+        "id": "41ba6488-845b-469d-83f2-568b477999a3",
+        "sessionId": "s",
+        "command": "printf command-104",
+        "cwd": "/tmp/workspace",
+        "output": "output-104\r\n",
+        "exitCode": 0,
+        "startedAt": 1040,
+        "completedAt": 1041
+      },
+      {
+        "id": "4e833b96-5a74-4338-b629-031a7fcdc11b",
+        "sessionId": "s",
+        "command": "printf command-105",
+        "cwd": "/tmp/workspace",
+        "output": "output-105\r\n",
+        "exitCode": 0,
+        "startedAt": 1050,
+        "completedAt": 1051
+      }
+    ],
+    "disabled": [],
+    "limits": [
+      {
+        "name": "line-limit",
+        "parts": [
+          {
+            "lines": 5010,
+            "start": 1,
+            "trailing": false
+          }
+        ],
+        "input": {
+          "sessionId": "s",
+          "command": "line-limit",
+          "cwd": "/tmp/workspace",
+          "exitCode": 0,
+          "startedAt": 2000,
+          "completedAt": 2001
+        },
+        "id": "4d5fba10-04ff-4f4e-89f6-e758f0560993",
+        "expectedOutput": {
+          "sha256": "9327dafa3e72c87fd7a90bb6b1d531f6f9fdd8d40efde58750e62a5c1754eaed",
+          "utf16Length": 48921,
+          "lines": 5000,
+          "prefix": "line-11\nline-12\nline-13\nline-14\nline-15\n",
+          "suffix": "\nline-5007\nline-5008\nline-5009\nline-5010"
+        }
+      },
+      {
+        "name": "character-limit",
+        "parts": [
+          "old-",
+          {
+            "repeat": "x",
+            "count": 1048576
+          },
+          "-new"
+        ],
+        "input": {
+          "sessionId": "s",
+          "command": "character-limit",
+          "cwd": "/tmp/workspace",
+          "exitCode": 0,
+          "startedAt": 2000,
+          "completedAt": 2001
+        },
+        "id": "ab23333c-eaab-4305-9971-1a7cb56c9b95",
+        "expectedOutput": {
+          "sha256": "bbb7fb01d2fa78002ba7c1013040f09df5275874241890eabdb5d8c6f8a5233f",
+          "utf16Length": 1048576,
+          "lines": 1,
+          "prefix": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "suffix": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-new"
+        }
+      }
+    ],
+    "purged": []
+  },
+  "formatting": {
+    "blocks": [
+      {
+        "id": "3e67b588-d2be-4c03-8226-9ab8f43b55de",
+        "sessionId": "s",
+        "command": "printf command-1",
+        "cwd": "/tmp/workspace",
+        "output": "hello\r\n",
+        "exitCode": 0,
+        "startedAt": 10,
+        "completedAt": 11
+      },
+      {
+        "id": "a711a132-f15a-4601-8f9e-e601bf9e8f39",
+        "sessionId": "s",
+        "command": "printf command-2",
+        "cwd": "/tmp/workspace",
+        "output": "one\ntwo",
+        "exitCode": 0,
+        "startedAt": 20,
+        "completedAt": 21
+      }
+    ],
+    "result": "❯ printf command-1\r\nhello\r\n\r\n❯ printf command-2\r\none\r\ntwo\r\n\r\n\u001b[2m──────── 会话已恢复 ────────\u001b[0m\r\n",
+    "empty": ""
+  }
+}

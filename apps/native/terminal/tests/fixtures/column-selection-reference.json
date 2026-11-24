@@ -1,0 +1,395 @@
+{
+  "source": "Frozen xterm 6.0.0 SelectionService",
+  "cases": [
+    {
+      "name": "four-directions-and-zero-width",
+      "cols": 8,
+      "rows": 4,
+      "text": "abcdef\r\nghijkl\r\nmnopqr",
+      "column": true,
+      "probes": [
+        {
+          "start": [
+            1,
+            0
+          ],
+          "steps": [
+            {
+              "move": [
+                4,
+                2
+              ],
+              "expected": {
+                "start": [
+                  1,
+                  0
+                ],
+                "end": [
+                  4,
+                  2
+                ],
+                "offset": 0,
+                "text": "bcd\nhij\nnop"
+              }
+            }
+          ]
+        },
+        {
+          "start": [
+            4,
+            0
+          ],
+          "steps": [
+            {
+              "move": [
+                1,
+                2
+              ],
+              "expected": {
+                "start": [
+                  4,
+                  0
+                ],
+                "end": [
+                  1,
+                  2
+                ],
+                "offset": 0,
+                "text": "bcd\nhij\nnop"
+              }
+            }
+          ]
+        },
+        {
+          "start": [
+            1,
+            2
+          ],
+          "steps": [
+            {
+              "move": [
+                4,
+                0
+              ],
+              "expected": {
+                "start": [
+                  4,
+                  0
+                ],
+                "end": [
+                  1,
+                  2
+                ],
+                "offset": 0,
+                "text": "bcd\nhij\nnop"
+              }
+            }
+          ]
+        },
+        {
+          "start": [
+            4,
+            2
+          ],
+          "steps": [
+            {
+              "move": [
+                1,
+                0
+              ],
+              "expected": {
+                "start": [
+                  1,
+                  0
+                ],
+                "end": [
+                  4,
+                  2
+                ],
+                "offset": 0,
+                "text": "bcd\nhij\nnop"
+              }
+            }
+          ]
+        },
+        {
+          "start": [
+            2,
+            0
+          ],
+          "steps": [
+            {
+              "move": [
+                2,
+                2
+              ],
+              "expected": {
+                "start": [
+                  2,
+                  0
+                ],
+                "end": [
+                  2,
+                  2
+                ],
+                "offset": 0,
+                "text": ""
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "soft-wrap-blank-row-nbsp-and-written-space",
+      "cols": 8,
+      "rows": 5,
+      "text": "ABCD12X4EFGH56Y8\r\n\r\nQ S \r\n",
+      "column": true,
+      "probes": [
+        {
+          "start": [
+            0,
+            0
+          ],
+          "steps": [
+            {
+              "move": [
+                4,
+                3
+              ],
+              "expected": {
+                "start": [
+                  0,
+                  0
+                ],
+                "end": [
+                  4,
+                  3
+                ],
+                "offset": 0,
+                "text": "ABCD\nEFGH\n\nQ S "
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "wide-characters-on-edges",
+      "cols": 8,
+      "rows": 4,
+      "text": "abcdef\r\n中Z文Q\r\nghijkl",
+      "column": true,
+      "probes": [
+        {
+          "start": [
+            1,
+            0
+          ],
+          "steps": [
+            {
+              "move": [
+                3,
+                2
+              ],
+              "expected": {
+                "start": [
+                  1,
+                  0
+                ],
+                "end": [
+                  3,
+                  2
+                ],
+                "offset": 0,
+                "text": "bc\n Z\nhi"
+              }
+            }
+          ]
+        },
+        {
+          "start": [
+            1,
+            1
+          ],
+          "steps": [
+            {
+              "move": [
+                5,
+                2
+              ],
+              "expected": {
+                "start": [
+                  2,
+                  1
+                ],
+                "end": [
+                  5,
+                  2
+                ],
+                "offset": 0,
+                "text": "Z文\nijk"
+              }
+            }
+          ]
+        },
+        {
+          "start": [
+            0,
+            0
+          ],
+          "steps": [
+            {
+              "move": [
+                4,
+                1
+              ],
+              "expected": {
+                "start": [
+                  0,
+                  0
+                ],
+                "end": [
+                  5,
+                  1
+                ],
+                "offset": 0,
+                "text": "abcde\n中Z文"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "linear-incremental-reverse-at-wide-tail",
+      "cols": 8,
+      "rows": 4,
+      "text": "中Z \r\nSECOND",
+      "column": false,
+      "probes": [
+        {
+          "start": [
+            3,
+            1
+          ],
+          "steps": [
+            {
+              "incremental": [
+                1,
+                0
+              ],
+              "expected": {
+                "start": [
+                  1,
+                  0
+                ],
+                "end": [
+                  3,
+                  1
+                ],
+                "offset": 0,
+                "text": " Z \nSEC"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "column-beyond-viewport-and-scroll",
+      "cols": 10,
+      "rows": 4,
+      "history": 40,
+      "column": true,
+      "text": "line00\r\nline01\r\nline02\r\nline03\r\nline04\r\nline05\r\nline06\r\nline07\r\nline08\r\nline09\r\nline10\r\nline11\r\nline12\r\nline13\r\nline14\r\nline15",
+      "probes": [
+        {
+          "start": [
+            5,
+            14
+          ],
+          "steps": [
+            {
+              "move": [
+                1,
+                12
+              ],
+              "outside": -2,
+              "expected": {
+                "start": [
+                  1,
+                  12
+                ],
+                "end": [
+                  5,
+                  14
+                ],
+                "offset": 12,
+                "text": "ine1\nine1\nine1"
+              }
+            },
+            {
+              "scroll": 2,
+              "expected": {
+                "start": [
+                  1,
+                  10
+                ],
+                "end": [
+                  5,
+                  14
+                ],
+                "offset": 10,
+                "text": "ine1\nine1\nine1\nine1\nine1"
+              }
+            },
+            {
+              "scroll": -10,
+              "expected": {
+                "start": [
+                  5,
+                  14
+                ],
+                "end": [
+                  1,
+                  15
+                ],
+                "offset": 12,
+                "text": "ine1\nine1"
+              }
+            }
+          ]
+        },
+        {
+          "start": [
+            1,
+            13
+          ],
+          "steps": [
+            {
+              "move": [
+                4,
+                15
+              ],
+              "outside": 2,
+              "expected": {
+                "start": [
+                  1,
+                  13
+                ],
+                "end": [
+                  4,
+                  15
+                ],
+                "offset": 12,
+                "text": "ine\nine\nine"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

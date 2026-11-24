@@ -1,0 +1,205 @@
+{
+  "versions": {
+    "node": "24.18.1",
+    "acorn": "8.16.0",
+    "ada": "3.4.4",
+    "amaro": "1.1.9",
+    "ares": "1.34.6",
+    "brotli": "1.2.0",
+    "cldr": "48.0",
+    "icu": "78.2",
+    "llhttp": "9.4.3",
+    "merve": "1.2.2",
+    "modules": "148",
+    "napi": "10",
+    "nbytes": "0.1.4",
+    "ncrypto": "0.0.1",
+    "nghttp2": "1.69.0",
+    "nghttp3": "",
+    "ngtcp2": "",
+    "openssl": "0.0.0",
+    "simdjson": "4.6.4",
+    "simdutf": "7.7.0",
+    "sqlite": "3.53.1",
+    "tz": "2025c",
+    "undici": "7.29.0",
+    "unicode": "17.0",
+    "uv": "1.52.1",
+    "uvwasi": "0.0.23",
+    "v8": "15.0.245.28-electron.0",
+    "zlib": "1.3.2.1-motley",
+    "zstd": "1.6.0",
+    "electron": "43.4.1",
+    "chrome": "150.0.7871.224"
+  },
+  "cases": [
+    {
+      "name": "legacy-no-id",
+      "action": "load",
+      "sourceRoot": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/legacy-no-id",
+      "before": {
+        "matou.sqlite.recovery.json": "{\"version\":1,\"reason\":\"physical-corruption\",\"durableDatabasePath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/legacy-no-id/matou.sqlite\",\"quarantinedPath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/legacy-no-id/matou.sqlite.corrupt-123\",\"markerPath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/legacy-no-id/matou.sqlite.recovery.json\",\"createdAt\":123}"
+      },
+      "expected": {
+        "kind": "recovery-required",
+        "recoveryId": "10fafdba-6c5a-49d6-ab67-83f11a402e9d",
+        "reason": "physical-corruption",
+        "durableDatabasePath": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/legacy-no-id/matou.sqlite",
+        "quarantinedPath": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/legacy-no-id/matou.sqlite.corrupt-123",
+        "markerPath": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/legacy-no-id/matou.sqlite.recovery.json",
+        "backups": []
+      },
+      "after": {
+        "matou.sqlite.recovery.json": "{\"version\":1,\"reason\":\"physical-corruption\",\"durableDatabasePath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/legacy-no-id/matou.sqlite\",\"quarantinedPath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/legacy-no-id/matou.sqlite.corrupt-123\",\"markerPath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/legacy-no-id/matou.sqlite.recovery.json\",\"createdAt\":123,\"recoveryId\":\"10fafdba-6c5a-49d6-ab67-83f11a402e9d\",\"state\":\"required\"}"
+      }
+    },
+    {
+      "name": "legacy-with-id",
+      "action": "load",
+      "sourceRoot": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/legacy-with-id",
+      "before": {
+        "matou.sqlite.recovery.json": "{\"1\":\"one\",\"2\":\"two\",\"version\":1,\"recoveryId\":\"reference-generation\",\"reason\":\"physical-corruption\",\"durableDatabasePath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/legacy-with-id/matou.sqlite\",\"quarantinedPath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/legacy-with-id/matou.sqlite.corrupt-123\",\"markerPath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/legacy-with-id/matou.sqlite.recovery.json\",\"createdAt\":123,\"extra\":\"retained legacy data\"}"
+      },
+      "expected": {
+        "kind": "recovery-required",
+        "recoveryId": "reference-generation",
+        "reason": "physical-corruption",
+        "durableDatabasePath": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/legacy-with-id/matou.sqlite",
+        "quarantinedPath": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/legacy-with-id/matou.sqlite.corrupt-123",
+        "markerPath": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/legacy-with-id/matou.sqlite.recovery.json",
+        "backups": []
+      },
+      "after": {
+        "matou.sqlite.recovery.json": "{\"1\":\"one\",\"2\":\"two\",\"version\":1,\"recoveryId\":\"reference-generation\",\"reason\":\"physical-corruption\",\"durableDatabasePath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/legacy-with-id/matou.sqlite\",\"quarantinedPath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/legacy-with-id/matou.sqlite.corrupt-123\",\"markerPath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/legacy-with-id/matou.sqlite.recovery.json\",\"createdAt\":123,\"extra\":\"retained legacy data\",\"state\":\"required\"}"
+      }
+    },
+    {
+      "name": "required",
+      "action": "load",
+      "sourceRoot": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/required",
+      "before": {
+        "matou.sqlite.recovery.json": "{\"version\":1,\"state\":\"required\",\"recoveryId\":\"reference-generation\",\"reason\":\"physical-corruption\",\"durableDatabasePath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/required/matou.sqlite\",\"quarantinedPath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/required/matou.sqlite.corrupt-123\",\"markerPath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/required/matou.sqlite.recovery.json\",\"createdAt\":123}"
+      },
+      "expected": {
+        "kind": "recovery-required",
+        "recoveryId": "reference-generation",
+        "reason": "physical-corruption",
+        "durableDatabasePath": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/required/matou.sqlite",
+        "quarantinedPath": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/required/matou.sqlite.corrupt-123",
+        "markerPath": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/required/matou.sqlite.recovery.json",
+        "backups": []
+      },
+      "after": {
+        "matou.sqlite.recovery.json": "{\"version\":1,\"state\":\"required\",\"recoveryId\":\"reference-generation\",\"reason\":\"physical-corruption\",\"durableDatabasePath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/required/matou.sqlite\",\"quarantinedPath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/required/matou.sqlite.corrupt-123\",\"markerPath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/required/matou.sqlite.recovery.json\",\"createdAt\":123}"
+      }
+    },
+    {
+      "name": "invalid-state",
+      "action": "load",
+      "sourceRoot": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/invalid-state",
+      "before": {
+        "matou.sqlite.recovery.json": "{\"version\":1,\"state\":\"unknown\",\"recoveryId\":\"reference-generation\",\"reason\":\"physical-corruption\",\"durableDatabasePath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/invalid-state/matou.sqlite\",\"quarantinedPath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/invalid-state/matou.sqlite.corrupt-123\",\"markerPath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/invalid-state/matou.sqlite.recovery.json\",\"createdAt\":123}"
+      },
+      "error": "database recovery marker is invalid",
+      "after": {
+        "matou.sqlite.recovery.json": "{\"version\":1,\"state\":\"unknown\",\"recoveryId\":\"reference-generation\",\"reason\":\"physical-corruption\",\"durableDatabasePath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/invalid-state/matou.sqlite\",\"quarantinedPath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/invalid-state/matou.sqlite.corrupt-123\",\"markerPath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/invalid-state/matou.sqlite.recovery.json\",\"createdAt\":123}"
+      }
+    },
+    {
+      "name": "invalid-path",
+      "action": "load",
+      "sourceRoot": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/invalid-path",
+      "before": {
+        "matou.sqlite.recovery.json": "{\"version\":1,\"state\":\"required\",\"recoveryId\":\"reference-generation\",\"reason\":\"physical-corruption\",\"durableDatabasePath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/invalid-path/matou.sqlite\",\"quarantinedPath\":\"/outside/unrelated\",\"markerPath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/invalid-path/matou.sqlite.recovery.json\",\"createdAt\":123}"
+      },
+      "error": "database recovery marker is invalid",
+      "after": {
+        "matou.sqlite.recovery.json": "{\"version\":1,\"state\":\"required\",\"recoveryId\":\"reference-generation\",\"reason\":\"physical-corruption\",\"durableDatabasePath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/invalid-path/matou.sqlite\",\"quarantinedPath\":\"/outside/unrelated\",\"markerPath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/invalid-path/matou.sqlite.recovery.json\",\"createdAt\":123}"
+      }
+    },
+    {
+      "name": "invalid-json",
+      "action": "load",
+      "sourceRoot": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/invalid-json",
+      "before": {
+        "matou.sqlite.recovery.json": "{"
+      },
+      "error": "database recovery marker is invalid",
+      "after": {
+        "matou.sqlite.recovery.json": "{"
+      }
+    },
+    {
+      "name": "resolve",
+      "action": "resolve",
+      "sourceRoot": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/resolve",
+      "before": {
+        "matou.sqlite.recovery.json": "{\"version\":1,\"state\":\"required\",\"recoveryId\":\"reference-generation\",\"reason\":\"physical-corruption\",\"durableDatabasePath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/resolve/matou.sqlite\",\"quarantinedPath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/resolve/matou.sqlite.corrupt-123\",\"markerPath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/resolve/matou.sqlite.recovery.json\",\"createdAt\":123}"
+      },
+      "expected": {
+        "wasResolved": false,
+        "wrongIdError": "数据库恢复状态已更新，请使用最新恢复页面重试",
+        "resolved": true
+      },
+      "after": {
+        "matou.sqlite.recovery.json": "{\"version\":1,\"state\":\"required\",\"recoveryId\":\"reference-generation\",\"reason\":\"physical-corruption\",\"durableDatabasePath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/resolve/matou.sqlite\",\"quarantinedPath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/resolve/matou.sqlite.corrupt-123\",\"markerPath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/resolve/matou.sqlite.recovery.json\",\"createdAt\":123}",
+        "matou.sqlite.recovery.json.resolved-reference-generation": "{\"version\":1,\"state\":\"resolved\",\"recoveryId\":\"reference-generation\",\"markerPath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/resolve/matou.sqlite.recovery.json\",\"resolvedAt\":1794723740865}"
+      }
+    },
+    {
+      "name": "initial-claim",
+      "action": "load",
+      "sourceRoot": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/initial-claim",
+      "before": {
+        "matou.sqlite.recovery.json.generation-358708a9bb0e6a0e0c11b1c827b69bca09f04ca6ce375d1c5bac9ce3dc43f354.claim": "{\"version\":1,\"kind\":\"recovery-generation-claim\",\"source\":{\"kind\":\"initial\"},\"markerDigest\":\"8e024e08907d50ea2a47b322c44aa82986d0981c6e9242a6a5be360e31f50ba3\",\"marker\":{\"version\":1,\"state\":\"required\",\"recoveryId\":\"46f7eadb-5848-4e07-98eb-fd46f5b33546\",\"reason\":\"ownership-recovery-required\",\"durableDatabasePath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/initial-claim/matou.sqlite\",\"quarantinedPath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/initial-claim/matou.sqlite\",\"markerPath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/initial-claim/matou.sqlite.recovery.json\",\"createdAt\":1794723740885,\"ownershipIssue\":\"owner-record-malformed\"}}"
+      },
+      "directories": [
+        "matou.sqlite.recovery-action.sqlite"
+      ],
+      "expected": {
+        "kind": "recovery-required",
+        "recoveryId": "46f7eadb-5848-4e07-98eb-fd46f5b33546",
+        "reason": "ownership-recovery-required",
+        "durableDatabasePath": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/initial-claim/matou.sqlite",
+        "quarantinedPath": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/initial-claim/matou.sqlite",
+        "markerPath": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/initial-claim/matou.sqlite.recovery.json",
+        "backups": [],
+        "ownershipIssue": "owner-record-malformed"
+      },
+      "after": {
+        "matou.sqlite.recovery.json": "{\"version\":1,\"state\":\"required\",\"recoveryId\":\"46f7eadb-5848-4e07-98eb-fd46f5b33546\",\"reason\":\"ownership-recovery-required\",\"durableDatabasePath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/initial-claim/matou.sqlite\",\"quarantinedPath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/initial-claim/matou.sqlite\",\"markerPath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/initial-claim/matou.sqlite.recovery.json\",\"createdAt\":1794723740885,\"ownershipIssue\":\"owner-record-malformed\"}",
+        "matou.sqlite.recovery.json.generation-358708a9bb0e6a0e0c11b1c827b69bca09f04ca6ce375d1c5bac9ce3dc43f354.claim": "{\"version\":1,\"kind\":\"recovery-generation-claim\",\"source\":{\"kind\":\"initial\"},\"markerDigest\":\"8e024e08907d50ea2a47b322c44aa82986d0981c6e9242a6a5be360e31f50ba3\",\"marker\":{\"version\":1,\"state\":\"required\",\"recoveryId\":\"46f7eadb-5848-4e07-98eb-fd46f5b33546\",\"reason\":\"ownership-recovery-required\",\"durableDatabasePath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/initial-claim/matou.sqlite\",\"quarantinedPath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/initial-claim/matou.sqlite\",\"markerPath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/initial-claim/matou.sqlite.recovery.json\",\"createdAt\":1794723740885,\"ownershipIssue\":\"owner-record-malformed\"}}"
+      }
+    },
+    {
+      "name": "resolved-claim",
+      "action": "load",
+      "sourceRoot": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/initial-claim",
+      "before": {
+        "matou.sqlite.recovery.json": "{\"version\":1,\"state\":\"required\",\"recoveryId\":\"46f7eadb-5848-4e07-98eb-fd46f5b33546\",\"reason\":\"ownership-recovery-required\",\"durableDatabasePath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/initial-claim/matou.sqlite\",\"quarantinedPath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/initial-claim/matou.sqlite\",\"markerPath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/initial-claim/matou.sqlite.recovery.json\",\"createdAt\":1794723740885,\"ownershipIssue\":\"owner-record-malformed\"}",
+        "matou.sqlite.recovery.json.generation-358708a9bb0e6a0e0c11b1c827b69bca09f04ca6ce375d1c5bac9ce3dc43f354.claim": "{\"version\":1,\"kind\":\"recovery-generation-claim\",\"source\":{\"kind\":\"initial\"},\"markerDigest\":\"8e024e08907d50ea2a47b322c44aa82986d0981c6e9242a6a5be360e31f50ba3\",\"marker\":{\"version\":1,\"state\":\"required\",\"recoveryId\":\"46f7eadb-5848-4e07-98eb-fd46f5b33546\",\"reason\":\"ownership-recovery-required\",\"durableDatabasePath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/initial-claim/matou.sqlite\",\"quarantinedPath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/initial-claim/matou.sqlite\",\"markerPath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/initial-claim/matou.sqlite.recovery.json\",\"createdAt\":1794723740885,\"ownershipIssue\":\"owner-record-malformed\"}}",
+        "matou.sqlite.recovery.json.generation-d71edf992c79d52cb0e3b4952dbc68cf16e1d143045670a4254e12cdbfd6a1c4.claim": "{\"version\":1,\"kind\":\"recovery-generation-claim\",\"source\":{\"kind\":\"resolved\",\"recoveryId\":\"46f7eadb-5848-4e07-98eb-fd46f5b33546\",\"markerDigest\":\"8e024e08907d50ea2a47b322c44aa82986d0981c6e9242a6a5be360e31f50ba3\",\"markerBytes\":\"{\\\"version\\\":1,\\\"state\\\":\\\"required\\\",\\\"recoveryId\\\":\\\"46f7eadb-5848-4e07-98eb-fd46f5b33546\\\",\\\"reason\\\":\\\"ownership-recovery-required\\\",\\\"durableDatabasePath\\\":\\\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/initial-claim/matou.sqlite\\\",\\\"quarantinedPath\\\":\\\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/initial-claim/matou.sqlite\\\",\\\"markerPath\\\":\\\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/initial-claim/matou.sqlite.recovery.json\\\",\\\"createdAt\\\":1794723740885,\\\"ownershipIssue\\\":\\\"owner-record-malformed\\\"}\"},\"markerDigest\":\"8a64a398bfdce3dbf9ed7011091ee3b41f15060784270e4665da4f8945ff7490\",\"marker\":{\"version\":1,\"state\":\"required\",\"recoveryId\":\"9ca9dd62-4db5-4a7d-b9e0-c5f90bcadd82\",\"reason\":\"ownership-recovery-required\",\"durableDatabasePath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/initial-claim/matou.sqlite\",\"quarantinedPath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/initial-claim/matou.sqlite\",\"markerPath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/initial-claim/matou.sqlite.recovery.json\",\"createdAt\":1794723740936,\"ownershipIssue\":\"owner-record-malformed\"}}",
+        "matou.sqlite.recovery.json.resolved-46f7eadb-5848-4e07-98eb-fd46f5b33546": "{\"version\":1,\"state\":\"resolved\",\"recoveryId\":\"46f7eadb-5848-4e07-98eb-fd46f5b33546\",\"markerPath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/initial-claim/matou.sqlite.recovery.json\",\"resolvedAt\":1794723740919}"
+      },
+      "directories": [
+        "matou.sqlite.recovery-action.sqlite"
+      ],
+      "expected": {
+        "kind": "recovery-required",
+        "recoveryId": "9ca9dd62-4db5-4a7d-b9e0-c5f90bcadd82",
+        "reason": "ownership-recovery-required",
+        "durableDatabasePath": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/initial-claim/matou.sqlite",
+        "quarantinedPath": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/initial-claim/matou.sqlite",
+        "markerPath": "/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/initial-claim/matou.sqlite.recovery.json",
+        "backups": [],
+        "ownershipIssue": "owner-record-malformed"
+      },
+      "after": {
+        "matou.sqlite.recovery.json": "{\"version\":1,\"state\":\"required\",\"recoveryId\":\"9ca9dd62-4db5-4a7d-b9e0-c5f90bcadd82\",\"reason\":\"ownership-recovery-required\",\"durableDatabasePath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/initial-claim/matou.sqlite\",\"quarantinedPath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/initial-claim/matou.sqlite\",\"markerPath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/initial-claim/matou.sqlite.recovery.json\",\"createdAt\":1794723740936,\"ownershipIssue\":\"owner-record-malformed\"}",
+        "matou.sqlite.recovery.json.generation-358708a9bb0e6a0e0c11b1c827b69bca09f04ca6ce375d1c5bac9ce3dc43f354.claim": "{\"version\":1,\"kind\":\"recovery-generation-claim\",\"source\":{\"kind\":\"initial\"},\"markerDigest\":\"8e024e08907d50ea2a47b322c44aa82986d0981c6e9242a6a5be360e31f50ba3\",\"marker\":{\"version\":1,\"state\":\"required\",\"recoveryId\":\"46f7eadb-5848-4e07-98eb-fd46f5b33546\",\"reason\":\"ownership-recovery-required\",\"durableDatabasePath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/initial-claim/matou.sqlite\",\"quarantinedPath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/initial-claim/matou.sqlite\",\"markerPath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/initial-claim/matou.sqlite.recovery.json\",\"createdAt\":1794723740885,\"ownershipIssue\":\"owner-record-malformed\"}}",
+        "matou.sqlite.recovery.json.generation-d71edf992c79d52cb0e3b4952dbc68cf16e1d143045670a4254e12cdbfd6a1c4.claim": "{\"version\":1,\"kind\":\"recovery-generation-claim\",\"source\":{\"kind\":\"resolved\",\"recoveryId\":\"46f7eadb-5848-4e07-98eb-fd46f5b33546\",\"markerDigest\":\"8e024e08907d50ea2a47b322c44aa82986d0981c6e9242a6a5be360e31f50ba3\",\"markerBytes\":\"{\\\"version\\\":1,\\\"state\\\":\\\"required\\\",\\\"recoveryId\\\":\\\"46f7eadb-5848-4e07-98eb-fd46f5b33546\\\",\\\"reason\\\":\\\"ownership-recovery-required\\\",\\\"durableDatabasePath\\\":\\\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/initial-claim/matou.sqlite\\\",\\\"quarantinedPath\\\":\\\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/initial-claim/matou.sqlite\\\",\\\"markerPath\\\":\\\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/initial-claim/matou.sqlite.recovery.json\\\",\\\"createdAt\\\":1794723740885,\\\"ownershipIssue\\\":\\\"owner-record-malformed\\\"}\"},\"markerDigest\":\"8a64a398bfdce3dbf9ed7011091ee3b41f15060784270e4665da4f8945ff7490\",\"marker\":{\"version\":1,\"state\":\"required\",\"recoveryId\":\"9ca9dd62-4db5-4a7d-b9e0-c5f90bcadd82\",\"reason\":\"ownership-recovery-required\",\"durableDatabasePath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/initial-claim/matou.sqlite\",\"quarantinedPath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/initial-claim/matou.sqlite\",\"markerPath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/initial-claim/matou.sqlite.recovery.json\",\"createdAt\":1794723740936,\"ownershipIssue\":\"owner-record-malformed\"}}",
+        "matou.sqlite.recovery.json.resolved-46f7eadb-5848-4e07-98eb-fd46f5b33546": "{\"version\":1,\"state\":\"resolved\",\"recoveryId\":\"46f7eadb-5848-4e07-98eb-fd46f5b33546\",\"markerPath\":\"/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-recovery-marker-contract-jcq5uw/initial-claim/matou.sqlite.recovery.json\",\"resolvedAt\":1794723740919}"
+      }
+    }
+  ]
+}

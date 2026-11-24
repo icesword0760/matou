@@ -35,5 +35,14 @@ __pycache__/
 .claude/worktrees/
 server.pid
 
+# Local native migration reference bundles, data and evidence
+/artifacts/native-parity/
+/apps/native/target/
+/apps/native/terminal/vendor/
+/apps/native/vendor/
+
 # Short macOS socket aliases for isolated packaged acceptance
 /.c5/
+
+/.rw*/
+/.tmp*/

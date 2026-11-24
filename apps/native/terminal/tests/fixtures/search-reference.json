@@ -1,0 +1,971 @@
+{
+  "source": "Frozen SearchEngine, SearchLineCache and SearchAddon",
+  "cases": [
+    {
+      "name": "cycles-and-incremental-query",
+      "cols": 24,
+      "rows": 4,
+      "text": "one KEY two key\r\nkey alone\r\nlast KEY",
+      "probes": [
+        {
+          "op": "next",
+          "term": "key",
+          "previous": null,
+          "cachedTerm": null,
+          "expected": {
+            "term": [
+              107,
+              101,
+              121
+            ],
+            "row": 0,
+            "col": 4,
+            "size": 3
+          }
+        },
+        {
+          "op": "next",
+          "term": "key",
+          "previous": {
+            "start": {
+              "x": 4,
+              "y": 0
+            },
+            "end": {
+              "x": 7,
+              "y": 0
+            }
+          },
+          "cachedTerm": "key",
+          "expected": {
+            "term": [
+              107,
+              101,
+              121
+            ],
+            "row": 0,
+            "col": 12,
+            "size": 3
+          }
+        },
+        {
+          "op": "next",
+          "term": "key",
+          "previous": {
+            "start": {
+              "x": 12,
+              "y": 0
+            },
+            "end": {
+              "x": 15,
+              "y": 0
+            }
+          },
+          "cachedTerm": "key",
+          "expected": {
+            "term": [
+              107,
+              101,
+              121
+            ],
+            "row": 1,
+            "col": 0,
+            "size": 3
+          }
+        },
+        {
+          "op": "next",
+          "term": "key",
+          "previous": {
+            "start": {
+              "x": 0,
+              "y": 1
+            },
+            "end": {
+              "x": 3,
+              "y": 1
+            }
+          },
+          "cachedTerm": "key",
+          "expected": {
+            "term": [
+              107,
+              101,
+              121
+            ],
+            "row": 2,
+            "col": 5,
+            "size": 3
+          }
+        },
+        {
+          "op": "next",
+          "term": "key",
+          "previous": {
+            "start": {
+              "x": 5,
+              "y": 2
+            },
+            "end": {
+              "x": 8,
+              "y": 2
+            }
+          },
+          "cachedTerm": "key",
+          "expected": {
+            "term": [
+              107,
+              101,
+              121
+            ],
+            "row": 0,
+            "col": 4,
+            "size": 3
+          }
+        },
+        {
+          "op": "next",
+          "term": "ke",
+          "previous": {
+            "start": {
+              "x": 4,
+              "y": 0
+            },
+            "end": {
+              "x": 7,
+              "y": 0
+            }
+          },
+          "cachedTerm": "key",
+          "expected": {
+            "term": [
+              107,
+              101
+            ],
+            "row": 0,
+            "col": 4,
+            "size": 2
+          }
+        },
+        {
+          "op": "previous",
+          "term": "key",
+          "previous": {
+            "start": {
+              "x": 4,
+              "y": 0
+            },
+            "end": {
+              "x": 6,
+              "y": 0
+            }
+          },
+          "cachedTerm": "ke",
+          "expected": {
+            "term": [
+              107,
+              101,
+              121
+            ],
+            "row": 0,
+            "col": 4,
+            "size": 3
+          }
+        },
+        {
+          "op": "previous",
+          "term": "key",
+          "previous": {
+            "start": {
+              "x": 4,
+              "y": 0
+            },
+            "end": {
+              "x": 7,
+              "y": 0
+            }
+          },
+          "cachedTerm": "key",
+          "expected": {
+            "term": [
+              107,
+              101,
+              121
+            ],
+            "row": 2,
+            "col": 5,
+            "size": 3
+          }
+        },
+        {
+          "op": "previous",
+          "term": "key",
+          "previous": {
+            "start": {
+              "x": 5,
+              "y": 2
+            },
+            "end": {
+              "x": 8,
+              "y": 2
+            }
+          },
+          "cachedTerm": "key",
+          "expected": {
+            "term": [
+              107,
+              101,
+              121
+            ],
+            "row": 1,
+            "col": 0,
+            "size": 3
+          }
+        },
+        {
+          "op": "previous",
+          "term": "key",
+          "previous": {
+            "start": {
+              "x": 0,
+              "y": 1
+            },
+            "end": {
+              "x": 3,
+              "y": 1
+            }
+          },
+          "cachedTerm": "key",
+          "expected": {
+            "term": [
+              107,
+              101,
+              121
+            ],
+            "row": 0,
+            "col": 12,
+            "size": 3
+          }
+        },
+        {
+          "op": "previous",
+          "term": "key",
+          "previous": {
+            "start": {
+              "x": 12,
+              "y": 0
+            },
+            "end": {
+              "x": 15,
+              "y": 0
+            }
+          },
+          "cachedTerm": "key",
+          "expected": {
+            "term": [
+              107,
+              101,
+              121
+            ],
+            "row": 0,
+            "col": 4,
+            "size": 3
+          }
+        },
+        {
+          "op": "previous",
+          "term": "KEY",
+          "options": {
+            "caseSensitive": true
+          },
+          "previous": {
+            "start": {
+              "x": 4,
+              "y": 0
+            },
+            "end": {
+              "x": 7,
+              "y": 0
+            }
+          },
+          "cachedTerm": "key",
+          "expected": {
+            "term": [
+              75,
+              69,
+              89
+            ],
+            "row": 0,
+            "col": 4,
+            "size": 3
+          }
+        },
+        {
+          "op": "find",
+          "term": "KEY",
+          "row": 0,
+          "col": 4,
+          "options": {
+            "caseSensitive": true
+          },
+          "previous": {
+            "start": {
+              "x": 4,
+              "y": 0
+            },
+            "end": {
+              "x": 7,
+              "y": 0
+            }
+          },
+          "cachedTerm": "KEY",
+          "expected": {
+            "term": [
+              75,
+              69,
+              89
+            ],
+            "row": 0,
+            "col": 4,
+            "size": 3
+          }
+        },
+        {
+          "op": "find",
+          "term": "",
+          "row": 0,
+          "col": 0,
+          "previous": {
+            "start": {
+              "x": 4,
+              "y": 0
+            },
+            "end": {
+              "x": 7,
+              "y": 0
+            }
+          },
+          "cachedTerm": "KEY",
+          "expected": null
+        }
+      ]
+    },
+    {
+      "name": "whole-word-boundaries",
+      "cols": 24,
+      "rows": 4,
+      "text": "untest test\r\n[test] next\r\nfoo_test~test\r\nSTOP",
+      "probes": [
+        {
+          "op": "find",
+          "term": "test",
+          "row": 0,
+          "col": 0,
+          "options": {
+            "wholeWord": true
+          },
+          "previous": null,
+          "cachedTerm": null,
+          "expected": {
+            "term": [
+              116,
+              101,
+              115,
+              116
+            ],
+            "row": 1,
+            "col": 1,
+            "size": 4
+          }
+        },
+        {
+          "op": "find",
+          "term": "test",
+          "row": 0,
+          "col": 5,
+          "options": {
+            "wholeWord": true
+          },
+          "previous": null,
+          "cachedTerm": null,
+          "expected": {
+            "term": [
+              116,
+              101,
+              115,
+              116
+            ],
+            "row": 0,
+            "col": 7,
+            "size": 4
+          }
+        },
+        {
+          "op": "find",
+          "term": "test",
+          "row": 2,
+          "col": 0,
+          "options": {
+            "wholeWord": true
+          },
+          "previous": null,
+          "cachedTerm": null,
+          "expected": null
+        },
+        {
+          "op": "find",
+          "term": "test",
+          "row": 2,
+          "col": 9,
+          "options": {
+            "wholeWord": true
+          },
+          "previous": null,
+          "cachedTerm": null,
+          "expected": {
+            "term": [
+              116,
+              101,
+              115,
+              116
+            ],
+            "row": 2,
+            "col": 9,
+            "size": 4
+          }
+        },
+        {
+          "op": "all",
+          "term": "test",
+          "options": {
+            "wholeWord": true
+          },
+          "previous": null,
+          "cachedTerm": null,
+          "expected": [
+            {
+              "term": [
+                116,
+                101,
+                115,
+                116
+              ],
+              "row": 1,
+              "col": 1,
+              "size": 4
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "wide-padding-and-unicode-offsets",
+      "cols": 8,
+      "rows": 5,
+      "text": "abc1234中文🙂éfin\r\nlast",
+      "probes": [
+        {
+          "op": "find",
+          "term": "4中文",
+          "row": 0,
+          "col": 0,
+          "previous": null,
+          "cachedTerm": null,
+          "expected": {
+            "term": [
+              52,
+              20013,
+              25991
+            ],
+            "row": 0,
+            "col": 6,
+            "size": 6
+          }
+        },
+        {
+          "op": "find",
+          "term": "🙂é",
+          "row": 0,
+          "col": 0,
+          "previous": null,
+          "cachedTerm": null,
+          "expected": {
+            "term": [
+              55357,
+              56898,
+              101,
+              769
+            ],
+            "row": 1,
+            "col": 4,
+            "size": 2
+          }
+        },
+        {
+          "op": "find",
+          "term": "中文",
+          "row": 1,
+          "col": 0,
+          "previous": null,
+          "cachedTerm": null,
+          "expected": null
+        },
+        {
+          "op": "find",
+          "term": ".",
+          "row": 1,
+          "col": 4,
+          "options": {
+            "regex": true
+          },
+          "previous": null,
+          "cachedTerm": null,
+          "expected": {
+            "term": [
+              56898
+            ],
+            "row": 1,
+            "col": 4,
+            "size": 1
+          }
+        },
+        {
+          "op": "find",
+          "term": "🙂.",
+          "row": 0,
+          "col": 0,
+          "options": {
+            "regex": true
+          },
+          "previous": null,
+          "cachedTerm": null,
+          "expected": {
+            "term": [
+              55357,
+              56898,
+              101
+            ],
+            "row": 1,
+            "col": 4,
+            "size": 1
+          }
+        },
+        {
+          "op": "find",
+          "term": "fin",
+          "row": 1,
+          "col": 4,
+          "previous": null,
+          "cachedTerm": null,
+          "expected": {
+            "term": [
+              102,
+              105,
+              110
+            ],
+            "row": 1,
+            "col": 6,
+            "size": 3
+          }
+        },
+        {
+          "op": "previous",
+          "term": "中文",
+          "previous": null,
+          "cachedTerm": null,
+          "expected": {
+            "term": [
+              20013,
+              25991
+            ],
+            "row": 1,
+            "col": 0,
+            "size": 4
+          }
+        }
+      ]
+    },
+    {
+      "name": "regex-slices-lookbehind-backrefs-and-overlap",
+      "cols": 24,
+      "rows": 4,
+      "text": "cat42 cat42 noon\r\nababa\r\nlast",
+      "probes": [
+        {
+          "op": "find",
+          "term": "(?<=cat)\\d+",
+          "row": 0,
+          "col": 0,
+          "options": {
+            "regex": true
+          },
+          "previous": null,
+          "cachedTerm": null,
+          "expected": {
+            "term": [
+              52,
+              50
+            ],
+            "row": 0,
+            "col": 3,
+            "size": 2
+          }
+        },
+        {
+          "op": "find",
+          "term": "(?<=cat)\\d+",
+          "row": 0,
+          "col": 3,
+          "options": {
+            "regex": true
+          },
+          "previous": null,
+          "cachedTerm": null,
+          "expected": {
+            "term": [
+              52,
+              50
+            ],
+            "row": 0,
+            "col": 9,
+            "size": 2
+          }
+        },
+        {
+          "op": "find",
+          "term": "([a-z])\\1",
+          "row": 0,
+          "col": 0,
+          "options": {
+            "regex": true
+          },
+          "previous": null,
+          "cachedTerm": null,
+          "expected": {
+            "term": [
+              111,
+              111
+            ],
+            "row": 0,
+            "col": 13,
+            "size": 2
+          }
+        },
+        {
+          "op": "previous",
+          "term": "aba",
+          "options": {
+            "regex": true
+          },
+          "previous": null,
+          "cachedTerm": null,
+          "expected": {
+            "term": [
+              97,
+              98,
+              97
+            ],
+            "row": 1,
+            "col": 2,
+            "size": 3
+          }
+        },
+        {
+          "op": "previous",
+          "term": "aba",
+          "options": {
+            "regex": true
+          },
+          "previous": {
+            "start": {
+              "x": 2,
+              "y": 1
+            },
+            "end": {
+              "x": 5,
+              "y": 1
+            }
+          },
+          "cachedTerm": "aba",
+          "expected": {
+            "term": [
+              97,
+              98,
+              97
+            ],
+            "row": 1,
+            "col": 2,
+            "size": 3
+          }
+        },
+        {
+          "op": "find",
+          "term": "(?=a)|a",
+          "row": 1,
+          "col": 0,
+          "options": {
+            "regex": true
+          },
+          "previous": {
+            "start": {
+              "x": 2,
+              "y": 1
+            },
+            "end": {
+              "x": 5,
+              "y": 1
+            }
+          },
+          "cachedTerm": "aba",
+          "expected": null
+        },
+        {
+          "op": "previous",
+          "term": "(?=a)|a",
+          "options": {
+            "regex": true
+          },
+          "previous": {
+            "start": {
+              "x": 2,
+              "y": 1
+            },
+            "end": {
+              "x": 5,
+              "y": 1
+            }
+          },
+          "cachedTerm": "aba",
+          "expected": {
+            "term": [],
+            "row": 1,
+            "col": 4,
+            "size": 0
+          }
+        },
+        {
+          "op": "previous",
+          "term": "$",
+          "options": {
+            "regex": true
+          },
+          "previous": null,
+          "cachedTerm": "(?=a)|a",
+          "expected": {
+            "term": [],
+            "row": 3,
+            "col": 0,
+            "size": 0
+          }
+        },
+        {
+          "op": "find",
+          "term": "[",
+          "row": 0,
+          "col": 0,
+          "options": {
+            "regex": true
+          },
+          "previous": null,
+          "cachedTerm": "$",
+          "expected": {
+            "error": true
+          }
+        }
+      ]
+    },
+    {
+      "name": "signed-cell-mapping-inside-combining-graphemes",
+      "cols": 10,
+      "rows": 2,
+      "text": "ȩ́̀abc",
+      "probes": [
+        {
+          "op": "find",
+          "term": ".",
+          "row": 0,
+          "col": 0,
+          "options": {
+            "regex": true
+          },
+          "previous": null,
+          "cachedTerm": null,
+          "expected": {
+            "term": [
+              101
+            ],
+            "row": 0,
+            "col": 0,
+            "size": -2
+          }
+        },
+        {
+          "op": "find",
+          "term": "̧",
+          "row": 0,
+          "col": 0,
+          "previous": null,
+          "cachedTerm": null,
+          "expected": {
+            "term": [
+              807
+            ],
+            "row": 0,
+            "col": -1,
+            "size": 1
+          }
+        },
+        {
+          "op": "next",
+          "term": "̧",
+          "previous": null,
+          "cachedTerm": null,
+          "expected": {
+            "term": [
+              807
+            ],
+            "row": 0,
+            "col": -1,
+            "size": 1
+          }
+        },
+        {
+          "op": "next",
+          "term": "̧",
+          "previous": {
+            "start": {
+              "x": -1,
+              "y": 0
+            },
+            "end": {
+              "x": 0,
+              "y": 0
+            }
+          },
+          "cachedTerm": "̧",
+          "expected": {
+            "term": [
+              807
+            ],
+            "row": 0,
+            "col": -1,
+            "size": 1
+          }
+        },
+        {
+          "op": "previous",
+          "term": "̧",
+          "previous": {
+            "start": {
+              "x": -1,
+              "y": 0
+            },
+            "end": {
+              "x": 0,
+              "y": 0
+            }
+          },
+          "cachedTerm": "̧",
+          "expected": {
+            "term": [
+              807
+            ],
+            "row": 0,
+            "col": -1,
+            "size": 1
+          }
+        },
+        {
+          "op": "all",
+          "term": ".",
+          "options": {
+            "regex": true
+          },
+          "previous": {
+            "start": {
+              "x": -1,
+              "y": 0
+            },
+            "end": {
+              "x": 0,
+              "y": 0
+            }
+          },
+          "cachedTerm": "̧",
+          "expected": [
+            {
+              "term": [
+                101
+              ],
+              "row": 0,
+              "col": 0,
+              "size": -2
+            },
+            {
+              "term": [
+                97
+              ],
+              "row": 0,
+              "col": 1,
+              "size": 1
+            },
+            {
+              "term": [
+                98
+              ],
+              "row": 0,
+              "col": 2,
+              "size": 1
+            },
+            {
+              "term": [
+                99
+              ],
+              "row": 0,
+              "col": 3,
+              "size": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "thousand-highlight-limit",
+      "cols": 20,
+      "rows": 4,
+      "history": 200,
+      "generated": {
+        "unit": "a a a a a a a a a \r\n",
+        "count": 116
+      },
+      "probes": [
+        {
+          "op": "all",
+          "term": "a",
+          "summarize": true,
+          "previous": null,
+          "cachedTerm": null,
+          "expected": {
+            "count": 1000,
+            "first": {
+              "term": [
+                97
+              ],
+              "row": 0,
+              "col": 0,
+              "size": 1
+            },
+            "last": {
+              "term": [
+                97
+              ],
+              "row": 111,
+              "col": 0,
+              "size": 1
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,1528 @@
+diff --git a/src/platform.rs b/src/platform.rs
+index 047a0055..b6a82685 100644
+--- a/src/platform.rs
++++ b/src/platform.rs
+@@ -488,6 +488,10 @@ pub(crate) trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
+     fn toggle_fullscreen(&self);
+     fn is_fullscreen(&self) -> bool;
+     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>);
++    #[cfg(target_os = "windows")]
++    fn frame_requested(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
++        Default::default()
++    }
+     fn on_input(&self, callback: Box<dyn FnMut(PlatformInput) -> DispatchEventResult>);
+     fn on_active_status_change(&self, callback: Box<dyn FnMut(bool)>);
+     fn on_hover_status_change(&self, callback: Box<dyn FnMut(bool)>);
+diff --git a/src/window.rs b/src/window.rs
+index 6d74a0e1..f84f9b9e 100644
+--- a/src/window.rs
++++ b/src/window.rs
+@@ -32,6 +32,8 @@ use raw_window_handle::{HandleError, HasDisplayHandle, HasWindowHandle};
+ use refineable::Refineable;
+ use slotmap::SlotMap;
+ use smallvec::SmallVec;
++#[cfg(target_os = "windows")]
++use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+ use std::{
+     any::{Any, TypeId},
+     borrow::Cow,
+@@ -100,11 +102,15 @@ struct WindowInvalidatorInner {
+ #[derive(Clone)]
+ pub(crate) struct WindowInvalidator {
+     inner: Rc<RefCell<WindowInvalidatorInner>>,
++    #[cfg(target_os = "windows")]
++    frame_requested: Arc<AtomicBool>,
+ }
+
+ impl WindowInvalidator {
+-    pub fn new() -> Self {
++    pub fn new(#[cfg(target_os = "windows")] frame_requested: Arc<AtomicBool>) -> Self {
+         WindowInvalidator {
++            #[cfg(target_os = "windows")]
++            frame_requested,
+             inner: Rc::new(RefCell::new(WindowInvalidatorInner {
+                 dirty: true,
+                 draw_phase: DrawPhase::None,
+@@ -118,6 +124,8 @@ impl WindowInvalidator {
+         inner.dirty_views.insert(entity);
+         if inner.draw_phase == DrawPhase::None {
+             inner.dirty = true;
++            #[cfg(target_os = "windows")]
++            self.request_frame();
+             cx.push_effect(Effect::Notify { emitter: entity });
+             true
+         } else {
+@@ -130,7 +138,16 @@ impl WindowInvalidator {
+     }
+
+     pub fn set_dirty(&self, dirty: bool) {
+-        self.inner.borrow_mut().dirty = dirty
++        self.inner.borrow_mut().dirty = dirty;
++        #[cfg(target_os = "windows")]
++        if dirty {
++            self.request_frame();
++        }
++    }
++
++    #[cfg(target_os = "windows")]
++    fn request_frame(&self) {
++        self.frame_requested.store(true, Relaxed);
+     }
+
+     pub fn set_phase(&self, phase: DrawPhase) {
+@@ -986,7 +1003,10 @@ impl Window {
+         let scale_factor = platform_window.scale_factor();
+         let appearance = platform_window.appearance();
+         let text_system = Arc::new(WindowTextSystem::new(cx.text_system().clone()));
+-        let invalidator = WindowInvalidator::new();
++        let invalidator = WindowInvalidator::new(
++            #[cfg(target_os = "windows")]
++            platform_window.frame_requested(),
++        );
+         let active = Rc::new(Cell::new(platform_window.is_active()));
+         let hovered = Rc::new(Cell::new(platform_window.is_hovered()));
+         let needs_present = Rc::new(Cell::new(false));
+@@ -1018,9 +1038,11 @@ impl Window {
+         platform_window.on_request_frame(Box::new({
+             let mut cx = cx.to_async();
+             let invalidator = invalidator.clone();
++            #[cfg(not(target_os = "windows"))]
+             let active = active.clone();
+             let needs_present = needs_present.clone();
+             let next_frame_callbacks = next_frame_callbacks.clone();
++            #[cfg(not(target_os = "windows"))]
+             let last_input_timestamp = last_input_timestamp.clone();
+             move |request_frame_options| {
+                 let next_frame_callbacks = next_frame_callbacks.take();
+@@ -1034,10 +1056,12 @@ impl Window {
+                         .log_err();
+                 }
+
+-                // Keep presenting the current scene for 1 extra second since the
+-                // last input to prevent the display from underclocking the refresh rate.
+-                let needs_present = request_frame_options.require_presentation
+-                    || needs_present.get()
++                let needs_present =
++                    request_frame_options.require_presentation || needs_present.get();
++                // Keep the existing post-input refresh rate policy on platforms
++                // that continuously request frames. Windows presents on demand.
++                #[cfg(not(target_os = "windows"))]
++                let needs_present = needs_present
+                     || (active.get()
+                         && last_input_timestamp.get().elapsed() < Duration::from_secs(1));
+
+@@ -1643,6 +1667,8 @@ impl Window {
+     /// Schedule the given closure to be run directly after the current frame is rendered.
+     pub fn on_next_frame(&self, callback: impl FnOnce(&mut Window, &mut App) + 'static) {
+         RefCell::borrow_mut(&self.next_frame_callbacks).push(Box::new(callback));
++        #[cfg(target_os = "windows")]
++        self.invalidator.request_frame();
+     }
+
+     /// Schedule a frame to be drawn on the next animation frame.
+@@ -1976,6 +2002,8 @@ impl Window {
+         self.refreshing = false;
+         self.invalidator.set_phase(DrawPhase::None);
+         self.needs_present.set(true);
++        #[cfg(target_os = "windows")]
++        self.invalidator.request_frame();
+
+         ArenaClearNeeded
+     }
+@@ -2007,6 +2035,10 @@ impl Window {
+     fn present(&self) {
+         self.platform_window.draw(&self.rendered_frame.scene);
+         self.needs_present.set(false);
++        #[cfg(target_os = "windows")]
++        if !self.invalidator.is_dirty() && self.next_frame_callbacks.borrow().is_empty() {
++            self.invalidator.frame_requested.store(false, Relaxed);
++        }
+         profiling::finish_frame!();
+     }
+
+@@ -3655,7 +3687,7 @@ impl Window {
+                     })
+                 }
+                 FileDropEvent::Exited => {
+-                    cx.active_drag.take();
++                    cx.stop_active_drag(self);
+                     PlatformInput::FileDrop(FileDropEvent::Exited)
+                 }
+             },
+diff --git a/src/platform/windows/direct_write.rs b/src/platform/windows/direct_write.rs
+index e187fc4b..b667427f 100644
+--- a/src/platform/windows/direct_write.rs
++++ b/src/platform/windows/direct_write.rs
+@@ -22,6 +22,8 @@ use windows_numerics::Vector2;
+
+ use crate::*;
+
++const TEXT_FORMAT_CACHE_CAPACITY: usize = 256;
++
+ #[derive(Debug)]
+ struct FontInfo {
+     font_family: String,
+@@ -58,6 +60,7 @@ struct DirectWriteState {
+     system_font_collection: IDWriteFontCollection1,
+     custom_font_collection: IDWriteFontCollection1,
+     fonts: Vec<FontInfo>,
++    text_formats: HashMap<(FontId, u32), IDWriteTextFormat1>,
+     font_selections: HashMap<Font, FontId>,
+     font_id_by_identifier: HashMap<FontIdentifier, FontId>,
+ }
+@@ -206,6 +209,7 @@ impl DirectWriteTextSystem {
+             system_font_collection,
+             custom_font_collection,
+             fonts: Vec::new(),
++            text_formats: HashMap::default(),
+             font_selections: HashMap::default(),
+             font_id_by_identifier: HashMap::default(),
+         })))
+@@ -317,6 +321,7 @@ impl DirectWriteState {
+                 .CreateFontCollectionFromFontSet(&set)?
+         };
+         self.custom_font_collection = collection;
++        self.text_formats.clear();
+
+         Ok(())
+     }
+@@ -454,6 +459,7 @@ impl DirectWriteState {
+                 .is_some()
+         } {
+             self.system_font_collection = collection.unwrap();
++            self.text_formats.clear();
+         }
+     }
+
+@@ -543,6 +549,43 @@ impl DirectWriteState {
+         }
+     }
+
++    fn text_format(&mut self, font_id: FontId, font_size: Pixels) -> Result<IDWriteTextFormat1> {
++        let key = (font_id, font_size.0.to_bits());
++        if let Some(format) = self.text_formats.get(&key) {
++            return Ok(format.clone());
++        }
++        let font = &self.fonts[font_id.0];
++        let collection = if font.is_system_font {
++            &self.system_font_collection
++        } else {
++            &self.custom_font_collection
++        };
++        let format: IDWriteTextFormat1 = unsafe {
++            self.components
++                .factory
++                .CreateTextFormat(
++                    &HSTRING::from(&font.font_family),
++                    collection,
++                    font.font_face.GetWeight(),
++                    font.font_face.GetStyle(),
++                    DWRITE_FONT_STRETCH_NORMAL,
++                    font_size.0,
++                    &HSTRING::from(&self.components.locale),
++                )?
++                .cast()?
++        };
++        if let Some(ref fallbacks) = font.fallbacks {
++            unsafe { format.SetFontFallback(fallbacks)? };
++        }
++        // GPUI already caches shaped text. Reuse the format and fallback
++        // configuration when it encounters new text in the same face and size.
++        if self.text_formats.len() == TEXT_FORMAT_CACHE_CAPACITY {
++            self.text_formats.clear();
++        }
++        self.text_formats.insert(key, format.clone());
++        Ok(format)
++    }
++
+     fn layout_line(
+         &mut self,
+         text: &str,
+@@ -563,29 +606,8 @@ impl DirectWriteState {
+             let mut utf16_offset = 0u32;
+             let text_layout = {
+                 let first_run = &font_runs[0];
++                let format = self.text_format(first_run.font_id, font_size)?;
+                 let font_info = &self.fonts[first_run.font_id.0];
+-                let collection = if font_info.is_system_font {
+-                    &self.system_font_collection
+-                } else {
+-                    &self.custom_font_collection
+-                };
+-                let format: IDWriteTextFormat1 = self
+-                    .components
+-                    .factory
+-                    .CreateTextFormat(
+-                        &HSTRING::from(&font_info.font_family),
+-                        collection,
+-                        font_info.font_face.GetWeight(),
+-                        font_info.font_face.GetStyle(),
+-                        DWRITE_FONT_STRETCH_NORMAL,
+-                        font_size.0,
+-                        &HSTRING::from(&self.components.locale),
+-                    )?
+-                    .cast()?;
+-                if let Some(ref fallbacks) = font_info.fallbacks {
+-                    format.SetFontFallback(fallbacks)?;
+-                }
+-
+                 let layout = self.components.factory.CreateTextLayout(
+                     &text_wide,
+                     &format,
+diff --git a/src/platform/windows/events.rs b/src/platform/windows/events.rs
+index 9c10dcec..b097ce44 100644
+--- a/src/platform/windows/events.rs
++++ b/src/platform/windows/events.rs
+@@ -1,4 +1,4 @@
+-use std::rc::Rc;
++use std::{rc::Rc, sync::atomic::Ordering::Relaxed};
+
+ use ::util::ResultExt;
+ use anyhow::Context as _;
+@@ -39,7 +39,20 @@ impl WindowsWindowInner {
+         lparam: LPARAM,
+     ) -> LRESULT {
+         let handled = match msg {
+-            WM_ACTIVATE => self.handle_activate_msg(wparam),
++            WM_ACTIVATE => self.handle_activate_msg(handle, wparam),
++            WM_SETFOCUS => self.handle_set_focus(handle),
++            WM_KILLFOCUS => {
++                let had_native_caret = {
++                    let mut state = self.state.borrow_mut();
++                    state.last_ime_caret = None;
++                    state.native_caret_height.take().is_some()
++                };
++                if had_native_caret {
++                    unsafe { DestroyCaret().log_err() };
++                }
++                self.clear_ime_composition();
++                None
++            }
+             WM_CREATE => self.handle_create_msg(handle),
+             WM_MOVE => self.handle_move_msg(handle, lparam),
+             WM_SIZE => self.handle_size_msg(wparam, lparam),
+@@ -99,8 +112,19 @@ impl WindowsWindowInner {
+             WM_KEYUP => self.handle_keyup_msg(handle, wparam, lparam),
+             WM_CHAR => self.handle_char_msg(wparam),
+             WM_DEADCHAR => self.handle_dead_char_msg(wparam),
+-            WM_IME_STARTCOMPOSITION => self.handle_ime_position(handle),
++            WM_IME_SETCONTEXT => self.handle_ime_set_context(handle, wparam, lparam),
++            WM_IME_STARTCOMPOSITION => {
++                self.sync_ime_caret(handle, true);
++                Some(0)
++            }
++            WM_IME_NOTIFY => {
++                if should_sync_ime_notify(wparam) {
++                    self.sync_ime_caret(handle, true);
++                }
++                None
++            }
+             WM_IME_COMPOSITION => self.handle_ime_composition(handle, lparam),
++            WM_IME_ENDCOMPOSITION => self.handle_ime_end_composition(handle),
+             WM_SETCURSOR => self.handle_set_cursor(handle, lparam),
+             WM_SETTINGCHANGE => self.handle_system_settings_changed(handle, wparam, lparam),
+             WM_INPUTLANGCHANGE => self.handle_input_language_changed(),
+@@ -173,7 +197,9 @@ impl WindowsWindowInner {
+         // Don't resize the renderer when the window is minimized, but record that it was minimized so
+         // that on restore the swap chain can be recreated via `update_drawable_size_even_if_unchanged`.
+         if wparam.0 == SIZE_MINIMIZED as usize {
+-            lock.restore_from_minimized = lock.callbacks.request_frame.take();
++            if let Some(request_frame) = lock.callbacks.request_frame.take() {
++                lock.restore_from_minimized = Some(request_frame);
++            }
+             return Some(0);
+         }
+
+@@ -185,6 +211,7 @@ impl WindowsWindowInner {
+         let mut should_resize_renderer = false;
+         if lock.restore_from_minimized.is_some() {
+             lock.callbacks.request_frame = lock.restore_from_minimized.take();
++            self.frame_requested.store(true, Relaxed);
+         } else {
+             should_resize_renderer = true;
+         }
+@@ -370,6 +397,12 @@ impl WindowsWindowInner {
+     // It's a known bug that you can't trigger `ctrl-shift-0`. See:
+     // https://superuser.com/questions/1455762/ctrl-shift-number-key-combination-has-stopped-working-for-a-few-numbers
+     fn handle_keydown_msg(&self, handle: HWND, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
++        // IMM owns this key, even before the first marked string arrives.
++        if is_ime_process_key(wparam) {
++            translate_message(handle, wparam, lparam);
++            return Some(0);
++        }
++
+         let mut lock = self.state.borrow_mut();
+         let Some(input) = handle_key_event(handle, wparam, lparam, &mut lock, |keystroke| {
+             PlatformInput::KeyDown(KeyDownEvent {
+@@ -407,6 +440,10 @@ impl WindowsWindowInner {
+     }
+
+     fn handle_keyup_msg(&self, handle: HWND, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
++        if is_ime_process_key(wparam) {
++            return Some(0);
++        }
++
+         let mut lock = self.state.borrow_mut();
+         let Some(input) = handle_key_event(handle, wparam, lparam, &mut lock, |keystroke| {
+             PlatformInput::KeyUp(KeyUpEvent { keystroke })
+@@ -613,86 +650,174 @@ impl WindowsWindowInner {
+         if handled { Some(0) } else { Some(1) }
+     }
+
+-    fn retrieve_caret_position(&self) -> Option<POINT> {
++    fn handle_set_focus(&self, handle: HWND) -> Option<isize> {
++        {
++            let mut state = self.state.borrow_mut();
++            state.last_ime_caret = None;
++            state.native_caret_height = None;
++        }
++        // Win32 can send this while GPUI is updating the window.
++        let this = self.this.clone();
++        self.executor
++            .spawn(async move {
++                if let Some(this) = this.upgrade()
++                    && unsafe { GetFocus() } == handle
++                {
++                    this.sync_ime_caret(handle, true);
++                }
++            })
++            .detach();
++        None
++    }
++
++    fn handle_ime_set_context(
++        &self,
++        handle: HWND,
++        wparam: WPARAM,
++        lparam: LPARAM,
++    ) -> Option<isize> {
++        if wparam.0 == 0 {
++            return None;
++        }
++        self.sync_ime_caret(handle, true);
++        let new_lparam = strip_ime_composition_window_flag(lparam);
++        Some(unsafe { DefWindowProcW(handle, WM_IME_SETCONTEXT, wparam, new_lparam) }.0)
++    }
++
++    fn retrieve_caret_rect(&self) -> Option<RECT> {
+         self.with_input_handler_and_scale_factor(|input_handler, scale_factor| {
+             let caret_range = input_handler.selected_text_range(false)?;
+-            let caret_position = input_handler.bounds_for_range(caret_range.range)?;
+-            Some(POINT {
+-                // logical to physical
+-                x: (caret_position.origin.x.0 * scale_factor) as i32,
+-                y: (caret_position.origin.y.0 * scale_factor) as i32
+-                    + ((caret_position.size.height.0 * scale_factor) as i32 / 2),
+-            })
++            let bounds = input_handler.bounds_for_range(caret_range.range)?;
++            Some(caret_bounds_to_physical_rect(
++                bounds.origin.x.0,
++                bounds.origin.y.0,
++                bounds.size.width.0,
++                bounds.size.height.0,
++                scale_factor,
++            ))
+         })
+     }
+
+-    fn handle_ime_position(&self, handle: HWND) -> Option<isize> {
++    pub(super) fn sync_ime_caret(&self, handle: HWND, force: bool) -> Option<()> {
++        let caret = self.retrieve_caret_rect()?;
++        {
++            let mut state = self.state.borrow_mut();
++            if !force && state.last_ime_caret == Some(caret) {
++                return Some(());
++            }
++            state.last_ime_caret = Some(caret);
++        }
++
++        // Windows can query the native caret before the first IMM composition.
++        // Keep it hidden because GPUI draws the visible caret.
+         unsafe {
+-            let ctx = ImmGetContext(handle);
++            if GetFocus() == handle {
++                let height = caret.bottom - caret.top;
++                let needs_caret = self.state.borrow().native_caret_height != Some(height);
++                if needs_caret && CreateCaret(handle, None, 1, height).log_err().is_some() {
++                    self.state.borrow_mut().native_caret_height = Some(height);
++                }
++                SetCaretPos(caret.left, caret.top).log_err();
++            }
++        }
+
+-            let Some(caret_position) = self.retrieve_caret_position() else {
+-                return Some(0);
++        let context = ImeContext::acquire(handle)?;
++        let position = POINT {
++            x: caret.left,
++            y: caret.bottom,
++        };
++        unsafe {
++            let composition = COMPOSITIONFORM {
++                dwStyle: CFS_FORCE_POSITION,
++                ptCurrentPos: position,
++                ..Default::default()
+             };
+-            {
+-                let config = COMPOSITIONFORM {
+-                    dwStyle: CFS_POINT,
+-                    ptCurrentPos: caret_position,
+-                    ..Default::default()
+-                };
+-                ImmSetCompositionWindow(ctx, &config as _).ok().log_err();
+-            }
+-            {
+-                let config = CANDIDATEFORM {
++            ImmSetCompositionWindow(context.raw, &composition)
++                .ok()
++                .log_err();
++            let candidate = CANDIDATEFORM {
++                dwIndex: 0,
++                dwStyle: CFS_EXCLUDE,
++                ptCurrentPos: position,
++                rcArea: caret,
++            };
++            if !ImmSetCandidateWindow(context.raw, &candidate).as_bool() {
++                let fallback = CANDIDATEFORM {
+                     dwStyle: CFS_CANDIDATEPOS,
+-                    ptCurrentPos: caret_position,
++                    ptCurrentPos: position,
+                     ..Default::default()
+                 };
+-                ImmSetCandidateWindow(ctx, &config as _).ok().log_err();
++                ImmSetCandidateWindow(context.raw, &fallback).ok().log_err();
+             }
+-            ImmReleaseContext(handle, ctx).ok().log_err();
+-            Some(0)
+         }
++        Some(())
+     }
+
+     fn handle_ime_composition(&self, handle: HWND, lparam: LPARAM) -> Option<isize> {
+-        let ctx = unsafe { ImmGetContext(handle) };
+-        let result = self.handle_ime_composition_inner(ctx, lparam);
+-        unsafe { ImmReleaseContext(handle, ctx).ok().log_err() };
+-        result
++        let mut handled = None;
++        for update in ImeUpdate::from_flags(lparam) {
++            match update {
++                ImeUpdate::Clear => {
++                    self.clear_ime_composition();
++                }
++                ImeUpdate::Commit => {
++                    let text = {
++                        let context = ImeContext::acquire(handle)?;
++                        parse_ime_composition_string(context.raw, GCS_RESULTSTR)?
++                    };
++                    self.with_input_handler(|handler| {
++                        handler.replace_text_in_range(None, &text);
++                    })?;
++                }
++                ImeUpdate::Preedit => {
++                    if self.handle_ime_preedit(handle, lparam).is_none() {
++                        // A result already sent to GPUI must not also go through
++                        // default processing when the remaining preedit cannot be read.
++                        return handled;
++                    }
++                }
++            }
++            handled = Some(0);
++        }
++        handled
+     }
+
+-    fn handle_ime_composition_inner(&self, ctx: HIMC, lparam: LPARAM) -> Option<isize> {
+-        let lparam = lparam.0 as u32;
+-        if lparam == 0 {
+-            // Japanese IME may send this message with lparam = 0, which indicates that
+-            // there is no composition string.
+-            self.with_input_handler(|input_handler| {
+-                input_handler.replace_text_in_range(None, "");
+-            })?;
+-            Some(0)
++    fn handle_ime_preedit(&self, handle: HWND, lparam: LPARAM) -> Option<()> {
++        let (text, caret) = {
++            let context = ImeContext::acquire(handle)?;
++            let text = parse_ime_composition_string(context.raw, GCS_COMPSTR)?;
++            let caret = if !text.is_empty() && lparam.0 as u32 & GCS_CURSORPOS.0 != 0 {
++                retrieve_composition_cursor_position(context.raw)
++                    .map(|pos| pos.min(text.encode_utf16().count()))
++                    .map(|pos| pos..pos)
++            } else {
++                None
++            };
++            (text, caret)
++        };
++        if text.is_empty() {
++            self.clear_ime_composition();
+         } else {
+-            if lparam & GCS_COMPSTR.0 > 0 {
+-                let comp_string = parse_ime_composition_string(ctx, GCS_COMPSTR)?;
+-                let caret_pos =
+-                    (!comp_string.is_empty() && lparam & GCS_CURSORPOS.0 > 0).then(|| {
+-                        let pos = retrieve_composition_cursor_position(ctx);
+-                        pos..pos
+-                    });
+-                self.with_input_handler(|input_handler| {
+-                    input_handler.replace_and_mark_text_in_range(None, &comp_string, caret_pos);
+-                })?;
+-            }
+-            if lparam & GCS_RESULTSTR.0 > 0 {
+-                let comp_result = parse_ime_composition_string(ctx, GCS_RESULTSTR)?;
+-                self.with_input_handler(|input_handler| {
+-                    input_handler.replace_text_in_range(None, &comp_result);
+-                })?;
+-                return Some(0);
++            self.with_input_handler(|handler| {
++                handler.replace_and_mark_text_in_range(None, &text, caret);
++            })?;
++        }
++        self.sync_ime_caret(handle, true);
++        Some(())
++    }
++
++    fn clear_ime_composition(&self) -> Option<()> {
++        self.with_input_handler(|handler| {
++            if handler.marked_text_range().is_some() {
++                handler.unmark_text();
+             }
++        })
++    }
+
+-            // currently, we don't care other stuff
+-            None
+-        }
++    fn handle_ime_end_composition(&self, _handle: HWND) -> Option<isize> {
++        self.clear_ime_composition();
++        // Let the IME finish closing its candidate window.
++        None
+     }
+
+     /// SEE: https://learn.microsoft.com/en-us/windows/win32/winmsg/wm-nccalcsize
+@@ -746,11 +871,19 @@ impl WindowsWindowInner {
+         Some(0)
+     }
+
+-    fn handle_activate_msg(self: &Rc<Self>, wparam: WPARAM) -> Option<isize> {
+-        let activated = wparam.loword() > 0;
++    fn handle_activate_msg(self: &Rc<Self>, handle: HWND, wparam: WPARAM) -> Option<isize> {
++        let activated = wparam.loword() != WA_INACTIVE as u16;
++        if !activated {
++            self.clear_ime_composition();
++        }
+         let this = self.clone();
+         self.executor
+             .spawn(async move {
++                // Deactivation can be delivered while GPUI is already updating.
++                // Retry the local cleanup when the app is free and focus is still away.
++                if !activated && unsafe { GetFocus() } != handle {
++                    this.clear_ime_composition();
++                }
+                 let mut lock = this.state.borrow_mut();
+                 if let Some(mut func) = lock.callbacks.active_status_change.take() {
+                     drop(lock);
+@@ -1165,6 +1298,7 @@ impl WindowsWindowInner {
+     }
+
+     fn handle_input_language_changed(&self) -> Option<isize> {
++        self.clear_ime_composition();
+         unsafe {
+             PostMessageW(
+                 Some(self.platform_window_handle),
+@@ -1174,7 +1308,7 @@ impl WindowsWindowInner {
+             )
+             .log_err();
+         }
+-        Some(0)
++        None
+     }
+
+     fn handle_window_visibility_changed(&self, handle: HWND, wparam: WPARAM) -> Option<isize> {
+@@ -1195,12 +1329,13 @@ impl WindowsWindowInner {
+     #[inline]
+     fn draw_window(&self, handle: HWND, force_render: bool) -> Option<isize> {
+         let mut request_frame = self.state.borrow_mut().callbacks.request_frame.take()?;
++        // Validate first so a request posted while the frame is drawing stays pending.
++        unsafe { ValidateRect(Some(handle), None).ok().log_err() };
+         request_frame(RequestFrameOptions {
+             require_presentation: false,
+             force_render,
+         });
+         self.state.borrow_mut().callbacks.request_frame = Some(request_frame);
+-        unsafe { ValidateRect(Some(handle), None).ok().log_err() };
+         Some(0)
+     }
+
+@@ -1293,7 +1428,8 @@ fn translate_message(handle: HWND, wparam: WPARAM, lparam: LPARAM) {
+         time: 0,
+         pt: POINT::default(),
+     };
+-    unsafe { TranslateMessage(&msg).ok().log_err() };
++    // FALSE also means the key did not produce a character message.
++    let _ = unsafe { TranslateMessage(&msg) };
+ }
+
+ fn handle_key_event<F>(
+@@ -1341,12 +1477,8 @@ where
+                 capslock,
+             }))
+         }
++        VK_PROCESSKEY => None,
+         vkey => {
+-            let vkey = if vkey == VK_PROCESSKEY {
+-                VIRTUAL_KEY(unsafe { ImmGetVirtualKey(handle) } as u16)
+-            } else {
+-                vkey
+-            };
+             let keystroke = parse_normal_key(vkey, lparam, modifiers)?;
+             Some(f(keystroke))
+         }
+@@ -1428,31 +1560,213 @@ fn parse_normal_key(
+     })
+ }
+
+-fn parse_ime_composition_string(ctx: HIMC, comp_type: IME_COMPOSITION_STRING) -> Option<String> {
+-    unsafe {
+-        let string_len = ImmGetCompositionStringW(ctx, comp_type, None, 0);
+-        if string_len >= 0 {
+-            let mut buffer = vec![0u8; string_len as usize + 2];
+-            ImmGetCompositionStringW(
+-                ctx,
+-                comp_type,
+-                Some(buffer.as_mut_ptr() as _),
+-                string_len as _,
+-            );
+-            let wstring = std::slice::from_raw_parts::<u16>(
+-                buffer.as_mut_ptr().cast::<u16>(),
+-                string_len as usize / 2,
+-            );
+-            Some(String::from_utf16_lossy(wstring))
++fn is_ime_process_key(wparam: WPARAM) -> bool {
++    VIRTUAL_KEY(wparam.loword()) == VK_PROCESSKEY
++}
++
++fn caret_bounds_to_physical_rect(
++    origin_x: f32,
++    origin_y: f32,
++    width: f32,
++    height: f32,
++    scale_factor: f32,
++) -> RECT {
++    let left = (origin_x * scale_factor).round() as i32;
++    let top = (origin_y * scale_factor).round() as i32;
++    RECT {
++        left,
++        top,
++        right: left + (width * scale_factor).round().max(1.0) as i32,
++        bottom: top + (height * scale_factor).round().max(1.0) as i32,
++    }
++}
++
++fn strip_ime_composition_window_flag(lparam: LPARAM) -> LPARAM {
++    LPARAM(lparam.0 & !(ISC_SHOWUICOMPOSITIONWINDOW as isize))
++}
++
++fn should_sync_ime_notify(wparam: WPARAM) -> bool {
++    matches!(wparam.0 as u32, IMN_OPENCANDIDATE | IMN_CHANGECANDIDATE)
++}
++
++#[derive(Debug, PartialEq, Eq)]
++enum ImeUpdate {
++    Clear,
++    Commit,
++    Preedit,
++}
++
++impl ImeUpdate {
++    fn from_flags(lparam: LPARAM) -> impl Iterator<Item = Self> {
++        let flags = lparam.0 as u32;
++        let commit = flags & GCS_RESULTSTR.0 != 0;
++        // An IME can commit part of the text and continue composing the rest.
++        let next = if flags & GCS_COMPSTR.0 != 0 {
++            Some(Self::Preedit)
++        } else if commit || flags == 0 {
++            Some(Self::Clear)
+         } else {
+             None
++        };
++        [commit.then_some(Self::Commit), next].into_iter().flatten()
++    }
++}
++
++struct ImeContext {
++    window: HWND,
++    raw: HIMC,
++}
++
++impl ImeContext {
++    fn acquire(window: HWND) -> Option<Self> {
++        let raw = unsafe { ImmGetContext(window) };
++        if raw.is_invalid() {
++            None
++        } else {
++            Some(Self { window, raw })
+         }
+     }
+ }
+
+-#[inline]
+-fn retrieve_composition_cursor_position(ctx: HIMC) -> usize {
+-    unsafe { ImmGetCompositionStringW(ctx, GCS_CURSORPOS, None, 0) as usize }
++impl Drop for ImeContext {
++    fn drop(&mut self) {
++        unsafe { ImmReleaseContext(self.window, self.raw).ok().log_err() };
++    }
++}
++
++fn parse_ime_composition_string(ctx: HIMC, comp_type: IME_COMPOSITION_STRING) -> Option<String> {
++    unsafe {
++        let byte_len = u32::try_from(ImmGetCompositionStringW(ctx, comp_type, None, 0)).ok()?;
++        if byte_len == 0 {
++            return Some(String::new());
++        }
++        let mut buffer = vec![0u16; byte_len.div_ceil(2) as usize];
++        let copied = usize::try_from(ImmGetCompositionStringW(
++            ctx,
++            comp_type,
++            Some(buffer.as_mut_ptr().cast()),
++            byte_len,
++        ))
++        .ok()?;
++        Some(String::from_utf16_lossy(buffer.get(..copied / 2)?))
++    }
++}
++
++fn retrieve_composition_cursor_position(ctx: HIMC) -> Option<usize> {
++    usize::try_from(unsafe { ImmGetCompositionStringW(ctx, GCS_CURSORPOS, None, 0) }).ok()
++}
++
++#[cfg(test)]
++mod ime_tests {
++    use windows::Win32::{
++        Foundation::{LPARAM, RECT, WPARAM},
++        UI::Input::{
++            Ime::{
++                GCS_COMPATTR, GCS_COMPSTR, GCS_CURSORPOS, GCS_RESULTSTR, IMN_CHANGECANDIDATE,
++                IMN_CLOSECANDIDATE, IMN_OPENCANDIDATE, IMN_SETCANDIDATEPOS,
++                IMN_SETCOMPOSITIONWINDOW, ISC_SHOWUICANDIDATEWINDOW, ISC_SHOWUICOMPOSITIONWINDOW,
++                ISC_SHOWUIGUIDELINE,
++            },
++            KeyboardAndMouse::{VK_A, VK_BACK, VK_LEFT, VK_PROCESSKEY, VK_RETURN, VK_SPACE},
++        },
++    };
++
++    use super::{
++        ImeUpdate, caret_bounds_to_physical_rect, is_ime_process_key, should_sync_ime_notify,
++        strip_ime_composition_window_flag,
++    };
++
++    #[test]
++    fn caret_rect_rounds_at_each_dpi_and_has_minimum_dimensions() {
++        for (scale, left, top, right, bottom) in [
++            (1.0, 10, 21, 13, 36),
++            (1.5, 15, 31, 19, 53),
++            (2.0, 21, 41, 26, 70),
++        ] {
++            assert_eq!(
++                caret_bounds_to_physical_rect(10.25, 20.5, 2.5, 14.5, scale),
++                RECT {
++                    left,
++                    top,
++                    right,
++                    bottom,
++                }
++            );
++        }
++        assert_eq!(
++            caret_bounds_to_physical_rect(10.0, 20.0, 0.1, 0.0, 2.0),
++            RECT {
++                left: 20,
++                top: 40,
++                right: 21,
++                bottom: 41,
++            }
++        );
++    }
++
++    #[test]
++    fn set_context_preserves_candidate_and_other_ui_flags() {
++        let other_flags = (ISC_SHOWUICANDIDATEWINDOW | ISC_SHOWUIGUIDELINE) as isize;
++        let flags = other_flags | ISC_SHOWUICOMPOSITIONWINDOW as isize;
++        assert_eq!(
++            strip_ime_composition_window_flag(LPARAM(flags)),
++            LPARAM(other_flags)
++        );
++        assert_eq!(strip_ime_composition_window_flag(LPARAM(0)), LPARAM(0));
++    }
++
++    #[test]
++    fn only_opening_or_changing_candidates_syncs_the_caret() {
++        for notification in [IMN_OPENCANDIDATE, IMN_CHANGECANDIDATE] {
++            assert!(should_sync_ime_notify(WPARAM(notification as usize)));
++        }
++        for notification in [
++            IMN_CLOSECANDIDATE,
++            IMN_SETCANDIDATEPOS,
++            IMN_SETCOMPOSITIONWINDOW,
++        ] {
++            assert!(!should_sync_ime_notify(WPARAM(notification as usize)));
++        }
++    }
++
++    #[test]
++    fn process_key_is_reserved_for_ime() {
++        assert!(is_ime_process_key(WPARAM(VK_PROCESSKEY.0.into())));
++        for key in [VK_BACK, VK_RETURN, VK_SPACE, VK_LEFT, VK_A] {
++            assert!(!is_ime_process_key(WPARAM(key.0.into())));
++        }
++    }
++
++    #[test]
++    fn result_only_and_empty_messages_clear_marked_text() {
++        assert_eq!(
++            ImeUpdate::from_flags(LPARAM(GCS_RESULTSTR.0 as isize)).collect::<Vec<_>>(),
++            [ImeUpdate::Commit, ImeUpdate::Clear]
++        );
++        assert_eq!(
++            ImeUpdate::from_flags(LPARAM(GCS_COMPSTR.0 as isize)).collect::<Vec<_>>(),
++            [ImeUpdate::Preedit]
++        );
++        assert_eq!(
++            ImeUpdate::from_flags(LPARAM(0)).collect::<Vec<_>>(),
++            [ImeUpdate::Clear]
++        );
++        assert_eq!(
++            ImeUpdate::from_flags(LPARAM(GCS_COMPATTR.0 as isize)).next(),
++            None
++        );
++    }
++
++    #[test]
++    fn partial_commit_keeps_the_remaining_preedit() {
++        for cursor in [0, GCS_CURSORPOS.0] {
++            let flags = GCS_RESULTSTR.0 | GCS_COMPSTR.0 | cursor;
++            assert_eq!(
++                ImeUpdate::from_flags(LPARAM(flags as isize)).collect::<Vec<_>>(),
++                [ImeUpdate::Commit, ImeUpdate::Preedit]
++            );
++        }
++    }
+ }
+
+ #[inline]
+diff --git a/src/platform/windows/platform.rs b/src/platform/windows/platform.rs
+index 361d8e11..8186f377 100644
+--- a/src/platform/windows/platform.rs
++++ b/src/platform/windows/platform.rs
+@@ -4,7 +4,10 @@ use std::{
+     mem::ManuallyDrop,
+     path::{Path, PathBuf},
+     rc::{Rc, Weak},
+-    sync::Arc,
++    sync::{
++        Arc,
++        atomic::{AtomicBool, Ordering::Relaxed},
++    },
+ };
+
+ use ::util::{ResultExt, paths::SanitizedPath};
+@@ -28,9 +31,22 @@ use windows::{
+
+ use crate::*;
+
++type WindowFrameTargets = RwLock<SmallVec<[WindowFrameTarget; 4]>>;
++
++struct WindowFrameTarget {
++    hwnd: SafeHwnd,
++    requested: Arc<AtomicBool>,
++}
++
++impl WindowFrameTarget {
++    fn as_raw(&self) -> HWND {
++        self.hwnd.as_raw()
++    }
++}
++
+ pub(crate) struct WindowsPlatform {
+     inner: Rc<WindowsPlatformInner>,
+-    raw_window_handles: Arc<RwLock<SmallVec<[SafeHwnd; 4]>>>,
++    raw_window_handles: Arc<WindowFrameTargets>,
+     // The below members will never change throughout the entire lifecycle of the app.
+     icon: HICON,
+     background_executor: BackgroundExecutor,
+@@ -44,7 +60,7 @@ pub(crate) struct WindowsPlatform {
+
+ struct WindowsPlatformInner {
+     state: RefCell<WindowsPlatformState>,
+-    raw_window_handles: std::sync::Weak<RwLock<SmallVec<[SafeHwnd; 4]>>>,
++    raw_window_handles: std::sync::Weak<WindowFrameTargets>,
+     // The below members will never change throughout the entire lifecycle of the app.
+     validation_number: usize,
+     main_receiver: flume::Receiver<Runnable>,
+@@ -261,9 +277,13 @@ impl WindowsPlatform {
+                     let Some(all_windows) = all_windows.upgrade() else {
+                         break;
+                     };
+-                    for hwnd in all_windows.read().iter() {
+-                        unsafe {
+-                            let _ = RedrawWindow(Some(hwnd.as_raw()), None, None, RDW_INVALIDATE);
++                    for window in all_windows.read().iter() {
++                        if window.requested.swap(false, Relaxed) {
++                            // Queue a low-priority WM_PAINT without synchronously
++                            // asking the UI thread to run the frame.
++                            unsafe {
++                                let _ = InvalidateRect(Some(window.as_raw()), None, false);
++                            }
+                         }
+                     }
+                 }
+@@ -411,8 +431,10 @@ impl Platform for WindowsPlatform {
+         options: WindowParams,
+     ) -> Result<Box<dyn PlatformWindow>> {
+         let window = WindowsWindow::new(handle, options, self.generate_creation_info())?;
+-        let handle = window.get_raw_handle();
+-        self.raw_window_handles.write().push(handle.into());
++        self.raw_window_handles.write().push(WindowFrameTarget {
++            hwnd: window.get_raw_handle().into(),
++            requested: window.frame_requested(),
++        });
+
+         Ok(Box::new(window))
+     }
+@@ -830,7 +852,7 @@ pub(crate) struct WindowCreationInfo {
+
+ struct PlatformWindowCreateContext {
+     inner: Option<Result<Rc<WindowsPlatformInner>>>,
+-    raw_window_handles: std::sync::Weak<RwLock<SmallVec<[SafeHwnd; 4]>>>,
++    raw_window_handles: std::sync::Weak<WindowFrameTargets>,
+     validation_number: usize,
+     main_receiver: Option<flume::Receiver<Runnable>>,
+     directx_devices: Option<DirectXDevices>,
+@@ -1034,7 +1056,7 @@ fn handle_gpu_device_lost(
+     directx_devices: &mut DirectXDevices,
+     platform_window: HWND,
+     validation_number: usize,
+-    all_windows: &std::sync::Weak<RwLock<SmallVec<[SafeHwnd; 4]>>>,
++    all_windows: &std::sync::Weak<WindowFrameTargets>,
+     text_system: &std::sync::Weak<DirectWriteTextSystem>,
+ ) {
+     // Here we wait a bit to ensure the system has time to recover from the device lost state.
+diff --git a/src/platform/windows/window.rs b/src/platform/windows/window.rs
+index e765fa1a..ba58f950 100644
+--- a/src/platform/windows/window.rs
++++ b/src/platform/windows/window.rs
+@@ -1,12 +1,12 @@
+ #![deny(unsafe_op_in_unsafe_fn)]
+
+ use std::{
+-    cell::RefCell,
++    cell::{Cell, RefCell},
+     num::NonZeroIsize,
+     path::PathBuf,
+     rc::{Rc, Weak},
+     str::FromStr,
+-    sync::{Arc, Once},
++    sync::{Arc, Once, atomic::AtomicBool},
+     time::{Duration, Instant},
+ };
+
+@@ -42,6 +42,8 @@ pub struct WindowsWindowState {
+
+     pub callbacks: Callbacks,
+     pub input_handler: Option<PlatformInputHandler>,
++    pub(super) last_ime_caret: Option<RECT>,
++    pub(super) native_caret_height: Option<i32>,
+     pub pending_surrogate: Option<u16>,
+     pub last_reported_modifiers: Option<Modifiers>,
+     pub last_reported_capslock: Option<Capslock>,
+@@ -74,6 +76,8 @@ pub(crate) struct WindowsWindowInner {
+     pub(crate) validation_number: usize,
+     pub(crate) main_receiver: flume::Receiver<Runnable>,
+     pub(crate) platform_window_handle: HWND,
++    pub(super) frame_requested: Arc<AtomicBool>,
++    ime_sync_pending: Cell<bool>,
+ }
+
+ impl WindowsWindowState {
+@@ -130,6 +134,8 @@ impl WindowsWindowState {
+             min_size,
+             callbacks,
+             input_handler,
++            last_ime_caret: None,
++            native_caret_height: None,
+             pending_surrogate,
+             last_reported_modifiers,
+             last_reported_capslock,
+@@ -231,6 +237,8 @@ impl WindowsWindowInner {
+             validation_number: context.validation_number,
+             main_receiver: context.main_receiver.clone(),
+             platform_window_handle: context.platform_window_handle,
++            frame_requested: Arc::new(AtomicBool::new(true)),
++            ime_sync_pending: Cell::new(false),
+             system_settings: RefCell::new(WindowsSystemSettings::new(context.display)),
+         }))
+     }
+@@ -597,6 +605,23 @@ impl PlatformWindow for WindowsWindow {
+
+     fn set_input_handler(&mut self, input_handler: PlatformInputHandler) {
+         self.0.state.borrow_mut().input_handler = Some(input_handler);
++        if self.0.ime_sync_pending.replace(true) {
++            return;
++        }
++
++        // Reading the caret reenters GPUI through the input handler. Wait until
++        // the current draw has released its borrow of the app and window.
++        let this = self.0.this.clone();
++        let hwnd = self.0.hwnd;
++        self.0
++            .executor
++            .spawn(async move {
++                if let Some(this) = this.upgrade() {
++                    this.ime_sync_pending.set(false);
++                    this.sync_ime_caret(hwnd, false);
++                }
++            })
++            .detach();
+     }
+
+     fn take_input_handler(&mut self) -> Option<PlatformInputHandler> {
+@@ -801,6 +826,10 @@ impl PlatformWindow for WindowsWindow {
+         self.0.state.borrow().is_fullscreen()
+     }
+
++    fn frame_requested(&self) -> Arc<AtomicBool> {
++        self.0.frame_requested.clone()
++    }
++
+     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {
+         self.0.state.borrow_mut().callbacks.request_frame = Some(callback);
+     }
+@@ -903,9 +932,9 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
+                 if idata.u.hGlobal.is_invalid() {
+                     return Ok(());
+                 }
+-                let hdrop = idata.u.hGlobal.0 as *mut HDROP;
++                let hdrop = HDROP(idata.u.hGlobal.0);
+                 let mut paths = SmallVec::<[PathBuf; 2]>::new();
+-                with_file_names(*hdrop, |file_name| {
++                with_file_names(hdrop, |file_name| {
+                     if let Some(path) = PathBuf::from_str(&file_name).log_err() {
+                         paths.push(path);
+                     }
+diff --git a/src/elements/text.rs b/src/elements/text.rs
+index 5d34ccfa..fa6678aa 100644
+--- a/src/elements/text.rs
++++ b/src/elements/text.rs
+@@ -46,10 +46,10 @@ impl Element for &'static str {
+         _inspector_id: Option<&InspectorElementId>,
+         bounds: Bounds<Pixels>,
+         text_layout: &mut Self::RequestLayoutState,
+-        _window: &mut Window,
+-        _cx: &mut App,
++        window: &mut Window,
++        cx: &mut App,
+     ) {
+-        text_layout.prepaint(bounds, self)
++        text_layout.prepaint(bounds, self, window, cx)
+     }
+
+     fn paint(
+@@ -112,10 +112,10 @@ impl Element for SharedString {
+         _inspector_id: Option<&InspectorElementId>,
+         bounds: Bounds<Pixels>,
+         text_layout: &mut Self::RequestLayoutState,
+-        _window: &mut Window,
+-        _cx: &mut App,
++        window: &mut Window,
++        cx: &mut App,
+     ) {
+-        text_layout.prepaint(bounds, self.as_ref())
++        text_layout.prepaint(bounds, self.as_ref(), window, cx)
+     }
+
+     fn paint(
+@@ -279,10 +279,10 @@ impl Element for StyledText {
+         _inspector_id: Option<&InspectorElementId>,
+         bounds: Bounds<Pixels>,
+         _: &mut Self::RequestLayoutState,
+-        _window: &mut Window,
+-        _cx: &mut App,
++        window: &mut Window,
++        cx: &mut App,
+     ) {
+-        self.layout.prepaint(bounds, &self.text)
++        self.layout.prepaint(bounds, &self.text, window, cx)
+     }
+
+     fn paint(
+@@ -314,12 +314,62 @@ pub struct TextLayout(Rc<RefCell<Option<TextLayoutInner>>>);
+ struct TextLayoutInner {
+     len: usize,
+     lines: SmallVec<[WrappedLine; 1]>,
++    font_size: Pixels,
+     line_height: Pixels,
+     wrap_width: Option<Pixels>,
++    truncate_width: Option<Pixels>,
++    runs: Vec<TextRun>,
+     size: Option<Size<Pixels>>,
+     bounds: Option<Bounds<Pixels>>,
+ }
+
++impl TextLayoutInner {
++    fn shape(
++        &mut self,
++        text: SharedString,
++        text_style: &TextStyle,
++        window: &Window,
++        cx: &App,
++    ) -> Size<Pixels> {
++        let mut shaped_runs;
++        let (text, runs) = if let (Some(width), Some(TextOverflow::Truncate(suffix))) =
++            (self.truncate_width, &text_style.text_overflow)
++        {
++            shaped_runs = self.runs.clone();
++            let mut wrapper = cx
++                .text_system()
++                .line_wrapper(text_style.font(), self.font_size);
++            let text = wrapper.truncate_line(text, width, suffix, &mut shaped_runs);
++            (text, shaped_runs.as_slice())
++        } else {
++            (text, self.runs.as_slice())
++        };
++
++        let len = text.len();
++        let lines = window
++            .text_system()
++            .shape_text(
++                text,
++                self.font_size,
++                runs,
++                self.wrap_width,
++                text_style.line_clamp,
++            )
++            .log_err();
++        self.len = if lines.is_some() { len } else { 0 };
++        self.lines = lines.unwrap_or_default();
++
++        let mut size: Size<Pixels> = Size::default();
++        for line in &self.lines {
++            let line_size = line.size(self.line_height);
++            size.height += line_size.height;
++            size.width = size.width.max(line_size.width).ceil();
++        }
++        self.size = Some(size);
++        size
++    }
++}
++
+ impl TextLayout {
+     fn layout(
+         &self,
+@@ -334,7 +384,7 @@ impl TextLayout {
+             .line_height
+             .to_pixels(font_size.into(), window.rem_size());
+
+-        let mut runs = if let Some(runs) = runs {
++        let runs = if let Some(runs) = runs {
+             runs
+         } else {
+             vec![text_style.to_run(text.len())]
+@@ -353,92 +403,63 @@ impl TextLayout {
+                     None
+                 };
+
+-                let (truncate_width, truncation_suffix) =
+-                    if let Some(text_overflow) = text_style.text_overflow.clone() {
+-                        let width = known_dimensions.width.or(match available_space.width {
+-                            crate::AvailableSpace::Definite(x) => match text_style.line_clamp {
+-                                Some(max_lines) => Some(x * max_lines),
+-                                None => Some(x),
+-                            },
+-                            _ => None,
+-                        });
+-
+-                        match text_overflow {
+-                            TextOverflow::Truncate(s) => (width, s),
++                let truncate_width = text_style.text_overflow.as_ref().and_then(|_| {
++                    known_dimensions.width.or(match available_space.width {
++                        crate::AvailableSpace::Definite(width) => {
++                            Some(width * text_style.line_clamp.unwrap_or(1))
+                         }
+-                    } else {
+-                        (None, "".into())
+-                    };
+-
+-                if let Some(text_layout) = element_state.0.borrow().as_ref()
+-                    && text_layout.size.is_some()
+-                    && (wrap_width.is_none() || wrap_width == text_layout.wrap_width)
+-                {
+-                    return text_layout.size.unwrap();
+-                }
+-
+-                let mut line_wrapper = cx.text_system().line_wrapper(text_style.font(), font_size);
+-                let text = if let Some(truncate_width) = truncate_width {
+-                    line_wrapper.truncate_line(
+-                        text.clone(),
+-                        truncate_width,
+-                        &truncation_suffix,
+-                        &mut runs,
+-                    )
+-                } else {
+-                    text.clone()
+-                };
+-                let len = text.len();
+-
+-                let Some(lines) = window
+-                    .text_system()
+-                    .shape_text(
+-                        text,
+-                        font_size,
+-                        &runs,
+-                        wrap_width,            // Wrap if we know the width.
+-                        text_style.line_clamp, // Limit the number of lines if line_clamp is set.
+-                    )
+-                    .log_err()
+-                else {
+-                    element_state.0.borrow_mut().replace(TextLayoutInner {
+-                        lines: Default::default(),
+-                        len: 0,
+-                        line_height,
+-                        wrap_width,
+-                        size: Some(Size::default()),
+-                        bounds: None,
+-                    });
+-                    return Size::default();
+-                };
+-
+-                let mut size: Size<Pixels> = Size::default();
+-                for line in &lines {
+-                    let line_size = line.size(line_height);
+-                    size.height += line_size.height;
+-                    size.width = size.width.max(line_size.width).ceil();
+-                }
++                        _ => None,
++                    })
++                });
+
+-                element_state.0.borrow_mut().replace(TextLayoutInner {
+-                    lines,
+-                    len,
++                let mut state = element_state.0.borrow_mut();
++                let state = state.get_or_insert_with(|| TextLayoutInner {
++                    lines: Default::default(),
++                    len: 0,
++                    font_size,
+                     line_height,
+-                    wrap_width,
+-                    size: Some(size),
++                    wrap_width: None,
++                    truncate_width: None,
++                    runs: runs.clone(),
++                    size: None,
+                     bounds: None,
+                 });
++                if let Some(size) = state.size
++                    && (wrap_width.is_none() || wrap_width == state.wrap_width)
++                    && truncate_width == state.truncate_width
++                {
++                    return size;
++                }
+
+-                size
++                state.wrap_width = wrap_width;
++                state.truncate_width = truncate_width;
++                state.bounds = None;
++                state.shape(text.clone(), &text_style, window, cx)
+             }
+         })
+     }
+
+-    fn prepaint(&self, bounds: Bounds<Pixels>, text: &str) {
++    fn prepaint(&self, bounds: Bounds<Pixels>, text: &str, window: &mut Window, cx: &mut App) {
+         let mut element_state = self.0.borrow_mut();
+         let element_state = element_state
+             .as_mut()
+             .with_context(|| format!("measurement has not been performed on {text}"))
+             .unwrap();
++        let text_style = window.text_style();
++        let width = bounds.size.width;
++        let truncate_width = width * text_style.line_clamp.unwrap_or(1);
++
++        // The final bounds can shrink without a second measurement from Taffy.
++        if matches!(text_style.text_overflow, Some(TextOverflow::Truncate(_)))
++            && width > crate::px(0.)
++            && element_state.truncate_width != Some(truncate_width)
++            && element_state.lines.iter().any(|line| line.width() > width)
++        {
++            element_state.truncate_width = Some(truncate_width);
++            element_state.wrap_width =
++                (text_style.white_space == WhiteSpace::Normal).then_some(width);
++            element_state.shape(text.to_owned().into(), &text_style, window, cx);
++        }
+         element_state.bounds = Some(bounds);
+     }
+
+@@ -912,3 +933,150 @@ impl IntoElement for InteractiveText {
+         self
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::{
++        AvailableSpace, Styled, TestAppContext, canvas, div, point, px, relative, rgb, size,
++    };
++
++    const TITLE: &str = "SECOND_CARD_DIRECT_OK";
++    const MAX_CONTENT: Size<AvailableSpace> =
++        size(AvailableSpace::MaxContent, AvailableSpace::MaxContent);
++
++    fn assert_ellipsized(layout: &TextLayout, width: Pixels) -> String {
++        let text = layout.text();
++        assert!(
++            text.ends_with('…'),
++            "expected an ellipsis at width {width:?}, got {text:?}"
++        );
++        let state = layout.0.borrow();
++        let state = state.as_ref().unwrap();
++        assert_eq!(state.lines.len(), 1);
++        assert!(state.lines[0].size(state.line_height).width <= width);
++        text
++    }
++
++    #[test]
++    fn nowrap_ellipsis_remeasures_at_new_widths() {
++        let mut cx = TestAppContext::single();
++        let cx = cx.add_empty_window();
++        cx.draw(point(px(0.), px(0.)), MAX_CONTENT, |_, _| {
++            canvas(
++                |_, window, cx| {
++                    let style = div()
++                        .whitespace_nowrap()
++                        .text_ellipsis()
++                        .text_style()
++                        .take();
++                    window.with_text_style(style, |window| {
++                        let style = window.text_style();
++                        let runs = vec![
++                            style.to_run(8),
++                            TextRun {
++                                color: rgb(0xff0000).into(),
++                                ..style.to_run(TITLE.len() - 8)
++                            },
++                        ];
++                        let layout = TextLayout::default();
++                        let node = layout.layout(TITLE.into(), Some(runs), window, cx);
++
++                        window.compute_layout(node, MAX_CONTENT, cx);
++                        assert_eq!(layout.text(), TITLE);
++
++                        let narrow = px(62.);
++                        let wider = px(118.);
++                        let definite = |width| {
++                            size(AvailableSpace::Definite(width), AvailableSpace::MaxContent)
++                        };
++                        window.compute_layout(node, definite(narrow), cx);
++                        let narrow_text = assert_ellipsized(&layout, narrow);
++                        window.compute_layout(node, definite(wider), cx);
++                        let wider_text = assert_ellipsized(&layout, wider);
++                        assert!(wider_text.len() > narrow_text.len());
++
++                        window.compute_layout(node, MAX_CONTENT, cx);
++                        assert_eq!(layout.text(), TITLE);
++                        window.compute_layout(node, definite(narrow), cx);
++                        assert_eq!(assert_ellipsized(&layout, narrow), narrow_text);
++                        window.compute_layout(node, definite(px(400.)), cx);
++                        assert_eq!(layout.text(), TITLE);
++                        let state = layout.0.borrow();
++                        let runs = &state.as_ref().unwrap().lines[0].decoration_runs;
++                        assert_eq!(runs.len(), 2);
++                        assert_eq!(runs[0].len, 8);
++                        assert_eq!(runs[1].len as usize, TITLE.len() - 8);
++                    });
++                },
++                |_, (), _, _| {},
++            )
++        });
++    }
++
++    fn assert_ellipsis_at_final_width(width: impl FnOnce(Pixels) -> Pixels + 'static) {
++        let mut cx = TestAppContext::single();
++        let cx = cx.add_empty_window();
++        cx.draw(point(px(0.), px(0.)), MAX_CONTENT, |_, _| {
++            canvas(
++                |_, window, cx| {
++                    let style = div()
++                        .whitespace_nowrap()
++                        .text_ellipsis()
++                        .text_style()
++                        .take();
++                    window.with_text_style(style, |window| {
++                        let mut text = StyledText::new(TITLE);
++                        let (node, mut state) = text.request_layout(None, None, window, cx);
++                        window.compute_layout(node, MAX_CONTENT, cx);
++                        assert_eq!(text.layout().text(), TITLE);
++
++                        let mut bounds = window.layout_bounds(node);
++                        let measured_width =
++                            text.layout().0.borrow().as_ref().unwrap().lines[0].width();
++                        bounds.size.width = width(measured_width);
++                        text.prepaint(None, None, bounds, &mut state, window, cx);
++                        assert_eq!(text.layout().bounds(), bounds);
++                        assert_ellipsized(text.layout(), bounds.size.width);
++                    });
++                },
++                |_, (), _, _| {},
++            )
++        });
++    }
++
++    #[test]
++    fn nowrap_ellipsis_prepaints_at_final_width() {
++        assert_ellipsis_at_final_width(|_| px(92.));
++    }
++
++    #[test]
++    fn nowrap_ellipsis_fits_fractional_width() {
++        assert_ellipsis_at_final_width(|measured| {
++            let floor = measured.floor();
++            assert!(measured > floor);
++            (measured + floor) / 2.
++        });
++    }
++
++    #[test]
++    fn nowrap_ellipsis_fits_relative_max_width() {
++        let mut cx = TestAppContext::single();
++        let cx = cx.add_empty_window();
++        let title = StyledText::new(TITLE);
++        let layout = title.layout().clone();
++        cx.draw(point(px(0.), px(0.)), MAX_CONTENT, |_, _| {
++            use crate::ParentElement as _;
++            div().w(px(200.)).flex().child(
++                div()
++                    .min_w_0()
++                    .max_w(relative(0.46))
++                    .overflow_hidden()
++                    .whitespace_nowrap()
++                    .text_ellipsis()
++                    .child(title),
++            )
++        });
++        assert_ellipsized(&layout, px(92.));
++    }
++}
+diff --git a/src/text_system/line_wrapper.rs b/src/text_system/line_wrapper.rs
+index 55599cc0..5410f768 100644
+--- a/src/text_system/line_wrapper.rs
++++ b/src/text_system/line_wrapper.rs
+@@ -151,7 +151,7 @@ impl LineWrapper {
+             let char_width = self.width_for_char(c);
+             width += char_width;
+
+-            if width.floor() > truncate_width {
++            if width > truncate_width {
+                 let result =
+                     SharedString::from(format!("{}{}", &line[..truncate_ix], truncation_suffix));
+                 update_runs_after_truncation(&result, truncation_suffix, runs);

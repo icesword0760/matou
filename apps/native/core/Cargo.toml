@@ -1,0 +1,30 @@
+[package]
+name = "matou-native-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+crc32fast = "1.5"
+flate2 = "1.1"
+icu_normalizer = { version = "=2.4.0", default-features = false, features = ["compiled_data"] }
+icu_properties = "=2.4.0"
+portable-pty = "=0.9.0"
+rusqlite = { version = "=0.42.0", features = ["bundled", "backup", "hooks"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip", "raw_value"] }
+sha2 = "0.10"
+url = "=2.5.8"
+uuid = { version = "=1.29.2", features = ["v4"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_Storage_FileSystem"] }
+
+[dev-dependencies]
+tempfile = "3"
