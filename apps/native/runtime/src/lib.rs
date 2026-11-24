@@ -37,6 +37,7 @@ mod provider_catalog;
 mod provider_hook;
 mod provider_resume;
 pub mod retention_policy;
+mod safe_browser;
 pub mod search;
 pub mod session;
 mod shell_input;
