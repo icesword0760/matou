@@ -3183,8 +3183,21 @@ impl ShellOwner {
                 let end = options.launch.argv.len();
                 options.launch.argv.split_off(end - 2)
             });
+            let control_asset_root = std::env::var_os("MATOU_CONTROL_ASSET_ROOT");
+            let current_executable = std::env::current_exe().ok();
+            let foreman_available = crate::provider_hook::bundled_foreman_script(
+                current_executable.as_deref(),
+                control_asset_root.as_deref().map(Path::new),
+            )
+            .is_some();
             let mut registration = self
-                .register_hook(&mut options, &run_id, expected_id, fork_source_id)
+                .register_hook(
+                    &mut options,
+                    &run_id,
+                    expected_id,
+                    fork_source_id,
+                    foreman_available,
+                )
                 .context(HookSetup)?;
             if let Some(argv) = fork_argv {
                 options.launch.argv.extend(argv);
@@ -3219,11 +3232,16 @@ impl ShellOwner {
                         catalog_root.clone(),
                         options.launch.cwd.join(".gemini"),
                     ]);
-                    let run_environment = registration.antigravity_environment();
+                    let system_message_file = registration
+                        .attach_antigravity_instructions(foreman_available)
+                        .context("Prepare Antigravity system instructions")?;
+                    let run_environment =
+                        registration.antigravity_environment(Some(&system_message_file));
                     secrets.extend(
                         run_environment
-                            .values()
-                            .filter_map(|value| value.to_str().map(str::to_owned)),
+                            .iter()
+                            .filter(|(key, _)| key.as_os_str() != "MATOU_ANTIGRAVITY_SYSTEM_MESSAGE_FILE")
+                            .filter_map(|(_, value)| value.to_str().map(str::to_owned)),
                     );
                     let settings_path = registration
                         .settings_path
@@ -3252,7 +3270,7 @@ impl ShellOwner {
                     binding,
                     environment_handoff,
                 }) => {
-                    let patch = registration.attach_dsh(&config_dump, &run_id)?;
+                    let patch = registration.attach_dsh(&config_dump, &run_id, foreman_available)?;
                     let expected = binding
                         .as_ref()
                         .map(|binding| binding.provider_session_id.as_str());
@@ -3370,15 +3388,13 @@ impl ShellOwner {
                         identity_wait
                     }
             });
-            if profile != LaunchProfile::Dsh
-                && matches!(
-                    Path::new(&session_id)
-                        .components()
-                        .collect::<Vec<_>>()
-                        .as_slice(),
-                    [std::path::Component::Normal(_)]
-                )
-            {
+            if matches!(
+                Path::new(&session_id)
+                    .components()
+                    .collect::<Vec<_>>()
+                    .as_slice(),
+                [std::path::Component::Normal(_)]
+            ) {
                 let directory = options
                     .launch
                     .data_root
@@ -3435,6 +3451,14 @@ impl ShellOwner {
             None
         };
         clear_control_environment(&mut options.launch);
+        let roles_path = options
+            .launch
+            .data_root
+            .join(matou_native_core::dispatch_roles::ROLES_FILENAME);
+        options
+            .launch
+            .env
+            .insert("MATOU_FOREMAN_ROLES_FILE".into(), roles_path.into_os_string());
         if let Some(directory) = agent_status_directory {
             options
                 .launch
@@ -3551,6 +3575,7 @@ impl ShellOwner {
         run_id: &str,
         expected_id: Option<String>,
         fork_source_id: Option<String>,
+        foreman_available: bool,
     ) -> Result<Registration> {
         if self.hook_server.is_none() {
             self.hook_server = Some(ProviderHookServer::start()?);
@@ -3567,7 +3592,7 @@ impl ShellOwner {
             },
         )?;
         if options.launch.profile == LaunchProfile::Codex {
-            registration.attach_codex(&mut options.launch)?;
+            registration.attach_codex(&mut options.launch, foreman_available)?;
         } else if options.launch.profile == LaunchProfile::ClaudeCode {
             attach_claude_settings(&mut options.launch, &registration.settings_path)?;
             let control_asset_root = std::env::var_os("MATOU_CONTROL_ASSET_ROOT");

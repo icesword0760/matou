@@ -31,7 +31,9 @@ use matou_native_core::dispatch_config::{
     DispatchConfig,
     form::{DispatchForm, LOAD_FAILED, RETRY_LABEL},
 };
+use matou_native_core::dispatch_roles::DispatchRolesStore;
 use matou_native_core::sessions::{InterfaceLocale, LocalePreference};
+use matou_native_desktop::dispatch_roles_panel::DispatchRolesPanel;
 use matou_native_desktop::dispatch_settings::DispatchSettingsPanel;
 use matou_native_desktop::provider_context_editor::{
     ACTIVE_PROVIDER_BOTTOM_EDGE_RGB, context_mode_subtitle, context_mode_title,
@@ -1907,6 +1909,8 @@ pub struct SettingsShell {
     editor: Option<Editor>,
     dispatch_config: Option<Rc<DispatchConfig>>,
     dispatch_panel: Option<Result<Entity<DispatchSettingsPanel>, String>>,
+    dispatch_roles_store: Option<Rc<DispatchRolesStore>>,
+    dispatch_roles_panel: Option<Entity<DispatchRolesPanel>>,
     theme: ThemeState,
     theme_error: Option<String>,
     keyboard_focus: bool,
@@ -1963,6 +1967,8 @@ impl SettingsShell {
             dispatch_config: std::env::home_dir()
                 .map(|home| Rc::new(DispatchConfig::for_home(home))),
             dispatch_panel: None,
+            dispatch_roles_store: None,
+            dispatch_roles_panel: None,
             theme: ThemeState::new(ThemePreference::Light, window.appearance()),
             theme_error: None,
             keyboard_focus: false,
@@ -3492,7 +3498,27 @@ impl SettingsShell {
                     }))
                 }),
         );
+        self.dispatch_roles_panel = self.dispatch_roles_store.clone().and_then(|store| {
+            match store.snapshot() {
+                Ok(snapshot) => Some(cx.new(|cx| {
+                    DispatchRolesPanel::new(
+                        snapshot,
+                        move |config| store.save(config).map_err(|error| error.to_string()),
+                        cx,
+                    )
+                })),
+                Err(error) => {
+                    eprintln!("Read dispatch roles: {error}");
+                    None
+                }
+            }
+        });
         cx.notify();
+    }
+
+    pub(crate) fn configure_data_root(&mut self, data_root: Option<std::path::PathBuf>) {
+        self.dispatch_roles_store =
+            data_root.map(|root| Rc::new(DispatchRolesStore::for_data_root(root)));
     }
 
     pub(crate) fn configure_theme(&mut self, theme: ThemeState) {
@@ -5600,7 +5626,9 @@ impl SettingsShell {
                             .text("正在载入派活默认值…", "Loading dispatch defaults…"),
                     ),
             ),
-            Some(Ok(panel)) => content.child(panel),
+            Some(Ok(panel)) => content
+                .child(panel)
+                .children(self.dispatch_roles_panel.clone()),
             Some(Err(_)) => content.child(self.dispatch_error_block(cx)),
         }
     }

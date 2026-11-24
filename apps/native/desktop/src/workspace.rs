@@ -3001,6 +3001,7 @@ impl Workspace {
             );
             settings.configure_theme(self.theme);
             settings.configure_diagnostics_cwd(diagnostics_cwd);
+            settings.configure_data_root(self.data_root.clone());
             settings
         });
         let subscription =
