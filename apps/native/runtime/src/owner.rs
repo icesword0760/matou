@@ -304,6 +304,13 @@ pub struct ShellOwner {
     codex_forks: CodexForks,
 }
 
+#[derive(PartialEq, Eq)]
+enum EgressUpdate {
+    Sample,
+    Rule,
+    Protection,
+}
+
 impl ShellOwner {
     /// Startup has already selected writable mode and migrated the database.
     /// Reconcile runs belonging to the previous process before launching new PTYs.
@@ -317,6 +324,7 @@ impl ShellOwner {
             [],
             |row| row.get::<_, String>(0),
         )?;
+        let (egress_rule, protection_enabled) = egress_probe::load_settings(&connection)?;
         let (send, receive) = mpsc::channel();
         let mut owner = Self {
             shells: HashMap::new(),
@@ -334,7 +342,7 @@ impl ShellOwner {
             run_control: None,
             control_bin: None,
             closing: false,
-            egress: EgressMonitor::default(),
+            egress: EgressMonitor::new(egress_rule, protection_enabled),
             blocked_gateway_families: Arc::default(),
             subscriptions: None,
             egress_membership_changed: false,
@@ -762,8 +770,9 @@ impl ShellOwner {
     }
 
     pub(crate) fn apply_egress_sample(&mut self, sample: EgressSample) -> Result<()> {
-        let effects = self.egress.apply_full_sample(sample, now() as u64);
-        self.apply_egress_effects(effects)
+        self.update_egress(EgressUpdate::Sample, |monitor, now| {
+            Ok(monitor.apply_full_sample(sample, now))
+        })
     }
 
     pub(crate) fn exempt_egress(&mut self, family: Family) -> Result<()> {
@@ -775,20 +784,41 @@ impl ShellOwner {
     }
 
     pub(crate) fn set_egress_rule_mode(&mut self, mode: RuleMode) -> Result<()> {
-        let effects = self.egress.set_rule_mode(mode, now() as u64);
-        self.apply_egress_effects(effects)
+        self.update_egress(EgressUpdate::Rule, |monitor, now| {
+            Ok(monitor.set_rule_mode(mode, now))
+        })
     }
 
     pub(crate) fn set_egress_protection(&mut self, enabled: bool) -> Result<()> {
-        let effects = self.egress.set_protection(enabled, now() as u64);
-        self.apply_egress_effects(effects)
+        self.update_egress(EgressUpdate::Protection, |monitor, now| {
+            Ok(monitor.set_protection(enabled, now))
+        })
     }
 
     pub(crate) fn accept_egress_baseline(&mut self, family: Family) -> Result<()> {
-        let effects = self
-            .egress
-            .accept_current(family, now() as u64)
-            .map_err(anyhow::Error::msg)?;
+        self.update_egress(EgressUpdate::Rule, |monitor, now| {
+            monitor
+                .accept_current(family, now)
+                .map_err(anyhow::Error::msg)
+        })
+    }
+
+    fn update_egress(
+        &mut self,
+        kind: EgressUpdate,
+        update: impl FnOnce(&mut EgressMonitor, u64) -> Result<Vec<SessionEffect>>,
+    ) -> Result<()> {
+        let time = now();
+        // Publish session effects only after the settings they depend on are durable.
+        let mut monitor = self.egress.clone();
+        let effects = update(&mut monitor, time as u64)?;
+        let rule = (kind == EgressUpdate::Rule || monitor.rule() != self.egress.rule())
+            .then_some(monitor.rule());
+        let protection = (kind == EgressUpdate::Protection).then_some(monitor.protection_enabled());
+        if (rule.is_some() || protection.is_some()) && !self.control_is_read_only()? {
+            egress_probe::save_settings(&mut self.connection, rule, protection, time)?;
+        }
+        self.egress = monitor;
         self.apply_egress_effects(effects)
     }
 
@@ -6606,6 +6636,185 @@ fn process_working_directory(pid: u32) -> Option<String> {
     }
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     Path::new(&cwd).is_dir().then_some(cwd)
+}
+
+#[cfg(test)]
+mod egress_settings_tests {
+    use super::*;
+    use crate::egress_probe::{EgressRule, Exit, HostPair, HostSample};
+    use matou_native_core::startup::{self, BootstrapResult};
+
+    fn open(root: &Path, prepare: impl FnOnce(&Connection) -> Result<()>) -> Result<ShellOwner> {
+        let BootstrapResult::Writable {
+            connection,
+            ownership,
+            ..
+        } = startup::open(root, &Uuid::new_v4().to_string())?
+        else {
+            anyhow::bail!("expected writable database");
+        };
+        prepare(&connection)?;
+        ShellOwner::new(connection, ownership, || Uuid::new_v4().to_string())
+    }
+
+    fn fixture() -> Result<tempfile::TempDir> {
+        Ok(tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR"))?)
+    }
+
+    fn seed(db: &Connection, rule: &str, protection: &str) -> Result<()> {
+        db.execute(
+            "INSERT INTO preferences VALUES ('egress.rule', ?, 1), ('egress.protection', ?, 1)",
+            [rule, protection],
+        )?;
+        Ok(())
+    }
+
+    fn sample(family: Family, ip: &str) -> (EgressSample, Exit) {
+        let exit = Exit {
+            ip: ip.into(),
+            country: "US".into(),
+        };
+        let (api, login) = family.hosts();
+        let pair = HostPair::new(
+            family,
+            HostSample::success(api, exit.clone()),
+            HostSample::success(login, exit.clone()),
+        );
+        (EgressSample::new([(family, pair)].into()), exit)
+    }
+
+    #[test]
+    fn egress_inherits_electron_preferences_and_keeps_changes_on_restart() -> Result<()> {
+        let root = fixture()?;
+        let stored = json!({
+            "mode": "ip",
+            "baselines": {
+                "anthropic": {"ip":"203.0.113.1","country":"US"},
+                "openai": {"ip":"203.0.113.2","country":"JP"},
+                "chatgpt-subscription": {"ip":"203.0.113.3","country":"GB"},
+                "google": {"ip":"203.0.113.4","country":"DE"}
+            }
+        });
+        let mut owner = open(root.path(), |db| seed(db, &stored.to_string(), "false"))?;
+        assert_eq!(serde_json::to_value(owner.egress().rule())?, stored);
+        assert!(!owner.egress().protection_enabled());
+        let (sample, new_exit) = sample(Family::Anthropic, "203.0.113.10");
+        owner.apply_egress_sample(sample)?;
+        assert_eq!(serde_json::to_value(owner.egress().rule())?, stored);
+        owner.set_egress_rule_mode(RuleMode::Country)?;
+        owner.set_egress_protection(true)?;
+        owner.accept_egress_baseline(Family::Anthropic)?;
+        let mut expected = stored;
+        expected["mode"] = json!("country");
+        expected["baselines"]["anthropic"] = serde_json::to_value(new_exit)?;
+        drop(owner);
+
+        let mut owner = open(root.path(), |_| Ok(()))?;
+        assert_eq!(serde_json::to_value(owner.egress().rule())?, expected);
+        assert!(owner.egress().protection_enabled());
+        let rows = owner.connection.prepare(
+            "SELECT value_json, updated_at FROM preferences WHERE key IN ('egress.rule', 'egress.protection') ORDER BY key",
+        )?.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0, "true");
+        assert_eq!(serde_json::from_str::<Value>(&rows[1].0)?, expected);
+        assert!(rows.iter().all(|(_, updated_at)| *updated_at > 1));
+        owner.set_egress_rule_mode(RuleMode::Ip)?;
+        owner.set_egress_protection(false)?;
+        drop(owner);
+
+        let owner = open(root.path(), |_| Ok(()))?;
+        expected["mode"] = json!("ip");
+        assert_eq!(serde_json::to_value(owner.egress().rule())?, expected);
+        assert!(!owner.egress().protection_enabled());
+        Ok(())
+    }
+
+    #[test]
+    fn egress_recovers_corrupt_preferences_and_persists_the_first_baseline() -> Result<()> {
+        let root = fixture()?;
+        let mut owner = open(root.path(), |db| seed(db, "{invalid", "\"false\""))?;
+        assert_eq!(owner.egress().rule(), &EgressRule::default());
+        assert!(owner.egress().protection_enabled());
+        owner.set_egress_protection(true)?;
+        assert_eq!(
+            owner.connection.query_row(
+                "SELECT value_json FROM preferences WHERE key = 'egress.protection'",
+                [],
+                |row| row.get::<_, String>(0),
+            )?,
+            "true",
+        );
+        let (sample, exit) = sample(Family::Google, "203.0.113.5");
+        owner.apply_egress_sample(sample.clone())?;
+        owner.connection.execute(
+            "UPDATE preferences SET updated_at = 1 WHERE key = 'egress.rule'",
+            [],
+        )?;
+        owner.apply_egress_sample(sample)?;
+        assert_eq!(
+            owner.connection.query_row(
+                "SELECT updated_at FROM preferences WHERE key = 'egress.rule'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?,
+            1,
+        );
+        drop(owner);
+
+        let owner = open(root.path(), |_| Ok(()))?;
+        assert_eq!(owner.egress().rule().mode, RuleMode::Country);
+        assert_eq!(
+            owner.egress().rule().baselines,
+            [(Family::Google, exit)].into()
+        );
+        assert!(owner.egress().protection_enabled());
+        Ok(())
+    }
+
+    #[test]
+    fn egress_ignores_invalid_fields_and_does_not_write_in_read_only_mode() -> Result<()> {
+        let root = fixture()?;
+        let rule = json!({
+            "mode": false,
+            "baselines": {
+                "anthropic": {"ip":0,"country":"US"},
+                "openai": {"ip":"203.0.113.2","country":""},
+                "chatgpt-subscription": ["203.0.113.3","GB"],
+                "google": {"ip":"203.0.113.4","country":"DE","ignored":true},
+                "unknown": {"ip":"203.0.113.9","country":"US"}
+            }
+        });
+        let mut owner = open(root.path(), |db| seed(db, &rule.to_string(), "false"))?;
+        assert_eq!(
+            serde_json::to_value(owner.egress().rule())?,
+            json!({"mode":"country","baselines":{"google":{"ip":"203.0.113.4","country":"DE"}}}),
+        );
+        owner.connection.pragma_update(None, "query_only", true)?;
+        let (sample, _) = sample(Family::Anthropic, "203.0.113.8");
+        owner.apply_egress_sample(sample)?;
+        owner.accept_egress_baseline(Family::Anthropic)?;
+        owner.set_egress_rule_mode(RuleMode::Ip)?;
+        owner.set_egress_protection(true)?;
+        assert_eq!(owner.egress().rule().mode, RuleMode::Ip);
+        assert!(owner.egress().protection_enabled());
+        drop(owner);
+
+        let owner = open(root.path(), |_| Ok(()))?;
+        assert_eq!(owner.egress().rule().mode, RuleMode::Country);
+        assert_eq!(owner.egress().rule().baselines.len(), 1);
+        assert!(!owner.egress().protection_enabled());
+        assert_eq!(
+            owner.connection.query_row(
+                "SELECT COUNT(*) FROM preferences WHERE key LIKE 'egress.%' AND updated_at = 1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?,
+            2,
+        );
+        Ok(())
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]

@@ -410,6 +410,10 @@ impl State {
                 [(header::HeaderName::from_static("x-api-key"), key)],
             );
         }
+        let track_deepseek = message_response.track_usage && deepseek_tools::matches(&destination);
+        if track_deepseek {
+            remove_brotli(&mut parts.headers);
+        }
         if rewritten {
             for name in ["content-md5", "content-digest", "digest"] {
                 parts.headers.remove(name);
@@ -509,14 +513,19 @@ impl State {
         if (message_response.track_usage || message_response.gemini_stream)
             && response.status.is_success()
             && let Some(media) = observable_media(&response.headers)
+            && let Some(encoding) = observable_encoding(&response.headers)
         {
             if message_response.track_usage {
-                body.usage = Some(deepseek_token_usage::Observer::new(
+                body.usage = Some(deepseek_token_usage::ResponseObserver::new(
                     media,
+                    encoding,
                     Arc::clone(&self.token_usage),
                 ));
             }
-            if message_response.gemini_stream && media == ObservableMedia::Sse {
+            if message_response.gemini_stream
+                && media == ObservableMedia::Sse
+                && encoding == Encoding::Identity
+            {
                 response.headers.remove(header::CONTENT_LENGTH);
                 body.keep_alive = Some(gemini_sse_keepalive::KeepAlive::new(
                     self.keep_alive_interval,
@@ -1121,22 +1130,67 @@ fn request_headers<const N: usize>(
     }
 }
 
+fn remove_brotli(headers: &mut HeaderMap) {
+    let mut removed = false;
+    let mut kept: Vec<&[u8]> = Vec::new();
+    for token in headers
+        .get_all(header::ACCEPT_ENCODING)
+        .iter()
+        .flat_map(|value| value.as_bytes().split(|byte| *byte == b','))
+        .map(<[u8]>::trim_ascii)
+        .filter(|token| !token.is_empty())
+    {
+        let coding = token.split(|byte| *byte == b';').next().unwrap_or_default();
+        if coding.trim_ascii().eq_ignore_ascii_case(b"br") {
+            removed = true;
+        } else {
+            kept.push(token);
+        }
+    }
+    if removed {
+        let value = if kept.is_empty() {
+            HeaderValue::from_static("gzip, deflate")
+        } else {
+            let joined = kept.join(&b", "[..]);
+            HeaderValue::from_bytes(&joined).expect("validated header values joined with commas")
+        };
+        headers.insert(header::ACCEPT_ENCODING, value);
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ObservableMedia {
     Sse,
     Json,
 }
 
-fn observable_media(headers: &HeaderMap) -> Option<ObservableMedia> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Encoding {
+    Identity,
+    Gzip,
+    Deflate,
+}
+
+fn observable_encoding(headers: &HeaderMap) -> Option<Encoding> {
     let mut encodings = headers.get_all(header::CONTENT_ENCODING).iter();
-    if let Some(encoding) = encodings.next() {
-        let encoding = encoding.as_bytes().trim_ascii();
-        if !(encoding.is_empty() || encoding.eq_ignore_ascii_case(b"identity"))
-            || encodings.next().is_some()
-        {
-            return None;
-        }
+    let encoding = encodings
+        .next()
+        .map_or(&[][..], |value| value.as_bytes().trim_ascii());
+    if encodings.next().is_some() {
+        return None;
     }
+    if encoding.is_empty() || encoding.eq_ignore_ascii_case(b"identity") {
+        Some(Encoding::Identity)
+    } else if encoding.eq_ignore_ascii_case(b"gzip") {
+        Some(Encoding::Gzip)
+    } else if encoding.eq_ignore_ascii_case(b"deflate") {
+        Some(Encoding::Deflate)
+    } else {
+        None
+    }
+}
+
+fn observable_media(headers: &HeaderMap) -> Option<ObservableMedia> {
     let mut json = false;
     for value in headers.get_all(header::CONTENT_TYPE) {
         let contains = |needle: &[u8]| {
@@ -1332,7 +1386,7 @@ struct UpstreamBody {
     incoming: Incoming,
     prefetched: VecDeque<Bytes>,
     _connection: AbortOnDrop,
-    usage: Option<deepseek_token_usage::Observer>,
+    usage: Option<deepseek_token_usage::ResponseObserver>,
     keep_alive: Option<gemini_sse_keepalive::KeepAlive>,
     cancelled: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
 }
