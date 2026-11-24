@@ -81,6 +81,19 @@ pub struct DagPoint {
     pub y: f64,
 }
 
+fn dag_wheel_pan(delta: gpui::ScrollDelta) -> DagPoint {
+    // GPUI deltas are already in the view's direction, opposite to DOM wheel deltas.
+    let delta = delta.pixel_delta(gpui::px(20.));
+    DagPoint {
+        x: f64::from(delta.x),
+        y: f64::from(delta.y),
+    }
+}
+
+fn dag_wheel_zoom_factor(dy: f64) -> f64 {
+    (dy * 0.002).exp()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DagSize {
     pub width: f64,
@@ -1324,7 +1337,44 @@ fn preferred_session(layout: &DagLayout, preferred: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::{ScrollDelta, point, px};
     use serde_json::json;
+
+    #[test]
+    fn dag_wheel_pan_follows_the_gesture_for_pixels_and_lines() {
+        for (dx, dy) in [(-20., 40.), (20., -40.)] {
+            let dom_x = -f64::from(dx);
+            let dom_y = -f64::from(dy);
+            let expected = DagPoint {
+                x: -dom_x,
+                y: -dom_y,
+            };
+            assert_eq!(
+                dag_wheel_pan(ScrollDelta::Pixels(point(px(dx), px(dy)))),
+                expected
+            );
+            assert_eq!(
+                dag_wheel_pan(ScrollDelta::Lines(point(dx / 20., dy / 20.))),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn dag_wheel_zoom_increases_for_positive_gpui_delta() {
+        for (delta, zoom_in) in [
+            (ScrollDelta::Pixels(point(px(0.), px(20.))), true),
+            (ScrollDelta::Pixels(point(px(0.), px(-20.))), false),
+            (ScrollDelta::Lines(point(0., 1.)), true),
+            (ScrollDelta::Lines(point(0., -1.)), false),
+        ] {
+            let dy = dag_wheel_pan(delta).y;
+            let dom_delta_y = -dy;
+            let factor = dag_wheel_zoom_factor(dy);
+            assert_eq!(factor > 1., zoom_in);
+            assert_eq!(factor, (-dom_delta_y * 0.002).exp());
+        }
+    }
 
     #[test]
     fn dag_canvas_invalid_snapshot_keeps_last_usable_state() {
@@ -2035,12 +2085,9 @@ mod view {
             cx: &mut Context<Self>,
         ) {
             self.centering = None;
-            let (dx, dy) = match event.delta {
-                ScrollDelta::Pixels(delta) => (f32::from(delta.x), f32::from(delta.y)),
-                ScrollDelta::Lines(delta) => (delta.x * 20., delta.y * 20.),
-            };
+            let movement = dag_wheel_pan(event.delta);
             if event.modifiers.platform || event.modifiers.control {
-                let factor = (-f64::from(dy) * 0.002).exp();
+                let factor = dag_wheel_zoom_factor(movement.y);
                 let scale = self.canvas.transform.scale * factor;
                 let anchor = self
                     .bounds
@@ -2052,10 +2099,7 @@ mod view {
                     .unwrap_or_else(|| self.canvas.viewport.center());
                 self.canvas.zoom_at(scale, anchor);
             } else {
-                self.canvas.pan_by(DagPoint {
-                    x: -f64::from(dx),
-                    y: -f64::from(dy),
-                });
+                self.canvas.pan_by(movement);
             }
             self.schedule_transform(window, cx);
             cx.stop_propagation();

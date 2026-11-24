@@ -89,6 +89,20 @@ pub(super) const DANGER_BG: u32 = 0xfff2f1;
 const DANGER_LINE: u32 = 0xf4d4d1;
 const NOTICE_BG: u32 = 0xeaf4ff;
 const NOTICE_LINE: u32 = 0xd1e6fc;
+const NOTICE_SUCCESS_ICON: u32 = 0x3284ed;
+const NOTICE_ERROR_ICON: u32 = 0xbc5550;
+const NOTICE_ERROR_ICON_DARK: u32 = 0x5a2a28;
+const NOTICE_ERROR_BG: u32 = 0xfff2f1;
+const NOTICE_ERROR_LINE: u32 = 0xf1d3cf;
+const NOTICE_PADDING: f32 = 17.;
+const NOTICE_GAP: f32 = 12.;
+const NOTICE_MARGIN_Y: f32 = 16.;
+const NOTICE_RADIUS: f32 = 10.;
+const NOTICE_ICON_SIZE: f32 = 27.;
+const NOTICE_TITLE_SIZE: f32 = 13.;
+const NOTICE_TITLE_WEIGHT: f32 = 700.;
+const NOTICE_BODY_SIZE: f32 = 12.;
+const NOTICE_BODY_LINE_HEIGHT: f32 = 19.2;
 const CONFIRM_BG: u32 = 0xfff7e8;
 const CONFIRM_LINE: u32 = 0xebd6af;
 const DIALOG_BORDER: u32 = 0xe0e6ee;
@@ -110,6 +124,25 @@ const WORKSPACE_SIDEBAR_WIDTH: f32 = 260.;
 const SETTINGS_ANIMATION_MS: u64 = 180;
 const DIALOG_ANIMATION_MS: u64 = 160;
 const CLI_DEFAULT_MODEL: &str = "CLI 默认";
+
+// Shared provider-row track. API and subscription cards must use the same
+// logo/name/model/actions geometry so the model column lines up across both
+// kinds. The actions minimum is language-specific because the widest English
+// labels (`Refresh models` / `Edit` / `Sign in again`) need more room than the
+// Chinese pair, while both card kinds still share one track per language.
+const PROVIDER_LOGO_SIZE: f32 = 32.;
+const PROVIDER_ROW_GAP: f32 = 11.;
+const PROVIDER_NAME_MIN_W: f32 = 150.;
+const PROVIDER_MODEL_MIN_W: f32 = 130.;
+const PROVIDER_NAME_GROW: f32 = 1.2;
+const PROVIDER_MODEL_GROW: f32 = 1.;
+const PROVIDER_ROW_PAD_X: f32 = 12.;
+const PROVIDER_ROW_BORDER_W: f32 = 1.;
+const PROVIDER_ACTIONS_GAP: f32 = 5.;
+const PROVIDER_ACTIONS_MIN_W_ZH: f32 = 200.;
+const PROVIDER_ACTIONS_MIN_W_EN: f32 = 290.;
+const PROVIDER_STACK_MAX_W: f32 = 640.;
+const PROVIDER_COMPACT_VIEWPORT_MAX_W: f32 = 940.;
 
 /// Resolved colors for the frozen provider setup dialog and its status cards.
 ///
@@ -352,6 +385,73 @@ fn reduced_motion() -> bool {
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         false
+    }
+}
+
+fn light_success_notice_colors() -> (Rgba, Rgba) {
+    (rgb(NOTICE_BG), rgb(NOTICE_LINE))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ProviderModelSlot {
+    Hidden,
+    Inline,
+    Column,
+}
+
+/// Pure column decision shared by the API and subscription provider rows.
+///
+/// `container_width` is the settings content width; `viewport_width` drives the
+/// 940px compact rule. A stacked row (<=640px container) embeds the model under
+/// the name, the compact viewport hides it, and the wide layout gives it its own
+/// column. The current-row border is offset by reducing horizontal padding, so
+/// its content box starts and ends at the same x as every other row.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ProviderRowLayout {
+    model: ProviderModelSlot,
+    name_min_w: f32,
+    model_min_w: f32,
+    name_grow: f32,
+    model_grow: f32,
+    actions_min_w: f32,
+    horizontal_padding: f32,
+}
+
+fn provider_actions_min_width(locale: InterfaceLocale) -> f32 {
+    match locale {
+        InterfaceLocale::Chinese => PROVIDER_ACTIONS_MIN_W_ZH,
+        InterfaceLocale::English => PROVIDER_ACTIONS_MIN_W_EN,
+    }
+}
+
+fn provider_row_layout(
+    container_width: f32,
+    viewport_width: f32,
+    locale: InterfaceLocale,
+    current: bool,
+) -> ProviderRowLayout {
+    let stacked = container_width <= PROVIDER_STACK_MAX_W;
+    let model = if stacked {
+        ProviderModelSlot::Inline
+    } else if viewport_width <= PROVIDER_COMPACT_VIEWPORT_MAX_W {
+        ProviderModelSlot::Hidden
+    } else {
+        ProviderModelSlot::Column
+    };
+    ProviderRowLayout {
+        model,
+        // The stacked row lets the combined name/model cell shrink to zero;
+        // keeping the 150px name minimum there would push the three-button
+        // action track out of narrow settings windows.
+        name_min_w: if stacked { 0. } else { PROVIDER_NAME_MIN_W },
+        model_min_w: match model {
+            ProviderModelSlot::Inline => 0.,
+            ProviderModelSlot::Hidden | ProviderModelSlot::Column => PROVIDER_MODEL_MIN_W,
+        },
+        name_grow: PROVIDER_NAME_GROW,
+        model_grow: PROVIDER_MODEL_GROW,
+        actions_min_w: provider_actions_min_width(locale),
+        horizontal_padding: PROVIDER_ROW_PAD_X - if current { PROVIDER_ROW_BORDER_W } else { 0. },
     }
 }
 
@@ -676,9 +776,9 @@ impl SecretInput {
         let display = self.display();
         let empty = self.text.is_empty();
         let default_color = if empty {
-            rgba(SEARCH_PLACEHOLDER)
+            rgb(SEARCH_PLACEHOLDER)
         } else {
-            rgba(DIALOG_LABEL)
+            rgb(DIALOG_LABEL)
         };
         let color = if empty {
             self.placeholder_color.unwrap_or(default_color)
@@ -5780,9 +5880,15 @@ impl SettingsShell {
             colors.link
         };
         let icon_bg = if error {
-            if dark { 0x5a2a28 } else { 0xbc5550 }
+            if dark {
+                rgb(NOTICE_ERROR_ICON_DARK)
+            } else {
+                rgb(NOTICE_ERROR_ICON)
+            }
+        } else if dark {
+            rgba(colors.primary)
         } else {
-            colors.primary
+            rgb(NOTICE_SUCCESS_ICON)
         };
         let dismiss_hover = if dark {
             palette.workspace.line
@@ -5791,7 +5897,7 @@ impl SettingsShell {
         };
         let mut dismiss = div()
             .id("settings-notice-dismiss")
-            .size(px(27.))
+            .size(px(NOTICE_ICON_SIZE))
             .flex_none()
             .flex()
             .items_center()
@@ -5816,8 +5922,8 @@ impl SettingsShell {
         let retry_id = self.providers.retry_switch_id().map(str::to_owned);
         let mut text = div().flex_1().min_w_0().child(
             div()
-                .text_size(px(13.))
-                .font_weight(FontWeight(600.))
+                .text_size(px(NOTICE_TITLE_SIZE))
+                .font_weight(FontWeight(NOTICE_TITLE_WEIGHT))
                 .text_color(rgba(if error {
                     colors.error_text
                 } else {
@@ -5828,9 +5934,9 @@ impl SettingsShell {
         if !body.is_empty() {
             text = text.child(
                 div()
-                    .mt(px(6.))
-                    .text_size(px(12.))
-                    .line_height(px(19.2))
+                    .my(px(6.))
+                    .text_size(px(NOTICE_BODY_SIZE))
+                    .line_height(px(NOTICE_BODY_LINE_HEIGHT))
                     .text_color(rgba(if error {
                         colors.error_text
                     } else {
@@ -5855,38 +5961,35 @@ impl SettingsShell {
                 },
             ));
         }
-        let border = if error {
-            colors.error_line
-        } else if dark {
-            palette.workspace.line
-        } else {
-            NOTICE_LINE
-        };
-        let background = if error {
-            colors.error_bg
-        } else if dark {
-            palette.settings.language_selected
-        } else {
-            NOTICE_BG
+        let (background, border) = match (dark, error) {
+            (false, false) => light_success_notice_colors(),
+            (false, true) => (rgb(NOTICE_ERROR_BG), rgb(NOTICE_ERROR_LINE)),
+            (true, false) => (
+                rgba(palette.settings.language_selected),
+                rgba(palette.workspace.line),
+            ),
+            (true, true) => (rgba(colors.error_bg), rgba(colors.error_line)),
         };
         div()
             .flex()
             .items_start()
-            .gap(px(12.))
-            .p(px(17.))
-            .rounded(px(10.))
+            .gap(px(NOTICE_GAP))
+            .p(px(NOTICE_PADDING))
+            .my(px(NOTICE_MARGIN_Y))
+            .w_full()
+            .rounded(px(NOTICE_RADIUS))
             .border_1()
-            .border_color(rgba(border))
-            .bg(rgba(background))
+            .border_color(border)
+            .bg(background)
             .child(
                 div()
-                    .size(px(27.))
+                    .size(px(NOTICE_ICON_SIZE))
                     .flex_none()
                     .flex()
                     .items_center()
                     .justify_center()
                     .rounded_full()
-                    .bg(rgba(icon_bg))
+                    .bg(icon_bg)
                     .text_size(px(13.))
                     .font_weight(FontWeight(700.))
                     .text_color(rgb(0xffffff))
@@ -6080,6 +6183,7 @@ impl SettingsShell {
                     details.as_ref(),
                     current,
                     is_last,
+                    container_width,
                     viewport_width,
                     switching.as_deref(),
                     busy,
@@ -6135,6 +6239,7 @@ impl SettingsShell {
             .font_weight(FontWeight(650.))
             .text_color(rgba(palette.settings.provider_action_text))
             .bg(rgba(palette.settings.provider_action_background))
+            .whitespace_nowrap()
             .child(self.locale.text("编辑", "Edit"));
         if busy {
             edit = edit.opacity(0.55).cursor(CursorStyle::OperationNotAllowed);
@@ -6175,6 +6280,7 @@ impl SettingsShell {
             })
             .text_size(px(12.))
             .font_weight(FontWeight(650.))
+            .whitespace_nowrap()
             .child(if switching_this {
                 self.locale.text("切换中…", "Switching…")
             } else if relogin {
@@ -6275,33 +6381,20 @@ impl SettingsShell {
 
         let (edit, switch) =
             self.provider_actions(provider, current, switching, busy, controls, false, cx);
-        let card = self
-            .provider_list_row(provider, current, is_last)
-            .flex_col()
-            .min_h(px(62.))
-            .px(px(12.))
-            .py(px(10.));
-        let mut header = div().flex().items_center().w_full().gap(px(11.));
-        header = header.child(
-            div()
-                .size(px(32.))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(8.))
-                .text_size(px(12.))
-                .font_weight(FontWeight(750.))
-                .text_color(rgb(0xffffff))
-                .bg(logo_bg)
-                .child(provider_initial(name)),
-        );
-        let mut name_column = div()
+        let layout = provider_row_layout(container_width, viewport_width, self.locale, current);
+        let logo = div()
+            .size(px(PROVIDER_LOGO_SIZE))
+            .flex_none()
             .flex()
-            .flex_col()
-            .gap(px(3.))
-            .min_w(px(150.))
-            .flex_1()
+            .items_center()
+            .justify_center()
+            .rounded(px(8.))
+            .text_size(px(12.))
+            .font_weight(FontWeight(750.))
+            .text_color(rgb(0xffffff))
+            .bg(logo_bg)
+            .child(provider_initial(name));
+        let name_body = div()
             .child(
                 div()
                     .flex()
@@ -6337,13 +6430,7 @@ impl SettingsShell {
                     .whitespace_normal()
                     .child(endpoint),
             );
-        name_column.style().flex_grow = Some(1.2);
-        let model_block = div()
-            .flex()
-            .flex_col()
-            .gap(px(3.))
-            .min_w(px(130.))
-            .flex_1()
+        let model_body = div()
             .child(
                 div()
                     .text_size(px(12.))
@@ -6361,28 +6448,11 @@ impl SettingsShell {
                     .whitespace_normal()
                     .child(model_sub),
             );
-        // Base media query hides the model column below 940px viewport; the
-        // provider-settings container query restores it by stacking when the
-        // card container itself is 640px or narrower.
-        let stacked = container_width <= 640.;
-        let hide_model = viewport_width <= 940. && !stacked;
-        if stacked {
-            header = header.child(name_column.flex_1().min_w_0().child(model_block));
-        } else {
-            header = header.child(name_column);
-            if !hide_model {
-                header = header.child(model_block);
-            }
-        }
-        header = header.child(
-            div()
-                .flex()
-                .flex_none()
-                .gap(px(5.))
-                .child(edit)
-                .child(switch),
-        );
-        card.child(header).into_any_element()
+        let actions = div().child(edit).child(switch);
+        self.provider_row(
+            provider, current, is_last, layout, logo, name_body, model_body, actions,
+        )
+        .into_any_element()
     }
 
     fn provider_list_row(&self, provider: &Value, current: bool, is_last: bool) -> Stateful<Div> {
@@ -6405,12 +6475,83 @@ impl SettingsShell {
             })
     }
 
+    /// Builds the one full-row track shared by API and subscription cards.
+    ///
+    /// The caller supplies only the cell *contents*; every width, gap, padding
+    /// and alignment decision comes from `layout`, so the name/model/actions
+    /// columns cannot drift between the two card kinds. `provider_list_row`
+    /// supplies the current-row 1px border; `layout.horizontal_padding` already
+    /// compensates for it, keeping the content box identical for every row.
+    fn provider_row(
+        &self,
+        provider: &Value,
+        current: bool,
+        is_last: bool,
+        layout: ProviderRowLayout,
+        logo: Div,
+        name: Div,
+        model: Div,
+        actions: Div,
+    ) -> Stateful<Div> {
+        let mut name_column = name
+            .flex()
+            .flex_col()
+            .gap(px(3.))
+            .min_w(px(layout.name_min_w))
+            .flex_basis(px(0.))
+            .flex_shrink();
+        name_column.style().flex_grow = Some(layout.name_grow);
+        let mut row = self
+            .provider_list_row(provider, current, is_last)
+            .flex()
+            .items_center()
+            .min_h(px(62.))
+            .gap(px(PROVIDER_ROW_GAP))
+            .px(px(layout.horizontal_padding))
+            .py(px(10.))
+            .child(logo);
+        match layout.model {
+            ProviderModelSlot::Inline => {
+                let model_column = model
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.))
+                    .w_full()
+                    .min_w(px(layout.model_min_w));
+                row = row.child(name_column.child(model_column));
+            }
+            ProviderModelSlot::Column => {
+                let mut model_column = model
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.))
+                    .min_w(px(layout.model_min_w))
+                    .flex_basis(px(0.))
+                    .flex_shrink();
+                model_column.style().flex_grow = Some(layout.model_grow);
+                row = row.child(name_column).child(model_column);
+            }
+            ProviderModelSlot::Hidden => {
+                row = row.child(name_column);
+            }
+        }
+        row.child(
+            actions
+                .flex()
+                .flex_none()
+                .gap(px(PROVIDER_ACTIONS_GAP))
+                .w(px(layout.actions_min_w))
+                .justify_end(),
+        )
+    }
+
     fn subscription_card(
         &self,
         provider: &Value,
         details: Option<&Value>,
         current: bool,
         is_last: bool,
+        container_width: f32,
         viewport_width: f32,
         switching: Option<&str>,
         busy: bool,
@@ -6513,13 +6654,7 @@ impl SettingsShell {
             );
         }
         name_row = name_row.child(self.render_provider_window_badge(provider));
-        let mut details = div()
-            .flex()
-            .flex_col()
-            .gap(px(3.))
-            .min_w_0()
-            .flex_1()
-            .child(name_row);
+        let mut details = div().child(name_row);
         if !account_line.is_empty() {
             details = details.child(
                 div()
@@ -6555,63 +6690,40 @@ impl SettingsShell {
                     .child(reason.to_owned()),
             );
         }
-        let mut card = self
-            .provider_list_row(provider, current, is_last)
-            .items_start()
-            .min_h(px(if status == "account-unavailable" {
-                120.
-            } else {
-                80.
-            }))
-            .gap(px(11.))
-            .px(px(12.))
-            .py(px(10.))
+        let logo = div()
+            .mt(px(1.))
+            .size(px(PROVIDER_LOGO_SIZE))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(8.))
+            .text_size(px(12.))
+            .font_weight(FontWeight(750.))
+            .text_color(rgb(0xffffff))
+            .bg(tone)
+            .child(initial);
+        let model_body = div()
             .child(
                 div()
-                    .mt(px(1.))
-                    .size(px(32.))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(8.))
                     .text_size(px(12.))
-                    .font_weight(FontWeight(750.))
-                    .text_color(rgb(0xffffff))
-                    .bg(tone)
-                    .child(initial),
+                    .line_height(px(16.8))
+                    .font_weight(FontWeight(650.))
+                    .text_color(rgba(palette.settings.provider_text))
+                    .whitespace_normal()
+                    .child(model_name.to_owned()),
             )
-            .child(details);
-        if viewport_width > 940. {
-            card = card.child(
+            .child(
                 div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(3.))
-                    .min_w(px(130.))
-                    .flex_1()
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .line_height(px(16.8))
-                            .font_weight(FontWeight(650.))
-                            .text_color(rgba(palette.settings.provider_text))
-                            .whitespace_normal()
-                            .child(model_name.to_owned()),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .line_height(px(15.4))
-                            .text_color(rgba(palette.workspace.muted))
-                            .whitespace_normal()
-                            .child(format!(
-                                "默认模型{}",
-                                if missing_opus { " · 不可用" } else { "" }
-                            )),
-                    ),
+                    .text_size(px(11.))
+                    .line_height(px(15.4))
+                    .text_color(rgba(palette.workspace.muted))
+                    .whitespace_normal()
+                    .child(format!(
+                        "默认模型{}",
+                        if missing_opus { " · 不可用" } else { "" }
+                    )),
             );
-        }
         let (edit, switch) = self.provider_actions(
             provider,
             current,
@@ -6644,6 +6756,7 @@ impl SettingsShell {
             .text_size(px(12.))
             .font_weight(FontWeight(600.))
             .text_color(rgba(palette.workspace.muted))
+            .whitespace_nowrap()
             .child(refresh_label);
         if refresh_disabled {
             refresh = refresh
@@ -6661,26 +6774,32 @@ impl SettingsShell {
                 true,
                 move |this, _, cx| {
                     this.providers.dismiss_notice();
-                    let _ = this.providers.refresh_subscription_models(&provider_id);
+                    this.providers
+                        .refresh_subscription_models(&provider_id, this.locale);
                     cx.notify();
                 },
                 cx,
             );
         }
-        card.child(
-            div()
-                .flex()
-                .flex_none()
-                .gap(px(5.))
-                .child(mark_provider(
-                    refresh,
-                    "refresh-models",
-                    refresh_label,
-                    !refresh_disabled,
-                ))
-                .child(edit)
-                .child(switch),
+        let layout = provider_row_layout(container_width, viewport_width, self.locale, current);
+        let actions = div()
+            .child(mark_provider(
+                refresh,
+                "refresh-models",
+                refresh_label,
+                !refresh_disabled,
+            ))
+            .child(edit)
+            .child(switch);
+        self.provider_row(
+            provider, current, is_last, layout, logo, details, model_body, actions,
         )
+        .items_start()
+        .min_h(px(if status == "account-unavailable" {
+            120.
+        } else {
+            80.
+        }))
         .into_any_element()
     }
 
@@ -10007,6 +10126,171 @@ mod official_context_picker_tests {
             official_context_picker_models(&draft, &[provider], &native),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod provider_row_layout_tests {
+    use super::*;
+    use gpui::Rgba;
+
+    fn packed(color: Rgba) -> u32 {
+        let channel = |value: f32| (value * 255.).round() as u32;
+        (channel(color.r) << 24)
+            | (channel(color.g) << 16)
+            | (channel(color.b) << 8)
+            | channel(color.a)
+    }
+
+    fn minimum_row_width(layout: ProviderRowLayout) -> f32 {
+        let (model, gaps) = match layout.model {
+            ProviderModelSlot::Column => (layout.model_min_w, 3.),
+            ProviderModelSlot::Inline | ProviderModelSlot::Hidden => (0., 2.),
+        };
+        PROVIDER_LOGO_SIZE
+            + layout.name_min_w
+            + model
+            + layout.actions_min_w
+            + PROVIDER_ROW_GAP * gaps
+    }
+
+    #[::core::prelude::v1::test]
+    fn notice_card_uses_rgb_surfaces_and_provider_setup_geometry() {
+        // `rgba` reads 0x00eaf4ff from the 24-bit constant, i.e. zero red and
+        // an opaque cyan. The notice must use `rgb` and stay #eaf4ff/#d1e6fc.
+        let (background, line) = light_success_notice_colors();
+        assert_eq!(packed(background), 0xeaf4ffff);
+        assert_eq!(packed(line), 0xd1e6fcff);
+        assert_eq!(packed(rgb(SEARCH_PLACEHOLDER)), 0x8c99aaff);
+        assert_eq!(packed(rgb(DIALOG_LABEL)), 0x344257ff);
+        assert_eq!(packed(rgb(NOTICE_SUCCESS_ICON)), 0x3284edff);
+        assert_eq!(packed(rgb(NOTICE_ERROR_ICON)), 0xbc5550ff);
+        assert_eq!(packed(rgb(NOTICE_ERROR_ICON_DARK)), 0x5a2a28ff);
+        assert_eq!(packed(rgb(NOTICE_ERROR_BG)), 0xfff2f1ff);
+        assert_eq!(packed(rgb(NOTICE_ERROR_LINE)), 0xf1d3cfff);
+
+        assert_eq!(NOTICE_PADDING, 17.);
+        assert_eq!(NOTICE_GAP, 12.);
+        assert_eq!(NOTICE_MARGIN_Y, 16.);
+        assert_eq!(NOTICE_RADIUS, 10.);
+        assert_eq!(NOTICE_ICON_SIZE, 27.);
+        assert_eq!(NOTICE_TITLE_SIZE, 13.);
+        assert_eq!(NOTICE_TITLE_WEIGHT, 700.);
+        assert_eq!(NOTICE_BODY_SIZE, 12.);
+        assert_eq!(NOTICE_BODY_LINE_HEIGHT, 19.2);
+    }
+
+    #[::core::prelude::v1::test]
+    fn provider_row_layout_uses_the_same_940_and_640_rules() {
+        let column = provider_row_layout(1000., 1200., InterfaceLocale::Chinese, false);
+        assert_eq!(column.model, ProviderModelSlot::Column);
+        assert_eq!(column.name_min_w, 150.);
+        assert_eq!(column.model_min_w, 130.);
+        assert_eq!(column.name_grow, 1.2);
+        assert_eq!(column.model_grow, 1.);
+
+        let hidden = provider_row_layout(1000., 940., InterfaceLocale::Chinese, false);
+        assert_eq!(hidden.model, ProviderModelSlot::Hidden);
+        let visible_again = provider_row_layout(1000., 941., InterfaceLocale::Chinese, false);
+        assert_eq!(visible_again.model, ProviderModelSlot::Column);
+
+        let stacked = provider_row_layout(640., 1200., InterfaceLocale::Chinese, false);
+        assert_eq!(stacked.model, ProviderModelSlot::Inline);
+        assert_eq!(stacked.name_min_w, 0.);
+        assert_eq!(stacked.model_min_w, 0.);
+        // The container rule wins over the viewport rule.
+        let stacked_narrow = provider_row_layout(640., 940., InterfaceLocale::Chinese, false);
+        assert_eq!(stacked_narrow.model, ProviderModelSlot::Inline);
+
+        let just_above = provider_row_layout(641., 1200., InterfaceLocale::Chinese, false);
+        assert_eq!(just_above.model, ProviderModelSlot::Column);
+    }
+
+    #[::core::prelude::v1::test]
+    fn provider_row_layout_offsets_current_border_with_padding() {
+        let normal = provider_row_layout(1000., 1200., InterfaceLocale::Chinese, false);
+        let current = provider_row_layout(1000., 1200., InterfaceLocale::Chinese, true);
+        assert_eq!(normal.horizontal_padding, 12.);
+        assert_eq!(current.horizontal_padding, 11.);
+        assert_eq!(
+            normal.horizontal_padding,
+            current.horizontal_padding + PROVIDER_ROW_BORDER_W
+        );
+
+        // Both rows expose the same content width even though the current row
+        // adds one border pixel on each side.
+        let outer = 500.;
+        let normal_content = outer - 2. * normal.horizontal_padding;
+        let current_content = outer - 2. * current.horizontal_padding - 2. * PROVIDER_ROW_BORDER_W;
+        assert_eq!(normal_content, current_content);
+        assert_eq!(normal.actions_min_w, current.actions_min_w);
+    }
+
+    #[::core::prelude::v1::test]
+    fn provider_row_actions_min_width_covers_the_widest_labels() {
+        assert_eq!(provider_actions_min_width(InterfaceLocale::Chinese), 200.);
+        assert_eq!(provider_actions_min_width(InterfaceLocale::English), 290.);
+        let container_width = 641.;
+        let zh = provider_row_layout(container_width, 1200., InterfaceLocale::Chinese, false);
+        let en = provider_row_layout(container_width, 1200., InterfaceLocale::English, false);
+        assert_eq!(zh.actions_min_w, 200.);
+        assert_eq!(en.actions_min_w, 290.);
+        let available = container_width - 2. - 2. * PROVIDER_ROW_PAD_X;
+        assert!(minimum_row_width(zh) <= available);
+
+        let overflow = minimum_row_width(en) - available;
+        assert!(overflow > 0. && overflow <= 20.);
+        // Electron's four-column grid also exceeds its width budget at 641px
+        // with the estimated single-line English labels. Allow the small
+        // overflow so buttons stay readable and the model columns stay aligned.
+        let electron_actions = 94. + 24. + 87. + 3. * (2. * 9. + 2.) + 2. * 5.;
+        let electron_tracks = 34. + 150. + 130. + 3. * 11. + electron_actions;
+        let electron_available = container_width - 2. - 2. * 14.;
+        assert_eq!(overflow > 0., electron_tracks > electron_available);
+    }
+
+    #[::core::prelude::v1::test]
+    fn provider_row_tracks_fit_at_the_minimum_window_width() {
+        // The 720px minimum window leaves a 424px settings container,
+        // which uses the stacked layout.
+        let viewport_width = 720.;
+        let container_width = viewport_width - WORKSPACE_SIDEBAR_WIDTH - 2. * 18.;
+        let available = container_width - 2. - 2. * PROVIDER_ROW_PAD_X;
+        for locale in [InterfaceLocale::Chinese, InterfaceLocale::English] {
+            for current in [false, true] {
+                let layout = provider_row_layout(container_width, viewport_width, locale, current);
+                assert_eq!(layout.model, ProviderModelSlot::Inline);
+                assert!(
+                    minimum_row_width(layout) <= available,
+                    "{locale:?} current={current} needs {}px, has {available}px",
+                    minimum_row_width(layout)
+                );
+            }
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn provider_row_records_overflow_below_the_minimum_window_width() {
+        let viewport_width = 640.;
+        let container_width = viewport_width - WORKSPACE_SIDEBAR_WIDTH - 2. * 14.;
+        let available = container_width - 2. - 2. * PROVIDER_ROW_PAD_X;
+        let zh = provider_row_layout(
+            container_width,
+            viewport_width,
+            InterfaceLocale::Chinese,
+            false,
+        );
+        let en = provider_row_layout(
+            container_width,
+            viewport_width,
+            InterfaceLocale::English,
+            false,
+        );
+        assert_eq!(available, 326.);
+        assert!(minimum_row_width(zh) <= available);
+        // This viewport is below the supported 720px window minimum.
+        // Electron's compact subscription grid also overflows at this width.
+        assert_eq!(minimum_row_width(en) - available, 18.);
     }
 }
 

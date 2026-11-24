@@ -4,7 +4,9 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use matou_native_core::{claude_role_budget::CLAUDE_ROLES as ROLES, provider_launch::EFFORTS};
+use matou_native_core::{
+    claude_role_budget::CLAUDE_ROLES as ROLES, provider_launch::EFFORTS, sessions::InterfaceLocale,
+};
 use matou_native_runtime::{
     protocol::{
         ClaudeModelPreferencesReply, ProviderSettingsReply, ProviderSettingsResult,
@@ -23,6 +25,16 @@ const SAVE_FAILED: &str = "供应商配置保存失败";
 pub(crate) const DELETE_FAILED: &str = "删除失败";
 const SWITCH_FAILED: &str = "切换失败";
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
+
+fn subscription_models_refreshed_title(locale: InterfaceLocale, count: usize) -> String {
+    match locale {
+        InterfaceLocale::Chinese => format!("模型列表已更新（{count} 个模型）"),
+        InterfaceLocale::English => {
+            let unit = if count == 1 { "model" } else { "models" };
+            format!("Model list updated ({count} {unit})")
+        }
+    }
+}
 
 pub(crate) fn next_provider_settings_request() -> u64 {
     NEXT_REQUEST.fetch_add(1, Ordering::Relaxed)
@@ -430,7 +442,7 @@ pub(crate) struct ProviderSettings {
     active_id: Option<String>,
     load_error: Option<String>,
     loaded: bool,
-    notice: Option<(&'static str, String, bool)>,
+    notice: Option<(String, String, bool)>,
     retry_switch_id: Option<String>,
     committed_provider: Option<Value>,
     revision: u64,
@@ -440,7 +452,7 @@ pub(crate) struct ProviderSettings {
     subscription_login: SubscriptionLogin,
     subscription_request: Option<(u64, SubscriptionOperation)>,
     subscription_accounts: HashMap<String, Value>,
-    subscription_refreshes: HashMap<u64, String>,
+    subscription_refreshes: HashMap<u64, (String, InterfaceLocale)>,
     compaction: Option<Value>,
     compaction_request: Option<(u64, u64, bool)>,
     compaction_error: Option<String>,
@@ -672,7 +684,11 @@ impl ProviderSettings {
         );
     }
 
-    pub(crate) fn refresh_subscription_models(&mut self, provider_id: &str) {
+    pub(crate) fn refresh_subscription_models(
+        &mut self,
+        provider_id: &str,
+        locale: InterfaceLocale,
+    ) {
         if self.refreshing_subscription(provider_id) {
             return;
         }
@@ -685,16 +701,16 @@ impl ProviderSettings {
             }
         }) {
             self.subscription_refreshes
-                .insert(request_id, provider_id.into());
+                .insert(request_id, (provider_id.into(), locale));
         } else {
-            self.notice = Some(("模型刷新失败", CONNECTING.into(), true));
+            self.notice = Some(("模型刷新失败".into(), CONNECTING.into(), true));
         }
     }
 
     pub(crate) fn refreshing_subscription(&self, id: &str) -> bool {
         self.subscription_refreshes
             .values()
-            .any(|provider_id| provider_id == id)
+            .any(|(provider_id, _)| provider_id == id)
     }
 
     fn send_subscription(
@@ -780,7 +796,7 @@ impl ProviderSettings {
                     self.sort_providers();
                 }
                 self.subscription_login = SubscriptionLogin::default();
-                self.notice = Some(("配置已保存", "供应商配置已保存".into(), false));
+                self.notice = Some(("配置已保存".into(), "供应商配置已保存".into(), false));
                 ProviderUpdate::Saved
             }
             (_, ProviderSettingsResult::SubscriptionLogin(view)) => self.apply_login_view(view),
@@ -927,7 +943,7 @@ impl ProviderSettings {
     pub(crate) fn notice(&self) -> Option<(&str, &str, bool)> {
         self.notice
             .as_ref()
-            .map(|(title, text, error)| (*title, text.as_str(), *error))
+            .map(|(title, text, error)| (title.as_str(), text.as_str(), *error))
     }
 
     pub(crate) fn dismiss_notice(&mut self) {
@@ -1075,13 +1091,15 @@ impl ProviderSettings {
             self.subscription_request = None;
             return self.receive_subscription(operation, reply.result);
         }
-        if let Some(id) = self.subscription_refreshes.remove(&reply.request_id) {
+        if let Some((id, locale)) = self.subscription_refreshes.remove(&reply.request_id) {
             match reply.result {
                 ProviderSettingsResult::SubscriptionModels(view) if view.provider_id == id => {
+                    let title =
+                        subscription_models_refreshed_title(locale, view.details.models.len());
                     if self.accept_subscription_snapshot(view.snapshot) {
                         self.accept_subscription_details(id, view.details);
                     }
-                    self.notice = Some(("模型已刷新", String::new(), false));
+                    self.notice = Some((title, String::new(), false));
                 }
                 result => {
                     let error = match result {
@@ -1096,7 +1114,7 @@ impl ProviderSettings {
                         }
                         self.subscription_accounts.remove(&id);
                     }
-                    self.notice = Some(("模型刷新失败", error, true));
+                    self.notice = Some(("模型刷新失败".into(), error, true));
                 }
             }
             return ProviderUpdate::None;
@@ -1135,9 +1153,13 @@ impl ProviderSettings {
                     return self.request_switch(id, Some(provider));
                 }
                 self.notice = Some(if editing {
-                    ("配置已保存", "供应商配置已保存".into(), false)
+                    ("配置已保存".into(), "供应商配置已保存".into(), false)
                 } else {
-                    ("配置已保存", "供应商已保存，尚未切换。".into(), false)
+                    (
+                        "配置已保存".into(),
+                        "供应商已保存，尚未切换。".into(),
+                        false,
+                    )
                 });
                 ProviderUpdate::Saved
             }
@@ -1145,7 +1167,7 @@ impl ProviderSettings {
                 if !self.accept_snapshot(snapshot) {
                     return ProviderUpdate::DeleteFailed;
                 }
-                self.notice = Some(("供应商已删除", String::new(), false));
+                self.notice = Some(("供应商已删除".into(), String::new(), false));
                 ProviderUpdate::Deleted
             }
             (Operation::Switch { id, committed }, ProviderSettingsResult::Snapshot(snapshot)) => {
@@ -1166,7 +1188,7 @@ impl ProviderSettings {
                     "Claude Code"
                 };
                 self.notice = Some((
-                    "默认供应商已切换",
+                    "默认供应商已切换".into(),
                     format!("已切换为 {name}；{app} 新会话直接生效"),
                     false,
                 ));
@@ -1265,7 +1287,7 @@ impl ProviderSettings {
             self.committed_provider = committed;
             ProviderUpdate::SaveFailed(message)
         } else {
-            self.notice = Some(("需要检查", message, true));
+            self.notice = Some(("需要检查".into(), message, true));
             self.retry_switch_id = Some(id);
             ProviderUpdate::None
         }
@@ -1414,6 +1436,24 @@ impl Drop for ProviderSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subscription_refresh_title_matches_the_count_and_locale() {
+        assert_eq!(
+            subscription_models_refreshed_title(InterfaceLocale::Chinese, 7),
+            "模型列表已更新（7 个模型）"
+        );
+        for (count, expected) in [
+            (0, "Model list updated (0 models)"),
+            (1, "Model list updated (1 model)"),
+            (7, "Model list updated (7 models)"),
+        ] {
+            assert_eq!(
+                subscription_models_refreshed_title(InterfaceLocale::English, count),
+                expected
+            );
+        }
+    }
 
     fn api_draft() -> ProviderDraft {
         ProviderDraft {
