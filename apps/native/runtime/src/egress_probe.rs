@@ -19,7 +19,9 @@ use matou_native_core::provider_launch::{
 pub use matou_native_core::sessions::{
     InterfaceLocale, LocalePreference, resolve_interface_locale,
 };
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use url::Url;
 
 pub const SLOW_THRESHOLD_MS: u64 = 5_000;
@@ -29,6 +31,8 @@ pub const RECOVERY_CONFIRM_MS: u64 = 5_000;
 pub(crate) const LIVE_RECHECK_INTERVAL: Duration = Duration::from_secs(60);
 const MAX_TRACE_BYTES: usize = 4096;
 const LOCAL_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+const PROTECTION_KEY: &str = "egress.protection";
+const RULE_KEY: &str = "egress.rule";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -1358,10 +1362,72 @@ pub enum RuleMode {
     Ip,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct EgressRule {
     pub mode: RuleMode,
     pub baselines: BTreeMap<Family, Exit>,
+}
+
+pub(crate) fn load_settings(db: &Connection) -> rusqlite::Result<(EgressRule, bool)> {
+    let read = |key| {
+        db.query_row(
+            "SELECT CAST(value_json AS BLOB) FROM preferences WHERE key = ?",
+            [key],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()
+        .map(|value| value.and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok()))
+    };
+    let enabled = read(PROTECTION_KEY)?
+        .and_then(|value| value.as_bool())
+        .unwrap_or(true);
+    let mut rule = EgressRule::default();
+    if let Some(value) = read(RULE_KEY)? {
+        if value["mode"] == "ip" {
+            rule.mode = RuleMode::Ip;
+        }
+        for family in FAMILIES {
+            let baseline = &value["baselines"][family.name()];
+            if let (Some(ip), Some(country)) =
+                (baseline["ip"].as_str(), baseline["country"].as_str())
+                && !ip.is_empty()
+                && !country.is_empty()
+            {
+                rule.baselines.insert(
+                    family,
+                    Exit {
+                        ip: ip.into(),
+                        country: country.into(),
+                    },
+                );
+            }
+        }
+    }
+    Ok((rule, enabled))
+}
+
+pub(crate) fn save_settings(
+    db: &mut Connection,
+    rule: Option<&EgressRule>,
+    protection: Option<bool>,
+    now: i64,
+) -> anyhow::Result<()> {
+    let transaction = db.transaction()?;
+    let write = |key, value: String| {
+        transaction.execute(
+            "INSERT INTO preferences (key, value_json, updated_at) VALUES (?, ?, ?)
+             ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at",
+            params![key, value, now],
+        )
+    };
+    if let Some(rule) = rule {
+        write(RULE_KEY, serde_json::to_string(rule)?)?;
+    }
+    if let Some(enabled) = protection {
+        write(PROTECTION_KEY, enabled.to_string())?;
+    }
+    transaction.commit()?;
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -1720,6 +1786,7 @@ pub trait EgressSampler {
     ) -> impl Future<Output = Result<HostSample, Self::Error>> + Send;
 }
 
+#[derive(Clone)]
 pub struct EgressMonitor {
     rule: EgressRule,
     protection_enabled: bool,
@@ -1761,6 +1828,10 @@ impl EgressMonitor {
 
     pub fn rule(&self) -> &EgressRule {
         &self.rule
+    }
+
+    pub(crate) fn protection_enabled(&self) -> bool {
+        self.protection_enabled
     }
 
     pub fn recovery_deadline(&self) -> Option<u64> {
