@@ -20,6 +20,7 @@ use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
 use crate::codex_events;
+use crate::context_guard::interceptor::HookInterceptor;
 
 pub(crate) const IDENTITY_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const HOOK_QUEUE_CAPACITY: usize = 128;
@@ -343,6 +344,7 @@ type Registry = Arc<Mutex<HashMap<String, Record>>>;
 
 struct Record {
     scope: Scope,
+    data_root: PathBuf,
     _files: HookFiles,
     retired: Option<Instant>,
     reported_retirement: bool,
@@ -362,17 +364,37 @@ impl Drop for HookFiles {
     }
 }
 
+pub(crate) const FOREMAN_CAPABILITY_INDEX: &str = "\
+## Matou Built-in Task Dispatch (`mt-foreman`)
+
+When the user asks to delegate or hand off work to another coding agent (e.g. 用 Codex / 交给 Codex / 让 Codex 做 / 交给 DSH / 交给 Antigravity / 交给反重力), or when splitting out well-defined execution work:
+1. Run `mt-foreman guide` first to read the full brief, supervision, and acceptance workflow on demand (it automatically includes the user's latest Matou agent niche settings; use `mt-foreman roles` to re-check niche changes anytime, and `mt-foreman guide brief|parallel|reference` for templates and command details).
+2. Dispatch and supervise tasks with `mt-foreman` (`start`, `watch`, `answer`, `note`, `send`, `status`, `stop`) instead of raw `codex exec` or ad-hoc relay subagents.
+3. Do not dispatch recursively if this session is already a foreman worker (`MATOU_FOREMAN_DEPTH` is set).";
+
+pub(crate) fn compose_managed_instructions(base: &str, foreman_available: bool) -> String {
+    if !foreman_available {
+        return base.to_owned();
+    }
+    format!("{}\n\n{}", base.trim_end(), FOREMAN_CAPABILITY_INDEX)
+}
+
 pub(crate) struct Registration {
     token: String,
     registry: Registry,
     pub settings_path: PathBuf,
     script_path: PathBuf,
     url: String,
-    dsh_assets: Option<tempfile::TempDir>,
+    provider_assets: Option<tempfile::TempDir>,
 }
 
 impl Registration {
-    pub fn attach_dsh(&mut self, dump: &str, run_id: &str) -> Result<PathBuf> {
+    pub fn attach_dsh(
+        &mut self,
+        dump: &str,
+        run_id: &str,
+        foreman_available: bool,
+    ) -> Result<PathBuf> {
         let assets = tempfile::Builder::new()
             .prefix("dsh-")
             .tempdir_in(self.settings_path.parent().context("DSH hook directory")?)?;
@@ -394,9 +416,13 @@ impl Registration {
         ] {
             write_private(&directory.join(name), source.as_bytes(), 0o600)?;
         }
+        let system_message = compose_managed_instructions(
+            include_str!("../../../runtime/control-assets/providers/dsh-system-message.md"),
+            foreman_available,
+        );
         write_private(
             &assets.path().join("dsh-system-message.md"),
-            include_bytes!("../../../runtime/control-assets/providers/dsh-system-message.md"),
+            system_message.as_bytes(),
             0o600,
         )?;
         let bridge = directory.join("bridge.mjs");
@@ -408,24 +434,55 @@ impl Registration {
         )?;
         let path = assets.path().join("observation.yml");
         write_private(&path, patch.as_bytes(), 0o600)?;
-        self.dsh_assets = Some(assets);
+        self.provider_assets = Some(assets);
+        Ok(path)
+    }
+
+    pub fn attach_antigravity_instructions(&mut self, foreman_available: bool) -> Result<PathBuf> {
+        let assets = tempfile::Builder::new()
+            .prefix("antigravity-")
+            .tempdir_in(
+                self.settings_path
+                    .parent()
+                    .context("Antigravity hook directory")?,
+            )?;
+        let path = assets.path().join("antigravity-system-message.md");
+        let system_message = compose_managed_instructions(
+            include_str!("../../../runtime/control-assets/providers/antigravity-system-message.md"),
+            foreman_available,
+        );
+        write_private(&path, system_message.as_bytes(), 0o600)?;
+        self.provider_assets = Some(assets);
         Ok(path)
     }
 
     pub fn antigravity_environment(
         &self,
+        system_message_file: Option<&Path>,
     ) -> std::collections::BTreeMap<std::ffi::OsString, std::ffi::OsString> {
-        [
+        let mut env = std::collections::BTreeMap::from([
             ("MATOU_PROVIDER_HOOK_URL".into(), self.url.clone().into()),
             (
                 "MATOU_PROVIDER_HOOK_TOKEN".into(),
                 self.token.clone().into(),
             ),
-        ]
-        .into()
+        ]);
+        if let Some(path) = system_message_file {
+            env.insert(
+                "MATOU_ANTIGRAVITY_SYSTEM_MESSAGE_FILE".into(),
+                path.as_os_str().to_os_string(),
+            );
+        }
+        env
     }
 
-    pub fn attach_codex(&self, launch: &mut ShellLaunch) -> Result<()> {
+    pub fn attach_codex(&self, launch: &mut ShellLaunch, foreman_available: bool) -> Result<()> {
+        let instructions = compose_managed_instructions(
+            include_str!(
+                "../../../runtime/control-assets/providers/codex-developer-instructions.md"
+            ),
+            foreman_available,
+        );
         let command = json!(callback_command(&self.url, &self.script_path)?);
         let status = if launch
             .env
@@ -441,6 +498,8 @@ impl Registration {
             format!(r#"{event} = [{{ hooks = [{{ type = "command", command = {command}, timeout = {timeout}, statusMessage = {status} }}] }}]"#)
         });
         launch.argv.extend([
+            "-c".into(),
+            format!("developer_instructions={}", json!(instructions)),
             "-c".into(),
             format!("hooks={{ {} }}", hooks.join(", ")),
             "--dangerously-bypass-hook-trust".into(),
@@ -462,6 +521,7 @@ impl Drop for Registration {
 pub(crate) struct ProviderHookServer {
     port: u16,
     registry: Registry,
+    interceptor: Arc<HookInterceptor>,
     messages: Receiver<HookMessage>,
     stop: Arc<AtomicBool>,
     listener: Option<JoinHandle<()>>,
@@ -476,23 +536,30 @@ impl ProviderHookServer {
             .context("configure provider hook listener")?;
         let port = listener.local_addr()?.port();
         let registry = Registry::default();
+        let interceptor = Arc::new(HookInterceptor::new());
         let stop = Arc::new(AtomicBool::new(false));
         let (send, messages) = mpsc::sync_channel(HOOK_QUEUE_CAPACITY);
         let handle = {
             let registry = Arc::clone(&registry);
+            let interceptor = Arc::clone(&interceptor);
             let stop = Arc::clone(&stop);
             thread::Builder::new()
                 .name("provider-hook".into())
-                .spawn(move || listen(listener, &registry, &send, &stop))
+                .spawn(move || listen(listener, &registry, &interceptor, &send, &stop))
                 .context("start provider hook listener")?
         };
         Ok(Self {
             port,
             registry,
+            interceptor,
             messages,
             stop,
             listener: Some(handle),
         })
+    }
+
+    pub fn saved_noise_bytes(&self, session_id: &str) -> u64 {
+        self.interceptor.saved_noise_bytes(session_id)
     }
 
     pub fn register(&self, data_root: &Path, scope: Scope) -> Result<Registration> {
@@ -562,6 +629,7 @@ impl ProviderHookServer {
             token.clone(),
             Record {
                 scope,
+                data_root: data_root.to_path_buf(),
                 _files: files,
                 retired: None,
                 reported_retirement: false,
@@ -573,7 +641,7 @@ impl ProviderHookServer {
             settings_path,
             script_path,
             url,
-            dsh_assets: None,
+            provider_assets: None,
         })
     }
 
@@ -652,39 +720,63 @@ fn windows_callback_command(url: &str) -> String {
     )
 }
 
+fn bundled_control_assets_candidates(
+    executable: Option<&Path>,
+    control_asset_root: Option<&Path>,
+) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(root) = control_asset_root.filter(|root| !root.as_os_str().is_empty()) {
+        roots.push(root.to_path_buf());
+    }
+    if let Some(executable) = executable
+        && let Some(executable_dir) = executable.parent()
+    {
+        let resources = if executable
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"))
+        {
+            Some(executable_dir.join("resources"))
+        } else {
+            executable_dir.parent().and_then(|contents| {
+                (executable_dir.file_name() == Some(std::ffi::OsStr::new("MacOS"))
+                    && contents.file_name() == Some(std::ffi::OsStr::new("Contents")))
+                .then(|| contents.join("Resources"))
+            })
+        };
+        if let Some(resources) = resources {
+            roots.push(resources.join("control-assets"));
+        }
+    }
+    roots
+}
+
 pub(crate) fn bundled_claude_plugin(
     executable: Option<&Path>,
     control_asset_root: Option<&Path>,
 ) -> Option<PathBuf> {
-    let valid_plugin = |root: &Path| {
-        let plugin = root.join("providers/claude-plugin");
-        plugin
-            .join(".claude-plugin/plugin.json")
-            .is_file()
-            .then_some(plugin)
-    };
-    if let Some(plugin) = control_asset_root
-        .filter(|root| !root.as_os_str().is_empty())
-        .and_then(valid_plugin)
-    {
-        return Some(plugin);
-    }
-    let executable = executable?;
-    let executable_dir = executable.parent()?;
-    let resources = if executable
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"))
-    {
-        executable_dir.join("resources")
-    } else {
-        let contents = executable_dir.parent()?;
-        if executable_dir.file_name()? != "MacOS" || contents.file_name()? != "Contents" {
-            return None;
-        }
-        contents.join("Resources")
-    };
-    valid_plugin(&resources.join("control-assets"))
+    bundled_control_assets_candidates(executable, control_asset_root)
+        .into_iter()
+        .find_map(|root| {
+            let plugin = root.join("providers/claude-plugin");
+            plugin
+                .join(".claude-plugin/plugin.json")
+                .is_file()
+                .then_some(plugin)
+        })
+}
+
+pub(crate) fn bundled_foreman_script(
+    executable: Option<&Path>,
+    control_asset_root: Option<&Path>,
+) -> Option<PathBuf> {
+    bundled_control_assets_candidates(executable, control_asset_root)
+        .into_iter()
+        .find_map(|root| {
+            let script =
+                root.join("providers/claude-plugin/skills/agent-foreman/scripts/foreman.mjs");
+            script.is_file().then_some(script)
+        })
 }
 
 pub(crate) fn claude_config_counts(cwd: &Path, config: &Path) -> Value {
@@ -856,6 +948,7 @@ fn new_token() -> String {
 fn listen(
     listener: TcpListener,
     registry: &Registry,
+    interceptor: &Arc<HookInterceptor>,
     send: &SyncSender<HookMessage>,
     stop: &AtomicBool,
 ) {
@@ -885,10 +978,13 @@ fn listen(
             match listener.accept() {
                 Ok((socket, _)) => {
                     let registry = Arc::clone(registry);
+                    let interceptor = Arc::clone(interceptor);
                     let send = send.clone();
                     if let Ok(worker) = thread::Builder::new()
                         .name("provider-hook-request".into())
-                        .spawn(move || handle_request(socket, &registry, &send, drain_deadline))
+                        .spawn(move || {
+                            handle_request(socket, &registry, &interceptor, &send, drain_deadline)
+                        })
                     {
                         workers.push(worker);
                     }
@@ -912,9 +1008,42 @@ fn listen(
     }
 }
 
+const HOOK_DECISION_BUDGET: Duration = Duration::from_millis(150);
+
+fn evaluate_hook_fail_open(
+    interceptor: &Arc<HookInterceptor>,
+    data_root: &Path,
+    profile: LaunchProfile,
+    session_id: &str,
+    payload: &Value,
+) -> String {
+    let (tx, rx) = mpsc::sync_channel(1);
+    let interceptor = Arc::clone(interceptor);
+    let data_root = data_root.to_path_buf();
+    let session_id = session_id.to_owned();
+    let payload = payload.clone();
+    let spawned = thread::Builder::new()
+        .name("context-guard-eval".into())
+        .spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                interceptor
+                    .evaluate_hook(&data_root, profile, &session_id, &payload)
+                    .response_json
+            }))
+            .unwrap_or_else(|_| "{}".to_owned());
+            let _ = tx.try_send(result);
+        });
+    if spawned.is_err() {
+        return "{}".to_owned();
+    }
+    rx.recv_timeout(HOOK_DECISION_BUDGET)
+        .unwrap_or_else(|_| "{}".to_owned())
+}
+
 fn handle_request(
     mut socket: TcpStream,
     registry: &Registry,
+    interceptor: &Arc<HookInterceptor>,
     send: &SyncSender<HookMessage>,
     drain_deadline: Option<Instant>,
 ) {
@@ -923,10 +1052,10 @@ fn handle_request(
         return;
     }
     let deadline = drain_deadline.unwrap_or_else(|| Instant::now() + REQUEST_TIMEOUT);
-    let result = read_request(&mut socket, registry, send, deadline);
+    let result = read_request(&mut socket, registry, interceptor, send, deadline);
     let (status, body) = match result {
-        Ok(()) => ("200 OK", "{}"),
-        Err(status) => (status, ""),
+        Ok(decision_json) => ("200 OK", decision_json),
+        Err(status) => (status, String::new()),
     };
     let _ = socket.set_write_timeout(Some(Duration::from_millis(100)));
     let _ = write!(
@@ -944,9 +1073,10 @@ const NOT_FOUND: &str = "404 Not Found";
 fn read_request(
     socket: &mut TcpStream,
     registry: &Registry,
+    interceptor: &Arc<HookInterceptor>,
     send: &SyncSender<HookMessage>,
     deadline: Instant,
-) -> HttpResult<()> {
+) -> HttpResult<String> {
     let mut reader = BufReader::new(DeadlineRead { socket, deadline });
     let mut header_budget = MAX_HEADERS;
     let first = read_line(&mut reader, &mut header_budget)?;
@@ -1028,12 +1158,20 @@ fn read_request(
         {
             record.reported_retirement = true;
         }
-        return Ok(());
+        return Ok("{}".to_owned());
     }
     let received_at = Instant::now();
     if pre_tool_use && record.scope.profile != LaunchProfile::Antigravity {
         return Err(NOT_FOUND);
     }
+    let eval_scope = (!statusline).then(|| {
+        (
+            record.data_root.clone(),
+            record.scope.profile,
+            record.scope.session_id.clone(),
+            Value::Object(payload.clone()),
+        )
+    });
     let message = if record.scope.profile == LaunchProfile::Antigravity {
         use crate::antigravity_events::Source;
         let source = if statusline {
@@ -1063,8 +1201,21 @@ fn read_request(
         observation.hud_payload = Some(Value::Object(payload));
         HookMessage::Observed(record.scope.clone(), observation, received_at)
     };
+    drop(registry);
     match send.try_send(message) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            let decision_json = match eval_scope {
+                Some((data_root, profile, session_id, payload_val)) => evaluate_hook_fail_open(
+                    interceptor,
+                    &data_root,
+                    profile,
+                    &session_id,
+                    &payload_val,
+                ),
+                None => "{}".to_owned(),
+            };
+            Ok(decision_json)
+        }
         Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
             Err("503 Service Unavailable")
         }
@@ -1160,6 +1311,7 @@ mod tests {
         let mut server = ProviderHookServer {
             port: listener.local_addr()?.port(),
             registry: Registry::default(),
+            interceptor: Arc::new(HookInterceptor::new()),
             messages,
             stop: Arc::new(AtomicBool::new(false)),
             listener: None,
@@ -1178,9 +1330,10 @@ mod tests {
         // Start at the stop boundary so the connection is still in the TCP backlog.
         server.stop.store(true, Ordering::Relaxed);
         let registry = Arc::clone(&server.registry);
+        let interceptor = Arc::clone(&server.interceptor);
         let stop = Arc::clone(&server.stop);
         server.listener = Some(thread::spawn(move || {
-            listen(listener, &registry, &send, &stop)
+            listen(listener, &registry, &interceptor, &send, &stop)
         }));
         socket.write_all(body)?;
         server.finish_requests();
@@ -1264,6 +1417,52 @@ mod tests {
                 Some(explicit_plugin.clone()),
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn bundled_foreman_script_and_composed_instructions_work() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let explicit = root.path().join("explicit assets");
+        let explicit_script = explicit
+            .join("providers/claude-plugin/skills/agent-foreman/scripts/foreman.mjs");
+        fs::create_dir_all(explicit_script.parent().unwrap())?;
+        fs::write(&explicit_script, "// foreman")?;
+        assert_eq!(
+            bundled_foreman_script(None, Some(&explicit)),
+            Some(explicit_script.clone()),
+        );
+        for (executable, resources) in [
+            (
+                root.path().join("Matou package/matou-native-runtime.exe"),
+                root.path().join("Matou package/resources"),
+            ),
+            (
+                root.path()
+                    .join("Matou.app/Contents/MacOS/matou-native-runtime"),
+                root.path().join("Matou.app/Contents/Resources"),
+            ),
+        ] {
+            let script = resources
+                .join("control-assets/providers/claude-plugin/skills/agent-foreman/scripts/foreman.mjs");
+            fs::create_dir_all(script.parent().unwrap())?;
+            fs::write(&script, "// bundled")?;
+            assert_eq!(
+                bundled_foreman_script(Some(&executable), None),
+                Some(script),
+            );
+            assert_eq!(
+                bundled_foreman_script(Some(&executable), Some(&explicit)),
+                Some(explicit_script.clone()),
+            );
+        }
+
+        let base = "Base host instructions.\n";
+        assert_eq!(compose_managed_instructions(base, false), base);
+        let composed = compose_managed_instructions(base, true);
+        assert!(composed.starts_with("Base host instructions.\n\n"));
+        assert!(composed.contains("mt-foreman guide"));
+        assert!(composed.contains("MATOU_FOREMAN_DEPTH"));
         Ok(())
     }
 

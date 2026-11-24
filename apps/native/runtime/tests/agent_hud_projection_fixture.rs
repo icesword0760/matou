@@ -337,3 +337,31 @@ fn claude_status_line_accepts_rate_limits_and_explicit_usage_windows() {
     assert_eq!(windows[0].id, "id");
     assert_eq!(windows[0].reset_text.as_deref(), Some("7m"));
 }
+
+#[test]
+fn dsh_hud_projects_external_foreman_agents_only_when_present() {
+    let mut projection = AgentHudProjection::new("dsh", HudProvider::Dsh, 0.);
+    let idle = projection.snapshot(1000.);
+    assert!(idle.agents.is_none());
+    assert!(idle.subagent_count.is_none());
+
+    projection.set_external_agents(vec![
+        matou_native_runtime::agent_hud_projection::AgentActivity {
+            id: "codex-demo-01".into(),
+            label: "demo-01".into(),
+            state: matou_native_runtime::agent_hud_projection::AgentState::Running,
+            source: matou_native_runtime::agent_hud_projection::AgentSource::External,
+            started_at: Some(1000.),
+            detail: Some("sol · high".into()),
+        },
+    ]);
+    let active = projection.snapshot(2000.);
+    assert_eq!(active.subagent_count, Some(1));
+    assert_eq!(active.agents.as_ref().map(Vec::len), Some(1));
+    assert_eq!(active.agents.as_ref().unwrap()[0].id, "codex-demo-01");
+
+    projection.set_external_agents(Vec::new());
+    let cleared = projection.snapshot(3000.);
+    assert!(cleared.agents.is_none());
+    assert!(cleared.subagent_count.is_none());
+}

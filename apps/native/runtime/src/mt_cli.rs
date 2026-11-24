@@ -54,6 +54,34 @@ pub(crate) fn install_shim(data_root: &Path) -> anyhow::Result<std::path::PathBu
     shim.as_file()
         .set_permissions(Permissions::from_mode(0o700))?;
     shim.persist(dir.join("mt"))?;
+    let foreman_shim_path = dir.join("mt-foreman");
+    let control_asset_root = std::env::var_os("MATOU_CONTROL_ASSET_ROOT");
+    if let Some(script) = crate::provider_hook::bundled_foreman_script(
+        Some(executable.as_path()),
+        control_asset_root.as_deref().map(Path::new),
+    ) {
+        let mut foreman_shim = tempfile::NamedTempFile::new_in(&dir)?;
+        foreman_shim.write_all(b"#!/bin/sh\nexec \"${MATOU_CONTROL_NODE_EXECUTABLE:-node}\" '")?;
+        for part in script
+            .as_os_str()
+            .as_bytes()
+            .split_inclusive(|byte| *byte == b'\'')
+        {
+            if let Some(path) = part.strip_suffix(b"'") {
+                foreman_shim.write_all(path)?;
+                foreman_shim.write_all(b"'\\''")?;
+            } else {
+                foreman_shim.write_all(part)?;
+            }
+        }
+        writeln!(foreman_shim, "' \"$@\"")?;
+        foreman_shim
+            .as_file()
+            .set_permissions(Permissions::from_mode(0o700))?;
+        foreman_shim.persist(foreman_shim_path)?;
+    } else {
+        let _ = fs::remove_file(foreman_shim_path);
+    }
     Ok(dir)
 }
 
@@ -67,6 +95,23 @@ pub(crate) fn install_shim(data_root: &Path) -> anyhow::Result<std::path::PathBu
         "@echo off\r\nsetlocal DisableDelayedExpansion\r\n\"%MATOU_CONTROL_RUNTIME%\" {MODE} %*\r\n"
     )?;
     shim.persist(dir.join("mt.cmd"))?;
+    let foreman_shim_path = dir.join("mt-foreman.cmd");
+    let executable = std::env::current_exe().ok();
+    let control_asset_root = std::env::var_os("MATOU_CONTROL_ASSET_ROOT");
+    if let Some(script) = crate::provider_hook::bundled_foreman_script(
+        executable.as_deref(),
+        control_asset_root.as_deref().map(Path::new),
+    ) {
+        let mut foreman_shim = tempfile::NamedTempFile::new_in(&dir)?;
+        let script_str = script.to_string_lossy();
+        write!(
+            foreman_shim,
+            "@echo off\r\nsetlocal DisableDelayedExpansion\r\nif not \"%MATOU_CONTROL_NODE_EXECUTABLE%\"==\"\" (\r\n  \"%MATOU_CONTROL_NODE_EXECUTABLE%\" \"{script_str}\" %*\r\n) else (\r\n  node \"{script_str}\" %*\r\n)\r\n"
+        )?;
+        foreman_shim.persist(foreman_shim_path)?;
+    } else {
+        let _ = std::fs::remove_file(foreman_shim_path);
+    }
     Ok(dir)
 }
 
@@ -127,6 +172,27 @@ pub(crate) fn run_with(
         };
     };
     let json_output = json_output_requested(command, &args[1..]);
+    if command == "ctx" {
+        return match crate::context_guard::cli::run_ctx_command(&args[1..], None) {
+            Ok(text) => {
+                let output = if json_output {
+                    pretty_json(&json!({ "text": text }))
+                } else {
+                    text
+                };
+                if writeln!(stdout, "{output}").is_ok() {
+                    0
+                } else {
+                    1
+                }
+            }
+            Err(error) => {
+                let cli_err = CliError::new("INVALID_ARGUMENT", error.to_string());
+                let _ = writeln!(stderr, "{}", cli_err.format(json_output));
+                cli_err.exit_code()
+            }
+        };
+    }
     let (endpoint, token) = identity();
     let result = request(command, &args[1..], endpoint, token);
     match result {

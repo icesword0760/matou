@@ -58,13 +58,14 @@ pub(crate) use windows::connect as connect_pipe;
 #[cfg(windows)]
 use windows::{Endpoint, accept_connections};
 
-const CONTROL_ENV: [&str; 10] = [
+const CONTROL_ENV: [&str; 11] = [
     "MATOU_CONTROL_ENDPOINT",
     "MATOU_CONTROL_TOKEN",
     "MATOU_CONTROL_PROTOCOL",
     "MATOU_CONTROL_CALLER_SESSION",
     "MATOU_CONTROL_CALLER_RUN",
     "MATOU_AGENT_STATUS_DIR",
+    "MATOU_FOREMAN_ROLES_FILE",
     "MATOU_CONTROL_NODE_EXECUTABLE",
     "MATOU_CONTROL_ASSET_ROOT",
     "DSH_MATOU_CONTROL_TOKEN",

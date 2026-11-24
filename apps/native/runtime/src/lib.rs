@@ -14,6 +14,7 @@ pub mod codex_fork;
 mod codex_launch;
 mod codex_permissions;
 mod codex_resume;
+pub mod context_guard;
 pub mod derived;
 pub mod dsh_catalog;
 pub mod dsh_events;

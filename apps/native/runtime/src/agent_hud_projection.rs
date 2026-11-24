@@ -7,6 +7,7 @@ use regex::Regex;
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::context_guard::ContextGuardHudSummary;
 use crate::provider_hook::{nonempty, one_line};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -215,6 +216,8 @@ pub struct HudSnapshot {
     pub config_counts: Option<ConfigCounts>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hook_names: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_guard: Option<ContextGuardHudSummary>,
 }
 
 pub struct AgentHudProjection {
@@ -276,6 +279,7 @@ impl AgentHudProjection {
                 all_usage_windows: None,
                 config_counts: None,
                 hook_names: None,
+                context_guard: None,
             },
             context_tokens: None,
             context_used_tokens: None,
@@ -358,6 +362,10 @@ impl AgentHudProjection {
     pub(crate) fn set_config(&mut self, counts: ConfigCounts, hook_names: Vec<String>) {
         self.hud.config_counts = Some(counts);
         self.hud.hook_names = Some(hook_names);
+    }
+
+    pub fn set_context_guard(&mut self, summary: Option<ContextGuardHudSummary>) {
+        self.hud.context_guard = summary;
     }
 
     pub(crate) fn cwd(&self) -> Option<&str> {
@@ -445,7 +453,7 @@ impl AgentHudProjection {
                 hud.running_tools = Some(running.into_iter().map(|(_, tool)| tool).collect());
             }
         }
-        if hud.agents.is_some() {
+        if hud.agents.is_some() || (!self.session_ended && !self.external_agents.is_empty()) {
             let mut agents = Vec::new();
             if !self.session_ended {
                 for (agent, failed_at) in &self.transcript_agents {
