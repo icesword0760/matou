@@ -2750,6 +2750,7 @@ dependencies = [
  "async-channel 2.5.0",
  "base64",
  "encoding_rs",
+ "flate2",
  "getrandom 0.4.3",
  "http-body-util",
  "hyper",

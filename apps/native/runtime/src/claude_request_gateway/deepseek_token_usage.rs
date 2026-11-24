@@ -1,11 +1,13 @@
 use std::{
     collections::{BTreeMap, VecDeque},
+    io::{self, Write},
     sync::{Arc, Mutex, OnceLock},
 };
 
+use flate2::write::{DeflateDecoder, MultiGzDecoder, ZlibDecoder};
 use serde_json::{Map, Value, json};
 
-use super::ObservableMedia;
+use super::{Encoding, ObservableMedia};
 
 const MAX_KEYS: usize = 256;
 const MAX_BYTES: usize = 4 * 1024 * 1024;
@@ -242,7 +244,116 @@ fn has_client_tools(message: &Map<String, Value>) -> bool {
         })
 }
 
-pub(super) struct Observer {
+pub(super) struct ResponseObserver {
+    decoder: Decoder,
+    compressed_bytes: usize,
+}
+
+enum Decoder {
+    Identity(Observer),
+    Gzip(MultiGzDecoder<Decoded>),
+    Zlib {
+        decoder: ZlibDecoder<Decoded>,
+        // Keep the prefix only while the wrapped decoder has produced no output.
+        prefix: Option<Vec<u8>>,
+    },
+    RawDeflate(DeflateDecoder<Decoded>),
+}
+
+struct Decoded(Observer);
+
+impl Write for Decoded {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if self.0.push(bytes) {
+            Ok(bytes.len())
+        } else {
+            Err(io::Error::other("usage observation limit exceeded"))
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl ResponseObserver {
+    pub(super) fn new(
+        media: ObservableMedia,
+        encoding: Encoding,
+        tracker: Arc<Mutex<Tracker>>,
+    ) -> Self {
+        let observer = Observer::new(media, tracker);
+        let decoder = match encoding {
+            Encoding::Identity => Decoder::Identity(observer),
+            Encoding::Gzip => Decoder::Gzip(MultiGzDecoder::new(Decoded(observer))),
+            Encoding::Deflate => Decoder::Zlib {
+                decoder: ZlibDecoder::new(Decoded(observer)),
+                prefix: Some(Vec::new()),
+            },
+        };
+        Self {
+            decoder,
+            compressed_bytes: 0,
+        }
+    }
+
+    pub(super) fn push(&mut self, chunk: &[u8]) -> bool {
+        if let Decoder::Identity(observer) = &mut self.decoder {
+            return observer.push(chunk);
+        }
+        self.compressed_bytes += chunk.len();
+        self.compressed_bytes <= MAX_BYTES && self.decoder.write_compressed(chunk).is_ok()
+    }
+
+    pub(super) fn finish(self) {
+        let decoded = match self.decoder {
+            Decoder::Identity(observer) => return observer.finish(),
+            Decoder::Gzip(decoder) => decoder.finish(),
+            Decoder::Zlib { decoder, .. } => decoder.finish(),
+            Decoder::RawDeflate(decoder) => decoder.finish(),
+        };
+        if let Ok(Decoded(observer)) = decoded {
+            observer.finish();
+        }
+    }
+}
+
+impl Decoder {
+    fn write_compressed(&mut self, chunk: &[u8]) -> io::Result<()> {
+        match self {
+            Self::Identity(_) => unreachable!(),
+            Self::Gzip(decoder) => decoder.write_all(chunk),
+            Self::RawDeflate(decoder) => decoder.write_all(chunk),
+            Self::Zlib { decoder, prefix } => {
+                if let Some(prefix) = prefix {
+                    prefix.extend_from_slice(chunk);
+                }
+                match decoder.write_all(chunk) {
+                    Ok(()) => {
+                        if decoder.total_out() > 0 {
+                            *prefix = None;
+                        }
+                        Ok(())
+                    }
+                    Err(error)
+                        if error.kind() == io::ErrorKind::InvalidInput
+                            && decoder.total_out() == 0
+                            && let Some(prefix) = prefix.take() =>
+                    {
+                        let observer = decoder.get_ref().0.empty();
+                        let mut raw = DeflateDecoder::new(Decoded(observer));
+                        raw.write_all(&prefix)?;
+                        *self = Self::RawDeflate(raw);
+                        Ok(())
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+        }
+    }
+}
+
+struct Observer {
     tracker: Arc<Mutex<Tracker>>,
     sse: bool,
     received: usize,
@@ -254,7 +365,7 @@ pub(super) struct Observer {
 }
 
 impl Observer {
-    pub(super) fn new(media: ObservableMedia, tracker: Arc<Mutex<Tracker>>) -> Self {
+    fn new(media: ObservableMedia, tracker: Arc<Mutex<Tracker>>) -> Self {
         Self {
             tracker,
             sse: media == ObservableMedia::Sse,
@@ -267,8 +378,17 @@ impl Observer {
         }
     }
 
+    fn empty(&self) -> Self {
+        let media = if self.sse {
+            ObservableMedia::Sse
+        } else {
+            ObservableMedia::Json
+        };
+        Self::new(media, Arc::clone(&self.tracker))
+    }
+
     // Return false to retire observation while continuing the response unchanged.
-    pub(super) fn push(&mut self, chunk: &[u8]) -> bool {
+    fn push(&mut self, chunk: &[u8]) -> bool {
         self.received += chunk.len();
         if self.received > MAX_BYTES {
             return false;
@@ -373,7 +493,7 @@ impl Observer {
         }
     }
 
-    pub(super) fn finish(mut self) {
+    fn finish(mut self) {
         let pending = std::mem::take(&mut self.pending);
         if self.sse {
             self.ingest_line(&pending);
@@ -411,6 +531,24 @@ impl Observer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compressed_observation_stops_at_the_decoded_byte_limit() {
+        let tracker = Arc::new(Mutex::new(Tracker::default()));
+        let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        gzip.write_all(br#"{"usage":{"input_tokens":100},"content":"large reply"}"#)
+            .unwrap();
+        gzip.write_all(&vec![b' '; MAX_BYTES]).unwrap();
+        let compressed = gzip.finish().unwrap();
+        assert!(compressed.len() < MAX_BYTES);
+
+        let mut observer =
+            ResponseObserver::new(ObservableMedia::Json, Encoding::Gzip, Arc::clone(&tracker));
+        if observer.push(&compressed) {
+            observer.finish();
+        }
+        assert!(tracker.lock().unwrap().keys.is_empty());
+    }
 
     fn continuation(content: Value) -> Map<String, Value> {
         json!({

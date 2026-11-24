@@ -14,6 +14,10 @@ use super::{
     },
 };
 use anyhow::{Result, ensure};
+use flate2::{
+    Compression,
+    write::{DeflateEncoder, GzEncoder, ZlibEncoder},
+};
 use serde_json::{Value, json};
 
 fn main_delta_gateway(ordinary: SocketAddr, deepseek: SocketAddr) -> Result<Gateway> {
@@ -192,6 +196,157 @@ fn deepseek_observes_actual_tokens_across_routes_and_honors_request_boundaries()
         forward(&replacement, &deepseek, MESSAGES, "", &stop, UNUSED_REPLY)?["messages"],
         stop["messages"]
     );
+    Ok(())
+}
+
+fn compressed(encoding: &str, bytes: &[u8]) -> Result<Vec<u8>> {
+    macro_rules! encode {
+        ($encoder:ident) => {{
+            let mut writer = $encoder::new(Vec::new(), Compression::default());
+            writer.write_all(bytes)?;
+            writer.finish()?
+        }};
+    }
+    Ok(match encoding {
+        "gzip" => encode!(GzEncoder),
+        "deflate" => encode!(ZlibEncoder),
+        "raw" => encode!(DeflateEncoder),
+        _ => unreachable!(),
+    })
+}
+
+#[test]
+fn deepseek_compressed_json_and_sse_preserve_bytes_and_report_actual_usage() -> Result<()> {
+    for (media, response, assistant, used) in [
+        (
+            SSE,
+            OBSERVED_TOOL,
+            json!([{"type":"tool_use","id":"call_bash_1"}]),
+            383_171,
+        ),
+        (JSON, TEXT_REPLY, json!("18 passed, 19 remaining."), 413_200),
+    ] {
+        for format in ["gzip", "deflate", "raw", "bad-gzip"] {
+            let encoding = match format {
+                "raw" => "deflate",
+                "bad-gzip" => "gzip",
+                _ => format,
+            };
+            let mut bytes =
+                compressed(if format == "bad-gzip" { "gzip" } else { format }, response)?;
+            if format == "bad-gzip" {
+                let crc = bytes.len() - 8;
+                bytes[crc] ^= 1;
+            }
+            let ordinary = listener()?;
+            let deepseek = listener()?;
+            let gateway = main_delta_gateway(ordinary.local_addr()?, deepseek.local_addr()?)?;
+            let (send_tail, tail) = mpsc::channel();
+            let upstream_bytes = bytes.clone();
+            let server = upstream(deepseek.try_clone()?, move |mut io, _, headers| {
+                assert_eq!(headers["accept-encoding"], "gzip, deflate");
+                drain_request(&mut io, length(&headers)?)?;
+                let out = io.get_mut();
+                write!(
+                    out,
+                    "HTTP/1.1 200 OK\r\n{media}Content-Encoding: {encoding}\r\nTransfer-Encoding: chunked\r\n\r\n"
+                )?;
+                write_chunk(out, &upstream_bytes[..1])?;
+                tail.recv_timeout(TIMEOUT)?;
+                for piece in upstream_bytes[1..].chunks(7) {
+                    write_chunk(out, piece)?;
+                }
+                write_chunk(out, b"")?;
+                Ok(())
+            });
+            let mut client = BufReader::new(open_request(
+                &gateway,
+                MESSAGES,
+                &stream_body("matou-role/sonnet", media == SSE),
+                "Accept-Encoding: gzip, deflate, br\r\n",
+            )?);
+            let (status, headers) = head(&mut client)?;
+            assert!(status.contains("200 OK"));
+            assert_eq!(headers["content-encoding"], encoding);
+            let mut received = Vec::new();
+            assert_eq!(read_chunk(&mut client, &mut received)?, 1);
+            assert_eq!(received, bytes[..1]);
+            send_tail.send(())?;
+            while read_chunk(&mut client, &mut received)? != 0 {}
+            assert_eq!(received, bytes, "{media} {format}");
+            server.join().unwrap()?;
+
+            let follow_up = json!({
+                "model":"matou-role/sonnet",
+                "messages":[
+                    {"role":"assistant","content":assistant},
+                    {"role":"user","content":"continue"}
+                ]
+            });
+            let delivered = forward(&gateway, &deepseek, MESSAGES, "", &follow_up, UNUSED_REPLY)?;
+            let content = &delivered["messages"][1]["content"];
+            if format == "bad-gzip" {
+                assert_eq!(content, "continue");
+            } else {
+                assert_eq!(content[1], reminder(used, 1_048_576), "{media} {format}");
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn brotli_filter_is_limited_to_tracked_deepseek_requests() -> Result<()> {
+    let ordinary = listener()?;
+    let deepseek = listener()?;
+    let gateway = main_delta_gateway(ordinary.local_addr()?, deepseek.local_addr()?)?;
+    for (server, model, path, headers, expected) in [
+        (
+            &deepseek,
+            "matou-role/sonnet",
+            MESSAGES,
+            "Accept-Encoding: Br; q=1\r\n",
+            vec!["gzip, deflate"],
+        ),
+        (
+            &deepseek,
+            "matou-role/sonnet",
+            MESSAGES,
+            "Accept-Encoding: gzip;q=0.8\r\nAccept-Encoding: Br;q=0.5, deflate, identity\r\n",
+            vec!["gzip;q=0.8, deflate, identity"],
+        ),
+        (
+            &deepseek,
+            "matou-role/sonnet",
+            COUNT,
+            "Accept-Encoding: gzip, br\r\n",
+            vec!["gzip, br"],
+        ),
+        (
+            &ordinary,
+            "matou-role/opus",
+            MESSAGES,
+            "Accept-Encoding: gzip, br\r\n",
+            vec!["gzip, br"],
+        ),
+        (&deepseek, "matou-role/sonnet", MESSAGES, "", vec![]),
+    ] {
+        let (requests, tasks) = record(server.try_clone()?, 1, "200 OK", JSON, b"{}");
+        assert_eq!(
+            exchange(&gateway, path, &stream_body(model, false), headers)?.0,
+            200
+        );
+        let (_, delivered, _) = requests.recv_timeout(TIMEOUT)?;
+        let encodings = delivered
+            .get_all("accept-encoding")
+            .iter()
+            .map(|value| value.to_str())
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        assert_eq!(encodings, expected);
+        for task in tasks {
+            task.join().unwrap()?;
+        }
+    }
     Ok(())
 }
 
