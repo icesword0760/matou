@@ -2179,7 +2179,12 @@ impl Workspace {
 
     fn ensure_history_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.history_view.is_none() {
-            let view = cx.new(HistoryView::new);
+            let dark = self.theme.effective() == AppTheme::Dark;
+            let view = cx.new(|cx| {
+                let mut view = HistoryView::new(cx);
+                view.set_dark(dark, cx);
+                view
+            });
             let generation = self.runtime_generation;
             self.subscriptions.push(cx.subscribe_in(
                 &view,
@@ -3285,6 +3290,9 @@ impl Workspace {
         let app_theme = self.theme.effective();
         let dark = app_theme == AppTheme::Dark;
         cx.set_global(WorkspaceThemeGlobal { dark });
+        if let Some(history) = &self.history_view {
+            history.update(cx, |history, cx| history.set_dark(dark, cx));
+        }
         if let Some(search) = &self.search {
             let colors = SearchBarColors::for_theme(app_theme);
             search.input.update(cx, |input, cx| {
