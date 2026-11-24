@@ -3017,6 +3017,7 @@ impl ShellOwner {
         };
         if !is_shell {
             options.screen_recovery = Some(self.screen_recovery_options(&options.session_id)?);
+            crate::checkpoint_sync::protect_existing(&self.connection, &mut options)?;
         }
         let session_id = options.session_id.clone();
         let cols = options.launch.cols.into();

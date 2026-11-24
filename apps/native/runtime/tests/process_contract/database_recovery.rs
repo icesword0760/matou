@@ -1001,6 +1001,7 @@ fn both_read_only_sources_can_browse_search_and_export_without_changing_source()
                 == owner_mode
         );
         let after = file_tree(&child.data)?;
+        ensure!(!child.data.join("checkpoints").exists(), "read-only Runtime created checkpoint storage");
         ensure!(
             before.keys().eq(after.keys())
                 && before.iter().all(|(name, bytes)| after[name] == *bytes),

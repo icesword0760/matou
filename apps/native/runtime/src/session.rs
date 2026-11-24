@@ -25,6 +25,7 @@ use matou_native_terminal::{
 
 use crate::{
     SessionEvent, SessionOptions, StorageFaultCode,
+    checkpoint_sync::{CapturedCheckpoint, CheckpointSync},
     flow::{
         BATCH_DELAY, CREDIT_HIGH_WATERMARK_BYTES, CREDIT_LOW_WATERMARK_BYTES, CreditWindow,
         MAX_CODE_UNITS, OutputBatcher, Utf8Decoder,
@@ -236,6 +237,8 @@ pub struct Session {
     data_root: PathBuf,
     session_id: String,
     journal: SegmentJournal,
+    checkpoint: Option<CheckpointSync>,
+    screen_epoch: u64,
     gate: Gate,
     protocol_terminal: Terminal,
     display_terminal: Terminal,
@@ -264,6 +267,7 @@ pub struct Session {
 
 impl Session {
     pub fn launch(mut options: SessionOptions) -> Result<Self> {
+        let checkpoint = CheckpointSync::for_session(&options);
         let mut journal = SegmentJournal::open(
             &options.launch.data_root,
             &options.session_id,
@@ -282,10 +286,12 @@ impl Session {
             "initial Shell PTY and terminal geometry differ"
         );
         let mut recovery_diagnostic = None;
+        let mut screen_epoch = 0;
         let [protocol_terminal, mut display_terminal] =
             if options.launch.profile != LaunchProfile::Shell && journal.last_sequence() > 0 {
                 let mut recovered = recover_screen(&options, &journal)?;
                 recovery_diagnostic = recovered.diagnostic;
+                screen_epoch = recovered.screen_epoch;
                 if recovered.resized {
                     journal
                         .append(&Record {
@@ -339,6 +345,8 @@ impl Session {
             data_root: options.launch.data_root,
             session_id: options.session_id,
             journal,
+            checkpoint,
+            screen_epoch,
             gate,
             protocol_terminal,
             display_terminal,
@@ -700,10 +708,14 @@ impl Session {
     }
 
     pub(crate) fn poll_deadline(&self) -> Option<Instant> {
-        [self.screen_deadline(), self.search.deadline()]
-            .into_iter()
-            .flatten()
-            .min()
+        [
+            self.screen_deadline(),
+            self.search.deadline(),
+            self.checkpoint.as_ref().and_then(CheckpointSync::deadline),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     pub fn is_closed(&self) -> bool {
@@ -834,7 +846,60 @@ impl Session {
         self.observe_exit()?;
         self.enqueue_exit_if_ready()?;
         self.refresh_search();
+        self.sync_checkpoint(false);
         Ok(())
+    }
+
+    fn capture_checkpoint_snapshot(&mut self) -> Result<Option<CapturedCheckpoint>> {
+        let Some(checkpoint) = &self.checkpoint else {
+            return Ok(None);
+        };
+        let sequence = self.journal.last_sequence();
+        let (cols, rows) = self.display_grid;
+        if sequence <= checkpoint.last_checkpoint_sequence
+            || self.gate.state() != State::Healthy
+            || cols < 2
+            || rows == 0
+            || !self.display_terminal.can_format_vt_snapshot()?
+        {
+            return Ok(None);
+        }
+        Ok(Some(CapturedCheckpoint {
+            terminal_sequence: sequence,
+            screen_epoch: self.screen_epoch,
+            cols,
+            rows,
+            snapshot: self.display_terminal.format_vt_snapshot()?,
+        }))
+    }
+
+    fn sync_checkpoint(&mut self, closing: bool) {
+        if self.closed {
+            return;
+        }
+        let now = Instant::now();
+        let Some(deadline) = self.checkpoint.as_ref().and_then(CheckpointSync::deadline) else {
+            return;
+        };
+        if !closing && now < deadline {
+            return;
+        }
+        self.checkpoint.as_mut().unwrap().attempted(now);
+        let result = self.capture_checkpoint_snapshot().and_then(|captured| {
+            if let Some(captured) = captured {
+                self.checkpoint.as_mut().unwrap().persist(
+                    &self.data_root,
+                    &self.session_id,
+                    &mut self.journal,
+                    captured,
+                )?;
+            }
+            Ok(())
+        });
+        if let Err(error) = result {
+            self.events
+                .push(diagnostic(format!("write terminal checkpoint: {error:#}")));
+        }
     }
 
     fn refresh_search(&mut self) {
@@ -1014,6 +1079,7 @@ impl Session {
             let display_terminal = &mut self.display_terminal;
             let search = &mut self.search;
             let display_grid = &mut self.display_grid;
+            let checkpoint = &mut self.checkpoint;
             let (_, _, cell_width_px, cell_height_px) = self.geometry;
             let events = RefCell::new(&mut self.events);
             let fault_code = Cell::new(StorageFaultCode::WriteFailed);
@@ -1028,6 +1094,9 @@ impl Session {
                     Frame::Output { sequence, data } => {
                         let decoded = std::str::from_utf8(data)?;
                         display_terminal.feed(data);
+                        if let Some(checkpoint) = checkpoint {
+                            checkpoint.record_output(data.len());
+                        }
                         search.buffer_changed();
                         display_terminal.drain_responses();
                         let clipboard = display_terminal.drain_clipboard();
@@ -1111,6 +1180,7 @@ impl Session {
         self.events.extend(diagnostics);
         if let Some((sequence, status)) = exit {
             let disposed = self.disposed;
+            self.sync_checkpoint(true);
             self.close_resources();
             self.events.push(SessionEvent::SavedExit {
                 sequence,
@@ -1184,6 +1254,7 @@ impl Drop for Session {
 
 struct RecoveredScreen {
     terminals: [Terminal; 2],
+    screen_epoch: u64,
     has_history: bool,
     resized: bool,
     diagnostic: Option<SessionEvent>,
@@ -1203,15 +1274,20 @@ fn recover_screen(options: &SessionOptions, journal: &SegmentJournal) -> Result<
                 return None;
             }
             let checkpoint = candidate.read().ok()?;
-            Some((candidate.terminal_sequence, checkpoint))
+            Some((
+                candidate.terminal_sequence,
+                candidate.screen_epoch,
+                checkpoint,
+            ))
         })
     });
     // A readable checkpoint without a grid requires replay from the beginning.
-    let checkpoint = checkpoint
-        .and_then(|(sequence, checkpoint)| Some((sequence, checkpoint.grid?, checkpoint)));
+    let checkpoint = checkpoint.and_then(|(sequence, epoch, checkpoint)| {
+        Some((sequence, epoch, checkpoint.grid?, checkpoint))
+    });
     let mut grid = checkpoint
         .as_ref()
-        .map(|(_, grid, _)| *grid)
+        .map(|(_, _, grid, _)| *grid)
         .or_else(|| recovery.and_then(|recovery| recovery.initial_grid))
         .unwrap_or((target.cols, target.rows));
     let terminals_at = |(cols, rows)| {
@@ -1225,8 +1301,10 @@ fn recover_screen(options: &SessionOptions, journal: &SegmentJournal) -> Result<
     let mut terminals = terminals_at(grid)?;
     let mut has_history = false;
     let mut from = 1;
-    if let Some((sequence, _, checkpoint)) = checkpoint {
+    let mut screen_epoch = 0;
+    if let Some((sequence, epoch, _, checkpoint)) = checkpoint {
         from = sequence + 1;
+        screen_epoch = epoch;
         let snapshot = checkpoint.snapshot();
         has_history = !snapshot.is_empty();
         feed_recovered(
@@ -1271,8 +1349,12 @@ fn recover_screen(options: &SessionOptions, journal: &SegmentJournal) -> Result<
                         resize_recovered(&mut terminals, next, target)?;
                         grid = next;
                     }
-                    Frame::Reset { .. } => {
+                    Frame::Reset {
+                        screen_epoch: epoch,
+                        ..
+                    } => {
                         terminals = terminals_at(grid)?;
+                        screen_epoch = epoch;
                         decoder = UTF_8.new_decoder_with_bom_removal();
                         has_history = false;
                     }
@@ -1294,6 +1376,7 @@ fn recover_screen(options: &SessionOptions, journal: &SegmentJournal) -> Result<
     }
     Ok(RecoveredScreen {
         terminals,
+        screen_epoch,
         has_history,
         resized,
         diagnostic: replay_diagnostic,

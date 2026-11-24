@@ -117,6 +117,28 @@ async fn run(main: WindowHandle<Workspace>, cx: &mut AsyncApp) {
             .then(|| scene.to_owned())
     })
     .await;
+    let saved_b = DagTransform {
+        x: 31.,
+        y: -27.,
+        scale: 1.25,
+    };
+    let owner_b = dag_window::viewport_owner_key(&scene_b);
+    // Bypass the view cache so the next navigation loads the saved transform
+    // through the Runtime's scene geometry projection.
+    navigate(
+        main,
+        cx,
+        Command::PutGeometry {
+            sequence: 0,
+            update: GeometryUpdate {
+                scene_id: scene_b.clone(),
+                owner_key: owner_b.clone(),
+                layout_revision: 1.,
+                geometry: json!({"panX": saved_b.x, "panY": saved_b.y, "zoom": saved_b.scale}),
+                now: 1,
+            },
+        },
+    );
     assert_graph(main, child, cx, &scene_a, Some((&root, 2)));
     assert_main_focus(main, cx, "graph");
     report(
@@ -175,6 +197,7 @@ async fn run(main: WindowHandle<Workspace>, cx: &mut AsyncApp) {
     click_graph(main, cx);
     assert_eq!(child_window(main, cx).window_id(), child.window_id());
     assert_graph(main, child, cx, &scene_b, None);
+    assert_eq!(read_canvas(child, cx, |canvas| canvas.transform), saved_b);
     assert_main_focus(main, cx, "graph");
     report(
         cx,
@@ -184,8 +207,22 @@ async fn run(main: WindowHandle<Workspace>, cx: &mut AsyncApp) {
         "same-child main=B child=B main-focus=graph child-focus=content nodes=1 edges=0",
     );
 
+    key(child.into(), cx, "ctrl-=");
+    let changed_b = read_canvas(child, cx, |canvas| canvas.transform);
+    assert_ne!(changed_b, saved_b);
     close_system(child, cx);
     assert_closed(main, child, cx);
+    wait_graph(main, cx, |view| {
+        view.geometry
+            .get(&owner_b)
+            .filter(|row| {
+                row.geometry
+                    == json!({"panX": changed_b.x, "panY": changed_b.y, "zoom": changed_b.scale})
+                    && !view.geometry_dirty.contains(&owner_b)
+            })
+            .map(|_| ())
+    })
+    .await;
     report(
         cx,
         "close-system",
@@ -198,6 +235,10 @@ async fn run(main: WindowHandle<Workspace>, cx: &mut AsyncApp) {
     let reopened = child_window(main, cx);
     assert_ne!(reopened.window_id(), child.window_id());
     assert_graph(main, reopened, cx, &scene_b, None);
+    assert_eq!(
+        read_canvas(reopened, cx, |canvas| canvas.transform),
+        changed_b
+    );
     assert_main_focus(main, cx, "graph");
     report(
         cx,
@@ -384,6 +425,18 @@ async fn exercise_canvas(
         Some(child),
         "drag and offscreen culling",
     );
+    let panned = read_canvas(child, cx, |canvas| canvas.transform);
+    let owner = dag_window::viewport_owner_key(scene);
+    wait_graph(main, cx, |view| {
+        view.geometry
+            .get(&owner)
+            .filter(|row| {
+                row.geometry == json!({"panX": panned.x, "panY": panned.y, "zoom": panned.scale})
+                    && !view.geometry_dirty.contains(&owner)
+            })
+            .map(|_| ())
+    })
+    .await;
 
     search(child, cx, "probe");
     read_canvas(child, cx, |canvas| {
@@ -532,6 +585,18 @@ async fn exercise_canvas(
         .update(cx, |child, _, cx| child.refresh(&graph, cx))
         .unwrap();
     frame(child, cx);
+    assert_eq!(read_canvas(child, cx, |canvas| canvas.transform), transform);
+    // The aggregate scenario needs its root in view. Reopening now restores
+    // the offscreen search viewport, so set up the aggregate fixture explicitly.
+    key(child.into(), cx, "ctrl-0");
+    child
+        .update(cx, |view, _, cx| {
+            view.probe_canvas().1.update(cx, |view, cx| {
+                assert!(view.canvas_mut().focus_node(root));
+                cx.notify();
+            });
+        })
+        .unwrap();
     for _ in 0..6 {
         key(child.into(), cx, "ctrl--");
     }
