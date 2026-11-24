@@ -12,6 +12,7 @@ use std::{
 use anyhow::{Context, Result, ensure};
 use matou_native_core::{
     backup::{BackupService, CLEAN_EXIT_BACKUP_TIMEOUT},
+    context_optimizer_config::ContextOptimizerConfig,
     hierarchy::{
         self, HierarchyIds, HierarchyResult, Scene, Session as StoredSession, Task, Workspace,
         canvas, cards, tabs, tasks, workspaces,
@@ -43,6 +44,7 @@ use crate::{
         self, LaunchMode as AntigravityMode, PermissionMode as AntigravityPermission,
     },
     claude_request_gateway::{Gateway, ProxyEnvironment},
+    context_guard::{HandoffBrief, SessionContextGuard},
     codex_events::{self, title as codex_title},
     codex_fork::{
         CodexForkAuthority, CodexForkCandidate, CodexForkHook, CodexForkSettings, CodexForkSource,
@@ -173,6 +175,8 @@ struct RunHook {
     reported_missing: bool,
     pending_startup_observations: Vec<(Scope, Observation)>,
     hud: AgentHudProjection,
+    context_guard: SessionContextGuard,
+    mono_origin: Instant,
     gateway_context: Option<Arc<Mutex<(Option<u64>, Option<u64>)>>>,
     external_agents: Option<(PathBuf, ExternalAgents)>,
     antigravity_config: Vec<PathBuf>,
@@ -848,6 +852,11 @@ impl ShellOwner {
     }
 
     pub(crate) fn agent_hud(&mut self, session_id: &str, data_root: &Path) -> Result<Value> {
+        let saved_noise_bytes = self
+            .hook_server
+            .as_ref()
+            .map(|server| server.saved_noise_bytes(session_id))
+            .unwrap_or(0);
         let Some(shell) = self
             .shells
             .get_mut(session_id)
@@ -948,6 +957,27 @@ impl ShellOwner {
             .as_ref()
             .map(|codex| codex.hud_agents(time))
             .unwrap_or_default();
+        let preview = hook.hud.snapshot_with_agents(time, agents.clone());
+        hook.context_guard
+            .tick(time, hook.mono_origin.elapsed().as_secs_f64() * 1000.0);
+        let active_tool = preview
+            .running_tools
+            .as_ref()
+            .and_then(|tools| tools.last())
+            .map(|tool| (tool.name.as_str(), tool.target.as_deref()));
+        hook.context_guard.sync_observed_state(
+            preview.task_status,
+            preview.context_percent,
+            hook.hud.context_tokens(),
+            active_tool,
+            time,
+        );
+        hook.context_guard.set_saved_noise_bytes(saved_noise_bytes);
+        let optimizer_settings = ContextOptimizerConfig::for_data_root(data_root)
+            .effective_for(hook.context_guard.provider_id())
+            .unwrap_or_default();
+        hook.hud
+            .set_context_guard(hook.context_guard.project_hud(time, &optimizer_settings));
         let mut hud = json!(hook.hud.snapshot_with_agents(time, agents));
         hud["defaultAccountUsage"] = json!(
             hook.default_claude_login
@@ -978,6 +1008,25 @@ impl ShellOwner {
         });
         redact_hud(&mut projection, &hook.secrets);
         Ok(projection)
+    }
+
+    pub fn session_handoff_brief(
+        &self,
+        session_id: &str,
+        data_root: &Path,
+    ) -> Option<HandoffBrief> {
+        let managed = self.shells.get(session_id)?;
+        let hook = managed.hook.as_ref()?;
+        let locale =
+            sessions::current_interface_locale(sessions::read_locale_preference(data_root));
+        let time = now() as f64;
+        let snap = hook.hud.snapshot(time);
+        Some(hook.context_guard.build_handoff_brief(
+            snap.session_name.as_deref(),
+            snap.cwd.as_deref(),
+            time,
+            locale,
+        ))
     }
 
     pub fn session(&self, id: &str) -> Result<Option<StoredSession>> {
@@ -3115,17 +3164,14 @@ impl ShellOwner {
             let claude_projects = (profile == LaunchProfile::ClaudeCode)
                 .then(|| claude_projects(&options.launch))
                 .flatten();
-            let mut hud = AgentHudProjection::new(
-                &session_id,
-                match profile {
-                    LaunchProfile::ClaudeCode => HudProvider::ClaudeCode,
-                    LaunchProfile::Codex => HudProvider::Codex,
-                    LaunchProfile::Dsh => HudProvider::Dsh,
-                    LaunchProfile::Antigravity => HudProvider::Antigravity,
-                    LaunchProfile::Shell => unreachable!(),
-                },
-                now() as f64,
-            );
+            let hud_provider = match profile {
+                LaunchProfile::ClaudeCode => HudProvider::ClaudeCode,
+                LaunchProfile::Codex => HudProvider::Codex,
+                LaunchProfile::Dsh => HudProvider::Dsh,
+                LaunchProfile::Antigravity => HudProvider::Antigravity,
+                LaunchProfile::Shell => unreachable!(),
+            };
+            let mut hud = AgentHudProjection::new(&session_id, hud_provider, now() as f64);
             hud.seed_settings(
                 options.launch.cwd.to_str(),
                 launch_metadata["permissionMode"].as_str(),
@@ -3411,6 +3457,8 @@ impl ShellOwner {
                 reported_missing: false,
                 pending_startup_observations: Vec::new(),
                 hud,
+                context_guard: SessionContextGuard::new(hud_provider),
+                mono_origin: Instant::now(),
                 gateway_context,
                 external_agents: agent_status_directory
                     .clone()

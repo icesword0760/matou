@@ -1,6 +1,7 @@
 pub mod account_store;
 pub mod backup;
 pub mod claude_role_budget;
+pub mod context_optimizer_config;
 pub mod database_recovery;
 pub mod dispatch_config;
 pub mod durability;

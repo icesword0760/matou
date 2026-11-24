@@ -127,6 +127,27 @@ pub(crate) fn run_with(
         };
     };
     let json_output = json_output_requested(command, &args[1..]);
+    if command == "ctx" {
+        return match crate::context_guard::cli::run_ctx_command(&args[1..], None) {
+            Ok(text) => {
+                let output = if json_output {
+                    pretty_json(&json!({ "text": text }))
+                } else {
+                    text
+                };
+                if writeln!(stdout, "{output}").is_ok() {
+                    0
+                } else {
+                    1
+                }
+            }
+            Err(error) => {
+                let cli_err = CliError::new("INVALID_ARGUMENT", error.to_string());
+                let _ = writeln!(stderr, "{}", cli_err.format(json_output));
+                cli_err.exit_code()
+            }
+        };
+    }
     let (endpoint, token) = identity();
     let result = request(command, &args[1..], endpoint, token);
     match result {
