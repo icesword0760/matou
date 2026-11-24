@@ -3669,18 +3669,26 @@ impl SettingsShell {
                 .w_full()
                 .py(px(12.))
                 .text_size(px(11.5))
-                .text_color(rgb(0xb34d47))
+                .text_color(rgb(if self.theme.effective() == AppTheme::Dark {
+                    0xff9b94
+                } else {
+                    0xb34d47
+                }))
                 .child(err.clone()),
             None => div(),
         }
     }
 
-    pub(crate) fn configure_theme(&mut self, theme: ThemeState) {
+    pub(crate) fn configure_theme(&mut self, theme: ThemeState, cx: &mut Context<Self>) {
+        let theme_changed = self.theme.effective() != theme.effective();
         self.theme = theme;
+        if theme_changed && let Some(Ok(panel)) = &self.context_optimizer_panel {
+            panel.update(cx, |panel, cx| panel.set_theme(theme.effective(), cx));
+        }
     }
 
     pub(crate) fn theme_saved(&mut self, theme: ThemeState, cx: &mut Context<Self>) {
-        self.configure_theme(theme);
+        self.configure_theme(theme, cx);
         self.theme_error = None;
         cx.notify();
     }
@@ -3716,6 +3724,9 @@ impl SettingsShell {
         cx: &mut Context<Self>,
     ) {
         self.configure_locale(preference, locale, false);
+        if let Some(Ok(panel)) = &self.context_optimizer_panel {
+            panel.update(cx, |panel, cx| panel.set_locale(locale, cx));
+        }
         self.language_block.error = LanguageZoneError::None;
         self.forced_locale = (from_this_view
             && preference != LocalePreference::System
