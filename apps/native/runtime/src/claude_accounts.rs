@@ -1,20 +1,22 @@
 //! Local Claude account roster and presentation preferences. The bundled bridge
 //! owns credential storage, sign-in and default-account transactions.
+use crate::safe_browser;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
+    ffi::OsString,
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::mpsc,
+    sync::{Arc, Mutex, mpsc},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 #[cfg(unix)]
 use std::{
-    ffi::{OsStr, OsString},
+    ffi::OsStr,
     io::{Seek, SeekFrom},
     os::unix::{ffi::OsStringExt, process::CommandExt},
     sync::OnceLock,
@@ -205,7 +207,13 @@ impl Engine {
         ))
     }
 
-    fn spawn(&self, root: &Path, input: Value, interactive: bool) -> Result<EngineProcess, Fault> {
+    fn spawn(
+        &self,
+        root: &Path,
+        input: Value,
+        interactive: bool,
+        browser_env: Vec<(&'static str, OsString)>,
+    ) -> Result<EngineProcess, Fault> {
         if self.script.as_ref().is_some_and(|path| !path.is_file()) {
             return Err("engine-missing");
         }
@@ -242,18 +250,10 @@ impl Engine {
                 }
             }
         }
-        // Inherit the current safe-browser settings on every spawn. Only PATH
-        // comes from the login shell, never its credentials or other variables.
-        let safe_browser = [
-            "MATOU_SAFE_BROWSER_BIN",
-            "MATOU_SAFE_BROWSER_TZ",
-            "MATOU_SAFE_BROWSER_SEED",
-        ];
-        command.envs(
-            safe_browser
-                .into_iter()
-                .filter_map(|key| std::env::var_os(key).map(|value| (key, value))),
-        );
+        for key in safe_browser::ACCOUNT_ENV_KEYS {
+            command.env_remove(key);
+        }
+        command.envs(browser_env);
         let mut child = command
             .args(self.script.iter())
             .arg(root)
@@ -465,7 +465,9 @@ struct Draft {
 }
 
 struct Manager {
+    data_root: PathBuf,
     root: PathBuf,
+    exit_country: Arc<Mutex<Option<String>>>,
     engine: Option<Engine>,
     prefs: Preferences,
     roster: Roster,
@@ -475,9 +477,15 @@ struct Manager {
 }
 
 impl Manager {
-    fn new(root: PathBuf, engine: Option<Engine>) -> Self {
+    fn new(
+        data_root: PathBuf,
+        exit_country: Arc<Mutex<Option<String>>>,
+        engine: Option<Engine>,
+    ) -> Self {
         Self {
-            root,
+            root: data_root.join("claude-accounts"),
+            data_root,
+            exit_country,
             engine,
             prefs: Preferences::default(),
             roster: Roster::default(),
@@ -491,8 +499,21 @@ impl Manager {
         self.engine.as_ref().ok_or("engine-missing")
     }
 
+    fn spawn_engine(&self, input: Value, interactive: bool) -> Result<EngineProcess, Fault> {
+        let engine = self.engine()?;
+        let country = self
+            .exit_country
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let browser_env = safe_browser::account_env(&self.data_root, country.as_deref(), |key| {
+            std::env::var_os(key)
+        });
+        engine.spawn(&self.root, input, interactive, browser_env)
+    }
+
     fn run(&self, input: Value) -> Result<Value, Fault> {
-        let mut process = self.engine()?.spawn(&self.root, input, false)?;
+        let mut process = self.spawn_engine(input, false)?;
         let started = Instant::now();
         while started.elapsed() < TIMEOUT {
             if let Some(result) = process.poll() {
@@ -705,8 +726,7 @@ impl Manager {
                 }
                 self.cancel();
                 let nonce = uuid::Uuid::new_v4().to_string();
-                let process = self.engine()?.spawn(
-                    &self.root,
+                let process = self.spawn_engine(
                     json!({"action":"login", "nonce":nonce, "replaceId":replace_id}),
                     true,
                 )?;
@@ -824,6 +844,7 @@ fn valid_code(value: &str) -> bool {
 }
 
 pub(crate) struct AccountWorker {
+    exit_country: Arc<Mutex<Option<String>>>,
     requests: Option<mpsc::Sender<(u64, ClaudeAccountCommand)>>,
     thread: Option<thread::JoinHandle<()>>,
     pub replies: mpsc::Receiver<(u64, ClaudeAccountsState)>,
@@ -835,25 +856,16 @@ impl AccountWorker {
         allow_default: bool,
         fixture: Option<PathBuf>,
     ) -> std::io::Result<Self> {
-        Self::spawn(
-            data_root.join("claude-accounts"),
-            Engine::resolve(allow_default, fixture),
-        )
-    }
-
-    pub fn send(&self, id: u64, command: ClaudeAccountCommand) -> bool {
-        self.requests
-            .as_ref()
-            .is_some_and(|requests| requests.send((id, command)).is_ok())
-    }
-
-    fn spawn(root: PathBuf, engine: Option<Engine>) -> std::io::Result<Self> {
+        let data_root = data_root.to_owned();
+        let engine = Engine::resolve(allow_default, fixture);
+        let exit_country = Arc::new(Mutex::new(None));
+        let manager_country = Arc::clone(&exit_country);
         let (requests, incoming) = mpsc::channel();
         let (outgoing, replies) = mpsc::channel();
         let thread = thread::Builder::new()
             .name("claude-accounts".into())
             .spawn(move || {
-                let mut manager = Manager::new(root, engine);
+                let mut manager = Manager::new(data_root, manager_country, engine);
                 loop {
                     if let Some((id, state, cleanup)) = manager.poll_login() {
                         let _ = outgoing.send((id, state));
@@ -892,10 +904,27 @@ impl AccountWorker {
                 manager.cancel();
             })?;
         Ok(Self {
+            exit_country,
             requests: Some(requests),
             thread: Some(thread),
             replies,
         })
+    }
+
+    pub fn send(&self, id: u64, command: ClaudeAccountCommand) -> bool {
+        self.requests
+            .as_ref()
+            .is_some_and(|requests| requests.send((id, command)).is_ok())
+    }
+
+    pub fn report_exit_country(&self, country: &str) {
+        let country = country.trim();
+        if country.len() == 2 && country.bytes().all(|byte| byte.is_ascii_alphabetic()) {
+            *self
+                .exit_country
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = Some(country.to_owned());
+        }
     }
 }
 
@@ -944,6 +973,51 @@ mod tests {
         let result = Command::new(claude).env("PATH", path).output().unwrap();
         assert!(result.status.success());
         assert_eq!(result.stdout, b"ready from node\n");
+    }
+
+    #[test]
+    fn account_engine_receives_the_resolved_browser_settings() {
+        let root = tempfile::tempdir().unwrap();
+        let accounts = root.path().join("claude-accounts");
+        fs::create_dir(&accounts).unwrap();
+        let browser = root.path().join("fixture browser");
+        executable(&browser, "#!/bin/sh\nexit 1\n");
+        fs::write(
+            root.path().join("safe-browser.json"),
+            r#"{"fingerprintSeed":42}"#,
+        )
+        .unwrap();
+        let engine = root.path().join("engine");
+        executable(
+            &engine,
+            r#"#!/bin/sh
+read -r request
+printf '%s\n' "$MATOU_SAFE_BROWSER_BIN" "$MATOU_SAFE_BROWSER_TZ" "$MATOU_SAFE_BROWSER_SEED" > "$1/browser-env"
+printf '%s\n' '{"ok":true,"value":{}}'
+"#,
+        );
+        let engine = Engine::new(engine, None, false);
+        for (country, zone) in [("JP", "Asia/Tokyo"), ("DE", "Europe/Berlin")] {
+            let browser_env = safe_browser::account_env(root.path(), Some(country), |key| {
+                (key == "MATOU_SAFE_BROWSER_PATH").then(|| browser.clone().into_os_string())
+            });
+            let mut process = engine
+                .spawn(&accounts, json!({"action":"login"}), true, browser_env)
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                if let Some(result) = process.poll() {
+                    result.unwrap();
+                    break;
+                }
+                assert!(Instant::now() < deadline);
+                thread::sleep(Duration::from_millis(10));
+            }
+            assert_eq!(
+                fs::read_to_string(accounts.join("browser-env")).unwrap(),
+                format!("{}\n{zone}\n42\n", browser.display())
+            );
+        }
     }
 
     fn receive(worker: &AccountWorker, request: u64) -> ClaudeAccountsState {
