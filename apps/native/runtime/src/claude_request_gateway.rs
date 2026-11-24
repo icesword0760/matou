@@ -515,7 +515,7 @@ impl State {
             && let Some(media) = observable_media(&response.headers)
             && let Some(encoding) = observable_encoding(&response.headers)
         {
-            if message_response.track_usage && (track_deepseek || encoding == Encoding::Identity) {
+            if message_response.track_usage {
                 body.usage = Some(deepseek_token_usage::ResponseObserver::new(
                     media,
                     encoding,
