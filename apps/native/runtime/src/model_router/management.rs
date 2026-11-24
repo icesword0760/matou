@@ -1,18 +1,30 @@
-use std::{net::Ipv4Addr, time::Duration};
+use std::{
+    fs,
+    net::Ipv4Addr,
+    path::{Path, PathBuf},
+    sync::LazyLock,
+    time::Duration,
+};
 
 use anyhow::{Context, Result, anyhow, ensure};
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::{Method, Request, StatusCode, body::Bytes, client::conn::http1, header};
 use hyper_util::rt::TokioIo;
+use regex::Regex;
 use serde_json::{Value, json};
 use tokio::net::TcpStream;
 
-use super::{RouterConnection, VERSION, config::codex_user_agent};
+use super::{
+    RouterConnection, VERSION,
+    config::{client_arch, compare_semver, parse_semver},
+};
 use crate::subscription_launch::{ModelAlias, SubscriptionProvider};
 
 const DEFAULT_LIMIT: usize = 1024 * 1024;
 const MODEL_LIMIT: usize = 4 * DEFAULT_LIMIT;
 const TIMEOUT: Duration = Duration::from_secs(15);
+const ANTIGRAVITY_FALLBACK_VERSION: &str = "2.29.0";
+const ANTIGRAVITY_FALLBACK_CL: &str = "1013060670";
 
 pub(crate) struct ManagementClient<'a> {
     connection: &'a RouterConnection,
@@ -120,12 +132,33 @@ impl<'a> ManagementClient<'a> {
         project: Option<&str>,
     ) -> Result<Option<Value>> {
         use AccountProbe::*;
+        let input = self.account_probe_request(probe, file, project)?;
+        let limit = if matches!(probe, CodexModels | AntigravityModels) {
+            MODEL_LIMIT
+        } else {
+            DEFAULT_LIMIT
+        };
+        self.send_account_probe(input, limit)
+    }
+
+    fn account_probe_request(
+        &self,
+        probe: AccountProbe,
+        file: &Value,
+        project: Option<&str>,
+    ) -> Result<Value> {
+        use AccountProbe::*;
+        let codex_identity = &self.connection.codex;
+        let codex_models_url;
         let (url, data) = match probe {
             CodexUsage => ("https://chatgpt.com/backend-api/wham/usage", None),
-            CodexModels => (
-                "https://chatgpt.com/backend-api/codex/models?client_version=0.162.1",
-                None,
-            ),
+            CodexModels => {
+                codex_models_url = format!(
+                    "https://chatgpt.com/backend-api/codex/models?client_version={}",
+                    codex_identity.version
+                );
+                (codex_models_url.as_str(), None)
+            }
             AntigravityAccount => (
                 "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist",
                 Some(json!({"metadata": {"ideType": "ANTIGRAVITY"}})),
@@ -151,7 +184,7 @@ impl<'a> ManagementClient<'a> {
         let mut headers = json!({
             "Authorization": "Bearer $TOKEN$",
             "Content-Type": "application/json",
-            "User-Agent": if codex { codex_user_agent().to_owned() } else { antigravity_user_agent() },
+            "User-Agent": if codex { codex_identity.user_agent.as_str() } else { antigravity_user_agent() },
         });
         if codex {
             headers["originator"] = json!("codex-tui");
@@ -166,11 +199,10 @@ impl<'a> ManagementClient<'a> {
         if let Some(data) = data {
             input["data"] = json!(data.to_string());
         }
-        let limit = if matches!(probe, CodexModels | AntigravityModels) {
-            MODEL_LIMIT
-        } else {
-            DEFAULT_LIMIT
-        };
+        Ok(input)
+    }
+
+    fn send_account_probe(&self, input: Value, limit: usize) -> Result<Option<Value>> {
         let envelope = self.json(
             Method::POST,
             "/requests/api-call",
@@ -346,17 +378,44 @@ pub(crate) enum AccountProbe {
     AntigravityModels,
 }
 
-pub(crate) fn antigravity_user_agent() -> String {
+pub(crate) fn antigravity_user_agent() -> &'static str {
+    static USER_AGENT: LazyLock<String> = LazyLock::new(|| {
+        let mut paths = Vec::new();
+        if cfg!(target_os = "macos") {
+            let app_plist = Path::new("Applications/Antigravity.app/Contents/Info.plist");
+            paths.push(Path::new("/").join(app_plist));
+            if let Some(home) = std::env::var_os("HOME").filter(|home| !home.is_empty()) {
+                paths.push(PathBuf::from(home).join(app_plist));
+            }
+        }
+        antigravity_user_agent_from_plists(&paths)
+    });
+    &USER_AGENT
+}
+
+fn antigravity_user_agent_from_plists(paths: &[PathBuf]) -> String {
+    static VERSION_KEY: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"<key>CFBundleShortVersionString</key>\s*<string>([^<]+)</string>").unwrap()
+    });
     let os = match std::env::consts::OS {
         "macos" => "darwin",
         value => value,
     };
-    let arch = if cfg!(target_arch = "aarch64") {
-        "arm64"
+    let arch = client_arch();
+    let detected = paths.iter().find_map(|path| {
+        let xml = fs::read_to_string(path).ok()?;
+        let version = VERSION_KEY.captures(&xml)?.get(1)?.as_str();
+        parse_semver(version).map(str::to_owned)
+    });
+    if let Some(version) =
+        detected.filter(|version| compare_semver(version, ANTIGRAVITY_FALLBACK_VERSION).is_gt())
+    {
+        format!("antigravity/hub/{version} (aidev_client; os_type={os}; arch={arch})")
     } else {
-        std::env::consts::ARCH
-    };
-    format!("antigravity/hub/2.29.0 (aidev_client; os_type={os}; arch={arch}; cl=1013060670)")
+        format!(
+            "antigravity/hub/{ANTIGRAVITY_FALLBACK_VERSION} (aidev_client; os_type={os}; arch={arch}; cl={ANTIGRAVITY_FALLBACK_CL})"
+        )
+    }
 }
 
 fn query(path: &str, key: &str, value: &str) -> String {
@@ -373,4 +432,82 @@ fn check_status(status: StatusCode, pinned: bool) -> Result<()> {
         "Model router management request failed ({status})"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::BTreeMap, sync::Arc};
+
+    use super::*;
+    use crate::model_router::config::{self, CodexClientIdentity};
+
+    #[test]
+    fn codex_probes_and_inference_use_the_same_identity() -> Result<()> {
+        let connection = RouterConnection {
+            port: 0,
+            generation: 0,
+            client_key: "test".into(),
+            management_key: "test".into(),
+            proxy: None,
+            codex: Arc::new(CodexClientIdentity::from_probe(
+                &BTreeMap::from([
+                    ("TERM_PROGRAM".into(), "FixtureTerminal".into()),
+                    ("TERM_PROGRAM_VERSION".into(), "2.0".into()),
+                ]),
+                Some("codex-cli 0.198.0"),
+                Some("15.6"),
+            )),
+        };
+        let client = ManagementClient::new(&connection);
+        let file = json!({"provider": "codex", "auth_index": "fixture"});
+        let models = client.account_probe_request(AccountProbe::CodexModels, &file, None)?;
+        let usage = client.account_probe_request(AccountProbe::CodexUsage, &file, None)?;
+        let directory = tempfile::tempdir()?;
+        let router = config::prepare(directory.path())?;
+        router.write_config(0, None, &BTreeMap::new(), &connection.codex)?;
+        let config: Value = serde_json::from_slice(&fs::read(router.path.join("config.json"))?)?;
+        let user_agent = models["header"]["User-Agent"].as_str().unwrap();
+        assert_eq!(
+            models["url"],
+            "https://chatgpt.com/backend-api/codex/models?client_version=0.198.0"
+        );
+        assert!(user_agent.starts_with("codex-tui/0.198.0 ("));
+        assert!(user_agent.ends_with(" FixtureTerminal/2.0 (codex-tui; 0.198.0)"));
+        assert_eq!(usage["header"]["User-Agent"], user_agent);
+        assert_eq!(
+            config["oauth"]["providers"]["codex"]["header-defaults"]["user-agent"],
+            user_agent
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn antigravity_user_agent_detects_plist_version_in_path_order() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let first = directory.path().join("system.plist");
+        let second = directory.path().join("user.plist");
+        let paths = [first.clone(), second.clone()];
+        let write_version = |path: &Path, version: &str| {
+            fs::write(
+                path,
+                format!(
+                    "<plist><dict><key>CFBundleShortVersionString</key>\n <string>{version}</string></dict></plist>"
+                ),
+            )
+        };
+        let fallback = antigravity_user_agent_from_plists(&[]);
+        assert!(fallback.starts_with("antigravity/hub/2.29.0 ("));
+        assert!(fallback.ends_with("; cl=1013060670)"));
+        assert_eq!(antigravity_user_agent_from_plists(&paths), fallback);
+
+        write_version(&second, "2.35.1")?;
+        let detected = antigravity_user_agent_from_plists(&paths);
+        assert!(detected.starts_with("antigravity/hub/2.35.1 (aidev_client; os_type="));
+        assert!(!detected.contains("cl="));
+        write_version(&first, "2.29.0")?;
+        assert_eq!(antigravity_user_agent_from_plists(&paths), fallback);
+        fs::write(first, "<plist><dict/></plist>")?;
+        assert_eq!(antigravity_user_agent_from_plists(&paths), detected);
+        Ok(())
+    }
 }

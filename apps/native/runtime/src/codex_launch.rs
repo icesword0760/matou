@@ -67,16 +67,7 @@ pub(crate) fn prepare(
         .unwrap_or(OsStr::new("codex"));
     let path = Path::new(command);
     let cwd = std::path::absolute(cwd)?;
-    let executable = if path.file_name() != Some(command) {
-        executable_at(cwd.join(path))
-    } else {
-        get_var(&environment, "PATH")
-            .into_iter()
-            .flat_map(std::env::split_paths)
-            .filter(|dir| !dir.as_os_str().is_empty())
-            .find_map(|dir| executable_at(cwd.join(dir).join(path)))
-    };
-    let executable = executable.with_context(|| {
+    let executable = resolve_executable(path, &cwd, &environment).with_context(|| {
         // Show the command name in the prompt without exposing a local path.
         let command = path.file_name().unwrap_or(OsStr::new("codex")).to_string_lossy();
         MissingCommand(if environment.get(OsStr::new("MATOU_LOCALE")).is_some_and(|value| value == "en") {
@@ -170,6 +161,21 @@ fn active_provider(data_root: &Path) -> Result<Value> {
         return Ok(provider.clone());
     }
     Ok(json!({"id": "openai-official", "endpoint": "https://api.openai.com/v1"}))
+}
+
+pub(crate) fn resolve_executable(
+    path: &Path,
+    cwd: &Path,
+    environment: &BTreeMap<OsString, OsString>,
+) -> Option<PathBuf> {
+    if path.file_name() != Some(path.as_os_str()) {
+        return executable_at(cwd.join(path));
+    }
+    get_var(environment, "PATH")
+        .into_iter()
+        .flat_map(std::env::split_paths)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .find_map(|dir| executable_at(cwd.join(dir).join(path)))
 }
 
 fn executable_at(path: PathBuf) -> Option<PathBuf> {

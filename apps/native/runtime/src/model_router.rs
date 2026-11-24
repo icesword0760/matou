@@ -36,6 +36,7 @@ pub(crate) struct RouterConnection {
     pub client_key: String,
     management_key: String,
     proxy: Option<String>,
+    codex: Arc<config::CodexClientIdentity>,
 }
 
 impl RouterConnection {
@@ -194,6 +195,7 @@ fn supervise(
     let mut last_restart = None;
     let mut ready_since: Option<Instant> = None;
     let mut generation = 0;
+    let mut codex = None;
     loop {
         let mut state = shared.state.lock().unwrap();
         if state.stopped {
@@ -239,6 +241,9 @@ fn supervise(
             let aliases = state.aliases.clone();
             drop(state);
             generation += 1;
+            // Resolve only when the first subscription lease needs a router.
+            let codex = codex
+                .get_or_insert_with(|| Arc::new(config::CodexClientIdentity::detect(environment)));
             let result = start(
                 root,
                 environment,
@@ -247,6 +252,7 @@ fn supervise(
                 previous_port,
                 restart.is_some(),
                 generation,
+                codex,
             );
             let mut state = shared.state.lock().unwrap();
             match result {
@@ -287,6 +293,7 @@ fn start(
     previous_port: Option<u16>,
     recovering: bool,
     generation: u64,
+    codex: &Arc<config::CodexClientIdentity>,
 ) -> Result<(Watchdog, RouterConnection)> {
     let directory = config::prepare(root)?;
     let binary = config::router_binary(
@@ -320,13 +327,14 @@ fn start(
             continue;
         }
         used.push(port);
-        directory.write_config(port, proxy.as_deref(), aliases)?;
+        directory.write_config(port, proxy.as_deref(), aliases, codex)?;
         let connection = RouterConnection {
             port,
             generation,
             client_key: directory.keys.client.clone(),
             management_key: directory.keys.management.clone(),
             proxy: proxy.clone(),
+            codex: Arc::clone(codex),
         };
         let client = ManagementClient::new(&connection);
         // Release the reservation only when the child is ready to bind.
@@ -479,26 +487,32 @@ pub fn run_watchdog(directory: &Path) -> Result<()> {
 #[cfg(all(test, target_os = "macos", debug_assertions))]
 mod tests {
     use super::*;
-    use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt, sync::Barrier};
+    use std::{
+        collections::BTreeMap, ffi::OsString, fs, os::unix::fs::PermissionsExt, sync::Barrier,
+    };
 
-    fn fixture(mode: &str) -> Result<(tempfile::TempDir, ModelRouterManager)> {
-        // The workspace test command builds the runtime binary used by process contracts.
-        let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR"))?;
-        let binary = root.path().join("fixture-router");
+    fn fixture_environment(root: &Path, mode: &str) -> Result<BTreeMap<OsString, OsString>> {
+        let binary = root.join("fixture-router");
         fs::write(
             &binary,
             include_str!("../tests/fixtures/subscription-router.py"),
         )?;
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o700))?;
-        let directory = root.path().join("model-router");
+        let directory = root.join("model-router");
         fs::create_dir(&directory)?;
         fs::write(directory.join("fixture-mode"), mode)?;
+        Ok(BTreeMap::from([
+            ("MATOU_MODEL_ROUTER_BIN".into(), binary.into()),
+            ("NO_PROXY".into(), "*".into()),
+        ]))
+    }
+
+    fn fixture(mode: &str) -> Result<(tempfile::TempDir, ModelRouterManager)> {
+        // The workspace test command builds the runtime binary used by process contracts.
+        let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR"))?;
         let manager = ModelRouterManager::new(
             root.path().to_owned(),
-            BTreeMap::from([
-                ("MATOU_MODEL_ROUTER_BIN".into(), binary.into()),
-                ("NO_PROXY".into(), "*".into()),
-            ]),
+            fixture_environment(root.path(), mode)?,
         )?;
         Ok((root, manager))
     }
@@ -514,7 +528,22 @@ mod tests {
 
     #[test]
     fn concurrent_leases_idle_shutdown_and_busy_previous_port() -> Result<()> {
-        let (root, manager) = fixture("")?;
+        let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR"))?;
+        let shell = root.path().join("fixture-login-shell");
+        let probe_log = root.path().join("codex-probe.log");
+        fs::write(
+            &shell,
+            "#!/bin/sh\nprintf 'probe\\n' >> \"$PROBE_LOG\"\nprintf '__MATOU_LOGIN_PATH__=%s\\n' \"$PATH\"\n",
+        )?;
+        fs::set_permissions(&shell, fs::Permissions::from_mode(0o700))?;
+        let mut environment = fixture_environment(root.path(), "")?;
+        environment.extend([
+            ("PATH".into(), root.path().into()),
+            ("HOME".into(), root.path().into()),
+            ("SHELL".into(), shell.into()),
+            ("PROBE_LOG".into(), probe_log.clone().into()),
+        ]);
+        let manager = ModelRouterManager::new(root.path().to_owned(), environment)?;
         let barrier = Barrier::new(6);
         let leases = thread::scope(|scope| {
             (0..6)
@@ -533,6 +562,8 @@ mod tests {
         })?;
         let port = leases[0].0.port;
         assert!(leases.iter().all(|(connection, _)| connection.port == port));
+        assert_eq!(leases[0].0.codex.version, "0.162.1");
+        assert_eq!(fs::read_to_string(&probe_log)?, "probe\n");
         assert_eq!(starts(root.path()).len(), 1);
         let config: serde_json::Value =
             serde_json::from_slice(&fs::read(root.path().join("model-router/config.json"))?)?;
@@ -572,6 +603,8 @@ mod tests {
         let (restarted, _lease) = manager.acquire()?;
         assert_ne!(restarted.port, port);
         assert_eq!(starts(root.path()).len(), 2);
+        assert_eq!(restarted.codex.version, "0.162.1");
+        assert_eq!(fs::read_to_string(probe_log)?, "probe\n");
         manager.shutdown();
         TcpListener::bind((Ipv4Addr::LOCALHOST, restarted.port))?;
         drop(occupied);

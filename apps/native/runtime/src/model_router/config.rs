@@ -1,19 +1,29 @@
 use std::{
+    cmp::Ordering,
     collections::BTreeMap,
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fmt::Write as _,
     fs,
-    io::{self, Write},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
+    process::{Command, Stdio},
+    sync::{LazyLock, mpsc},
+    thread,
     time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, anyhow, ensure};
+use matou_native_core::pty::get_var;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::VERSION;
-use crate::{egress_probe, subscription_launch::ModelAlias};
+use crate::{codex_launch, egress_probe, subscription_launch::ModelAlias};
+
+const CODEX_FALLBACK_VERSION: &str = "0.162.1";
+const CODEX_VERSION_TIMEOUT: Duration = Duration::from_millis(1_400);
+const CODEX_VERSION_LIMIT: u64 = 16 * 1024;
 
 #[derive(Deserialize, Serialize)]
 pub(super) struct Keys {
@@ -191,6 +201,7 @@ impl Directory {
         port: u16,
         proxy: Option<&str>,
         aliases: &BTreeMap<&str, Vec<ModelAlias>>,
+        codex: &CodexClientIdentity,
     ) -> Result<()> {
         let mut value = json!({
             "config-version": 8,
@@ -203,7 +214,7 @@ impl Directory {
                 "auth-dir": self.path.join("credentials"),
                 "providers": {
                     "antigravity": { "antigravity-credits": false, "disable-cooling": true },
-                    "codex": { "header-defaults": { "user-agent": codex_user_agent() } }
+                    "codex": { "header-defaults": { "user-agent": codex.user_agent } }
                 }
             },
             "antigravity": { "connection-pool": { "enabled": true, "idle-conn-timeout": "30s", "max-idle-conns-per-host": 2 } },
@@ -227,29 +238,204 @@ impl Directory {
     }
 }
 
-pub(super) fn codex_user_agent() -> &'static str {
-    use std::sync::LazyLock;
-    static USER_AGENT: LazyLock<String> = LazyLock::new(|| {
+pub(super) struct CodexClientIdentity {
+    pub version: String,
+    pub user_agent: String,
+}
+
+impl CodexClientIdentity {
+    pub fn detect(environment: &BTreeMap<OsString, OsString>) -> Self {
+        let output = detect_codex_version(environment);
+        Self::from_probe(environment, output.as_deref(), macos_version())
+    }
+
+    pub(super) fn from_probe(
+        environment: &BTreeMap<OsString, OsString>,
+        output: Option<&str>,
+        macos_product_version: Option<&str>,
+    ) -> Self {
+        let version = output
+            .and_then(parse_semver)
+            .filter(|version| compare_semver(version, CODEX_FALLBACK_VERSION).is_gt())
+            .unwrap_or(CODEX_FALLBACK_VERSION)
+            .to_owned();
         let platform = if cfg!(target_os = "macos") {
-            let version = macos_version().unwrap_or("15.0.0");
+            let version = macos_product_version.unwrap_or("15.0.0");
             format!("Mac OS {version}")
         } else if cfg!(windows) {
             "Windows NT 10.0".into()
         } else {
             "Linux".into()
         };
-        let arch = if cfg!(target_arch = "aarch64") {
-            "arm64"
-        } else {
-            std::env::consts::ARCH
+        let terminal = get_var(environment, "TERM_PROGRAM")
+            .filter(|name| !name.is_empty())
+            .map(|name| {
+                let terminal_version =
+                    get_var(environment, "TERM_PROGRAM_VERSION").unwrap_or(OsStr::new("1.0"));
+                format!(
+                    "{}/{}",
+                    name.to_string_lossy(),
+                    terminal_version.to_string_lossy()
+                )
+            })
+            .unwrap_or_else(|| "iTerm.app/3.6.11".into());
+        let arch = client_arch();
+        let user_agent =
+            format!("codex-tui/{version} ({platform}; {arch}) {terminal} (codex-tui; {version})");
+        Self {
+            version,
+            user_agent,
+        }
+    }
+}
+
+pub(super) fn client_arch() -> &'static str {
+    match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        arch => arch,
+    }
+}
+
+pub(super) fn parse_semver(raw: &str) -> Option<&str> {
+    static SEMVER: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?-u:\b[0-9]+\.[0-9]+\.[0-9]+\b)").unwrap());
+    SEMVER.find(raw).map(|version| version.as_str())
+}
+
+pub(super) fn compare_semver(left: &str, right: &str) -> Ordering {
+    left.split('.')
+        .zip(right.split('.'))
+        .map(|(left, right)| {
+            let left = left.trim_start_matches('0');
+            let right = right.trim_start_matches('0');
+            left.len().cmp(&right.len()).then_with(|| left.cmp(right))
+        })
+        .find(|order| !order.is_eq())
+        .unwrap_or(Ordering::Equal)
+}
+
+fn detect_codex_version(environment: &BTreeMap<OsString, OsString>) -> Option<String> {
+    let command = get_var(environment, "MATOU_CODEX_COMMAND")
+        .filter(|value| !value.is_empty())
+        .unwrap_or(OsStr::new("codex"));
+    let path = Path::new(command);
+    let cwd = std::env::current_dir().ok()?;
+    let deadline = Instant::now() + CODEX_VERSION_TIMEOUT;
+    let (executable, login_path): (_, Option<OsString>) =
+        match codex_launch::resolve_executable(path, &cwd, environment) {
+            Some(executable) => (executable, None),
+            None => {
+                #[cfg(unix)]
+                {
+                    if path.file_name() != Some(command) {
+                        return None;
+                    }
+                    let login_path = codex_login_path(environment, deadline)?;
+                    let mut login_environment = environment.clone();
+                    login_environment.insert("PATH".into(), login_path.clone());
+                    let executable =
+                        codex_launch::resolve_executable(path, &cwd, &login_environment)?;
+                    (executable, Some(login_path))
+                }
+                #[cfg(not(unix))]
+                return None;
+            }
         };
-        format!("codex-tui/0.162.1 ({platform}; {arch}) iTerm.app/3.6.11 (codex-tui; 0.162.1)")
-    });
-    &USER_AGENT
+    let mut command = Command::new(executable);
+    command.arg("--version").env_clear().envs(environment);
+    if let Some(login_path) = login_path {
+        command.env("PATH", login_path);
+    }
+    probe_output(&mut command, deadline, CODEX_VERSION_LIMIT)
+}
+
+#[cfg(unix)]
+fn codex_login_path(
+    environment: &BTreeMap<OsString, OsString>,
+    deadline: Instant,
+) -> Option<OsString> {
+    if get_var(environment, "MATOU_DISABLE_LOGIN_PATH_PROBE") == Some(OsStr::new("1")) {
+        return None;
+    }
+    let home = get_var(environment, "HOME").filter(|home| !home.is_empty())?;
+    let shell = get_var(environment, "SHELL")
+        .filter(|shell| !shell.is_empty())
+        .unwrap_or(OsStr::new("/bin/zsh"));
+    let mut command = Command::new(shell);
+    command
+        .args(["-ilc", "printf '__MATOU_LOGIN_PATH__=%s\\n' \"$PATH\""])
+        .current_dir(home)
+        .env_clear()
+        .envs(environment);
+    let output = probe_output(&mut command, deadline, 256 * 1024)?;
+    output
+        .lines()
+        .rev()
+        .find_map(|line| line.strip_prefix("__MATOU_LOGIN_PATH__="))
+        .filter(|path| !path.is_empty())
+        .map(OsString::from)
+}
+
+fn probe_output(command: &mut Command, deadline: Instant, limit: u64) -> Option<String> {
+    if Instant::now() >= deadline {
+        return None;
+    }
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    let mut child = command.spawn().ok()?;
+    let (send, receive) = mpsc::channel();
+    let stdout = child
+        .stdout
+        .take()
+        .expect("version probe uses piped stdout");
+    let reader = thread::Builder::new()
+        .name("codex-probe-output".into())
+        .spawn(move || {
+            let mut output = Vec::new();
+            let result = stdout.take(limit + 1).read_to_end(&mut output);
+            let _ = send.send(
+                result
+                    .ok()
+                    .filter(|&size| size as u64 <= limit)
+                    .and_then(|_| String::from_utf8(output).ok()),
+            );
+        });
+    if reader.is_ok() {
+        let output = receive.recv_timeout(deadline.saturating_duration_since(Instant::now()));
+        if let Ok(Some(output)) = output {
+            while Instant::now() < deadline {
+                match child.try_wait() {
+                    Ok(Some(status)) => return status.success().then_some(output),
+                    Ok(None) => thread::sleep(Duration::from_millis(5)),
+                    Err(_) => break,
+                }
+            }
+        }
+    }
+    #[cfg(unix)]
+    // SAFETY: the probe was placed in its own process group.
+    unsafe {
+        libc::kill(-(child.id() as i32), libc::SIGKILL);
+    }
+    #[cfg(not(unix))]
+    let _ = child.kill();
+    let _ = child.wait();
+    None
 }
 
 pub(crate) fn macos_version() -> Option<&'static str> {
-    use std::sync::LazyLock;
     static VERSION: LazyLock<Option<String>> = LazyLock::new(|| {
         if !cfg!(target_os = "macos") {
             return None;
@@ -435,6 +621,90 @@ fn validate_proxy(raw: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_identity_uses_first_semver_above_the_fallback() {
+        assert_eq!(parse_semver("codex-cli 0.198.0 (1.2.3)"), Some("0.198.0"));
+        assert_eq!(parse_semver("x0.198.0y 0.198"), None);
+        assert_eq!(parse_semver("codex 0.198.0-beta.1"), Some("0.198.0"));
+        assert!(compare_semver("0.198.0", "0.162.1").is_gt());
+        assert!(compare_semver("0.162.0", "0.162.1").is_lt());
+        assert!(compare_semver("0.0162.01", "0.162.1").is_eq());
+        assert!(compare_semver("1.0.0", "0.999.999").is_gt());
+
+        let environment = BTreeMap::from([("TERM_PROGRAM".into(), "FixtureTerminal".into())]);
+        let identity =
+            CodexClientIdentity::from_probe(&environment, Some("codex-cli 0.198.0"), Some("15.6"));
+        assert_eq!(identity.version, "0.198.0");
+        assert!(identity.user_agent.contains(" FixtureTerminal/1.0 "));
+        for probe in [None, Some("unknown"), Some("0.150.0"), Some("0.162.1")] {
+            let identity = CodexClientIdentity::from_probe(&BTreeMap::new(), probe, None);
+            assert_eq!(identity.version, CODEX_FALLBACK_VERSION);
+            assert!(identity.user_agent.contains(" iTerm.app/3.6.11 "));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_version_probe_uses_launch_path_and_command_override() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir()?;
+        for (command, version) in [("codex", "0.198.0"), ("fixture-codex", "0.201.0")] {
+            let executable = directory.path().join(command);
+            fs::write(
+                &executable,
+                format!(
+                    "#!/bin/sh\n[ \"$1\" = --version ] || exit 1\nprintf 'codex-cli {version}\\n'\n"
+                ),
+            )?;
+            fs::set_permissions(executable, fs::Permissions::from_mode(0o700))?;
+        }
+        let mut environment = BTreeMap::from([("PATH".into(), directory.path().into())]);
+        assert_eq!(CodexClientIdentity::detect(&environment).version, "0.198.0");
+        environment.insert("MATOU_CODEX_COMMAND".into(), "fixture-codex".into());
+        assert_eq!(CodexClientIdentity::detect(&environment).version, "0.201.0");
+
+        let shell = directory.path().join("fixture-shell");
+        fs::write(
+            &shell,
+            "#!/bin/sh\n[ \"$1\" = -ilc ] || exit 1\nprintf 'startup output\\n__MATOU_LOGIN_PATH__=%s\\n' \"$HOME\"\n",
+        )?;
+        fs::set_permissions(&shell, fs::Permissions::from_mode(0o700))?;
+        environment.insert("PATH".into(), "/usr/bin:/bin".into());
+        environment.insert("HOME".into(), directory.path().into());
+        environment.insert("SHELL".into(), shell.into());
+        assert_eq!(CodexClientIdentity::detect(&environment).version, "0.201.0");
+        Ok(())
+    }
+
+    #[test]
+    fn missing_codex_falls_back_within_the_version_probe_budget() -> Result<()> {
+        let empty_path = tempfile::tempdir()?;
+        let environment = BTreeMap::from([("PATH".into(), empty_path.path().into())]);
+        let started = Instant::now();
+        let identity = CodexClientIdentity::detect(&environment);
+        assert_eq!(identity.version, CODEX_FALLBACK_VERSION);
+        assert!(started.elapsed() < Duration::from_millis(1_500));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn version_probe_stops_waiting_for_a_hung_child() {
+        let mut command = Command::new("/bin/sleep");
+        command.arg("60");
+        let started = Instant::now();
+        assert_eq!(
+            probe_output(
+                &mut command,
+                started + Duration::from_millis(50),
+                CODEX_VERSION_LIMIT
+            ),
+            None
+        );
+        assert!(started.elapsed() < Duration::from_millis(1_500));
+    }
 
     #[test]
     fn router_proxy_preserves_priority_and_single_network_bypass() -> Result<()> {
