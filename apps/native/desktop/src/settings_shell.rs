@@ -1979,7 +1979,11 @@ impl SettingsShell {
     }
 
     pub fn can_close(&self) -> bool {
-        self.editor.is_none() && self.providers.switching().is_none()
+        self.editor.is_none() && !self.is_switching()
+    }
+
+    pub(crate) fn is_switching(&self) -> bool {
+        self.providers.switching().is_some()
     }
 
     fn subscription_connected(&self) -> bool {
