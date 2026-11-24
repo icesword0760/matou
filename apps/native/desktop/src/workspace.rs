@@ -923,18 +923,205 @@ enum ProviderRestoreBanner<'a> {
     },
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LoadingBadge {
     Recovering,
     Loading,
 }
 
 impl LoadingBadge {
+    fn for_first_frame(
+        node: &Value,
+        recovery: Option<&RecoveryState>,
+        awaiting_recovery_frame: bool,
+        has_first_frame_content: bool,
+        environment_or_storage_blocked: bool,
+    ) -> Option<Self> {
+        if has_first_frame_content
+            || environment_or_storage_blocked
+            || !node["archivedAt"].is_null()
+            || fork_failure_copy(node).is_some()
+            || fork_progress_copy(node).is_some()
+            || Workspace::provider_restore_state(node) == Some("failed")
+            || matches!(
+                recovery,
+                Some(
+                    RecoveryState::Deferred
+                        | RecoveryState::Failed(_)
+                        | RecoveryState::StartFailed(_)
+                        | RecoveryState::Restarting(_)
+                )
+            )
+        {
+            return None;
+        }
+
+        // The initial graph can still carry the previous run's exit status.
+        if matches!(recovery, Some(RecoveryState::Restoring)) || awaiting_recovery_frame {
+            Some(Self::Recovering)
+        } else if node["workStatus"] != "exited" {
+            Some(Self::Loading)
+        } else {
+            None
+        }
+    }
+
     fn label(self, locale: &InterfaceLocale) -> &'static str {
         match self {
             Self::Recovering => locale.text("恢复中", "Recovering"),
             Self::Loading => locale.text("加载中", "Loading"),
         }
+    }
+}
+
+fn clear_exited_recovery_sessions(
+    restoring_sessions: &mut HashSet<String>,
+    recovery: &HashMap<String, RecoveryState>,
+    previous_graph: &Value,
+    graph: &Value,
+) {
+    if restoring_sessions.is_empty() {
+        return;
+    }
+    let previous_nodes = session_levels::nodes(previous_graph);
+    for node in session_levels::nodes(graph) {
+        // An unchanged exit status can still belong to the previous run.
+        if node["workStatus"] == "exited"
+            && let Some(id) = node["sessionId"].as_str()
+            && restoring_sessions.contains(id)
+            && recovery.get(id) == Some(&RecoveryState::Ready)
+            && session_levels::node(previous_nodes, id)
+                .is_some_and(|previous| previous["workStatus"] != "exited")
+        {
+            restoring_sessions.remove(id);
+        }
+    }
+}
+
+#[cfg(test)]
+mod recovery_loading_tests {
+    use super::{LoadingBadge, RecoveryState, clear_exited_recovery_sessions, session_levels};
+    use serde_json::json;
+    use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn historical_work_status_preserves_recovery_until_the_first_visible_frame() {
+        for (mode, work_status) in [("claude-code", "exited"), ("shell", "error")] {
+            let node = json!({"currentMode": mode, "workStatus": work_status});
+            for (recovery, awaiting_recovery_frame) in [
+                (RecoveryState::Restoring, true),
+                (RecoveryState::Restoring, false),
+                (RecoveryState::Ready, true),
+            ] {
+                assert_eq!(
+                    LoadingBadge::for_first_frame(
+                        &node,
+                        Some(&recovery),
+                        awaiting_recovery_frame,
+                        false,
+                        false,
+                    ),
+                    Some(LoadingBadge::Recovering),
+                    "{mode} {recovery:?}"
+                );
+            }
+            assert_eq!(
+                LoadingBadge::for_first_frame(
+                    &node,
+                    Some(&RecoveryState::Ready),
+                    true,
+                    true,
+                    false
+                ),
+                None
+            );
+        }
+        assert_eq!(
+            LoadingBadge::for_first_frame(
+                &json!({"workStatus": "starting"}),
+                None,
+                false,
+                false,
+                false
+            ),
+            Some(LoadingBadge::Loading)
+        );
+    }
+
+    #[test]
+    fn terminal_failure_and_stopped_surfaces_suppress_recovery_loading() {
+        let node = json!({"currentMode": "claude-code", "workStatus": "exited"});
+        for recovery in [
+            RecoveryState::Deferred,
+            RecoveryState::StartFailed("start failed".into()),
+            RecoveryState::Failed("restore failed".into()),
+            RecoveryState::Restarting("restarting".into()),
+        ] {
+            assert_eq!(
+                LoadingBadge::for_first_frame(&node, Some(&recovery), true, false, false),
+                None,
+                "{recovery:?}"
+            );
+        }
+        for node in [
+            json!({"archivedAt": 10, "workStatus": "exited"}),
+            json!({"currentMode": "claude-code", "providerRestoreState": "failed", "workStatus": "error"}),
+            json!({"forkState": "failed", "workStatus": "error"}),
+            json!({"forkProgress": {"stage": "restoring-provider"}}),
+        ] {
+            assert_eq!(
+                LoadingBadge::for_first_frame(
+                    &node,
+                    Some(&RecoveryState::Restoring),
+                    true,
+                    false,
+                    false
+                ),
+                None,
+                "{node}"
+            );
+        }
+        assert_eq!(
+            LoadingBadge::for_first_frame(
+                &node,
+                Some(&RecoveryState::Restoring),
+                true,
+                false,
+                true
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn graph_exit_ends_an_empty_ready_run_but_preserves_historical_exit_during_recovery() {
+        let id = "session";
+        let graph = |work_status| json!({"nodes": [{"sessionId": id, "workStatus": work_status}]});
+        let starting = graph("starting");
+        let exited = graph("exited");
+        let node = session_levels::node(session_levels::nodes(&exited), id).unwrap();
+        let mut restoring = HashSet::from([id.to_owned()]);
+        let mut recovery = HashMap::from([(id.to_owned(), RecoveryState::Restoring)]);
+
+        clear_exited_recovery_sessions(&mut restoring, &recovery, &starting, &exited);
+        assert!(restoring.contains(id));
+
+        recovery.insert(id.to_owned(), RecoveryState::Ready);
+        clear_exited_recovery_sessions(&mut restoring, &recovery, &exited, &exited);
+        assert!(restoring.contains(id));
+
+        clear_exited_recovery_sessions(&mut restoring, &recovery, &starting, &exited);
+        assert!(!restoring.contains(id));
+        assert_eq!(
+            LoadingBadge::for_first_frame(
+                node,
+                recovery.get(id),
+                restoring.contains(id),
+                false,
+                false
+            ),
+            None
+        );
     }
 }
 
@@ -6183,17 +6370,15 @@ impl Workspace {
         node: &Value,
         awaiting_first_frame: bool,
     ) -> Option<LoadingBadge> {
-        if !awaiting_first_frame || !self.recovery_water_needed(id, node) {
+        if !awaiting_first_frame {
             return None;
         }
-        Some(
-            if matches!(self.recovery.get(id), Some(RecoveryState::Restoring))
-                || self.restoring_sessions.contains(id)
-            {
-                LoadingBadge::Recovering
-            } else {
-                LoadingBadge::Loading
-            },
+        LoadingBadge::for_first_frame(
+            node,
+            self.recovery.get(id),
+            self.restoring_sessions.contains(id),
+            self.first_frame_content.contains(id),
+            self.storage_fault_sessions.contains(id) || self.environment_unavailable(id),
         )
     }
 
@@ -6382,24 +6567,9 @@ impl Workspace {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn recovery_water_needed(&self, id: &str, node: &Value) -> bool {
-        node["archivedAt"].is_null()
-            && !self.environment_unavailable(id)
-            && fork_failure_copy(node).is_none()
-            && fork_progress_copy(node).is_none()
-            && Self::provider_restore_state(node) != Some("failed")
-            && !self.first_frame_content.contains(id)
-            && !self.storage_fault_sessions.contains(id)
-            && !matches!(
-                self.recovery.get(id),
-                Some(
-                    RecoveryState::Deferred
-                        | RecoveryState::Failed(_)
-                        | RecoveryState::StartFailed(_)
-                        | RecoveryState::Restarting(_)
-                )
-            )
-            && !matches!(node["workStatus"].as_str(), Some("error" | "exited"))
+        self.loading_badge(id, node, true).is_some()
     }
 
     #[cfg(target_os = "macos")]
@@ -8966,6 +9136,12 @@ impl Workspace {
             .and_then(|object| object.remove("providerPermissionModeResults"));
         self.update_notifications(&mut graph);
         self.refresh_egress_for_graph_change(&graph, cx);
+        clear_exited_recovery_sessions(
+            &mut self.restoring_sessions,
+            &self.recovery,
+            &self.graph,
+            &graph,
+        );
         self.graph = graph;
         if let Some(child) = self.dag_window
             && child

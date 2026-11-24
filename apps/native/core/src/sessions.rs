@@ -661,7 +661,7 @@ pub fn start_run(
             "UPDATE sessions
              SET status = 'running',
                  work_status = CASE kind
-                     WHEN 'claude-code' THEN work_status
+                     WHEN 'claude-code' THEN CASE WHEN work_status = 'exited' THEN 'starting' ELSE work_status END
                      WHEN 'codex' THEN 'starting'
                      WHEN 'dsh' THEN 'starting'
                      WHEN 'antigravity' THEN 'starting'
@@ -2425,4 +2425,127 @@ fn trim(text: &str) -> &str {
             | '\u{205F}' | '\u{3000}' | '\u{FEFF}'
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        hierarchy::{BootstrapWindowInput, HierarchyIds, bootstrap_window},
+        storage::{configure_connection, migrate},
+    };
+
+    fn command(id: &str) -> CommandMetadata {
+        CommandMetadata {
+            command_id: id.into(),
+            command_type: "test.session-run".into(),
+            request_hash: id.into(),
+            causation_id: None,
+            correlation_id: None,
+        }
+    }
+
+    fn claude_session_db() -> Result<Connection> {
+        let mut db = Connection::open_in_memory()?;
+        configure_connection(&db)?;
+        migrate(&mut db, 1)?;
+        bootstrap_window(
+            &mut db,
+            &command("bootstrap"),
+            &BootstrapWindowInput {
+                window_id: "window".into(),
+                default_root_directory: "/workspace".into(),
+                default_name: "Workspace".into(),
+                now: 2,
+            },
+            &HierarchyIds {
+                workspace_id: "workspace".into(),
+                execution_context_id: "context".into(),
+                task_id: "task".into(),
+                scene_id: "scene".into(),
+                root_node_id: "root".into(),
+                session_id: "session".into(),
+                mount_id: "mount".into(),
+            },
+            "Task",
+            2,
+        )?;
+        promote_shell_to_claude(&mut db, &command("promote"), "session", 3)?;
+        Ok(db)
+    }
+
+    fn start_claude_run(db: &mut Connection, id: &str, generation: &str, now: i64) -> Result<()> {
+        start_run(
+            db,
+            &command(id),
+            &StartRunInput {
+                id: id.into(),
+                session_id: "session".into(),
+                runtime_generation: generation.into(),
+                pid: None,
+                cols: 80,
+                rows: 24,
+                now,
+            },
+            now,
+        )?;
+        Ok(())
+    }
+
+    fn assert_session_status(db: &Connection, status: &str, work_status: &str) -> Result<()> {
+        let (actual_status, actual_work_status): (String, String) = db.query_row(
+            "SELECT status, work_status FROM sessions WHERE id = 'session'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(
+            (actual_status.as_str(), actual_work_status.as_str()),
+            (status, work_status)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn starting_a_bound_claude_session_clears_the_previous_exit_status() -> Result<()> {
+        let mut db = claude_session_db()?;
+        start_claude_run(&mut db, "first-run", "first-generation", 4)?;
+        record_claude_identity(
+            &mut db,
+            &command("bind"),
+            &ClaudeIdentity {
+                binding_id: "binding",
+                session_id: "session",
+                run_id: "first-run",
+                generation: "first-generation",
+                provider_session_id: "conversation",
+                expected_id: None,
+                launch_metadata: &Value::Null,
+                observed_metadata: &Value::Null,
+                event_name: "SessionStart",
+                first_for_run: true,
+            },
+            5,
+        )?;
+        finish_run(&mut db, &command("exit"), "first-run", 0, None, 6, 6)?;
+        assert_session_status(&db, "exited", "exited")?;
+
+        start_claude_run(&mut db, "resumed-run", "next-generation", 7)?;
+        assert_session_status(&db, "running", "starting")?;
+        Ok(())
+    }
+
+    #[test]
+    fn starting_a_claude_run_preserves_non_exit_work_status() -> Result<()> {
+        for status in ["idle", "running", "needs-input", "interrupted"] {
+            let mut db = claude_session_db()?;
+            db.execute(
+                "UPDATE sessions SET work_status = ? WHERE id = 'session'",
+                [status],
+            )?;
+
+            start_claude_run(&mut db, "replacement-run", "first-generation", 4)?;
+            assert_session_status(&db, "running", status)?;
+        }
+        Ok(())
+    }
 }
