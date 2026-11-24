@@ -296,6 +296,53 @@ fn deepseek_compressed_json_and_sse_preserve_bytes_and_report_actual_usage() -> 
 }
 
 #[test]
+fn deepseek_continuation_uses_gzip_usage_from_another_upstream() -> Result<()> {
+    let ordinary = listener()?;
+    let deepseek = listener()?;
+    let ordinary_address = ordinary.local_addr()?;
+    let gateway = main_delta_gateway(ordinary_address, deepseek.local_addr()?)?;
+    let bytes = compressed("gzip", TEXT_REPLY)?;
+    let upstream_bytes = bytes.clone();
+    let server = upstream(ordinary, move |mut io, _, headers| {
+        assert_eq!(headers["host"], ordinary_address.to_string());
+        assert_eq!(headers["accept-encoding"], "gzip, br");
+        drain_request(&mut io, length(&headers)?)?;
+        let out = io.get_mut();
+        write!(
+            out,
+            "HTTP/1.1 200 OK\r\n{JSON}Content-Encoding: gzip\r\nContent-Length: {}\r\n\r\n",
+            upstream_bytes.len()
+        )?;
+        out.write_all(&upstream_bytes)?;
+        Ok(())
+    });
+    let (status, headers, received) = exchange(
+        &gateway,
+        MESSAGES,
+        &stream_body("matou-role/opus", false),
+        "Accept-Encoding: gzip, br\r\n",
+    )?;
+    assert_eq!(status, 200);
+    assert_eq!(headers["content-encoding"], "gzip");
+    assert_eq!(received, bytes);
+    server.join().unwrap()?;
+
+    let follow_up = json!({
+        "model":"matou-role/sonnet",
+        "messages":[
+            {"role":"assistant","content":"18 passed, 19 remaining."},
+            {"role":"user","content":"continue"}
+        ]
+    });
+    let delivered = forward(&gateway, &deepseek, MESSAGES, "", &follow_up, UNUSED_REPLY)?;
+    assert_eq!(
+        delivered["messages"][1]["content"],
+        json!([{"type":"text","text":"continue"}, reminder(413_200, 1_048_576)])
+    );
+    Ok(())
+}
+
+#[test]
 fn brotli_filter_is_limited_to_tracked_deepseek_requests() -> Result<()> {
     let ordinary = listener()?;
     let deepseek = listener()?;
