@@ -2,14 +2,15 @@
 
 ## 发布模型
 
-Matou 使用 `electron-updater` 的 generic HTTPS provider。客户端读取打包时写入的更新地址，检查 `stable-mac.yml`，下载对应 ZIP 与 blockmap，并由 macOS 签名链验证后安装。
+原生 Matou 读取打包时写入的 generic HTTPS 更新地址。macOS 使用 `stable-mac.yml` 发现更新并下载 DMG。Electron 0.2.x 可读取同一份清单，选择 ZIP 并验证应用签名后安装。Windows 使用 `stable.yml` 查找 EXE 安装器。
 
-首阶段产物：
+macOS 产物包括
 
 - `Matou-<version>-mac-arm64.dmg`
 - `Matou-<version>-mac-arm64.zip`
-- `Matou-<version>-mac-arm64.zip.blockmap`
+- ZIP 和 DMG 各自的 `.blockmap`，本机有可用的 `app-builder` 时生成
 - `stable-mac.yml`
+- `SHA256SUMS-<version>-mac-arm64.txt`
 
 x64 构建使用相同命名并将架构替换为 `x64`。
 
@@ -31,63 +32,29 @@ https://updates.example.com/matou/stable
 
 ## 版本与签名
 
-从 0.2.18 开始，`pnpm package:mac` 要求签名成功，发布使用同一 Developer ID 身份；不得用 `identity=-` 或关闭签名发现来替代正式发布签名。临时签名的指定要求随构建内容变化，会使 macOS 目录授权失效。安装替换前应退出旧应用；旧应用启动的长期后台服务仍可能持有旧身份，需要在确认用途后单独结束。备份包不作为日常启动入口。签名和公证分别验证，签名成功不能当作公证成功。
+每次发布前提升 `apps/desktop/package.json` 的 `version`，同步四个原生 workspace 包和 `apps/native/Cargo.lock`。
 
-每次发布前把 `apps/desktop/package.json` 的 `version` 提升为严格递增的 SemVer。macOS 自动安装要求 Developer ID Application 签名；发布机或 CI 配置：
-
-```bash
-export CSC_LINK=/secure/path/DeveloperIDApplication.p12
-export CSC_KEY_PASSWORD='CERTIFICATE_PASSWORD'
-export APPLE_API_KEY=/secure/path/AuthKey_KEY_ID.p8
-export APPLE_API_KEY_ID='KEY_ID'
-export APPLE_API_ISSUER='ISSUER_UUID'
-```
-
-`CSC_LINK` 也可以使用 CI Secret 注入的 base64 或 HTTPS 地址。公证凭据按 electron-builder 当前支持的 Apple API Key 变量提供。
-
-### 第一次接入签名与公证的步骤
-
-1. 用 Apple ID 加入 [Apple Developer Program](https://developer.apple.com/programs/enroll/)（个人，99 美元/年），审核通常 1 到 2 天。
-2. 在 Xcode → Settings → Accounts 里登录该 Apple ID，点 Manage Certificates，新建 **Developer ID Application** 证书。证书会进本机钥匙串；发布机就是本机时，electron-builder 会自动从钥匙串取证书，`CSC_LINK` / `CSC_KEY_PASSWORD` 可以不设。要给 CI 用时，从钥匙串导出 `.p12` 再设这两个变量。
-3. 公证凭据二选一：
-   - App Store Connect → Users and Access → Integrations → App Store Connect API，生成密钥，下载 `AuthKey_<KEY_ID>.p8`，设 `APPLE_API_KEY` / `APPLE_API_KEY_ID` / `APPLE_API_ISSUER`；
-   - 或在 [appleid.apple.com](https://appleid.apple.com) 生成 app 专用密码，设 `APPLE_ID`、`APPLE_APP_SPECIFIC_PASSWORD`、`APPLE_TEAM_ID`。
-4. electron-builder 26 检测到上述任一组变量就会在签名后自动公证并装订（stapling）；没有变量时只打印 `skipped macOS notarization` 警告，不会失败。想强制关闭时在 `build.mac` 里设 `"notarize": false`。
-5. 验证：`spctl -a -vv -t install /Applications/码头.app` 输出 `accepted` 且 `source=Notarized Developer ID`；`xcrun stapler validate` 对 dmg 和 app 都通过。
-6. 签名版发出后，删掉 README 里「仍要打开」和 `xattr -dr com.apple.quarantine` 的说明，并把 `status-early preview` 徽章旁的未签名提示一并去掉。
-
-凭据只放在发布机的 shell 环境或 CI Secret 里，不进仓库。
+macOS 发布机的钥匙串须具备 `build.mac.identity` 指定的 Developer ID Application 证书及其私钥。正式包保留 `com.matou.desktop`、Team `JAKX72KQ6X` 和固定的 designated requirement，并使用 Apple 安全时间戳。原生流水线无 Apple 公证步骤。本地替换前先退出旧应用，再用 `pnpm install:mac --source <绝对路径.app>`。
 
 ## 构建
 
 ```bash
-export MATOU_UPDATE_BASE_URL='https://updates.example.com/matou/stable'
-export MATOU_MAC_ARCH='arm64' # Intel 发布机使用 x64
 pnpm package:mac
+pnpm package:win
 ```
 
-arm64 与 x64 分别在对应架构的 macOS 发布机上构建，避免 Runtime 中的原生 PTY 依赖带入错误架构。CI 以 `MATOU_MAC_ARCH=arm64` 和 `MATOU_MAC_ARCH=x64` 两个任务产出独立安装包；每个产物上传前都需验证应用主程序和 PTY 原生模块架构。
+产物默认保存在 `apps/native/release/`。每个架构使用独立输出目录，可用 `--out-dir` 指定。macOS 默认 arm64，Intel 使用 `--arch x64`，并准备对应架构的 Claude accounts 和 model-router。资源默认从 `apps/desktop/package-resources` 读取。两平台均支持使用预编译的 `--desktop-bin` 和 `--runtime-bin`。
 
-本机只验证包结构、跳过签名发现时：
-
-```bash
-export MATOU_UPDATE_BASE_URL='https://updates.example.invalid/matou/stable'
-export CSC_IDENTITY_AUTO_DISCOVERY=false
-pnpm build
-node tooling/prepare-package-resources.mjs
-pnpm exec electron-builder --projectDir apps/desktop --mac dmg zip --arm64 --publish never -c.mac.hardenedRuntime=false
-```
-
-未签名产物仅用于界面和清单验证，不进入正式更新目录。
+Windows ZIP 解压后可直接运行。要让 Windows 更新器打开安装器，使用 `--installer <文件.exe>` 生成指向现有 EXE 的 `stable.yml`。默认生成的 ZIP 清单用于手动分发。旧 Electron 打包入口为 `pnpm package:mac:legacy`。
 
 ## 上传顺序
 
 发布必须保持“清单最后可见”：
 
-1. 上传 ZIP、DMG 及所有 blockmap 到临时路径。
+1. 上传清单引用的产物及已生成的 blockmap 到临时路径。
 2. 校验文件 SHA-512、大小和 HTTPS Range 下载。
 3. 将二进制及 blockmap 移入 stable 目录。
-4. 最后原子替换 `stable-mac.yml`。
+4. 最后原子替换 `stable-mac.yml` 或 `stable.yml`。
 5. 从外网读取清单中的每个 URL，并校验文件存在及长度一致。
 
 清单提前发布会让客户端看到一个尚未完整上传的版本，从而产生下载失败。
@@ -99,7 +66,7 @@ location /matou/stable/ {
     alias /srv/matou-updates/stable/;
     add_header Accept-Ranges bytes always;
     types {
-        application/octet-stream zip blockmap;
+        application/octet-stream zip exe blockmap;
         application/x-apple-diskimage dmg;
         text/yaml yml;
     }
@@ -113,7 +80,7 @@ location ~ ^/matou/stable/.*\.yml$ {
 
 实际部署时按服务器目录调整 `alias`，并用 `curl -I` 与 Range 请求验证响应头。
 
-## 客户端验收
+## Electron 0.2.x 跨代更新验收
 
 1. 安装版本 N，并确认工作区中存在一个运行会话和一个空闲会话。
 2. 在服务器发布版本 N+1。

@@ -4,11 +4,12 @@ import { constants, createReadStream } from 'node:fs'
 import {
   access, chmod, copyFile, cp, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, writeFile
 } from 'node:fs/promises'
-import { basename, dirname, join, resolve, sep } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isDeepStrictEqual, parseArgs, promisify } from 'node:util'
 
 import { verifyInstallSource } from '../install-macos-app.mjs'
+import { canonicalOutput, formatUpdateConfig, requireSafeMacOutput } from '../native-release-helpers.mjs'
 
 const desktopProject = fileURLToPath(new URL('../../apps/desktop/', import.meta.url))
 const accountEngine = 'matou-claude-accounts'
@@ -24,6 +25,7 @@ const desktopName = 'matou-native-desktop'
 const runtimeName = 'matou-native-runtime'
 const iconName = 'icon.icns'
 const entitlementsName = 'entitlements.mac.plist'
+const updateConfigName = 'app-update.yml'
 const teamId = 'JAKX72KQ6X'
 // The frozen reference bundle's generated Info.plist declares macOS 12.0.
 const minimumSystemVersion = '12.0'
@@ -33,6 +35,7 @@ const usage = `Usage:
       --out-dir <directory> --version <X.Y.Z> [--app-name <name>] [--bundle-id <id>]
       [--entitlements <plist>] [--claude-accounts-engine <directory>] [--unsigned]
       [--model-router <directory>] [--allow-missing-model-router]
+      [--update-base-url <http(s) URL>] [--update-channel <channel>]
   node tooling/native-parity/package-native-mac.mjs --verify <path.app>
       [--app-name <name>] [--bundle-id <id>] [--require-release-signature]
       [--allow-missing-model-router]
@@ -329,6 +332,20 @@ function workflowPath(resources, workflow, appName) {
   return join(resources, dirname(workflow.to), `${workflowName(appName)}.workflow`)
 }
 
+async function verifyUpdateConfig(resources) {
+  const path = join(resources, updateConfigName)
+  if (!await optionalPath(path)) return
+  await requirePath(path, updateConfigName)
+  const config = await readFile(path, 'utf8')
+  const match = /^provider: generic\r?\nurl: ([^\r\n]+)\r?\nchannel: ([^\r\n]+)(?:\r?\n)?$/.exec(config)
+  if (!match) throw new Error(`Invalid ${updateConfigName}: expected provider, url and channel`)
+  try {
+    formatUpdateConfig(match[1], match[2])
+  } catch (error) {
+    throw new Error(`Invalid ${updateConfigName}: ${error.message}`, { cause: error })
+  }
+}
+
 async function verifyLayout(bundle, config, bundleId, workflow, requestedAppName, allowMissingModelRouter) {
   const contents = join(bundle, 'Contents')
   const macos = join(contents, 'MacOS')
@@ -356,6 +373,7 @@ async function verifyLayout(bundle, config, bundleId, workflow, requestedAppName
   const entitlements = join(resources, entitlementsName)
   await requirePath(entitlements, 'entitlements resource')
   await readPlist(entitlements)
+  await verifyUpdateConfig(resources)
   const bundledWorkflow = workflowPath(resources, workflow, appName)
   for (const path of [
     dirname(bundledWorkflow), bundledWorkflow, join(bundledWorkflow, 'Contents'),
@@ -396,29 +414,6 @@ async function verifyLayout(bundle, config, bundleId, workflow, requestedAppName
   return { info, runtime, engine, modelRouter, architectures }
 }
 
-async function canonicalOutput(path) {
-  const missing = []
-  let current = resolve(path)
-  for (;;) {
-    try {
-      return join(await realpath(current), ...missing)
-    } catch (error) {
-      if (error.code !== 'ENOENT') throw error
-      missing.unshift(basename(current))
-      current = dirname(current)
-    }
-  }
-}
-
-function requireSafeOutput(path) {
-  const normalized = path.toLowerCase()
-  if (['/applications', '/system/applications', '/system/volumes/data/applications'].some(
-    directory => normalized === directory || normalized.startsWith(`${directory}${sep}`)
-  ) || normalized.split(sep).some(part => part.endsWith('.app'))) {
-    throw new Error(`--out-dir cannot write to /Applications or inside an existing .app: ${path}`)
-  }
-}
-
 async function requireAbsent(path) {
   try {
     await lstat(path)
@@ -431,14 +426,16 @@ async function requireAbsent(path) {
 
 async function assemble(options, config, bundleId, workflow) {
   const output = await canonicalOutput(options['out-dir'])
-  requireSafeOutput(resolve(options['out-dir']))
-  requireSafeOutput(output)
+  requireSafeMacOutput(resolve(options['out-dir']))
+  requireSafeMacOutput(output)
   const appName = options['app-name'] ?? config.productName
   const executableName = options['app-name'] ?? desktopName
   const bundleName = `${appName}.app`
   const destination = join(output, bundleName)
   await requireAbsent(destination)
   validateVersion(options.version)
+  const updateConfig = options['update-base-url'] === undefined ? null :
+    formatUpdateConfig(options['update-base-url'], options['update-channel'] ?? 'stable')
   const desktop = await sourceFile(options['desktop-bin'], 'desktop binary')
   const runtime = await sourceFile(options['runtime-bin'], 'runtime binary')
   await requireExecutable(desktop, 'desktop binary')
@@ -464,7 +461,7 @@ async function assemble(options, config, bundleId, workflow) {
   ))
 
   await mkdir(output, { recursive: true })
-  requireSafeOutput(await realpath(output))
+  requireSafeMacOutput(await realpath(output))
   const staging = await mkdtemp(join(output, '.matou-native-mac-'))
   try {
     const bundle = join(staging, bundleName)
@@ -494,6 +491,7 @@ async function assemble(options, config, bundleId, workflow) {
       await chmod(join(directory, modelRouterName), 0o755)
     }
     await copyFile(entitlements, join(resources, entitlementsName))
+    if (updateConfig) await writeFile(join(resources, updateConfigName), updateConfig)
     const bundledWorkflow = workflowPath(resources, workflow, appName)
     for (const [index, file] of workflowFiles.entries()) {
       const path = join(bundledWorkflow, file)
@@ -524,8 +522,9 @@ async function assemble(options, config, bundleId, workflow) {
 
 async function main() {
   const input = ['desktop-bin', 'runtime-bin', 'out-dir', 'version']
+  const updateOptions = ['update-base-url', 'update-channel']
   const { values } = parseArgs({ options: {
-    ...Object.fromEntries([...input, 'app-name', 'bundle-id', 'entitlements', 'claude-accounts-engine', 'model-router', 'verify'].map(name => [name, { type: 'string' }])),
+    ...Object.fromEntries([...input, ...updateOptions, 'app-name', 'bundle-id', 'entitlements', 'claude-accounts-engine', 'model-router', 'verify'].map(name => [name, { type: 'string' }])),
     unsigned: { type: 'boolean' },
     'allow-missing-model-router': { type: 'boolean' },
     'require-release-signature': { type: 'boolean' },
@@ -534,7 +533,7 @@ async function main() {
   if (values.help) return console.log(usage)
   if (process.platform !== 'darwin') throw new Error('This toolkit requires macOS')
   const verifying = values.verify !== undefined
-  if (verifying && (!values.verify || [...input, 'entitlements', 'claude-accounts-engine', 'model-router', 'unsigned'].some(name => name in values))) {
+  if (verifying && (!values.verify || [...input, ...updateOptions, 'entitlements', 'claude-accounts-engine', 'model-router', 'unsigned'].some(name => name in values))) {
     throw new Error('--verify requires a .app path and accepts only --app-name, --bundle-id, --require-release-signature and --allow-missing-model-router')
   }
   if (!verifying && values['require-release-signature']) {
@@ -546,6 +545,9 @@ async function main() {
   if (!verifying) {
     for (const flag of input) {
       if (!values[flag]) throw new Error(`Missing required option --${flag}`)
+    }
+    if (values['update-channel'] !== undefined && values['update-base-url'] === undefined) {
+      throw new Error('--update-channel requires --update-base-url')
     }
   }
 

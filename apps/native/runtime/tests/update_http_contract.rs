@@ -716,14 +716,7 @@ fn resolves_update_source_version_channel_and_disable_in_frozen_order() -> Resul
     let version_json = resources.path().join("version.json");
     fs::write(
         &app_update,
-        "provider: generic\nurl: http://127.0.0.1:1/yaml\nchannel: ignored\n",
-    )?;
-    fs::write(
-        &version_json,
-        json!({"version":"1.2.3", "update":{
-            "baseUrl":"http://127.0.0.1:1/json", "channel":"packaged"
-        }})
-        .to_string(),
+        "provider: generic\nurl: http://127.0.0.1:1/yaml\nchannel: beta\n",
     )?;
     let resolve = |env: &[(&str, &str)]| {
         UpdateSettings::resolve(Some(resources.path()), |key| {
@@ -732,6 +725,19 @@ fn resolves_update_source_version_channel_and_disable_in_frozen_order() -> Resul
                 .map(|(_, value)| (*value).to_owned())
         })
     };
+    let yaml_only = resolve(&[]);
+    assert_eq!(yaml_only.feed.channel, "beta");
+    assert_eq!(
+        yaml_only.feed.channel_filename(Platform::Darwin, Architecture::Arm64),
+        "beta-mac.yml"
+    );
+    fs::write(
+        &version_json,
+        json!({"version":"1.2.3", "update":{
+            "baseUrl":"http://127.0.0.1:1/json", "channel":"packaged"
+        }})
+        .to_string(),
+    )?;
 
     let override_ = resolve(&[
         ("MATOU_UPDATE_BASE_URL", "  http://127.0.0.1:1/env  "),

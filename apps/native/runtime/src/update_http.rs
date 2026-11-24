@@ -60,12 +60,24 @@ impl UpdateSettings {
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
         let override_url = env("MATOU_UPDATE_BASE_URL");
+        let packaged_url = packaged_config.as_deref().and_then(parse_packaged_base_url);
+        let packaged_channel = packaged_config
+            .as_deref()
+            .filter(|_| packaged_url.is_some())
+            .and_then(|config| {
+                config.lines().find_map(|line| {
+                    line.strip_prefix("channel:")
+                        .map(str::trim)
+                        .filter(|channel| !channel.is_empty())
+                })
+            });
         let channel = env("MATOU_UPDATE_CHANNEL").or(metadata.update.channel);
+        let channel = channel.as_deref().or(packaged_channel);
         let override_url = override_url.as_deref().filter(|url| !url.trim().is_empty());
         let url = override_url
-            .or_else(|| packaged_config.as_deref().and_then(parse_packaged_base_url))
+            .or(packaged_url)
             .or(metadata.update.base_url.as_deref());
-        let feed = FeedConfiguration::resolve(url, None, channel.as_deref());
+        let feed = FeedConfiguration::resolve(url, None, channel);
         let enabled = update_checks_enabled(
             resources.is_some_and(Path::is_dir) || override_url.is_some(),
             env("MATOU_DISABLE_UPDATES").as_deref(),

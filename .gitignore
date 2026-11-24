@@ -10,6 +10,7 @@ playwright-report/
 .matou-data/
 apps/desktop/package-resources/
 apps/desktop/release/
+/apps/native/release/
 apps/desktop/release-*/
 output/
 .playwright-cli/
@@ -38,8 +39,8 @@ server.pid
 # Local native migration reference bundles, data and evidence
 /artifacts/native-parity/
 /apps/native/target/
-/apps/native/terminal/vendor/
-/apps/native/vendor/
+/apps/native/terminal/vendor
+/apps/native/vendor
 
 # Short macOS socket aliases for isolated packaged acceptance
 /.c5/

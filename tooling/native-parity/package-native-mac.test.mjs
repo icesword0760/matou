@@ -146,6 +146,23 @@ test('assembles and verifies an app with frozen metadata and universal Mach-O pa
   failure(cli(['--verify', explicitBundle]), /Missing account engine/)
 })
 
+test('writes a generic update configuration and rejects malformed configurations on verification', { skip }, async () => {
+  const base = 'https://updates.example.test/beta'
+  for (const [name, extra] of [['stable', []], ['beta', ['--update-channel', 'beta']]]) {
+    const app = success(assemble(join(root, `update ${name}`), {
+      extra: ['--update-base-url', base, ...extra]
+    })).path
+    const path = join(app, 'Contents/Resources/app-update.yml')
+    assert.equal(await readFile(path, 'utf8'), `provider: generic\nurl: ${base}\nchannel: ${name}\n`)
+    success(cli(['--verify', app]))
+    await appendFile(path, 'url: https://other.example.test\n')
+    failure(cli(['--verify', app]), /Invalid app-update.yml/)
+  }
+  failure(assemble(join(root, 'broken update'), {
+    extra: ['--update-base-url', 'file:///tmp/stable']
+  }), /absolute HTTP\(S\) URL/)
+})
+
 test('copies custom entitlements and audits the requested bundle ID', { skip }, async () => {
   const out = join(root, 'custom')
   const entitlements = join(root, 'custom.plist')
