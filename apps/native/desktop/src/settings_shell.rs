@@ -1518,7 +1518,14 @@ impl Editor {
         window: &mut Window,
         cx: &mut Context<SettingsShell>,
     ) -> Self {
+        let keep_empty_fable = draft.subscription_kind.is_some()
+            && draft.id.is_some()
+            && draft.model_mapping[1].trim().is_empty();
         normalize_subscription_draft(&mut draft);
+        if keep_empty_fable {
+            // An existing subscription may have left this optional mapping unset.
+            draft.model_mapping[1].clear();
+        }
         for effort in &mut draft.effort_mapping {
             if effort.is_empty() {
                 *effort = "follow".into();
@@ -1573,7 +1580,7 @@ impl Editor {
         let mappings = std::array::from_fn(|index| {
             input_entity(
                 draft.model_mapping[index].clone(),
-                locale.text("沿用 CLI 默认", "Use CLI default"),
+                locale.text("输入模型 ID", "Enter model ID"),
                 cx,
             )
         });
@@ -9514,53 +9521,42 @@ impl SettingsShell {
         }
     }
 
-    fn empty_mapping_label(&self, index: usize) -> &'static str {
-        if ROLES[index] == "fable" {
-            self.locale.text("沿用 Opus", "Follow Opus")
-        } else {
-            self.locale.text("沿用 CLI 默认", "Use CLI default")
-        }
-    }
-
     fn mapping_label(&self, work: &ProviderDraft, index: usize) -> (String, bool) {
         let id = work.model_mapping[index].trim();
-        let (label, enabled) =
-            if id.is_empty() && (ROLES[index] == "fable" || work.subscription_kind.is_none()) {
-                (self.empty_mapping_label(index).into(), true)
-            } else if !work.ignore_model_efforts
-                && let Some(row) = work
-                    .available_models()
-                    .into_iter()
-                    .find(|row| row["id"] == id)
-            {
-                (row["displayName"].as_str().unwrap_or(id).into(), true)
-            } else if work.subscription_kind.is_some() {
-                (
-                    if id.is_empty() {
-                        "—".into()
-                    } else {
-                        format!("{id} · {}", self.locale.text("不可用", "Unavailable"))
-                    },
-                    false,
-                )
-            } else if work.ignore_model_efforts || work.available_models().is_empty() {
-                (
-                    format!(
-                        "{id} {}",
-                        self.locale.text("（尚未获取列表）", "(list not fetched)")
-                    ),
-                    true,
-                )
-            } else {
-                (
-                    format!(
-                        "{id} {}",
-                        self.locale.text("（未在列表中）", "(not in list)")
-                    ),
-                    true,
-                )
-            };
-        (label, enabled)
+        if id.is_empty() {
+            (
+                self.locale.text("请选择模型", "Select a model").into(),
+                true,
+            )
+        } else if !work.ignore_model_efforts
+            && let Some(row) = work
+                .available_models()
+                .into_iter()
+                .find(|row| row["id"] == id)
+        {
+            (row["displayName"].as_str().unwrap_or(id).into(), true)
+        } else if work.subscription_kind.is_some() {
+            (
+                format!("{id} · {}", self.locale.text("不可用", "Unavailable")),
+                false,
+            )
+        } else if work.ignore_model_efforts || work.available_models().is_empty() {
+            (
+                format!(
+                    "{id} {}",
+                    self.locale.text("（尚未获取列表）", "(list not fetched)")
+                ),
+                true,
+            )
+        } else {
+            (
+                format!(
+                    "{id} {}",
+                    self.locale.text("（未在列表中）", "(not in list)")
+                ),
+                true,
+            )
+        }
     }
 
     fn provider_select_options(
@@ -9606,17 +9602,7 @@ impl SettingsShell {
                     work.available_models()
                 };
                 let known = models.iter().any(|row| row["id"] == id);
-                let mut options = Vec::with_capacity(models.len() + 3);
-                let fable = ROLES[index] == "fable";
-                if !subscription || fable {
-                    options.push(SelectOption {
-                        choice: ProviderChoice::Model(String::new()),
-                        label: self.empty_mapping_label(index).into(),
-                        detail: None,
-                        selected: id.is_empty(),
-                        enabled: true,
-                    });
-                }
+                let mut options = Vec::with_capacity(models.len() + 2);
                 options.extend(models.into_iter().map(|row| {
                     let model_id = row["id"].as_str().unwrap_or_default();
                     let window = window_text(row, self.locale);
@@ -9628,7 +9614,7 @@ impl SettingsShell {
                         enabled: true,
                     }
                 }));
-                if !known && (!id.is_empty() || (subscription && !fable)) {
+                if !known && !id.is_empty() {
                     let (label, enabled) = self.mapping_label(work, index);
                     options.push(SelectOption {
                         choice: ProviderChoice::Model(id.into()),
@@ -9638,7 +9624,7 @@ impl SettingsShell {
                         enabled,
                     });
                 }
-                if !subscription || fable {
+                if !subscription || ROLES[index] == "fable" {
                     options.push(SelectOption {
                         choice: ProviderChoice::Manual,
                         label: self
@@ -10305,6 +10291,7 @@ impl SettingsShell {
             "name" => &focus.name,
             "mapping-0" => &focus.mapping_choices[0],
             "mapping-1" => &focus.mapping_choices[1],
+            "mapping-2" => &focus.mapping_choices[2],
             "manual-0" => &focus.mappings[0],
             "manual-1" => &focus.mappings[1],
             "mapping-list-0" => &focus.manual_links[0],

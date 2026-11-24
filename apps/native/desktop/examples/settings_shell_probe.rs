@@ -905,6 +905,15 @@ mod probe {
                 view.labels.get(control)
             );
         };
+        let mapping_options = |view: &ProviderEditorProbe, expected: &[&str]| {
+            let mut options: Vec<_> = view
+                .labels
+                .keys()
+                .filter_map(|key| key.strip_prefix("mapping-option-"))
+                .collect();
+            options.sort_unstable();
+            assert_eq!(options, expected);
+        };
         let save_command = || match business(&sink).unwrap() {
             Command::SaveProvider { request_id, input } => (request_id, input),
             _ => panic!("expected provider write"),
@@ -969,9 +978,19 @@ mod probe {
         text(&view, "model-detail", "512,000 tokens");
         text(&view, "model-source", "本次获取");
 
-        text(&view, "mapping-1", "沿用 Opus");
+        assert_eq!(view.labels["mapping-1"], "请选择模型");
+        assert_eq!(view.labels["mapping-2"], "请选择模型");
+        let view = activate(cx, "mapping-2");
+        mapping_options(&view, &["manual", "other-model", "saved-model"]);
+        press(window, "escape", cx);
         let view = activate(cx, "mapping-1");
-        text(&view, "mapping-option-manual", "手动填写模型 ID");
+        mapping_options(&view, &["manual", "other-model", "saved-model"]);
+        text(
+            &view,
+            "mapping-option-other-model",
+            "other-model · 512,000 tokens",
+        );
+        text(&view, "mapping-option-manual", "手动填写模型 ID…");
         let view = click(cx, &view, "mapping-option-manual");
         text(&view, "mapping-list-1", "从列表选择");
         focus(cx, "manual-1");
@@ -982,6 +1001,10 @@ mod probe {
         let view = activate(cx, "mapping-list-1");
         text(&view, "mapping-1", "unk");
         text(&view, "mapping-1", "未在列表中");
+        let view = activate(cx, "mapping-1");
+        mapping_options(&view, &["manual", "other-model", "saved-model", "unk"]);
+        text(&view, "mapping-option-unk", "✓");
+        press(window, "escape", cx);
         let view = activate(cx, "effort-1");
         click(cx, &view, "effort-option-high");
         activate(cx, "context-512k");
@@ -994,6 +1017,7 @@ mod probe {
         assert_eq!(input["modelMapping"]["fable"], "unk");
         assert_eq!(input["effortMapping"]["fable"], "high");
         assert_eq!(input["modelMapping"]["opus"], "saved-model");
+        assert_eq!(input["modelMapping"]["sonnet"], "");
         assert_eq!(input["contextWindowMode"], "512k");
         assert_eq!(input["modelMetadata"].as_array().unwrap().len(), 2);
         let mut saved_api = api;
@@ -1009,6 +1033,7 @@ mod probe {
         text(&view, "title", "编辑供应商");
         text(&view, "subtitle", "用于 Claude Code");
         text(&view, "provider-name", "供应商名称");
+        assert_eq!(view.labels["mapping-1"], "请选择模型");
         for role in 0..4 {
             assert!(view.bounds.contains_key(format!("mapping-{role}").as_str()));
             assert!(view.bounds.contains_key(format!("effort-{role}").as_str()));
@@ -1036,10 +1061,14 @@ mod probe {
         assert!(!view.bounds.contains_key("mapping-option-manual"));
         click(cx, &view, "mapping-option-chat-b");
         let view = activate(cx, "effort-0");
-        click(cx, &view, "effort-option-high");
+        let view = click(cx, &view, "effort-option-high");
+        assert!(view.enabled["save"] && view.enabled["save-switch"]);
+        let view = activate(cx, "mapping-2");
+        mapping_options(&view, &["chat-a", "chat-b"]);
+        press(window, "escape", cx);
         let view = activate(cx, "mapping-1");
-        text(&view, "mapping-option-", "沿用 Opus");
-        text(&view, "mapping-option-manual", "手动填写模型 ID");
+        mapping_options(&view, &["chat-a", "chat-b", "manual"]);
+        text(&view, "mapping-option-manual", "手动填写模型 ID…");
         click(cx, &view, "mapping-option-chat-b");
         let view = activate(cx, "effort-1");
         click(cx, &view, "effort-option-low");
@@ -1092,6 +1121,9 @@ mod probe {
         let view = activate(cx, "next");
         assert!(view.bounds["context"].top() > view.bounds["mapping-3"].bottom());
         assert_eq!(view.context_mode.as_deref(), Some("default"));
+        for role in 0..4 {
+            assert_eq!(view.labels[&format!("mapping-{role}")], "请选择模型");
+        }
         activate(cx, "context-maximum");
         let view = activate(cx, "back");
         text(&view, "confirmation", "有尚未保存的修改");
