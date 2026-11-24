@@ -287,14 +287,19 @@ mod workspace {
             )
         }
 
-        pub(super) fn focus_title_menu_item(&mut self, restore: bool, cx: &mut Context<Self>) {
+        pub(super) fn focus_title_menu_item(&mut self, cx: &mut Context<Self>) {
             use matou_native_desktop::card_context_menu::CardMenuAction;
-            let action = if restore {
-                CardMenuAction::RestoreAutoTitle
-            } else {
-                CardMenuAction::Rename
-            };
-            self.select_card_menu_action_for_probe(action, cx);
+            self.select_card_menu_action_for_probe(CardMenuAction::Rename, cx);
+        }
+
+        pub(super) fn restore_auto_title_for_probe(&mut self, cx: &mut Context<Self>) {
+            self.send(
+                Command::SetSessionTitle {
+                    session_id: PEER.into(),
+                    title: None,
+                },
+                cx,
+            );
         }
 
         pub(super) fn replace_title_input(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -646,8 +651,10 @@ mod workspace {
             assert_eq!(PERMISSION_MENU_GAP, 8.);
             assert_eq!(PERMISSION_MENU_TITLE, "权限模式");
             assert_eq!(PERMISSION_MENU_CHECK, "✓");
-            let mut active = permission_menu_item(mode, mode);
-            let mut inactive = permission_menu_item(PermissionMode::ALL[(index + 1) % 5], mode);
+            let colors = popover_colors(true);
+            let mut active = permission_menu_item(mode, mode, colors);
+            let mut inactive =
+                permission_menu_item(PermissionMode::ALL[(index + 1) % 5], mode, colors);
             assert_eq!(
                 active.style().text.as_ref().unwrap().color,
                 Some(rgb(0x58a6ff).into())
@@ -5125,16 +5132,20 @@ mod probe {
                 );
                 if width == 1200. && case < 2 {
                     let restore = case == 1;
-                    let position = window
-                        .update(cx, |view, _, _| view.fork_card_header(PEER))
-                        .unwrap();
-                    fork_click(window, cx, MouseButton::Right, position);
-                    draw(window, cx);
-                    window
-                        .update(cx, |view, _, cx| view.focus_title_menu_item(restore, cx))
-                        .unwrap();
-                    press(window, cx, "enter");
-                    if !restore {
+                    if restore {
+                        window
+                            .update(cx, |view, _, cx| view.restore_auto_title_for_probe(cx))
+                            .unwrap();
+                    } else {
+                        let position = window
+                            .update(cx, |view, _, _| view.fork_card_header(PEER))
+                            .unwrap();
+                        fork_click(window, cx, MouseButton::Right, position);
+                        draw(window, cx);
+                        window
+                            .update(cx, |view, _, cx| view.focus_title_menu_item(cx))
+                            .unwrap();
+                        press(window, cx, "enter");
                         window
                             .update(cx, |view, window, cx| view.replace_title_input(window, cx))
                             .unwrap();
@@ -5183,7 +5194,7 @@ mod probe {
                     println!(
                         "Codex title menu | {}",
                         if restore {
-                            "restore sent from manual card"
+                            "restore sent through the runtime command"
                         } else {
                             "rename sent, failure kept input, retry succeeded"
                         }
