@@ -771,13 +771,13 @@ fn owned_attempt<'a>(
         .context("Subscription sign-in is unavailable")
 }
 
-fn pin_client_headers(
+pub(super) fn pin_client_headers(
     client: &ManagementClient<'_>,
     provider: SubscriptionProvider,
     file: &Value,
 ) -> Result<()> {
     let (key, value) = match provider {
-        SubscriptionProvider::ChatGpt => ("Originator", "codex-tui".to_owned()),
+        SubscriptionProvider::ChatGpt => ("Originator", "codex-tui"),
         SubscriptionProvider::Antigravity => ("User-Agent", antigravity_user_agent()),
     };
     if file["headers"][key] != value {

@@ -2710,6 +2710,274 @@ struct PendingView {
     scroll_request_id: u64,
 }
 
+#[derive(Default)]
+struct FrameDelivery {
+    sent_sequence: u64,
+    acknowledged_sequence: u64,
+    viewport_dirty: bool,
+}
+
+impl FrameDelivery {
+    fn blocks_view(&self) -> bool {
+        self.sent_sequence > self.acknowledged_sequence && !self.viewport_dirty
+    }
+
+    fn acknowledge(&mut self, sequence: u64) -> bool {
+        if sequence <= self.acknowledged_sequence || sequence > self.sent_sequence {
+            return false;
+        }
+        self.acknowledged_sequence = sequence;
+        true
+    }
+}
+
+fn viewport_scroll_session(command: &Command) -> Option<&str> {
+    match command {
+        Command::ScrollTo { session_id, .. }
+        | Command::Scroll { session_id, .. }
+        | Command::ScrollSelection { session_id, .. } => Some(session_id),
+        _ => None,
+    }
+}
+
+fn queue_viewport_scroll(batch: &mut VecDeque<Command>, command: Command) {
+    let session = viewport_scroll_session(&command);
+    let previous = batch
+        .iter_mut()
+        .rev()
+        .find(|previous| viewport_scroll_session(previous) == session);
+    match (previous, &command) {
+        (
+            Some(Command::ScrollTo {
+                row,
+                request_id,
+                pixel_target,
+                ..
+            }),
+            Command::ScrollTo {
+                row: next_row,
+                request_id: next_id,
+                pixel_target: next_target,
+                ..
+            },
+        ) if pixel_target == next_target => {
+            *row = *next_row;
+            *request_id = *next_id;
+        }
+        (Some(Command::Scroll { lines, .. }), Command::Scroll { lines: next, .. })
+        | (
+            Some(Command::ScrollSelection { lines, .. }),
+            Command::ScrollSelection { lines: next, .. },
+        ) if lines.signum() == next.signum()
+            && let Some(total) = lines.checked_add(*next) =>
+        {
+            // A reversal after hitting an edge must still move off that edge.
+            *lines = total;
+        }
+        _ => batch.push_back(command),
+    }
+}
+
+fn next_batched_command(
+    commands: &mut impl Iterator<Item = Result<Command, mpsc::TryRecvError>>,
+    scroll_batch: &mut VecDeque<Command>,
+    deferred_command: &mut Option<Result<Command, mpsc::TryRecvError>>,
+    interrupting_copy: bool,
+) -> Option<Result<Command, mpsc::TryRecvError>> {
+    if scroll_batch.is_empty() {
+        // Let Ctrl+C resolve before reading more commands or delivering a
+        // deferred focus/shutdown. Already buffered scrolls still reach the worker.
+        if interrupting_copy {
+            return None;
+        }
+        if deferred_command.is_none() {
+            for result in commands.by_ref() {
+                match result {
+                    Ok(command) if viewport_scroll_session(&command).is_some() => {
+                        queue_viewport_scroll(scroll_batch, command);
+                    }
+                    result => {
+                        *deferred_command = Some(result);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    scroll_batch
+        .pop_front()
+        .map(Ok)
+        .or_else(|| deferred_command.take())
+}
+
+#[cfg(test)]
+mod viewport_tests {
+    use super::*;
+
+    #[test]
+    fn scroll_batch_keeps_latest_target_per_session_and_preserves_transitions() {
+        let absolute = |session: &str, row, request_id, pixel_target| Command::ScrollTo {
+            session_id: session.into(),
+            row,
+            request_id,
+            pixel_target,
+        };
+        let relative = |lines| Command::Scroll {
+            session_id: "first".into(),
+            lines,
+        };
+        let selection = |lines| Command::ScrollSelection {
+            session_id: "first".into(),
+            lines,
+        };
+        let mut batch = VecDeque::new();
+        for command in [
+            absolute("first", 4, 1, false),
+            absolute("second", 20, 10, false),
+            absolute("first", 8, 2, false),
+            relative(4),
+            relative(2),
+            relative(-5),
+            selection(-2),
+            selection(-3),
+            absolute("first", 12, 3, true),
+            absolute("first", 14, 4, false),
+        ] {
+            queue_viewport_scroll(&mut batch, command);
+        }
+        assert!(matches!(
+            batch.pop_front(),
+            Some(Command::ScrollTo { session_id, row: 8, request_id: 2, .. }) if session_id == "first"
+        ));
+        assert!(matches!(
+            batch.pop_front(),
+            Some(Command::ScrollTo { session_id, row: 20, request_id: 10, .. }) if session_id == "second"
+        ));
+        assert!(matches!(
+            batch.pop_front(),
+            Some(Command::Scroll { lines: 6, .. })
+        ));
+        assert!(matches!(
+            batch.pop_front(),
+            Some(Command::Scroll { lines: -5, .. })
+        ));
+        assert!(matches!(
+            batch.pop_front(),
+            Some(Command::ScrollSelection { lines: -5, .. })
+        ));
+        assert!(matches!(
+            batch.pop_front(),
+            Some(Command::ScrollTo {
+                row: 12,
+                request_id: 3,
+                pixel_target: true,
+                ..
+            })
+        ));
+        assert!(matches!(
+            batch.pop_front(),
+            Some(Command::ScrollTo {
+                row: 14,
+                request_id: 4,
+                pixel_target: false,
+                ..
+            })
+        ));
+        assert!(batch.is_empty());
+    }
+
+    #[test]
+    fn interrupting_copy_drains_buffered_scrolls_before_pausing_command_delivery() {
+        let target = |row, request_id| Command::ScrollTo {
+            session_id: "target".into(),
+            row,
+            request_id,
+            pixel_target: true,
+        };
+        let mut source = [
+            Ok(Command::Scroll {
+                session_id: "other".into(),
+                lines: 2,
+            }),
+            Ok(target(1, 1)),
+            Ok(target(5, 2)),
+            Ok(Command::ScrollSelection {
+                session_id: "target".into(),
+                lines: 1,
+            }),
+            Ok(Command::Shutdown),
+        ]
+        .into_iter();
+        let mut batch = VecDeque::new();
+        let mut deferred = None;
+        let mut next = |interrupting| {
+            next_batched_command(&mut source, &mut batch, &mut deferred, interrupting)
+        };
+        assert!(matches!(
+            next(false),
+            Some(Ok(Command::Scroll { lines: 2, .. }))
+        ));
+        assert!(matches!(
+            next(true),
+            Some(Ok(Command::ScrollTo {
+                row: 5,
+                request_id: 2,
+                ..
+            }))
+        ));
+        assert!(matches!(
+            next(true),
+            Some(Ok(Command::ScrollSelection { lines: 1, .. }))
+        ));
+        assert!(next(true).is_none());
+        assert!(matches!(next(false), Some(Ok(Command::Shutdown))));
+    }
+
+    #[test]
+    fn viewport_requests_bypass_output_wait_and_applied_advances_credit_once() {
+        let mut delivery = FrameDelivery::default();
+        assert!(!delivery.blocks_view());
+        assert!(!delivery.acknowledge(0));
+        delivery.sent_sequence = 10;
+        assert!(delivery.blocks_view());
+        delivery.viewport_dirty = true;
+        assert!(!delivery.blocks_view());
+        delivery.viewport_dirty = false;
+        delivery.sent_sequence = 12;
+        assert!(delivery.acknowledge(10));
+        assert!(!delivery.acknowledge(10));
+        assert!(!delivery.acknowledge(13));
+        assert!(delivery.blocks_view());
+        assert!(delivery.acknowledge(12));
+        assert!(!delivery.blocks_view());
+    }
+
+    #[test]
+    fn promotion_failure_diagnostic_preserves_actionable_messages() {
+        let reason = "sonnet · ChatGPT: 模型已不可用";
+        let error = anyhow!(reason);
+        assert_eq!(
+            shell_promotion_failure_message(LaunchProfile::ClaudeCode, &error, false),
+            format!("启动准备失败：{reason}")
+        );
+        assert_eq!(
+            shell_promotion_failure_message(LaunchProfile::ClaudeCode, &error, true),
+            format!("Launch preparation failed: {reason}")
+        );
+        for message in [
+            "未检测到 Claude Code（命令：claude）。",
+            "Antigravity CLI (agy) was not found. Install it and ensure it is on PATH.",
+            "Launch preparation failed: missing configuration",
+        ] {
+            let error = anyhow!(message).context("prepare provider");
+            assert_eq!(
+                shell_promotion_failure_message(LaunchProfile::ClaudeCode, &error, false),
+                message
+            );
+        }
+    }
+}
+
 struct LaunchRetry {
     workspace_id: String,
     validated: bool,
@@ -4309,10 +4577,11 @@ fn run_writable(
     let mut sequence = HashMap::<String, u64>::new();
     let mut views = HashMap::<String, PendingView>::new();
     let mut scroll_requests = HashMap::<String, u64>::new();
-    let mut awaiting_ui = HashMap::<String, u64>::new();
+    let mut frame_delivery = HashMap::<String, FrameDelivery>::new();
     let mut operations = Vec::<WorkerOperation>::new();
     let mut shell_submissions = HashMap::<String, PendingShellSubmission>::new();
     let mut replay_shell_inputs = VecDeque::<Command>::new();
+    let mut deferred_command = None;
     let mut searches = Vec::<(String, u64, Receiver<Result<SearchResult>>)>::new();
     let mut copies = Vec::<(u64, String, bool, Receiver<Result<SelectionCopy>>)>::new();
     let mut navigation_publications = VecDeque::new();
@@ -4619,7 +4888,7 @@ fn run_writable(
                     sequence.remove(&id);
                     scroll_requests.remove(&id);
                     views.remove(&id);
-                    awaiting_ui.remove(&id);
+                    frame_delivery.remove(&id);
                     recovering.insert(id, state.workspace_id.clone());
                 }
             }
@@ -4649,7 +4918,7 @@ fn run_writable(
                     dirty.remove(&session_id);
                     sequence.remove(&session_id);
                     views.remove(&session_id);
-                    awaiting_ui.remove(&session_id);
+                    frame_delivery.remove(&session_id);
                     scroll_requests.remove(&session_id);
                     pending_input.retain(|input| input.session_id != session_id);
                     operations.retain(|(id, _, _)| id != &session_id);
@@ -5113,19 +5382,22 @@ fn run_writable(
                 send.send_blocking(with_graph_projection(reply, projection))?;
             }
         }
-        for _ in 0..128 {
-            // Resolve Ctrl+C before a subsequent focus/shutdown can overtake its
-            // control interaction. Ordinary copy does not hold this queue.
-            if copies.iter().any(|(_, _, interrupt, _)| *interrupt) {
-                break;
-            }
-            let command = match replay_shell_inputs
+        let mut commands = (0..128).map(|_| {
+            replay_shell_inputs
                 .pop_front()
                 .map_or_else(|| incoming.try_recv(), Ok)
-            {
-                Ok(command) => command,
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => break 'running false,
+        });
+        let mut scroll_batch = VecDeque::new();
+        loop {
+            let command = match next_batched_command(
+                &mut commands,
+                &mut scroll_batch,
+                &mut deferred_command,
+                copies.iter().any(|(_, _, interrupt, _)| *interrupt),
+            ) {
+                Some(Ok(command)) => command,
+                None | Some(Err(mpsc::TryRecvError::Empty)) => break,
+                Some(Err(mpsc::TryRecvError::Disconnected)) => break 'running false,
             };
             if !StoragePhase::Writable.accepts(&command) {
                 send.send_blocking(storage_command_rejected(
@@ -5330,7 +5602,7 @@ fn run_writable(
                                 sequence.remove(id);
                                 scroll_requests.remove(id);
                                 views.remove(id);
-                                awaiting_ui.remove(id);
+                                frame_delivery.remove(id);
                                 terminal_layouts.remove(id);
                                 recovering.remove(id);
                                 deferred_recovery.remove(id);
@@ -5998,12 +6270,11 @@ fn run_writable(
                     session_id,
                     sequence,
                 } => {
-                    if awaiting_ui.get(&session_id) != Some(&sequence) {
-                        continue;
-                    }
-                    awaiting_ui.remove(&session_id);
-                    // A layout frame before any PTY output has no output credit.
-                    if sequence == 0 || !sessions.contains(&session_id) {
+                    if !sessions.contains(&session_id)
+                        || !frame_delivery
+                            .get_mut(&session_id)
+                            .is_some_and(|delivery| delivery.acknowledge(sequence))
+                    {
                         continue;
                     }
                     (
@@ -6091,7 +6362,7 @@ fn run_writable(
                             sequence.remove(&session_id);
                             scroll_requests.remove(&session_id);
                             views.remove(&session_id);
-                            awaiting_ui.remove(&session_id);
+                            frame_delivery.remove(&session_id);
                             pending_input.retain(|input| input.session_id != session_id);
                             operations.retain(|(id, _, _)| id != &session_id);
                             searches.retain(|(id, _, _)| id != &session_id);
@@ -6524,7 +6795,7 @@ fn run_writable(
                     sequence.remove(session_id);
                     scroll_requests.remove(session_id);
                     views.remove(session_id);
-                    awaiting_ui.remove(session_id);
+                    frame_delivery.remove(session_id);
                     pending_input.retain(|input| input.session_id != *session_id);
                     operations.retain(|(id, _, _)| id != session_id);
                     searches.retain(|(id, _, _)| id != session_id);
@@ -6656,7 +6927,7 @@ fn run_writable(
                                 sequence.remove(session_id);
                                 scroll_requests.remove(session_id);
                                 views.remove(session_id);
-                                awaiting_ui.remove(session_id);
+                                frame_delivery.remove(session_id);
                                 pending_input.retain(|input| input.session_id != *session_id);
                                 operations.retain(|(id, _, _)| id != session_id);
                                 searches.retain(|(id, _, _)| id != session_id);
@@ -6725,7 +6996,9 @@ fn run_writable(
                 }
                 Command::Refresh => {
                     dirty.extend(sessions.iter().cloned());
-                    awaiting_ui.clear();
+                    for id in &sessions {
+                        frame_delivery.entry(id.clone()).or_default().viewport_dirty = true;
+                    }
                     let graph =
                         active_graph(&owner, scene_id.as_deref(), window_id, &startup_deferred)?;
                     pending_launch = unstarted_sessions(&owner, &graph, &sessions)?;
@@ -6842,16 +7115,27 @@ fn run_writable(
                     break 'running shutdown_requested.get() == Some(&true);
                 }
             };
-            let absolute_scroll = matches!(request, WorkerCommand::ScrollTo { .. });
+            let viewport_changed = matches!(
+                request,
+                WorkerCommand::ScrollTo { .. }
+                    | WorkerCommand::Scroll { .. }
+                    | WorkerCommand::ScrollSelection { .. }
+                    | WorkerCommand::Select { .. }
+                    | WorkerCommand::ClearSearch { .. }
+            );
             if let Err(error) = owner.send(&session_id, request) {
                 send.send_blocking(Event::Diagnostic(format!("{error:#}")))?;
                 continue;
             }
-            // The view request enters the same worker queue, after the scroll.
-            if absolute_scroll {
+            // SelectedView enters the same worker queue after the viewport command.
+            if viewport_changed {
+                frame_delivery
+                    .entry(session_id.clone())
+                    .or_default()
+                    .viewport_dirty = true;
                 dirty.insert(session_id.clone());
             }
-            operations.push((session_id, result, refresh));
+            operations.push((session_id, result, refresh && !viewport_changed));
         }
         // Revalidate a selected card after the background read, after any queued
         // navigation/close commands have had a chance to change its authority.
@@ -7047,7 +7331,7 @@ fn run_writable(
                     sequence.remove(&session_id);
                     scroll_requests.remove(&session_id);
                     views.remove(&session_id);
-                    awaiting_ui.remove(&session_id);
+                    frame_delivery.remove(&session_id);
                     pending_input.retain(|input| input.session_id != session_id);
                     operations.retain(|(id, _, _)| id != &session_id);
                     searches.retain(|(id, _, _)| id != &session_id);
@@ -7155,7 +7439,8 @@ fn run_writable(
                             // A retry starts with a fresh PTY output credit window.
                             sequence.remove(id);
                             views.remove(id);
-                            awaiting_ui.remove(id);
+                            scroll_requests.remove(id);
+                            frame_delivery.remove(id);
                             if !environment_changes.contains_key(id) {
                                 send.send_blocking(Event::Recovery {
                                     session_id: id.to_owned(),
@@ -7176,7 +7461,7 @@ fn run_writable(
                     sequence.remove(&session_id);
                     scroll_requests.remove(&session_id);
                     views.remove(&session_id);
-                    awaiting_ui.remove(&session_id);
+                    frame_delivery.remove(&session_id);
                     pending_input.retain(|input| input.session_id != session_id);
                     operations.retain(|(id, _, _)| id != &session_id);
                     searches.retain(|(id, _, _)| id != &session_id);
@@ -7299,10 +7584,11 @@ fn run_writable(
                         pending_input.retain(|input| &input.session_id != id);
                         finished_promotions.push(id.clone());
                     } else {
-                        let message = match promotion.launch.profile {
-                            LaunchProfile::Codex => codex_launch::failure_message(&error),
-                            _ => error.to_string(),
-                        };
+                        let message = shell_promotion_failure_message(
+                            promotion.launch.profile,
+                            &error,
+                            std::env::var("MATOU_LOCALE").as_deref() == Ok("en"),
+                        );
                         send.send_blocking(Event::Diagnostic(message))?;
                         owner.retire_sessions(std::slice::from_ref(id));
                         promotion.phase = ShellPromotionPhase::RollingBack;
@@ -7314,7 +7600,7 @@ fn run_writable(
             sequence.remove(id);
             scroll_requests.remove(id);
             views.remove(id);
-            awaiting_ui.remove(id);
+            frame_delivery.remove(id);
             operations.retain(|(session_id, _, _)| session_id != id);
             searches.retain(|(session_id, _, _)| session_id != id);
             graph_dirty = true;
@@ -7387,7 +7673,8 @@ fn run_writable(
                     dirty.remove(&id);
                     sequence.remove(&id);
                     views.remove(&id);
-                    awaiting_ui.remove(&id);
+                    scroll_requests.remove(&id);
+                    frame_delivery.remove(&id);
                     let message = format!("{error:#}");
                     let failure = if change.profile == LaunchProfile::Codex {
                         report_session_launch_failure(
@@ -7461,7 +7748,7 @@ fn run_writable(
                     dirty.remove(&session_id);
                     sequence.remove(&session_id);
                     views.remove(&session_id);
-                    awaiting_ui.remove(&session_id);
+                    frame_delivery.remove(&session_id);
                     scroll_requests.remove(&session_id);
                     pending_input.retain(|input| input.session_id != session_id);
                     graph_dirty = true;
@@ -7526,6 +7813,10 @@ fn run_writable(
                 Err(mpsc::TryRecvError::Empty) => return true,
                 Err(mpsc::TryRecvError::Disconnected) => Err("Shell search disconnected".into()),
             };
+            frame_delivery
+                .entry(session_id.clone())
+                .or_default()
+                .viewport_dirty = true;
             dirty.insert(session_id.clone());
             let _ = send.send_blocking(Event::SearchResults {
                 session_id: session_id.clone(),
@@ -7690,7 +7981,7 @@ fn run_writable(
                         sequence.remove(id);
                         scroll_requests.remove(id);
                         views.remove(id);
-                        awaiting_ui.remove(id);
+                        frame_delivery.remove(id);
                         terminal_layouts.remove(id);
                         recovering.remove(id);
                         deferred_recovery.remove(id);
@@ -7839,15 +8130,21 @@ fn run_writable(
         }
         views.retain(|session_id, pending| match pending.receive.try_recv() {
             Ok(Ok((screen, modes, selection))) => {
-                awaiting_ui.insert(session_id.clone(), pending.sequence);
-                let _ = send.send_blocking(Event::Frame {
-                    session_id: session_id.clone(),
-                    screen,
-                    selection,
-                    modes,
-                    sequence: pending.sequence,
-                    scroll_request_id: pending.scroll_request_id,
-                });
+                if send
+                    .send_blocking(Event::Frame {
+                        session_id: session_id.clone(),
+                        screen,
+                        selection,
+                        modes,
+                        sequence: pending.sequence,
+                        scroll_request_id: pending.scroll_request_id,
+                    })
+                    .is_ok()
+                    && pending.sequence > 0
+                {
+                    let delivery = frame_delivery.entry(session_id.clone()).or_default();
+                    delivery.sent_sequence = delivery.sent_sequence.max(pending.sequence);
+                }
                 false
             }
             Ok(Err(error)) => {
@@ -7861,11 +8158,18 @@ fn run_writable(
             }
         });
         for session_id in dirty.clone() {
-            if views.contains_key(&session_id) || awaiting_ui.contains_key(&session_id) {
+            if views.contains_key(&session_id)
+                || frame_delivery
+                    .get(&session_id)
+                    .is_some_and(FrameDelivery::blocks_view)
+            {
                 continue;
             }
             let (reply, receive) = mpsc::channel();
             owner.send(&session_id, WorkerCommand::SelectedView { reply })?;
+            if let Some(delivery) = frame_delivery.get_mut(&session_id) {
+                delivery.viewport_dirty = false;
+            }
             views.insert(
                 session_id.clone(),
                 PendingView {
@@ -8150,6 +8454,48 @@ fn poll_promotion_result<T>(result: &Receiver<Result<T>>) -> Result<Option<T>> {
         Ok(result) => result.map(Some),
         Err(mpsc::TryRecvError::Empty) => Ok(None),
         Err(error) => Err(error).context("Shell promotion worker disconnected"),
+    }
+}
+
+fn shell_promotion_failure_message(
+    profile: LaunchProfile,
+    error: &anyhow::Error,
+    english: bool,
+) -> String {
+    if profile == LaunchProfile::Codex {
+        return codex_launch::failure_message(error);
+    }
+    for cause in error.chain() {
+        let text = cause.to_string();
+        let line = text.lines().next().unwrap_or_default().trim();
+        if [
+            "未检测到 Claude Code",
+            "未检测到 Codex",
+            "未检测到 Antigravity CLI",
+            "未检测到 DSH",
+            "启动准备失败：",
+            "Launch preparation failed:",
+            "Codex 启动失败：",
+            "Codex failed to start:",
+        ]
+        .iter()
+        .any(|prefix| line.starts_with(prefix))
+            || ["Claude Code", "Codex", "Antigravity", "DSH"]
+                .iter()
+                .any(|provider| {
+                    line.strip_prefix(provider).is_some_and(|suffix| {
+                        (suffix.starts_with(" CLI (") || suffix.starts_with(" ("))
+                            && suffix.contains(") was not found.")
+                    })
+                })
+        {
+            return text;
+        }
+    }
+    if english {
+        format!("Launch preparation failed: {error}")
+    } else {
+        format!("启动准备失败：{error}")
     }
 }
 
@@ -10644,31 +10990,171 @@ mod tests {
     }
 
     fn next_test_event(runtime: &RuntimeHost, deadline: Instant) -> Result<Event> {
+        let event = next_unapplied_test_event(runtime, deadline)?;
+        if let Event::Frame {
+            session_id,
+            sequence,
+            ..
+        } = &event
+        {
+            send_test_command(
+                runtime,
+                Command::Applied {
+                    session_id: session_id.clone(),
+                    sequence: *sequence,
+                },
+            )?;
+        }
+        Ok(event)
+    }
+
+    fn next_unapplied_test_event(runtime: &RuntimeHost, deadline: Instant) -> Result<Event> {
         loop {
             match runtime.events.try_recv() {
-                Ok(event) => {
-                    if let Event::Frame {
-                        session_id,
-                        sequence,
-                        ..
-                    } = &event
-                    {
-                        send_test_command(
-                            runtime,
-                            Command::Applied {
-                                session_id: session_id.clone(),
-                                sequence: *sequence,
-                            },
-                        )?;
-                    }
-                    return Ok(event);
-                }
+                Ok(event) => return Ok(event),
                 Err(async_channel::TryRecvError::Empty) if Instant::now() < deadline => {
                     thread::sleep(Duration::from_millis(2));
                 }
                 Err(error) => return Err(error).context("waiting for host event"),
             }
         }
+    }
+
+    #[test]
+    fn scroll_frames_arrive_while_real_pty_output_is_unacknowledged() -> Result<()> {
+        use matou_native_core::journal::{Frame, for_each_frame};
+
+        let root = tempfile::tempdir()?;
+        let home = root.path().join("home");
+        let data_root = root.path().join("data");
+        std::fs::create_dir_all(&home)?;
+        std::fs::write(
+            home.join(".zshrc"),
+            "[[ -t 0 ]] || return\nfor n in {1..128}; do print -- history-$n; done\nprint -- SCROLL_FIXTURE_READY\nwhile [[ ! -e \"$HOME/proceed\" ]]; do /bin/sleep 0.02; done\nprint -- SCROLL_FIXTURE_RESUMED\nexec /bin/cat\n",
+        )?;
+        let mut runtime = RuntimeHost::start_with_offline_fixtures(
+            LaunchOptions {
+                data_root: data_root.clone(),
+                workspace: root.path().join("workspace"),
+                shell_home: home.clone(),
+                shell: "/bin/zsh".into(),
+            },
+            OfflineFixtures::default(),
+        )?;
+        let contains = |screen: &Screen, marker| {
+            screen.cells.chunks(screen.cols).any(|row| {
+                row.iter()
+                    .map(|cell| cell.text.as_str())
+                    .collect::<String>()
+                    .contains(marker)
+            })
+        };
+        let deadline = Instant::now() + Duration::from_secs(8);
+        let mut last_observed = (false, 0, 0);
+        let mut applied_through = 0;
+        let (session, held_sequence, bottom) = loop {
+            match next_unapplied_test_event(&runtime, deadline).with_context(|| {
+                let (marker_visible, sequence, offset) = last_observed;
+                format!("waiting for scroll fixture: marker_visible={marker_visible}, sequence={sequence}, history_offset={offset}")
+            })? {
+                Event::Frame {
+                    session_id,
+                    sequence,
+                    screen,
+                    ..
+                } => {
+                    let marker_visible = contains(&screen, "SCROLL_FIXTURE_READY");
+                    let offset = screen.scrollbar.offset;
+                    last_observed = (marker_visible, sequence, offset);
+                    if marker_visible && sequence > applied_through && offset > 10 {
+                        // The worker can render the marker before the host has
+                        // received the corresponding PTY output sequence.
+                        let mut output = Vec::new();
+                        for_each_frame(&data_root, &session_id, 1, Some(sequence), |record| {
+                            if let Frame::Output { data, .. } = record.frame {
+                                output.extend(data);
+                            }
+                            Ok(())
+                        })?;
+                        if output.ends_with(b"SCROLL_FIXTURE_READY\r\n")
+                            || output.ends_with(b"SCROLL_FIXTURE_READY\n")
+                        {
+                            break (session_id, sequence, offset);
+                        }
+                    }
+                    send_test_command(
+                        &runtime,
+                        Command::Applied {
+                            session_id,
+                            sequence,
+                        },
+                    )?;
+                    applied_through = applied_through.max(sequence);
+                }
+                Event::Diagnostic(message) => bail!("{message}"),
+                _ => {}
+            }
+        };
+        let scroll = |request_id, row| {
+            send_test_command(
+                &runtime,
+                Command::ScrollTo {
+                    session_id: session.clone(),
+                    row,
+                    request_id,
+                    pixel_target: true,
+                },
+            )
+        };
+        let wait_scroll = |request_id, row| -> Result<()> {
+            loop {
+                match next_unapplied_test_event(&runtime, deadline)? {
+                    Event::Frame {
+                        session_id,
+                        sequence,
+                        screen,
+                        scroll_request_id,
+                        ..
+                    } if session_id == session && scroll_request_id == request_id => {
+                        assert_eq!(sequence, held_sequence);
+                        assert_eq!(screen.scrollbar.offset, row);
+                        return Ok(());
+                    }
+                    Event::Diagnostic(message) => bail!("{message}"),
+                    _ => {}
+                }
+            }
+        };
+        scroll(1, 0)?;
+        scroll(2, 10)?;
+        wait_scroll(2, 10)?;
+        scroll(3, bottom)?;
+        wait_scroll(3, bottom)?;
+
+        std::fs::write(home.join("proceed"), "")?;
+        send_test_command(
+            &runtime,
+            Command::Applied {
+                session_id: session.clone(),
+                sequence: held_sequence,
+            },
+        )?;
+        loop {
+            match next_test_event(&runtime, deadline)? {
+                Event::Frame {
+                    session_id,
+                    sequence,
+                    screen,
+                    ..
+                } if session_id == session && contains(&screen, "SCROLL_FIXTURE_RESUMED") => {
+                    assert!(sequence > held_sequence);
+                    break;
+                }
+                Event::Diagnostic(message) => bail!("{message}"),
+                _ => {}
+            }
+        }
+        runtime.shutdown()
     }
 
     fn send_test_command(runtime: &RuntimeHost, command: Command) -> Result<()> {

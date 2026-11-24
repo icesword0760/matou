@@ -223,18 +223,30 @@ impl SubscriptionService {
             credential_identity_matches(file, &row.identity, row.identity.auth_index.as_deref())
                 && !needs_sign_in(file)
         });
-        let models =
-            match file.map(|file| account_details::read_models(&client, kind, file, None, true)) {
-                Some(Ok(models)) => models,
-                Some(Err(error)) if !error.is::<account_details::SignInRequired>() => {
-                    return Err(error);
-                }
-                _ => {
-                    self.store
-                        .mark_subscription_needs_sign_in(id, &row.identity)?;
-                    return Err(account_details::SignInRequired.into());
-                }
-            };
+        let models = match file.map(|file| {
+            if kind == SubscriptionProvider::Antigravity {
+                let _serial = self.serial.lock().unwrap();
+                ensure!(
+                    self.store.subscription(id)?.is_some_and(|current| {
+                        current.identity == row.identity
+                            && current.account["status"] != "needs-sign-in"
+                    }),
+                    "Subscription account changed during refresh"
+                );
+                login::pin_client_headers(&client, kind, file)?;
+            }
+            account_details::read_models(&client, kind, file, None, true)
+        }) {
+            Some(Ok(models)) => models,
+            Some(Err(error)) if !error.is::<account_details::SignInRequired>() => {
+                return Err(error);
+            }
+            _ => {
+                self.store
+                    .mark_subscription_needs_sign_in(id, &row.identity)?;
+                return Err(account_details::SignInRequired.into());
+            }
+        };
         let _serial = self.serial.lock().unwrap();
         ensure!(
             !round.lease.lock().unwrap().closed,

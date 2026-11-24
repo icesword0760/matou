@@ -326,6 +326,9 @@ impl SubscriptionService {
                     .filter(|index| !index.is_empty())
                 {
                     if credential_active(file) {
+                        if provider == SubscriptionProvider::Antigravity {
+                            login::pin_client_headers(&client, provider, file)?;
+                        }
                         disable_other_credentials(&client, &files, provider, &row.identity)?;
                         break index.to_owned();
                     }
@@ -579,6 +582,9 @@ impl SubscriptionService {
                     return Err(anyhow!("Subscription credential did not recover"));
                 }
                 if credential_active(file) {
+                    if provider == SubscriptionProvider::Antigravity {
+                        login::pin_client_headers(&client, provider, file)?;
+                    }
                     disable_other_credentials(&client, &files, provider, &binding.identity)?;
                     *validated = connection.generation;
                     return Ok(connection);
