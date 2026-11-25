@@ -57,6 +57,8 @@ pub struct HistoryPage {
     pub has_more_before: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub has_more_after: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conversation_event_index: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]

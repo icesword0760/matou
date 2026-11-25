@@ -27,8 +27,28 @@ pub(super) enum Block {
         text: SharedString,
         untyped: bool,
         tight_before: bool,
+        mark: Option<usize>,
     },
     Literal(SharedString),
+    MarkedLiteral(SharedString, Range<usize>),
+}
+
+impl Block {
+    fn contains_mark(&self) -> bool {
+        match self {
+            Self::Paragraph(paragraph) | Self::Heading { paragraph, .. } => {
+                paragraph.mark.is_some()
+            }
+            Self::List { items, .. } => items.iter().flatten().any(Self::contains_mark),
+            Self::Table { rows, .. } => rows
+                .iter()
+                .flatten()
+                .any(|paragraph| paragraph.mark.is_some()),
+            Self::Code { mark, .. } => mark.is_some(),
+            Self::MarkedLiteral(..) => true,
+            Self::Literal(_) => false,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -36,6 +56,7 @@ pub(super) struct Paragraph {
     pub(super) text: SharedString,
     pub(super) spans: Vec<Span>,
     pub(super) links: Vec<(Range<usize>, SharedString)>,
+    pub(super) mark: Option<Range<usize>>,
 }
 
 #[derive(Debug)]
@@ -67,10 +88,27 @@ impl Cache {
                 self.parses += 1;
             }
             Body {
-                blocks: parse(text, clipped),
+                blocks: parse(text, clipped, None),
                 clipped,
             }
         });
+    }
+
+    pub(super) fn insert_marked(
+        &mut self,
+        index: i64,
+        text: &str,
+        clipped: bool,
+        mark: Range<usize>,
+    ) -> bool {
+        let blocks = parse(text, clipped, Some(&mark));
+        let found = blocks.iter().any(Block::contains_mark);
+        #[cfg(any(debug_assertions, test))]
+        {
+            self.parses += 1;
+        }
+        self.bodies.insert((index, true), Body { blocks, clipped });
+        found
     }
 
     pub(super) fn get(&self, index: i64, expanded: bool) -> Option<&Body> {
@@ -85,14 +123,14 @@ impl Cache {
 
 type Events<'a> = Peekable<OffsetIter<'a>>;
 
-fn parse(source: &str, clipped: bool) -> Vec<Block> {
+fn parse(source: &str, clipped: bool, mark: Option<&Range<usize>>) -> Vec<Block> {
     let mut events = Parser::new_ext(source, Options::ENABLE_TABLES)
         .into_offset_iter()
         .peekable();
     let mut blocks = Vec::new();
     while let Some((_, range)) = events.peek() {
         let start = range.start;
-        match block(source, &mut events, 0) {
+        match block(source, &mut events, 0, mark) {
             Ok(block) => blocks.push(block),
             Err(()) => {
                 let line_start = source[..start]
@@ -103,20 +141,22 @@ fn parse(source: &str, clipped: bool) -> Vec<Block> {
                 } else {
                     start
                 };
-                blocks.push(literal(&source[start..]));
+                blocks.push(source_literal(source, start..source.len(), mark));
                 break;
             }
         }
     }
     if blocks.is_empty() {
-        blocks.push(literal(source));
+        blocks.push(source_literal(source, 0..source.len(), mark));
     }
     if clipped {
         match blocks.last_mut() {
             Some(Block::Paragraph(paragraph) | Block::Heading { paragraph, .. }) => {
                 paragraph.text = format!("{}…", paragraph.text).into();
             }
-            Some(Block::Literal(text)) => *text = format!("{text}…").into(),
+            Some(Block::Literal(text) | Block::MarkedLiteral(text, _)) => {
+                *text = format!("{text}…").into()
+            }
             _ => blocks.push(literal("…")),
         }
     }
@@ -127,9 +167,48 @@ fn literal(text: &str) -> Block {
     Block::Literal(text.to_owned().into())
 }
 
-fn block(source: &str, events: &mut Events<'_>, depth: usize) -> Result<Block, ()> {
+fn source_literal(source: &str, range: Range<usize>, mark: Option<&Range<usize>>) -> Block {
+    let text = &source[range.clone()];
+    if let Some(mark) = rendered_mark(source, &range, text, mark) {
+        Block::MarkedLiteral(text.to_owned().into(), mark)
+    } else {
+        literal(text)
+    }
+}
+
+// Map the source overlap to a span in the displayed token. Entities and
+// escaped characters may reshape a token, so mark the token in that case.
+fn rendered_mark(
+    source: &str,
+    original: &Range<usize>,
+    rendered: &str,
+    mark: Option<&Range<usize>>,
+) -> Option<Range<usize>> {
+    let mark = mark?;
+    let start = mark.start.max(original.start);
+    let end = mark.end.min(original.end);
+    if start >= end || rendered.is_empty() {
+        return None;
+    }
+    if &source[original.clone()] == rendered {
+        return Some(start - original.start..end - original.start);
+    }
+    let matched = &source[start..end];
+    let earlier_matches = source[original.start..start].matches(matched).count();
+    if let Some((offset, _)) = rendered.match_indices(matched).nth(earlier_matches) {
+        return Some(offset..offset + matched.len());
+    }
+    Some(0..rendered.len())
+}
+
+fn block(
+    source: &str,
+    events: &mut Events<'_>,
+    depth: usize,
+    mark: Option<&Range<usize>>,
+) -> Result<Block, ()> {
     if events.peek().is_some_and(|(event, _)| is_inline(event)) {
-        return inline(source, events, None).map(Block::Paragraph);
+        return inline(source, events, None, mark).map(Block::Paragraph);
     }
     let (event, range) = events.next().ok_or(())?;
     match event {
@@ -141,11 +220,11 @@ fn block(source: &str, events: &mut Events<'_>, depth: usize) -> Result<Block, (
                 > MAX_PARAGRAPH_CHARS
             {
                 skip(events, TagEnd::Paragraph)?;
-                return Ok(literal(&source[range]));
+                return Ok(source_literal(source, range, mark));
             }
-            let paragraph = inline(source, events, Some(TagEnd::Paragraph))?;
+            let paragraph = inline(source, events, Some(TagEnd::Paragraph), mark)?;
             Ok(if paragraph.text.is_empty() {
-                literal(&source[range])
+                source_literal(source, range, mark)
             } else {
                 Block::Paragraph(paragraph)
             })
@@ -154,7 +233,7 @@ fn block(source: &str, events: &mut Events<'_>, depth: usize) -> Result<Block, (
             level: level @ (HeadingLevel::H1 | HeadingLevel::H2 | HeadingLevel::H3),
             ..
         }) => {
-            let paragraph = inline(source, events, Some(TagEnd::Heading(level)))?;
+            let paragraph = inline(source, events, Some(TagEnd::Heading(level)), mark)?;
             Ok(Block::Heading { level, paragraph })
         }
         Event::Start(Tag::List(start)) if depth < MAX_LIST_DEPTH => {
@@ -165,7 +244,7 @@ fn block(source: &str, events: &mut Events<'_>, depth: usize) -> Result<Block, (
                     Some(Event::Start(Tag::Item)) => {
                         let mut item = Vec::new();
                         while !at_end(events, TagEnd::Item) {
-                            item.push(block(source, events, depth + 1)?);
+                            item.push(block(source, events, depth + 1, mark)?);
                         }
                         events.next();
                         items.push(item);
@@ -176,19 +255,27 @@ fn block(source: &str, events: &mut Events<'_>, depth: usize) -> Result<Block, (
             Ok(Block::List { start, items })
         }
         Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(language))) => {
-            fenced(source, events, range, &language)
+            fenced(source, events, range, &language, mark)
         }
-        Event::Start(Tag::Table(alignments)) => table(source, events, alignments),
+        Event::Start(Tag::Table(alignments)) => table(source, events, alignments, mark),
         Event::Start(tag) => {
             skip(events, tag.to_end())?;
-            Ok(literal(&source[range]))
+            Ok(source_literal(source, range, mark))
         }
-        Event::Rule => Ok(literal(source[range].trim_end_matches(['\r', '\n']))),
+        Event::Rule => {
+            let end = range.start + source[range.clone()].trim_end_matches(['\r', '\n']).len();
+            Ok(source_literal(source, range.start..end, mark))
+        }
         _ => Err(()),
     }
 }
 
-fn table(source: &str, events: &mut Events<'_>, alignments: Vec<Alignment>) -> Result<Block, ()> {
+fn table(
+    source: &str,
+    events: &mut Events<'_>,
+    alignments: Vec<Alignment>,
+    mark: Option<&Range<usize>>,
+) -> Result<Block, ()> {
     let mut rows = Vec::new();
     loop {
         let end = match events.next().map(|(event, _)| event) {
@@ -202,7 +289,7 @@ fn table(source: &str, events: &mut Events<'_>, alignments: Vec<Alignment>) -> R
             if !matches!(events.next(), Some((Event::Start(Tag::TableCell), _))) {
                 return Err(());
             }
-            cells.push(inline(source, events, Some(TagEnd::TableCell))?);
+            cells.push(inline(source, events, Some(TagEnd::TableCell), mark)?);
         }
         events.next();
         rows.push(cells);
@@ -231,16 +318,23 @@ fn fenced(
     events: &mut Events<'_>,
     range: Range<usize>,
     language: &str,
+    mark: Option<&Range<usize>>,
 ) -> Result<Block, ()> {
     let raw = &source[range.clone()];
     let opening = raw.lines().next().ok_or(())?;
     let marker = *opening.as_bytes().first().ok_or(())?;
     let width = opening.bytes().take_while(|byte| *byte == marker).count();
     let mut code = String::new();
+    let mut marked_byte = None;
     let mut content_end = range.start + opening.len();
     for (event, offset) in events.by_ref() {
         match event {
             Event::Text(text) => {
+                if marked_byte.is_none()
+                    && let Some(mark) = rendered_mark(source, &offset, &text, mark)
+                {
+                    marked_byte = Some(code.len() + mark.start);
+                }
                 code.push_str(&text);
                 content_end = content_end.max(offset.end);
             }
@@ -266,6 +360,7 @@ fn fenced(
                     text: code.to_owned().into(),
                     untyped,
                     tight_before,
+                    mark: marked_byte.filter(|byte| *byte < code.len()),
                 });
             }
             _ => return Err(()),
@@ -287,10 +382,16 @@ fn is_inline(event: &Event<'_>) -> bool {
     )
 }
 
-fn inline(source: &str, events: &mut Events<'_>, end: Option<TagEnd>) -> Result<Paragraph, ()> {
+fn inline(
+    source: &str,
+    events: &mut Events<'_>,
+    end: Option<TagEnd>,
+    mark: Option<&Range<usize>>,
+) -> Result<Paragraph, ()> {
     let mut text = String::new();
     let mut spans: Vec<Span> = Vec::new();
     let mut links = Vec::new();
+    let mut marked: Option<Range<usize>> = None;
     let mut bold = 0usize;
     let mut italic = 0usize;
     let mut link = None;
@@ -328,12 +429,19 @@ fn inline(source: &str, events: &mut Events<'_>, end: Option<TagEnd>) -> Result<
             }
             Event::Start(Tag::Image { .. }) => {
                 skip(events, TagEnd::Image)?;
-                text.push_str(&source[range]);
+                text.push_str(&source[range.clone()]);
             }
             _ => return Err(()),
         }
         if start == text.len() {
             continue;
+        }
+        if let Some(part) = rendered_mark(source, &range, &text[start..], mark) {
+            if let Some(marked) = marked.as_mut() {
+                marked.end = start + part.end;
+            } else {
+                marked = Some(start + part.start..start + part.end);
+            }
         }
         let bold = bold > 0;
         let italic = italic > 0;
@@ -369,6 +477,7 @@ fn inline(source: &str, events: &mut Events<'_>, end: Option<TagEnd>) -> Result<
         text: text.into(),
         spans,
         links,
+        mark: marked,
     })
 }
 
@@ -385,6 +494,23 @@ fn web_url(url: &str) -> Option<SharedString> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parse(source: &str, clipped: bool) -> Vec<Block> {
+        super::parse(source, clipped, None)
+    }
+
+    #[test]
+    fn marks_the_exact_soft_wrapped_source_line_inside_formatted_text() {
+        let source = "早前的 **灯光** 提到\n要找的是 **灯光** 设置";
+        let start = source.rfind("灯光").unwrap();
+        let blocks = super::parse(source, false, Some(&(start..start + "灯光".len())));
+        let [Block::Paragraph(paragraph)] = blocks.as_slice() else {
+            panic!("unexpected blocks: {blocks:?}");
+        };
+        let mark = paragraph.mark.as_ref().unwrap();
+        assert_eq!(&paragraph.text[mark.clone()], "灯光");
+        assert_eq!(mark.start, paragraph.text.rfind("灯光").unwrap());
+    }
 
     #[test]
     fn renders_heading_and_styles_utf8_ranges() {

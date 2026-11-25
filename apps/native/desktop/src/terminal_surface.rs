@@ -728,7 +728,11 @@ impl TerminalSurface {
             }
         } else {
             self.history_probe.reset();
-            if self.session_history.as_ref().is_some_and(HistoryView::live) {
+            if self
+                .session_history
+                .as_ref()
+                .is_some_and(|history| history.live() && !history.is_jump())
+            {
                 self.session_history = None;
                 self.history_updates = None;
             }
@@ -836,7 +840,7 @@ impl TerminalSurface {
         } else if self
             .session_history
             .as_ref()
-            .is_some_and(|history| history.ready && history.live())
+            .is_some_and(|history| history.ready && history.live() && !history.is_jump())
         {
             self.schedule_history_updates(cx);
         }
@@ -1032,8 +1036,7 @@ impl TerminalSurface {
     }
 
     fn start_history_probe(&mut self, cx: &mut Context<Self>) {
-        if self.history_binding.is_none() || self.session_history.is_some() || self.search.is_some()
-        {
+        if self.history_binding.is_none() || self.session_history.is_some() {
             return;
         }
         let Some(screen) = &self.screen else {
@@ -1067,6 +1070,52 @@ impl TerminalSurface {
             });
         })
         .detach();
+    }
+
+    pub(crate) fn jump_to_conversation(
+        &mut self,
+        event_index: i64,
+        line: String,
+        keyword: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if event_index <= 0
+            || self.history_binding.as_ref().is_none_or(|binding| {
+                binding.profile != LaunchProfile::ClaudeCode
+                    || binding.profile.history_seam().is_none()
+                    || binding
+                        .provider_session_id
+                        .as_ref()
+                        .is_none_or(String::is_empty)
+            })
+        {
+            return false;
+        }
+        self.history_probe.reset();
+        self.history_updates = None;
+        let screen = self
+            .screen
+            .as_ref()
+            .filter(|_| self.terminal_active != Some(false));
+        let focus = cx.focus_handle();
+        focus.focus(window);
+        self.session_history = Some(HistoryView::new_jump(
+            screen,
+            focus,
+            event_index,
+            line,
+            keyword,
+        ));
+        self.request_history_page(HistoryPage::Around(event_index), cx);
+        cx.notify();
+        true
+    }
+
+    pub(crate) fn is_conversation_jump(&self) -> bool {
+        self.session_history
+            .as_ref()
+            .is_some_and(HistoryView::is_jump)
     }
 
     fn request_history_page(&mut self, page: HistoryPage, cx: &mut Context<Self>) {
@@ -1147,6 +1196,7 @@ impl TerminalSurface {
                 && request_id == history.request_id
         } else {
             binding.profile == matou_native_core::pty::LaunchProfile::ClaudeCode
+                && history.request_id.is_none()
                 && result["cwd"].as_str() == Some(binding.cwd.as_str())
                 && result["providerSessionId"].as_str() == binding.provider_session_id.as_deref()
                 && page.matches(result)
@@ -1161,6 +1211,7 @@ impl TerminalSurface {
             {
                 let phase = match page {
                     HistoryPage::Latest => "latest-page",
+                    HistoryPage::Around(_) => "around-page",
                     HistoryPage::Earlier(_) => "earlier-page",
                     HistoryPage::Updates(_) => "updates-page",
                 };
@@ -1197,6 +1248,7 @@ impl TerminalSurface {
                 if let Some(history) = &this.session_history
                     && history.ready
                     && history.live()
+                    && !history.is_jump()
                     && !history.closing
                 {
                     if history.pending.is_some() {
@@ -1249,7 +1301,11 @@ impl TerminalSurface {
             self.focus.focus(window);
         }
         let Some(keys) = scroll_to_bottom.filter(|_| {
-            restore && history.live() && !self.input_disabled && !self.transport_suspended
+            restore
+                && history.live()
+                && self.screen.as_ref().is_some_and(|screen| screen.alternate)
+                && !self.input_disabled
+                && !self.transport_suspended
         }) else {
             self.session_history = None;
             self.history_updates = None;
@@ -1496,9 +1552,18 @@ impl TerminalSurface {
                     this.emit(SurfaceEventKind::FontZoom(zoom), cx);
                 } else if let Some(history) = &this.session_history {
                     let down = event.delta.pixel_delta(px(20.)).y < px(0.);
-                    if history.live() && down && history.opened_at.elapsed() <= FALSE_START {
+                    if history.live()
+                        && !history.is_jump()
+                        && down
+                        && history.opened_at.elapsed() <= FALSE_START
+                    {
                         this.close_session_history(false, window, cx);
-                    } else if history.live() && down && history.ready && history.at_bottom() {
+                    } else if history.live()
+                        && !history.is_jump()
+                        && down
+                        && history.ready
+                        && history.at_bottom()
+                    {
                         this.close_session_history(true, window, cx);
                     } else {
                         this.maybe_prefetch_history(cx);
@@ -1516,10 +1581,11 @@ impl TerminalSurface {
                         div.child(session_history_seam::error_row(
                             self.history_locale,
                             &surface.downgrade(),
+                            history,
                         ))
                     }),
             )
-            .when(live, |layer| {
+            .when(live || history.is_jump(), |layer| {
                 layer.child(
                     div()
                         .flex()
@@ -2300,7 +2366,6 @@ impl TerminalSurface {
             && !alternate
             && self.terminal_active == Some(false)
             && self.history_binding.is_some()
-            && self.search.is_none()
         {
             if self.session_history.is_none() {
                 self.session_history = Some(HistoryView::new(None, cx.focus_handle()));

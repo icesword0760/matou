@@ -15,11 +15,12 @@
 //! Unicode boxes when they fit and otherwise fall back to the terminal's
 //! `header: value` record layout.
 
-use std::ops::Range;
+use std::{cell::Cell, ops::Range, rc::Rc};
 
 use gpui::{
-    AnyElement, App, Div, ElementId, FontStyle, FontWeight, HighlightStyle, InteractiveText, Rgba,
-    SharedString, Styled, StyledText, div, prelude::*,
+    AnyElement, App, Bounds, Div, ElementId, FontStyle, FontWeight, HighlightStyle,
+    InteractiveText, Pixels, Rgba, SharedString, Styled, StyledText, TextLayout, canvas,
+    combine_highlights, div, prelude::*,
 };
 use pulldown_cmark::{Alignment, HeadingLevel};
 use unicode_segmentation::UnicodeSegmentation;
@@ -39,11 +40,17 @@ fn inline_code_foreground() -> Rgba {
     gpui::rgba(0xB1B9F9ff)
 }
 
-pub(super) fn render(blocks: &[Block], event_index: i64, style: HistoryStyle) -> Div {
+pub(super) fn render(
+    blocks: &[Block],
+    event_index: i64,
+    style: HistoryStyle,
+    scroll_pending: Option<Rc<Cell<bool>>>,
+) -> Div {
     let mut state = RenderState {
         style,
         event_index,
         next_link_id: 0,
+        scroll_pending,
     };
     let children = state.top_level_blocks(blocks);
     div()
@@ -58,6 +65,7 @@ struct RenderState {
     style: HistoryStyle,
     event_index: i64,
     next_link_id: usize,
+    scroll_pending: Option<Rc<Cell<bool>>>,
 }
 
 impl RenderState {
@@ -90,9 +98,21 @@ impl RenderState {
             Block::Code {
                 text,
                 untyped,
-                tight_before: _,
-            } => self.code_block(text, *untyped),
+                mark,
+                ..
+            } => self.code_block(text, *untyped, *mark),
             Block::Literal(text) => literal_block(text),
+            Block::MarkedLiteral(text, mark) => {
+                let styled = StyledText::new(text.clone())
+                    .with_highlights([(mark.clone(), search_highlight(self.style))]);
+                let layout = styled.layout().clone();
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .whitespace_normal()
+                    .child(styled)
+                    .children(self.scroll_marker(Some((layout, mark.start))))
+            }
         }
     }
 
@@ -121,34 +141,72 @@ impl RenderState {
     /// split across flex children, so wrapping, selection metrics and
     /// cursor/hit-testing stay with the framework's text layout.
     fn inline_text(&mut self, paragraph: &Paragraph) -> AnyElement {
-        let text = StyledText::new(paragraph.text.clone())
-            .with_highlights(paragraph_highlights(paragraph));
-        let links = clickable_links(paragraph);
-        if links.is_empty() {
-            return text.into_any_element();
+        let highlights = paragraph_highlights(paragraph);
+        let mut text = StyledText::new(paragraph.text.clone());
+        let marker = paragraph
+            .mark
+            .as_ref()
+            .and_then(|mark| self.scroll_marker(Some((text.layout().clone(), mark.start))));
+        if let Some(mark) = &paragraph.mark {
+            text = text.with_highlights(combine_highlights(
+                highlights,
+                [(mark.clone(), search_highlight(self.style))],
+            ));
+        } else {
+            text = text.with_highlights(highlights);
         }
+        let links = clickable_links(paragraph);
+        let text = if links.is_empty() {
+            text.into_any_element()
+        } else {
+            let link_id = self.next_link_id;
+            self.next_link_id += 1;
+            let element_id = ElementId::from(SharedString::from(format!(
+                "history-markdown-link-{}-{link_id}",
+                self.event_index
+            )));
+            let (ranges, targets): (Vec<_>, Vec<_>) = links.into_iter().unzip();
+            InteractiveText::new(element_id, text)
+                .on_click(ranges, move |index, _window, cx: &mut App| {
+                    if let Some(target) = targets.get(index) {
+                        cx.open_url(target.as_str());
+                    }
+                })
+                .into_any_element()
+        };
+        if let Some(marker) = marker {
+            div().child(text).child(marker).into_any_element()
+        } else {
+            text
+        }
+    }
 
-        let link_id = self.next_link_id;
-        self.next_link_id += 1;
-        let element_id = ElementId::from(SharedString::from(format!(
-            "history-markdown-link-{}-{link_id}",
-            self.event_index
-        )));
-        let ranges = links
-            .iter()
-            .map(|(range, _)| range.clone())
-            .collect::<Vec<_>>();
-        let targets = links
-            .into_iter()
-            .map(|(_, target)| target)
-            .collect::<Vec<_>>();
-        InteractiveText::new(element_id, text)
-            .on_click(ranges, move |index, _window, cx: &mut App| {
-                if let Some(target) = targets.get(index) {
-                    cx.open_url(target.as_str());
-                }
-            })
-            .into_any_element()
+    fn scroll_marker(&mut self, text: Option<(TextLayout, usize)>) -> Option<AnyElement> {
+        let pending = self.scroll_pending.take().filter(|pending| pending.get())?;
+        let after_paint = pending.clone();
+        let line_height = self.style.line_height;
+        Some(
+            canvas(
+                move |bounds, window, _| {
+                    if !pending.get() {
+                        return;
+                    }
+                    let mut bounds: Bounds<Pixels> = bounds;
+                    if let Some((layout, index)) = &text
+                        && let Some(position) = layout.position_for_index(*index)
+                    {
+                        bounds.origin.y = position.y;
+                    }
+                    bounds.size.height = line_height;
+                    window.request_autoscroll(bounds);
+                },
+                move |_, (), _, _| after_paint.set(false),
+            )
+            .absolute()
+            .top_0()
+            .left_0()
+            .into_any_element(),
+        )
     }
 
     fn list(&mut self, start: Option<u64>, items: &[Vec<Block>]) -> Div {
@@ -191,9 +249,16 @@ impl RenderState {
         div().w_full().min_w_0().flex().flex_col().children(rows)
     }
 
-    fn code_block(&mut self, code: &SharedString, untyped: bool) -> Div {
-        let text = content_columns(self.style)
-            .map_or_else(|| code.to_string(), |columns| wrap_code(code, columns));
+    fn code_block(&mut self, code: &SharedString, untyped: bool, mark: Option<usize>) -> Div {
+        let (text, marked_row) = content_columns(self.style).map_or_else(
+            || {
+                (
+                    code.to_string(),
+                    mark.map(|byte| code[..byte].matches('\n').count()),
+                )
+            },
+            |columns| wrap_code_with_mark(code, columns, mark),
+        );
         div()
             .w_full()
             .min_w_0()
@@ -201,7 +266,7 @@ impl RenderState {
             .when_some(code_foreground(untyped), |block, color| {
                 block.text_color(color)
             })
-            .child(terminal_rows(&text, self.style))
+            .child(self.terminal_rows(&text, marked_row))
     }
 
     fn table(&mut self, alignments: &[Alignment], rows: &[Vec<Paragraph>]) -> Div {
@@ -214,14 +279,26 @@ impl RenderState {
         if content_columns(self.style).is_some_and(|available| table_width(&widths) > available) {
             return self.record_table(&cells, rows, columns);
         }
+        let mut line = 1;
+        let marked_row = rows.iter().zip(&cells).find_map(|(row, cells)| {
+            let start = line;
+            line += cells
+                .iter()
+                .map(|cell| cell.split('\n').count())
+                .max()
+                .unwrap_or(1)
+                + 1;
+            row.iter().find_map(|cell| {
+                cell.mark
+                    .as_ref()
+                    .map(|mark| start + cell.text[..mark.start].matches('\n').count())
+            })
+        });
         div()
             .w_full()
             .min_w_0()
             .whitespace_nowrap()
-            .child(terminal_rows(
-                &format_box_table(alignments, &cells, &widths),
-                self.style,
-            ))
+            .child(self.terminal_rows(&format_box_table(alignments, &cells, &widths), marked_row))
     }
 
     /// The terminal does not squeeze wide tables into narrow columns. It turns
@@ -253,7 +330,12 @@ impl RenderState {
             }
             for column in 0..columns {
                 let label = headers.get(column).map_or("", String::as_str);
-                let paragraph = record_paragraph(label, row.get(column));
+                let mut paragraph = record_paragraph(label, row.get(column));
+                if row_index == 0
+                    && let Some(mark) = rows[0].get(column).and_then(|cell| cell.mark.clone())
+                {
+                    paragraph.mark = Some(mark);
+                }
                 container = container.child(
                     div()
                         .w_full()
@@ -264,6 +346,15 @@ impl RenderState {
             }
         }
         container
+    }
+
+    fn terminal_rows(&mut self, text: &str, mark: Option<usize>) -> Div {
+        terminal_rows(
+            text,
+            self.style,
+            mark,
+            mark.and_then(|_| self.scroll_marker(None)),
+        )
     }
 }
 
@@ -304,7 +395,26 @@ fn code_foreground(untyped: bool) -> Option<Rgba> {
 /// follow it drift left. ASCII runs stay in one child (their shaping is
 /// unchanged), while every non-ASCII grapheme gets its own non-shrinking child
 /// whose width is the terminal cell count. Blank lines keep a full line height.
-fn terminal_rows(text: &str, style: HistoryStyle) -> Div {
+fn search_highlight(style: HistoryStyle) -> HighlightStyle {
+    HighlightStyle {
+        background_color: Some(search_background(style).into()),
+        ..Default::default()
+    }
+}
+
+fn search_background(style: HistoryStyle) -> Rgba {
+    Rgba {
+        a: 0.35,
+        ..style.amber
+    }
+}
+
+fn terminal_rows(
+    text: &str,
+    style: HistoryStyle,
+    mark: Option<usize>,
+    mut marker: Option<AnyElement>,
+) -> Div {
     let cell = |text: &str, columns: usize| {
         div()
             .flex_shrink_0()
@@ -313,7 +423,7 @@ fn terminal_rows(text: &str, style: HistoryStyle) -> Div {
             .child(text.to_owned())
     };
     let mut rows = Vec::new();
-    for line in text.split('\n') {
+    for (index, line) in text.split('\n').enumerate() {
         let mut cells = Vec::new();
         let mut ascii_start = 0;
         for (index, grapheme) in line.grapheme_indices(true) {
@@ -336,6 +446,9 @@ fn terminal_rows(text: &str, style: HistoryStyle) -> Div {
                 .flex()
                 .h(style.line_height)
                 .whitespace_nowrap()
+                .when(mark == Some(index), |row| {
+                    row.bg(search_background(style)).children(marker.take())
+                })
                 .children(cells),
         );
     }
@@ -447,6 +560,7 @@ fn record_paragraph(header: &str, value: Option<&Paragraph>) -> Paragraph {
         link: false,
     }];
     let mut links = Vec::new();
+    let mut mark = None;
     if let Some(value) = value {
         text.push_str(&value.text);
         spans.extend(value.spans.iter().map(|span| Span {
@@ -462,11 +576,16 @@ fn record_paragraph(header: &str, value: Option<&Paragraph>) -> Paragraph {
                 .iter()
                 .map(|(range, target)| (range.start + offset..range.end + offset, target.clone())),
         );
+        mark = value
+            .mark
+            .as_ref()
+            .map(|mark| mark.start + offset..mark.end + offset);
     }
     Paragraph {
         text: text.into(),
         spans,
         links,
+        mark,
     }
 }
 
@@ -574,29 +693,43 @@ fn pad_cell(content: &str, width: usize, alignment: Alignment) -> String {
     padded
 }
 
-fn wrap_code(code: &str, columns: usize) -> String {
+fn wrap_code_with_mark(code: &str, columns: usize, mark: Option<usize>) -> (String, Option<usize>) {
     let columns = columns.max(1);
     let expanded = expand_tabs(code);
+    let mark = mark.map(|byte| expand_tabs(&code[..byte]).len());
     let mut out = String::with_capacity(expanded.len());
-    for (line_index, line) in expanded.split('\n').enumerate() {
-        if line_index > 0 {
-            out.push('\n');
-        }
-        if line.is_empty() {
-            continue;
-        }
+    let mut source_start = 0;
+    let mut row = 0;
+    let mut marked_row = None;
+    for line in expanded.split_inclusive('\n') {
         let mut column = 0;
-        for grapheme in line.graphemes(true) {
+        for (index, grapheme) in line.grapheme_indices(true) {
+            if grapheme == "\n" {
+                out.push('\n');
+                row += 1;
+                continue;
+            }
             let width = grapheme_columns(grapheme);
             if column > 0 && column + width > columns {
                 out.push('\n');
+                row += 1;
                 column = 0;
+            }
+            let start = source_start + index;
+            if mark.is_some_and(|byte| (start..start + grapheme.len()).contains(&byte)) {
+                marked_row = Some(row);
             }
             out.push_str(grapheme);
             column += width;
         }
+        source_start += line.len();
     }
-    out
+    (out, marked_row)
+}
+
+#[cfg(test)]
+fn wrap_code(code: &str, columns: usize) -> String {
+    wrap_code_with_mark(code, columns, None).0
 }
 
 fn expand_tabs(text: &str) -> String {
@@ -692,6 +825,7 @@ mod tests {
             text: text.into(),
             spans,
             links: Vec::new(),
+            mark: None,
         }
     }
 
@@ -776,11 +910,13 @@ mod tests {
             text: "code".into(),
             untyped: true,
             tight_before: true,
+            mark: None,
         };
         let loose = Block::Code {
             text: "code".into(),
             untyped: false,
             tight_before: false,
+            mark: None,
         };
         assert!(is_tight_code(&tight));
         assert!(!is_tight_code(&loose));

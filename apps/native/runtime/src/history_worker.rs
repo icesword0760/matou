@@ -12,7 +12,7 @@ use crate::{
         HistoryCursor, HistoryLine, HistoryPage, HistoryPageInput, HistorySearchInput,
         HistorySearchOptions, HistorySearchResult, JournalHistoryReader, MAX_LINES, SearchPattern,
     },
-    provider_catalog,
+    provider_catalog::{self, ConversationSearchLine},
 };
 
 #[derive(Serialize, Deserialize)]
@@ -119,11 +119,12 @@ struct ClaudeHistoryBinding {
 struct ClaudeSearchSnapshot {
     session_id: String,
     binding: ClaudeHistoryBinding,
-    lines: Vec<HistoryLine>,
+    lines: Vec<ConversationSearchLine>,
 }
 
 const CLAUDE_CONTEXT_LINES: usize = 12;
 const CLAUDE_CONTEXT_EXPIRED: &str = "Claude conversation search expired; search again";
+const CLAUDE_CONTEXT_MAX_LINE_CHARS: usize = 4_096;
 const HISTORY_PREVIEW_CHARS: usize = 400;
 const HISTORY_PREVIEW_BEFORE_MATCH: usize = 16;
 
@@ -157,9 +158,9 @@ impl LiteralPreview {
     }
 }
 
-fn shorten_preview(line: &mut HistoryLine, literal: Option<&LiteralPreview>) {
+fn shorten_preview(line: &mut HistoryLine, literal: Option<&LiteralPreview>, max_chars: usize) {
     let text = &line.text;
-    if text.chars().nth(HISTORY_PREVIEW_CHARS).is_none() {
+    if text.chars().nth(max_chars).is_none() {
         return;
     }
     let start = literal
@@ -173,7 +174,7 @@ fn shorten_preview(line: &mut HistoryLine, literal: Option<&LiteralPreview>) {
         })
         .unwrap_or(0);
     let before = if start == 0 { "" } else { "…" };
-    let budget = HISTORY_PREVIEW_CHARS - usize::from(start > 0);
+    let budget = max_chars - usize::from(start > 0);
     let (preview, after) = match text[start..].char_indices().nth(budget) {
         Some(_) => {
             let end = text[start..].char_indices().nth(budget - 1).unwrap().0;
@@ -211,6 +212,7 @@ impl ClaudeSearchSnapshot {
         let mut hits = lines
             .iter()
             .rev()
+            .map(|entry| &entry.line)
             .filter(|line| pattern.matches(&line.text, options.case_sensitive));
         let matches = hits.by_ref().take(MAX_LINES).cloned().collect();
         let result = HistorySearchResult {
@@ -231,16 +233,20 @@ impl ClaudeSearchSnapshot {
     fn context(&self, cursor: HistoryCursor) -> Result<HistoryPage, String> {
         let anchor = self
             .lines
-            .binary_search_by_key(&cursor, |line| line.cursor)
+            .binary_search_by_key(&cursor, |entry| entry.line.cursor)
             .map_err(|_| CLAUDE_CONTEXT_EXPIRED.to_owned())?;
         let start = anchor.saturating_sub(CLAUDE_CONTEXT_LINES);
         let end = (anchor + 1 + CLAUDE_CONTEXT_LINES).min(self.lines.len());
         Ok(HistoryPage {
-            lines: self.lines[start..end].to_vec(),
+            lines: self.lines[start..end]
+                .iter()
+                .map(|entry| entry.line.clone())
+                .collect(),
             anchor_index: Some(anchor - start),
             has_more_before: Some(start > 0),
             has_more_after: Some(end < self.lines.len()),
             has_more: start > 0 || end < self.lines.len(),
+            conversation_event_index: self.lines[anchor].event_index,
             ..HistoryPage::default()
         })
     }
@@ -304,7 +310,7 @@ impl HistoryWorker {
                             if let Ok(result) = &mut result {
                                 let literal = last_literal.as_ref().map(|(_, literal)| literal);
                                 for line in &mut result.matches {
-                                    shorten_preview(line, literal);
+                                    shorten_preview(line, literal, HISTORY_PREVIEW_CHARS);
                                 }
                             }
                             HistoryReply::Search {
@@ -318,6 +324,12 @@ impl HistoryWorker {
                             sequence,
                             cursor,
                         } => {
+                            // A conversation contains real lines, while a terminal journal can
+                            // accumulate several screen redraws in one logical line.
+                            let max_chars = match &source {
+                                HistorySource::Journal => HISTORY_PREVIEW_CHARS,
+                                HistorySource::Claude(_) => CLAUDE_CONTEXT_MAX_LINE_CHARS,
+                            };
                             let mut result = match source {
                                 HistorySource::Claude(binding) => claude_snapshot
                                     .as_ref()
@@ -355,7 +367,7 @@ impl HistoryWorker {
                                     } else {
                                         None
                                     };
-                                    shorten_preview(line, focus);
+                                    shorten_preview(line, focus, max_chars);
                                 }
                             }
                             HistoryReply::Context {
@@ -500,13 +512,14 @@ mod tests {
         let long_match = format!(
             "{}需要更新交代书。{}",
             "中\r".repeat(2_000),
-            "尾".repeat(2_000)
+            "尾".repeat(CLAUDE_CONTEXT_MAX_LINE_CHARS)
         );
+        let long_context = format!("{}这一行的结尾。", "正文".repeat(260));
         for index in 0..30 {
-            let text = if index == 14 {
-                long_match.clone()
-            } else {
-                format!("可见上下文 {index}")
+            let text = match index {
+                14 => long_match.clone(),
+                15 => long_context.clone(),
+                _ => format!("可见上下文 {index}"),
             };
             rows.push(json!({"type":"assistant","message":{"role":"assistant","content":text}}));
         }
@@ -516,6 +529,10 @@ mod tests {
             .collect::<String>();
         std::fs::write(&transcript, body)?;
 
+        let detail =
+            provider_catalog::detail(Some(&directory), &cwd, "test-dialogue", Some(1), None)
+                .map_err(|error| anyhow!(error))?;
+        let detail = serde_json::to_value(detail)?;
         let mut worker = HistoryWorker::with_projects_root(fixture.path().into(), Some(directory))?;
         let receive = |worker: &HistoryWorker| -> Result<HistoryReply> {
             worker
@@ -566,13 +583,30 @@ mod tests {
             assert_eq!(echoed, sequence);
             let page = result.map_err(|error| anyhow!(error))?;
             let index = page.anchor_index.context("context anchor")?;
-            assert_eq!(page.lines[index], *hit);
+            assert_eq!(page.lines[index].cursor, hit.cursor);
             if offset == 0 {
                 assert_eq!(index, 12);
                 assert_eq!(page.lines.len(), 25);
+                assert!(page.lines[index].text.contains("需要更新交代书。"));
+                assert_eq!(
+                    page.lines[index].text.chars().count(),
+                    CLAUDE_CONTEXT_MAX_LINE_CHARS
+                );
+                assert_eq!(page.lines[index + 1].text, long_context);
+                let target = page.conversation_event_index.context("event index")?;
+                assert!(
+                    detail["events"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|event| { event["index"] == target && event["text"] == long_match })
+                );
                 assert!(page.has_more);
             } else {
+                assert_eq!(page.lines[index].text, hit.text);
                 assert_eq!(page.lines[0].text, "First visible reply.");
+                // Mixed tool-result events do not have a rendered dialogue paragraph.
+                assert_eq!(page.conversation_event_index, None);
             }
             assert!(page.gaps.is_empty());
         }

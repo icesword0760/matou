@@ -1371,6 +1371,7 @@ fn parked_startup_card_reads_its_binding_until_explicit_recovery() -> Result<()>
         }
     }
     child.send(Command::GetProviderSession {
+        request_id: None,
         cwd: seed.workspace.to_string_lossy().into_owned(),
         provider_session_id: "bound-0".into(),
         start_event_index: None,
@@ -4489,6 +4490,7 @@ exec /bin/sleep 60
     }
     drop(transcript);
     child.send(Command::GetProviderSession {
+        request_id: Some(42),
         cwd: child.workspace.to_string_lossy().into_owned(),
         provider_session_id: "fork-source".into(),
         start_event_index: Some(1),
@@ -4500,6 +4502,8 @@ exec /bin/sleep 60
             && let Some(history) = graph["providerSessionDetailResults"].get(0)
         {
             assert_eq!(history["providerSessionId"], "fork-source");
+            assert_eq!(history["provider"], "claude-code");
+            assert_eq!(history["requestId"], 42);
             assert_eq!(history["page"]["total"], 4);
             let events = history["events"].as_array().unwrap();
             assert_eq!(events.len(), 4);

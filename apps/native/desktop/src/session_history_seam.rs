@@ -1,4 +1,5 @@
 use std::{
+    cell::Cell,
     collections::HashSet,
     hash::{DefaultHasher, Hash, Hasher},
     ops::Range,
@@ -49,6 +50,7 @@ pub(crate) struct Binding {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Page {
     Latest,
+    Around(i64),
     Earlier(i64),
     Updates(i64),
 }
@@ -57,6 +59,7 @@ impl Page {
     pub(crate) fn start(self) -> Option<i64> {
         match self {
             Self::Latest => None,
+            Self::Around(index) => Some(index.saturating_sub(16).max(1)),
             Self::Earlier(first) => Some((first - PAGE_SIZE).max(1)),
             Self::Updates(start) => Some(start),
         }
@@ -528,6 +531,98 @@ impl Message {
             cache.insert(self.index, expanded, text, clipped);
         }
     }
+
+    fn open_search_match(
+        &mut self,
+        event: &Value,
+        jump: &ConversationJump,
+        cache: &mut markdown::Cache,
+    ) -> bool {
+        let source = match self.kind {
+            MessageKind::User => HistoryTextSource::User,
+            MessageKind::Assistant => HistoryTextSource::Assistant,
+            _ => return false,
+        };
+        let Some(raw) = event["text"].as_str() else {
+            return false;
+        };
+        let HistoryText::Plain(text) = history_text(raw, source) else {
+            return false;
+        };
+        let Some(mark) = search_source_range(&text, &jump.line, jump.keyword.as_deref()) else {
+            self.cache_markdown(cache, true);
+            return false;
+        };
+
+        let start = if text[..mark.start].chars().take(EXPANDED_CHARS).count() < EXPANDED_CHARS {
+            0
+        } else {
+            let start = text[..mark.start]
+                .char_indices()
+                .rev()
+                .nth(COLLAPSED_CHARS)
+                .map_or(0, |(index, _)| index);
+            text[start..mark.start]
+                .find('\n')
+                .map_or(start, |line| start + line + 1)
+        };
+        let (excerpt, clipped) = truncate(&text[start..], EXPANDED_CHARS);
+        let leading = if start > 0 { "…\n\n" } else { "" };
+        self.text = format!("{leading}{excerpt}").into();
+        self.longer = clipped;
+        let offset = mark.start - start + leading.len();
+        let end = (mark.end - start + leading.len()).min(self.text.len());
+        cache.insert_marked(self.index, &self.text, clipped, offset..end)
+    }
+}
+
+fn search_source_range(source: &str, line: &str, keyword: Option<&str>) -> Option<Range<usize>> {
+    fn only_one<T>(mut matches: impl Iterator<Item = T>) -> Option<T> {
+        let first = matches.next()?;
+        matches.next().is_none().then_some(first)
+    }
+
+    let line = line.trim();
+    let lines = || {
+        let mut offset = 0;
+        source.split_inclusive('\n').map(move |raw| {
+            let text = raw.trim();
+            let start = offset + raw.len() - raw.trim_start().len();
+            offset += raw.len();
+            (start, text)
+        })
+    };
+    let mut exact = lines().filter(|(_, text)| !line.is_empty() && *text == line);
+    if let Some((start, text)) = exact.next() {
+        if exact.next().is_some() {
+            return None;
+        }
+        if let Some(keyword) = keyword.filter(|keyword| !keyword.is_empty())
+            && let Some(offset) = text.find(keyword)
+        {
+            return Some(start + offset..start + offset + keyword.len());
+        }
+        return Some(start..start + text.len());
+    }
+    // The worker may shorten a very long line around the literal match.
+    let excerpt = line.trim_matches('…');
+    if !excerpt.is_empty()
+        && let Some((start, text)) = only_one(lines().filter(|(_, text)| text.contains(excerpt)))
+        && let Some(offset) = only_one(text.match_indices(excerpt).map(|(index, _)| index))
+    {
+        let offset = start + offset;
+        return Some(
+            keyword
+                .filter(|keyword| !keyword.is_empty())
+                .and_then(|keyword| excerpt.find(keyword).map(|index| (keyword, index)))
+                .map_or(offset..offset + excerpt.len(), |(keyword, index)| {
+                    offset + index..offset + index + keyword.len()
+                }),
+        );
+    }
+    let keyword = keyword.filter(|keyword| !keyword.is_empty())?;
+    let (start, _) = only_one(source.match_indices(keyword))?;
+    Some(start..start + keyword.len())
 }
 
 fn timestamp(value: &Value) -> Option<u64> {
@@ -785,6 +880,15 @@ pub(super) struct HistoryView {
     expanded: HashSet<i64>,
     full_text: HashSet<i64>,
     snapshot: Option<Rc<Screen>>,
+    jump: Option<ConversationJump>,
+}
+
+struct ConversationJump {
+    index: i64,
+    line: String,
+    keyword: Option<String>,
+    scroll_pending: Rc<Cell<bool>>,
+    paragraph_found: bool,
 }
 
 impl HistoryView {
@@ -813,7 +917,30 @@ impl HistoryView {
             expanded: HashSet::new(),
             full_text: HashSet::new(),
             snapshot: screen.cloned().map(Rc::new),
+            jump: None,
         }
+    }
+
+    pub fn new_jump(
+        screen: Option<&Screen>,
+        focus: FocusHandle,
+        index: i64,
+        line: String,
+        keyword: Option<String>,
+    ) -> Self {
+        let mut history = Self::new(screen, focus);
+        history.jump = Some(ConversationJump {
+            index,
+            line,
+            keyword,
+            scroll_pending: Rc::new(Cell::new(true)),
+            paragraph_found: false,
+        });
+        history
+    }
+
+    pub fn is_jump(&self) -> bool {
+        self.jump.is_some()
     }
 
     pub fn live(&self) -> bool {
@@ -821,7 +948,7 @@ impl HistoryView {
     }
 
     pub fn visible(&self) -> bool {
-        self.ready || self.retry == Some(Page::Latest)
+        self.ready || self.is_jump() || self.retry == Some(Page::Latest)
     }
 
     pub fn at_bottom(&self) -> bool {
@@ -867,6 +994,47 @@ impl HistoryView {
                 .find_map(timestamp);
         }
         match request {
+            Page::Around(index) => {
+                let Some(jump) = self.jump.as_mut().filter(|jump| jump.index == index) else {
+                    return false;
+                };
+                let Some((event, mut target)) = events
+                    .iter()
+                    .find(|event| event["index"].as_i64() == Some(index))
+                    .and_then(|event| Some((event, Message::parse(event)?)))
+                    .filter(|(_, message)| {
+                        matches!(message.kind, MessageKind::Assistant | MessageKind::User)
+                    })
+                else {
+                    self.fail(request);
+                    return false;
+                };
+                self.markdown = markdown::Cache::default();
+                jump.paragraph_found = target.open_search_match(event, jump, &mut self.markdown);
+                self.full_text.insert(index);
+                let mut target = Some(target);
+                self.rows = group(events.iter().filter_map(|event| {
+                    if event["index"].as_i64() == Some(index) {
+                        target.take()
+                    } else {
+                        Message::parse(event)
+                    }
+                }));
+                cache_page_markdown(&mut self.markdown, &self.rows, request);
+                self.retry = None;
+                self.latest_index = last;
+                self.first_index = first;
+                self.has_earlier = page["hasEarlier"] == true;
+                self.ready = true;
+                self.list.reset(self.rows.len() + 1);
+                if let Some(position) = self.rows.iter().position(|row| row.index() == index) {
+                    self.list.scroll_to(gpui::ListOffset {
+                        item_ix: position + 1,
+                        offset_in_item: px(0.),
+                    });
+                }
+                true
+            }
             Page::Latest => {
                 self.retry = None;
                 self.latest_index = last;
@@ -1007,8 +1175,7 @@ impl HistoryView {
     pub fn expand_text(&mut self, index: i64) {
         if !self.full_text.remove(&index) {
             self.full_text.insert(index);
-            if let Some(Row::Message(message)) = self.rows.iter().find(|row| row.index() == index)
-            {
+            if let Some(Row::Message(message)) = self.rows.iter().find(|row| row.index() == index) {
                 #[cfg(debug_assertions)]
                 let measurement = tracing().then(|| (Instant::now(), self.markdown.parses()));
                 message.cache_markdown(&mut self.markdown, true);
@@ -1035,7 +1202,7 @@ impl HistoryView {
     }
 
     pub fn snapshot_at(&self, index: usize) -> Option<Rc<Screen>> {
-        (index == self.rows.len() + 2 + usize::from(self.compact_time.is_some()))
+        (!self.is_jump() && index == self.rows.len() + 2 + usize::from(self.compact_time.is_some()))
             .then(|| self.snapshot.clone())
             .flatten()
     }
@@ -1049,7 +1216,7 @@ impl HistoryView {
         let HistoryStyle { locale, dim, .. } = style;
         if index == 0 {
             if let Some(Page::Earlier(_)) = self.retry {
-                return error_row(locale, surface).into_any_element();
+                return error_row(locale, surface, self).into_any_element();
             }
             if self.has_earlier {
                 return div().into_any_element();
@@ -1152,10 +1319,20 @@ impl HistoryView {
             _ => "",
         };
         let user = (prefix_visible && message.kind == MessageKind::User).then_some(style.user_row);
+        let jump = self
+            .jump
+            .as_ref()
+            .filter(|jump| jump.index == message.index);
         let body = div()
             .min_w_0()
             .flex_1()
             .overflow_x_hidden()
+            .when_some(jump.filter(|jump| !jump.paragraph_found), |body, _| {
+                body.child(div().text_color(style.accent).child(locale.text(
+                    "已定位到消息，未能确认命中段落",
+                    "Message found. Couldn't locate the matching passage.",
+                )))
+            })
             .when(summary, |body| {
                 body.child(
                     div()
@@ -1172,7 +1349,12 @@ impl HistoryView {
                 )
             })
             .when_some(markdown, |body, markdown| {
-                body.child(markdown_render::render(&markdown.blocks, message.index, style))
+                body.child(markdown_render::render(
+                    &markdown.blocks,
+                    message.index,
+                    style,
+                    jump.map(|jump| jump.scroll_pending.clone()),
+                ))
             })
             .when_some(content, |body, (text, clipped)| {
                 body.child(
@@ -1258,7 +1440,9 @@ impl HistoryView {
                 div.px(style.cell_width * 2.)
             })
             .flex()
-            .when(message.kind != MessageKind::Assistant, |div| div.gap(px(4.)))
+            .when(message.kind != MessageKind::Assistant, |div| {
+                div.gap(px(4.))
+            })
             .text_color(if muted { dim } else { foreground })
             .when(!prefix.is_empty(), |div| {
                 div.child(
@@ -1438,23 +1622,45 @@ fn click(
 pub(super) fn error_row(
     locale: InterfaceLocale,
     surface: &WeakEntity<TerminalSurface>,
+    history: &HistoryView,
 ) -> gpui::Div {
-    div()
-        .flex()
-        .gap(px(10.))
-        .child(locale.text("读取不到更早的记录", "Couldn't read earlier history"))
-        .child(
-            div()
-                .id("history-retry")
-                .cursor_pointer()
-                .on_click(click(surface, Action::Retry))
-                .child(locale.text("重试", "Retry")),
+    if history.is_jump() && !history.ready && (history.retry.is_none() || history.pending.is_some())
+    {
+        return div().child(locale.text("正在定位会话段落…", "Locating the passage…"));
+    }
+    let label = if matches!(history.retry, Some(Page::Around(_))) {
+        locale.text(
+            "读取不到命中的会话记录",
+            "Couldn't read the matching conversation",
         )
+    } else {
+        locale.text("读取不到更早的记录", "Couldn't read earlier history")
+    };
+    div().flex().gap(px(10.)).child(label).child(
+        div()
+            .id("history-retry")
+            .cursor_pointer()
+            .on_click(click(surface, Action::Retry))
+            .child(locale.text("重试", "Retry")),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_prefers_a_unique_full_line_over_an_earlier_keyword() {
+        let line = "要找的是灯光设置";
+        let source = "### 灯光\n\n蓝图中的灯光\n\n要找的是灯光设置\n说明";
+        let mark = search_source_range(source, line, Some("灯光")).unwrap();
+        assert_eq!(&source[mark.clone()], "灯光");
+        assert_eq!(mark.start, source.rfind("灯光").unwrap());
+        assert_eq!(
+            search_source_range("灯光说明\n灯光说明", "灯光说明", Some("灯光")),
+            None
+        );
+    }
     use serde_json::json;
 
     #[test]

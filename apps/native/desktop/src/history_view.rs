@@ -6,7 +6,7 @@ use matou_native_runtime::history::{HistoryCursor as HistoryPageCursor, HistoryP
 
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::ui_text::{TextGeometryHandle, into_text_element, ui_text};
+use crate::ui_text::{TextGeometry, TextGeometryHandle, into_text_element, ui_text};
 
 pub enum HistoryViewState {
     Loading {
@@ -31,6 +31,7 @@ pub enum HistoryViewState {
 
 pub enum HistoryViewEvent {
     ReturnToLive,
+    JumpToConversation,
     OlderPage(HistoryPageCursor),
     LatestPage,
 }
@@ -198,6 +199,7 @@ pub struct HistoryView {
     entries: Vec<SelectableText>,
     body_entries: Range<usize>,
     return_bounds: BoundsHandle,
+    jump_focus: FocusHandle,
     older_focus: FocusHandle,
     latest_focus: FocusHandle,
     selection: Option<TextSelection>,
@@ -239,6 +241,7 @@ impl HistoryView {
             entries: Vec::new(),
             body_entries: 0..0,
             return_bounds: BoundsHandle::default(),
+            jump_focus: cx.focus_handle().tab_stop(true),
             older_focus: cx.focus_handle().tab_stop(true),
             latest_focus: cx.focus_handle().tab_stop(true),
             selection: None,
@@ -407,6 +410,33 @@ impl HistoryView {
 
     pub(crate) fn set_search_keyword(&mut self, keyword: Option<String>) {
         self.search_keyword = keyword;
+    }
+
+    pub(crate) fn conversation_anchor(&self) -> Option<(i64, String, Option<String>)> {
+        let page = self.conversation_page()?;
+        let line = page.lines.get(page.anchor_index?)?;
+        Some((
+            page.conversation_event_index?,
+            line.text.clone(),
+            self.search_keyword.clone(),
+        ))
+    }
+
+    fn conversation_page(&self) -> Option<&HistoryPage> {
+        match &self.state {
+            Some(HistoryViewState::Ready { page, .. })
+                if page.conversation_event_index.is_some() =>
+            {
+                Some(page)
+            }
+            _ => None,
+        }
+    }
+
+    fn jump_to_conversation(&mut self, cx: &mut Context<Self>) {
+        if self.conversation_page().is_some() {
+            cx.emit(HistoryViewEvent::JumpToConversation);
+        }
     }
 
     fn set_offline_state(&mut self, state: HistoryViewState, cx: &mut Context<Self>) {
@@ -639,27 +669,7 @@ impl HistoryView {
             }
         }
 
-        let source = &entry.source;
-        let x = position.x - geometry.bounds.left();
-        let byte = if x <= px(0.) {
-            0
-        } else if let Some(glyph) = geometry.layout.index_for_x(x) {
-            let (start, grapheme) = source
-                .grapheme_indices(true)
-                .take_while(|(index, _)| *index <= glyph)
-                .last()
-                .unwrap_or((0, ""));
-            let end = start + grapheme.len();
-            if matches!(unit, SelectionUnit::Character)
-                && x - geometry.layout.x_for_index(start) >= geometry.layout.x_for_index(end) - x
-            {
-                end
-            } else {
-                start
-            }
-        } else {
-            source.len()
-        };
+        let byte = hit_byte_index(geometry, &entry.source, position, unit);
         Some(TextPoint { row, byte })
     }
 
@@ -893,27 +903,23 @@ impl HistoryView {
                         let Some(layout) = layout.as_ref() else {
                             return;
                         };
-                        let a = layout.layout.x_for_index(range.start);
-                        let mut b = layout.layout.x_for_index(range.end);
-                        // Blink extends a selected block-ending line by its
-                        // primary font's space advance. The button is an
-                        // inline-block, whose final line has no extension.
+                        // Only a source line break extends the selection by a
+                        // space. Soft wraps still belong to the same source line.
+                        let mut trailing_space = px(0.);
                         if continues {
                             let style = window.text_style();
                             let font = window.text_system().resolve_font(&style.font());
                             let size = style.font_size.to_pixels(window.rem_size());
                             match window.text_system().advance(font, size, ' ') {
-                                Ok(space) => b += space.width,
+                                Ok(space) => trailing_space = space.width,
                                 Err(error) => {
                                     eprintln!("Measure history selection break: {error:#}")
                                 }
                             }
                         }
-                        let bounds = Bounds::new(
-                            point(layout.bounds.left() + a.min(b), layout.bounds.top()),
-                            size((b - a).abs(), layout.bounds.size.height),
-                        );
-                        window.paint_quad(fill(bounds, selection_background));
+                        for bounds in range_bounds(layout, &range, trailing_space) {
+                            window.paint_quad(fill(bounds, selection_background));
+                        }
                     },
                 )
                 .absolute()
@@ -1223,6 +1229,71 @@ impl HistoryView {
             )
     }
 
+    fn conversation_jump_button(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let colors = self.colors;
+        let focus = self.jump_focus.clone();
+        let mouse_focus = focus.clone();
+        div()
+            .id("history-jump-to-conversation")
+            .debug_selector(|| "history-jump-to-conversation".to_owned())
+            .relative()
+            .flex_none()
+            .px(px(9.))
+            .py(px(4.))
+            .border_1()
+            .border_color(colors.button_border)
+            .rounded(px(6.))
+            .text_color(colors.button_text)
+            .bg(colors.button_background)
+            .hover(|style| style.bg(colors.button_hover))
+            .cursor_pointer()
+            .whitespace_nowrap()
+            .track_focus(&self.jump_focus)
+            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                window.focus(&mouse_focus);
+                window.prevent_default();
+                cx.stop_propagation();
+            })
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space")
+                    && !event.keystroke.modifiers.modified()
+                {
+                    cx.stop_propagation();
+                    this.jump_to_conversation(cx);
+                }
+            }))
+            .on_click(cx.listener(|this, event, _, cx| {
+                if !matches!(event, ClickEvent::Keyboard(_)) {
+                    cx.stop_propagation();
+                    this.jump_to_conversation(cx);
+                }
+            }))
+            .child(ui_text(
+                self.locale.text("定位到会话", "Jump to conversation"),
+            ))
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |bounds, _, window, _| {
+                        if focus.is_focused(window) {
+                            window.paint_quad(
+                                outline(
+                                    bounds.dilate(px(3.)),
+                                    colors.button_focus,
+                                    BorderStyle::default(),
+                                )
+                                .corner_radii(px(9.))
+                                .border_widths(px(2.)),
+                            );
+                        }
+                    },
+                )
+                .absolute()
+                .inset_0()
+                .size_full(),
+            )
+    }
+
     fn body(
         &self,
         page: &HistoryPage,
@@ -1232,6 +1303,8 @@ impl HistoryView {
     ) -> Stateful<Div> {
         let view = cx.entity().downgrade();
         let before = boundaries && page.has_more_before == Some(true);
+        let wrap = boundaries || page.anchor_index.is_some();
+        let can_jump = self.conversation_page().is_some();
         let line_start = history_line_entries(self.body_entries.start, page, boundaries).start;
         let rows = page.lines.iter().enumerate().map(|(index, _)| {
             let current = page.anchor_index == Some(index);
@@ -1257,15 +1330,42 @@ impl HistoryView {
                 a: 0.32,
                 ..self.colors.current_line_marker
             };
+            let line_number = div()
+                .flex()
+                .flex_none()
+                .w(px(56.))
+                .justify_end()
+                .pr(px(12.))
+                .text_color(self.colors.line_number)
+                .child((index + 1).to_string());
+            let line_number = if current && can_jump {
+                let hover_text = self.colors.current_line_text;
+                line_number
+                    .id("history-jump-from-line-number")
+                    .debug_selector(|| "history-jump-from-line-number".to_owned())
+                    .cursor_pointer()
+                    .hover(move |style| style.text_color(hover_text))
+                    .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.jump_to_conversation(cx);
+                    }))
+                    .into_any_element()
+            } else {
+                line_number.into_any_element()
+            };
             div()
                 .relative()
                 .flex()
                 .flex_none()
                 .items_start()
-                .min_w_full()
                 .min_h(px(20.))
                 .pr(px(12.))
-                .whitespace_nowrap()
+                .when(wrap, |row| row.w_full().min_w_0())
+                .when(!wrap, |row| row.min_w_full().whitespace_nowrap())
                 .when(current, |row| {
                     row.bg(self.colors.current_line_background)
                         .text_color(self.colors.current_line_text)
@@ -1279,29 +1379,23 @@ impl HistoryView {
                                 .bg(self.colors.current_line_marker),
                         )
                 })
-                .child(
-                    div()
-                        .flex()
-                        .flex_none()
-                        .w(px(56.))
-                        .justify_end()
-                        .pr(px(12.))
-                        .text_color(self.colors.line_number)
-                        .child((index + 1).to_string()),
-                )
+                .child(line_number)
                 .child(track_bounds(self.entries[entry].bounds.clone()))
                 .child(
                     div()
                         .relative()
-                        .flex_none()
                         .min_w_0()
+                        .when(wrap, |body| body.flex_1().whitespace_normal())
+                        .when(!wrap, |body| body.flex_none())
                         .cursor(CursorStyle::IBeam)
                         .children(hit.clone().map(|range| {
                             canvas(
                                 |_, _, _| (),
                                 move |_, _, window, _| {
-                                    if let Some(bounds) = match_bounds(&hit_geometry, &range) {
-                                        window.paint_quad(fill(bounds, hit_color));
+                                    if let Some(geometry) = hit_geometry.borrow().as_ref() {
+                                        for bounds in range_bounds(geometry, &range, px(0.)) {
+                                            window.paint_quad(fill(bounds, hit_color));
+                                        }
                                     }
                                 },
                             )
@@ -1326,23 +1420,15 @@ impl HistoryView {
                                     }
                                     this.center_on_anchor = false;
                                     let offset = this.scroll.offset();
-                                    let y = (offset.y + viewport.center().y - bounds.center().y)
+                                    let first_hit = hit.as_ref().and_then(|range| {
+                                        let geometry = this.entries[entry].geometry.borrow();
+                                        range_bounds(geometry.as_ref()?, range, px(0.)).next()
+                                    });
+                                    let anchor_y = first_hit.unwrap_or(bounds).center().y;
+                                    let y = (offset.y + viewport.center().y - anchor_y)
                                         .clamp(-this.scroll.max_offset().height, px(0.));
-                                    let x = hit
-                                        .as_ref()
-                                        .and_then(|range| {
-                                            match_bounds(&this.entries[entry].geometry, range)
-                                        })
-                                        .filter(|matched| {
-                                            matched.left() < viewport.left()
-                                                || matched.right() > viewport.right()
-                                        })
-                                        .map_or(offset.x, |matched| {
-                                            (offset.x + viewport.center().x - matched.center().x)
-                                                .clamp(-this.scroll.max_offset().width, px(0.))
-                                        });
-                                    if x != offset.x || y != offset.y {
-                                        this.scroll.set_offset(point(x, y));
+                                    if y != offset.y {
+                                        this.scroll.set_offset(point(offset.x, y));
                                         cx.notify();
                                     }
                                 });
@@ -1364,6 +1450,7 @@ impl HistoryView {
             .min_w_0()
             .min_h_0()
             .overflow_scroll()
+            .when(wrap, |body| body.overflow_x_hidden())
             .track_scroll(&self.scroll)
             .py(px(8.))
             .children(before.then(|| self.boundary(self.body_entries.start, selection_background)))
@@ -1478,15 +1565,105 @@ impl HistoryView {
     }
 }
 
-fn match_bounds(geometry: &TextGeometryHandle, range: &Range<usize>) -> Option<Bounds<Pixels>> {
-    let geometry = geometry.borrow();
-    let text = geometry.as_ref()?;
-    let a = text.layout.x_for_index(range.start);
-    let b = text.layout.x_for_index(range.end);
-    Some(Bounds::new(
-        point(text.bounds.left() + a.min(b), text.bounds.top()),
-        size((b - a).abs(), text.bounds.size.height),
-    ))
+struct VisualTextLine {
+    bytes: Range<usize>,
+    left: Pixels,
+    right: Pixels,
+    top: Pixels,
+    height: Pixels,
+}
+
+fn visual_text_lines(text: &TextGeometry) -> impl Iterator<Item = VisualTextLine> + '_ {
+    let edges = text
+        .wrapped
+        .iter()
+        .flat_map(|layout| layout.wrap_boundaries())
+        .map(|edge| {
+            let glyph = &text.layout.runs[edge.run_ix].glyphs[edge.glyph_ix];
+            (glyph.index, glyph.position.x)
+        });
+    let height = if text.wrapped.is_some() {
+        text.line_height
+    } else {
+        text.bounds.size.height
+    };
+    std::iter::once((0, px(0.)))
+        .chain(edges.clone())
+        .zip(edges.chain([(text.layout.len, text.layout.width)]))
+        .enumerate()
+        .map(
+            move |(index, ((start, left), (end, right)))| VisualTextLine {
+                bytes: start..end,
+                left,
+                right,
+                top: text.bounds.top() + height * index,
+                height,
+            },
+        )
+}
+
+fn range_bounds<'a>(
+    text: &'a TextGeometry,
+    range: &'a Range<usize>,
+    trailing: Pixels,
+) -> impl Iterator<Item = Bounds<Pixels>> + 'a {
+    visual_text_lines(text).filter_map(move |line| {
+        let start = range.start.max(line.bytes.start);
+        let end = range.end.min(line.bytes.end);
+        let trailing = if end == range.end && end == text.layout.len {
+            trailing
+        } else {
+            px(0.)
+        };
+        if start > end || (start == end && trailing == px(0.)) {
+            return None;
+        }
+        let a = text.layout.x_for_index(start) - line.left;
+        let b = text.layout.x_for_index(end) - line.left + trailing;
+        Some(Bounds::new(
+            point(text.bounds.left() + a.min(b), line.top),
+            size((b - a).abs(), line.height),
+        ))
+    })
+}
+
+fn hit_byte_index(
+    text: &TextGeometry,
+    source: &str,
+    position: Point<Pixels>,
+    unit: SelectionUnit,
+) -> usize {
+    let line_count = text
+        .wrapped
+        .as_ref()
+        .map_or(1, |layout| layout.wrap_boundaries().len() + 1);
+    let index = ((position.y - text.bounds.top()) / text.line_height) as usize;
+    let line = visual_text_lines(text)
+        .nth(index.min(line_count - 1))
+        .expect("text geometry has one or more visual lines");
+    let x = position.x - text.bounds.left() + line.left;
+    if x <= line.left {
+        return line.bytes.start;
+    }
+    if x >= line.right {
+        return line.bytes.end.min(source.len());
+    }
+    let Some(glyph) = text.layout.index_for_x(x) else {
+        return line.bytes.end.min(source.len());
+    };
+    let (start, grapheme) = source
+        .grapheme_indices(true)
+        .take_while(|(index, _)| *index <= glyph)
+        .last()
+        .unwrap_or((0, ""));
+    let end = start + grapheme.len();
+    if matches!(unit, SelectionUnit::Character)
+        && x - text.layout.x_for_index(start) >= text.layout.x_for_index(end) - x
+    {
+        end
+    } else {
+        start
+    }
 }
 
 fn history_line_entries(
@@ -1627,6 +1804,82 @@ mod tests {
                 case["name"]
             );
         }
+    }
+
+    #[test]
+    fn search_context_wraps_long_tokens_and_maps_highlights_and_selection() -> anyhow::Result<()> {
+        use super::{
+            HistoryPage, HistoryView, HistoryViewState, SelectionUnit, TextPoint, TextSelection,
+            range_bounds, visual_text_lines,
+        };
+        use gpui::{AppContext, TestAppContext};
+        use matou_native_runtime::history::{HistoryCursor, HistoryLine};
+
+        let mut cx = TestAppContext::single();
+        let window = cx.add_window(|_, cx| HistoryView::new(cx));
+        let source = format!("{} 关键词 中文🙂", "x".repeat(750));
+        window.update(&mut cx, |view, _, cx| {
+            view.set_state(
+                HistoryViewState::Ready {
+                    result_index: 0,
+                    result_count: 1,
+                    page: HistoryPage {
+                        lines: vec![HistoryLine {
+                            sequence: 1,
+                            cursor: HistoryCursor {
+                                sequence: 1,
+                                line_index: 0,
+                            },
+                            text: source.clone(),
+                        }],
+                        anchor_index: Some(0),
+                        conversation_event_index: Some(7),
+                        ..HistoryPage::default()
+                    },
+                },
+                cx,
+            );
+        })?;
+        cx.update(|cx| cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear()))?;
+        window.update(&mut cx, |view, _, _| {
+            assert_eq!(view.conversation_anchor(), Some((7, source.clone(), None)));
+            let row = view.body_entries.start;
+            let entry = &view.entries[row];
+            let (range, point) = {
+                let geometry = entry.geometry.borrow();
+                let geometry = geometry.as_ref().expect("text was laid out");
+                let visual: Vec<_> = visual_text_lines(geometry).collect();
+                assert!(visual.len() > 2, "ASCII token must wrap");
+                assert_eq!(visual.first().unwrap().bytes.start, 0);
+                assert_eq!(visual.last().unwrap().bytes.end, source.len());
+                let split = visual[1].bytes.start;
+                let range = split - 2..split + 2;
+                let highlights: Vec<_> = range_bounds(geometry, &range, px(0.)).collect();
+                assert_eq!(highlights.len(), 2);
+                assert_eq!(highlights[0].top(), visual[0].top);
+                assert_eq!(highlights[1].top(), visual[1].top);
+                assert_eq!(highlights[1].left(), geometry.bounds.left());
+                assert!(highlights.iter().all(|bounds| bounds.size.width > px(0.)));
+                (range, point(geometry.bounds.left(), visual[1].top + px(1.)))
+            };
+            let point = view
+                .point_at(point, SelectionUnit::Character, true)
+                .expect("the first character on a wrapped line can be selected");
+            assert_eq!(point.row, row);
+            assert_eq!(point.byte, range.start + 2);
+            view.selection = Some(TextSelection {
+                anchor: TextPoint {
+                    row,
+                    byte: range.start,
+                },
+                head: TextPoint {
+                    row,
+                    byte: range.end,
+                },
+            });
+            assert_eq!(view.selected_text().as_deref(), Some(&source[range]));
+        })?;
+        Ok(())
     }
 
     #[allow(unexpected_cfgs)]
@@ -2023,7 +2276,11 @@ impl Render for HistoryView {
                         div()
                             .relative()
                             .children(self.selectable_text(index, selection_background))
-                    })),
+                    }))
+                    .children(
+                        self.conversation_page()
+                            .map(|_| div().ml_auto().child(self.conversation_jump_button(cx))),
+                    ),
             );
         }
         view

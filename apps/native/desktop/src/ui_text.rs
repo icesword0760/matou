@@ -100,6 +100,8 @@ pub(crate) type TextGeometryHandle = Rc<RefCell<Option<TextGeometry>>>;
 pub(crate) struct TextGeometry {
     pub(crate) bounds: Bounds<Pixels>,
     pub(crate) layout: Arc<LineLayout>,
+    pub(crate) wrapped: Option<Arc<WrappedLineLayout>>,
+    pub(crate) line_height: Pixels,
 }
 
 pub(crate) fn into_text_element(
@@ -165,6 +167,8 @@ impl Element for TrackedStyledText {
             .map(|line| TextGeometry {
                 bounds,
                 layout: line.unwrapped_layout.clone(),
+                wrapped: (!line.wrap_boundaries().is_empty()).then_some(line),
+                line_height: self.text.layout().line_height(),
             });
         self.geometry.replace(geometry);
     }
@@ -594,6 +598,8 @@ impl Element for SingleLineText {
             geometry.replace(result.line.as_ref().map(|line| TextGeometry {
                 bounds,
                 layout: line.unwrapped_layout.clone(),
+                wrapped: None,
+                line_height: result.metrics.height,
             }));
         }
         result

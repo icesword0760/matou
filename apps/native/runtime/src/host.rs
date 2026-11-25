@@ -777,6 +777,8 @@ pub enum Command {
         cwd: String,
     },
     GetProviderSession {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<u64>,
         cwd: String,
         provider_session_id: String,
         start_event_index: Option<i64>,
@@ -6554,6 +6556,7 @@ fn run_writable(
                     continue;
                 }
                 Command::GetProviderSession {
+                    request_id,
                     cwd,
                     provider_session_id,
                     start_event_index,
@@ -6563,6 +6566,7 @@ fn run_writable(
                         mpsc::TrySendError::Full(CatalogRequest::Detail(request))
                         | mpsc::TrySendError::Disconnected(CatalogRequest::Detail(request)),
                     ) = catalog_requests.try_send(CatalogRequest::Detail(CatalogDetailRequest {
+                        request_id,
                         cwd,
                         provider_session_id,
                         start_event_index,
@@ -9261,6 +9265,7 @@ impl CatalogRecentRequest {
 }
 
 struct CatalogDetailRequest {
+    request_id: Option<u64>,
     cwd: String,
     provider_session_id: String,
     start_event_index: Option<i64>,
@@ -9269,7 +9274,7 @@ struct CatalogDetailRequest {
 
 impl CatalogDetailRequest {
     fn result(self, result: Result<provider_catalog::SessionDetail, &'static str>) -> Value {
-        match result {
+        let mut reply = match result {
             Ok(detail) => json!({
                 "cwd": self.cwd, "providerSessionId": self.provider_session_id,
                 "events": detail.events, "page": detail.page,
@@ -9277,7 +9282,12 @@ impl CatalogDetailRequest {
             Err(error) => json!({
                 "cwd": self.cwd, "providerSessionId": self.provider_session_id, "error": error,
             }),
+        };
+        if let Some(request_id) = self.request_id {
+            reply["provider"] = json!("claude-code");
+            reply["requestId"] = json!(request_id);
         }
+        reply
     }
 }
 

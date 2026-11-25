@@ -356,12 +356,17 @@ fn transcript_in_projects<T>(
     found.ok_or(SESSION_NOT_FOUND)
 }
 
+pub(crate) struct ConversationSearchLine {
+    pub line: HistoryLine,
+    pub event_index: Option<i64>,
+}
+
 /// Read the visible conversation from the same project-bound transcript as the catalog.
 pub(crate) fn search_lines(
     root: Option<&Path>,
     cwd: &str,
     id: &str,
-) -> Result<Vec<HistoryLine>, &'static str> {
+) -> Result<Vec<ConversationSearchLine>, &'static str> {
     if !valid_id(id) {
         return Err("Invalid provider session ID");
     }
@@ -383,12 +388,17 @@ fn read_search_lines(
     mut reader: impl BufRead,
     workspace: &Path,
     skipped: &mut Skipped,
-) -> io::Result<Option<(Vec<HistoryLine>, bool)>> {
+) -> io::Result<Option<(Vec<ConversationSearchLine>, bool)>> {
     let mut origin = None;
     let mut raw = Vec::new();
     let mut lines = Vec::new();
+    let mut event_index = 0;
     while let Some(row) = read_row(&mut reader, &mut raw, skipped, false)? {
         observe_workspace_origin(&mut origin, &row);
+        let Some(event) = preview_event(&row) else {
+            continue;
+        };
+        event_index += 1;
         let source = match row["type"].as_str() {
             Some("user") => HistoryTextSource::User,
             Some("assistant") => HistoryTextSource::Assistant,
@@ -426,13 +436,16 @@ fn read_search_lines(
             };
             for text in text.lines().filter(|line| !trim_preview(line).is_empty()) {
                 let sequence = lines.len() as u64 + 1;
-                lines.push(HistoryLine {
-                    sequence,
-                    cursor: HistoryCursor {
+                lines.push(ConversationSearchLine {
+                    line: HistoryLine {
                         sequence,
-                        line_index: 0,
+                        cursor: HistoryCursor {
+                            sequence,
+                            line_index: 0,
+                        },
+                        text: text.to_owned(),
                     },
-                    text: text.to_owned(),
+                    event_index: matches!(event.kind, "user" | "assistant").then_some(event_index),
                 });
             }
         }

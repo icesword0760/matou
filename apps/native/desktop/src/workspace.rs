@@ -1982,6 +1982,7 @@ impl SearchBarColors {
 
 struct HistoryContextRequest {
     session_id: String,
+    binding: Option<terminal_surface::session_history_seam::Binding>,
     sequence: u64,
     cursor: HistoryCursor,
     result_index: usize,
@@ -3045,6 +3046,10 @@ impl Workspace {
             return;
         };
         let context = HistoryContextRequest {
+            binding: self
+                .terminals
+                .get(&session_id)
+                .and_then(|terminal| terminal.read(cx).history_binding().cloned()),
             session_id,
             sequence: search.sequence,
             cursor: matched.cursor,
@@ -3111,6 +3116,9 @@ impl Workspace {
                     }
                     match event {
                         HistoryViewEvent::ReturnToLive => this.exit_history(window, cx),
+                        HistoryViewEvent::JumpToConversation => {
+                            this.jump_to_history_conversation(window, cx);
+                        }
                         HistoryViewEvent::OlderPage(cursor) => {
                             this.request_read_only_history(Some(*cursor), window, cx);
                         }
@@ -3121,6 +3129,42 @@ impl Workspace {
                 },
             ));
             self.history_view = Some(view);
+        }
+    }
+
+    fn jump_to_history_conversation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(context) = self
+            .history_request
+            .as_ref()
+            .filter(|request| self.focused.as_ref() == Some(&request.session_id))
+        else {
+            return;
+        };
+        let Some((event_index, line, keyword)) = self
+            .history_view
+            .as_ref()
+            .and_then(|view| view.read(cx).conversation_anchor())
+        else {
+            return;
+        };
+        let Some(terminal) = self.terminals.get(&context.session_id) else {
+            return;
+        };
+        if context.binding.as_ref() != terminal.read(cx).history_binding() {
+            return;
+        }
+        if terminal.update(cx, |terminal, cx| {
+            terminal.jump_to_conversation(event_index, line, keyword, window, cx)
+        }) {
+            self.dismiss_history_context(cx);
+            if let Some(search) = &mut self.search {
+                search.dismissed_sequence = Some(search.sequence);
+                if let Some(archive) = &mut search.archive {
+                    archive.show_summary = false;
+                }
+            }
+            self.sync_terminal_input(window, cx);
+            cx.notify();
         }
     }
 
@@ -6955,7 +6999,9 @@ impl Workspace {
                     Some((binding.profile, binding.cwd.clone(), id))
                 });
                 if let Some((profile, cwd, provider_session_id)) = target {
-                    let request_id = if profile == LaunchProfile::ClaudeCode {
+                    let request_id = if profile == LaunchProfile::ClaudeCode
+                        && !terminal.read(cx).is_conversation_jump()
+                    {
                         None
                     } else {
                         self.loader_request_id += 1;
@@ -11575,6 +11621,7 @@ impl Workspace {
             }
         } else {
             Command::GetProviderSession {
+                request_id: None,
                 cwd: state.cwd.clone(),
                 provider_session_id: id.clone(),
                 start_event_index: start,
@@ -21709,6 +21756,7 @@ fn terminal_history_command(
     let limit = Some(page.limit());
     Some(match profile {
         LaunchProfile::ClaudeCode => Command::GetProviderSession {
+            request_id,
             cwd,
             provider_session_id,
             start_event_index: page.start(),
