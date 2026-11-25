@@ -28,6 +28,7 @@ use crate::{
     codex_launch::{self, CodexLaunch},
     codex_permissions,
     codex_resume::{self, Resume as CodexResume},
+    context_guard::store::get_saved_stats,
     dsh_catalog::{self, DshSessionCatalog},
     egress_probe::{self, EgressMonitor, EgressSample, Family, LiveEgressSampler, RuleMode},
     environment_runtime::{self, EnvironmentTarget, WorktreeExpectation},
@@ -976,6 +977,9 @@ pub enum Command {
     GetAccountSummary {
         request_id: u64,
     },
+    GetContextOptimizerStats {
+        request_id: u64,
+    },
     GetAgentHud {
         request_id: u64,
         session_id: String,
@@ -1194,6 +1198,7 @@ impl StoragePhase {
                 | Command::EvaluateExternalLink { .. }
                 | Command::GetUpdateStatus { .. }
                 | Command::GetAccountSummary { .. }
+                | Command::GetContextOptimizerStats { .. }
                 | Command::GetAgentHud { .. }
                 | Command::GetSessionHandoffBrief { .. },
             ) => true,
@@ -2414,6 +2419,11 @@ impl RuntimeWiring {
                 "accountSummaryResult",
                 *request_id,
                 account_summary(data_root),
+            ),
+            Command::GetContextOptimizerStats { request_id } => (
+                "contextOptimizerStatsResult",
+                *request_id,
+                Ok(json!(get_saved_stats(data_root, SystemTime::now()))),
             ),
             Command::GetAgentHud {
                 request_id,
@@ -3784,6 +3794,7 @@ pub fn storage_command_rejected(command: Command, code: &str, message: &str) -> 
         | Command::GetClaudeRoleAssignments { request_id }
         | Command::GetClaudeModelPreferences { request_id }
         | Command::GetTimeZoneSettings { request_id }
+        | Command::GetContextOptimizerStats { request_id }
         | Command::SetTimeZoneSettings { request_id, .. }
         | Command::SetClaudeRoleAssignments { request_id, .. }
         | Command::SetClaudeModelPreferences { request_id, .. }
@@ -7219,6 +7230,7 @@ fn run_writable(
                 | Command::InstallUpdate { .. }
                 | Command::RunRetentionCleanup { .. }
                 | Command::GetAccountSummary { .. }
+                | Command::GetContextOptimizerStats { .. }
                 | Command::GetClaudeAccounts { .. }
                 | Command::ClaudeAccountCommand { .. }
                 | Command::GetAgentHud { .. }

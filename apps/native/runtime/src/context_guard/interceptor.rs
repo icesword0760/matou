@@ -10,7 +10,7 @@ use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Mutex,
-    time::Instant,
+    time::{Instant, SystemTime},
 };
 
 use matou_native_core::{context_optimizer_config::ContextOptimizerConfig, pty::LaunchProfile};
@@ -21,14 +21,20 @@ use crate::context_guard::{
     dedup::{ReadDecision, ReadDedupGuard},
     filter::{HARD_CAP_BYTES, is_sensitive_path, strip_ansi_and_progress, trim_terminal_output},
     redact_secrets,
-    store::ContextGuardStore,
+    store::{ContextGuardStore, enqueue_saved_stats, prepare_saved_stats_writer},
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HookEvaluation {
     pub response_json: String,
     pub saved_noise_bytes: u64,
-    replacement_source: Option<String>,
+    savings: Option<(&'static str, SavedEvent)>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum SavedEvent {
+    Read(String),
+    Replacement(String),
 }
 
 impl HookEvaluation {
@@ -36,7 +42,7 @@ impl HookEvaluation {
         Self {
             response_json: "{}".to_owned(),
             saved_noise_bytes: 0,
-            replacement_source: None,
+            savings: None,
         }
     }
 }
@@ -51,11 +57,12 @@ pub struct HookInterceptor {
 #[derive(Default)]
 struct SavedNoise {
     bytes: u64,
-    counted_sources: HashSet<String>,
+    counted_events: HashSet<(&'static str, SavedEvent)>,
 }
 
 impl HookInterceptor {
     pub fn new() -> Self {
+        prepare_saved_stats_writer();
         Self::default()
     }
 
@@ -107,11 +114,17 @@ impl HookInterceptor {
                 }
                 HookEvaluation::allow()
             }
-            "PreToolUse" => {
-                self.evaluate_pre_tool_use(session_id, payload, &settings, sensitive_reads)
-            }
+            "PreToolUse" => self.evaluate_pre_tool_use(
+                agent_id,
+                session_id,
+                payload,
+                &settings,
+                sensitive_reads,
+            ),
             "PostToolUse" if profile == LaunchProfile::ClaudeCode => self
-                .replace_claude_tool_output(data_root, session_id, payload, &settings, deadline)
+                .replace_claude_tool_output(
+                    data_root, agent_id, session_id, payload, &settings, deadline,
+                )
                 .unwrap_or_else(HookEvaluation::allow),
             "PostToolUse" => self.evaluate_post_tool_use(data_root, session_id, payload, &settings),
             _ => HookEvaluation::allow(),
@@ -120,6 +133,7 @@ impl HookInterceptor {
 
     fn evaluate_pre_tool_use(
         &self,
+        agent_id: &'static str,
         session_id: &str,
         payload: &Value,
         settings: &matou_native_core::context_optimizer_config::AgentOptimizerSettings,
@@ -156,7 +170,7 @@ impl HookInterceptor {
             return HookEvaluation {
                 response_json: deny_pre_tool_json(&reason),
                 saved_noise_bytes: 0,
-                replacement_source: None,
+                savings: None,
             };
         }
 
@@ -177,26 +191,26 @@ impl HookInterceptor {
             ReadDecision::BlockDuplicate {
                 reason,
                 saved_bytes,
+            }
+            | ReadDecision::ReturnDiff {
+                diff: reason,
+                saved_bytes,
             } => {
                 self.add_saved_bytes(session_id, saved_bytes as u64);
                 HookEvaluation {
                     response_json: deny_pre_tool_json(&reason),
                     saved_noise_bytes: saved_bytes as u64,
-                    replacement_source: None,
-                }
-            }
-            ReadDecision::ReturnDiff { diff, saved_bytes } => {
-                self.add_saved_bytes(session_id, saved_bytes as u64);
-                HookEvaluation {
-                    response_json: deny_pre_tool_json(&diff),
-                    saved_noise_bytes: saved_bytes as u64,
-                    replacement_source: None,
+                    savings: payload
+                        .get("tool_use_id")
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.trim().is_empty())
+                        .map(|id| (agent_id, SavedEvent::Read(id.to_owned()))),
                 }
             }
             ReadDecision::BlockOversized { reason, .. } => HookEvaluation {
                 response_json: deny_pre_tool_json(&reason),
                 saved_noise_bytes: 0,
-                replacement_source: None,
+                savings: None,
             },
         }
     }
@@ -262,13 +276,14 @@ impl HookInterceptor {
         HookEvaluation {
             response_json: response.to_string(),
             saved_noise_bytes: trimmed.saved_bytes as u64,
-            replacement_source: None,
+            savings: None,
         }
     }
 
     fn replace_claude_tool_output(
         &self,
         data_root: &Path,
+        agent_id: &'static str,
         session_id: &str,
         payload: &Value,
         settings: &matou_native_core::context_optimizer_config::AgentOptimizerSettings,
@@ -323,19 +338,31 @@ impl HookInterceptor {
             }})
             .to_string(),
             saved_noise_bytes: saved_bytes as u64,
-            replacement_source: Some(source),
+            savings: Some((agent_id, SavedEvent::Replacement(source))),
         })
     }
 
-    pub(crate) fn record_claude_replacement(&self, session_id: &str, decision: &HookEvaluation) {
-        let Some(source) = &decision.replacement_source else {
+    pub(crate) fn record_delivered_savings(
+        &self,
+        data_root: PathBuf,
+        session_id: &str,
+        decision: HookEvaluation,
+        now: SystemTime,
+    ) {
+        let Some((agent_id, event)) = decision.savings else {
             return;
         };
-        if let Ok(mut map) = self.saved_by_session.lock() {
+        let is_replacement = matches!(event, SavedEvent::Replacement(_));
+        let first_delivery = self.saved_by_session.lock().is_ok_and(|mut map| {
             let saved = map.entry(session_id.to_owned()).or_default();
-            if saved.counted_sources.insert(source.clone()) {
+            let first_delivery = saved.counted_events.insert((agent_id, event));
+            if first_delivery && is_replacement {
                 saved.bytes = saved.bytes.saturating_add(decision.saved_noise_bytes);
             }
+            first_delivery
+        });
+        if first_delivery && decision.saved_noise_bytes > 0 {
+            enqueue_saved_stats(data_root, agent_id, decision.saved_noise_bytes, now);
         }
     }
 
@@ -616,7 +643,12 @@ mod tests {
             big_log.trim_end().len() - summary.len()
         );
         assert_eq!(interceptor.saved_noise_bytes("s1"), 0);
-        interceptor.record_claude_replacement("s1", &post_eval);
+        interceptor.record_delivered_savings(
+            dir.path().to_owned(),
+            "s1",
+            post_eval.clone(),
+            SystemTime::now(),
+        );
         let retry = interceptor.evaluate_hook(
             dir.path(),
             LaunchProfile::ClaudeCode,
@@ -625,11 +657,12 @@ mod tests {
             deadline(),
         );
         assert_eq!(retry, post_eval);
-        interceptor.record_claude_replacement("s1", &retry);
+        interceptor.record_delivered_savings(dir.path().to_owned(), "s1", retry, SystemTime::now());
         assert_eq!(
             interceptor.saved_noise_bytes("s1"),
             post_eval.saved_noise_bytes
         );
+        crate::context_guard::store::flush_saved_stats();
         let store = ContextGuardStore::open(dir.path()).unwrap();
         assert_eq!(store.list_session_logs("s1", 10).unwrap().len(), 1);
         assert_eq!(
