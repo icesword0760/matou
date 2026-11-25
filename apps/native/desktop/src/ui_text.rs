@@ -79,6 +79,7 @@ impl RenderOnce for UiText {
                         fonts,
                         runs,
                         normal_line_height: self.normal_line_height,
+                        shaped_full: RefCell::new(None),
                     }),
                     geometry: self.geometry,
                 }
@@ -266,6 +267,7 @@ struct SingleLineLabel {
     fonts: UiFonts,
     runs: Vec<TextRun>,
     normal_line_height: bool,
+    shaped_full: RefCell<Option<(f32, Option<WrappedLine>, LineMetrics)>>,
 }
 
 #[cfg(target_os = "macos")]
@@ -284,7 +286,7 @@ impl SingleLineLabel {
         &self,
         full: WrappedLine,
         width: Option<Pixels>,
-        window: &Window,
+        mut shape_candidate: impl FnMut(SharedString) -> Option<WrappedLine>,
     ) -> Option<WrappedLine> {
         let (Some(width), Some(TextOverflow::Truncate(suffix))) = (
             width.filter(|width| full.unwrapped_layout.width > *width),
@@ -306,8 +308,7 @@ impl SingleLineLabel {
         while start < end {
             let mid = start + (end - start) / 2;
             let text: SharedString = format!("{}{suffix}", &self.text[..boundaries[mid]]).into();
-            let runs = self.fonts.runs(&text, window);
-            let candidate = self.shape(text, &runs, window)?;
+            let candidate = shape_candidate(text)?;
             if candidate.unwrapped_layout.width <= width {
                 best = Some(candidate);
                 start = mid + 1;
@@ -319,10 +320,42 @@ impl SingleLineLabel {
     }
 
     fn measure(&self, limit: Option<Pixels>, window: &Window) -> MeasuredLine {
-        let full = self.shape(self.text.clone(), &self.runs, window);
-        // Normal line height uses all fonts participating in layout before paint truncation.
-        let metrics = self.metrics(full.as_ref(), window);
-        let line = full.and_then(|line| self.fit(line, limit, window));
+        self.measure_shaped(
+            limit,
+            window.scale_factor(),
+            || {
+                let full = self.shape(self.text.clone(), &self.runs, window);
+                // Compute normal line height before truncation so every font still contributes.
+                let metrics = self.metrics(full.as_ref(), window);
+                (full, metrics)
+            },
+            |text| {
+                let runs = self.fonts.runs(&text, window);
+                self.shape(text, &runs, window)
+            },
+        )
+    }
+
+    fn measure_shaped(
+        &self,
+        limit: Option<Pixels>,
+        scale: f32,
+        shape_full: impl FnOnce() -> (Option<WrappedLine>, LineMetrics),
+        shape_candidate: impl FnMut(SharedString) -> Option<WrappedLine>,
+    ) -> MeasuredLine {
+        let cached = self
+            .shaped_full
+            .borrow()
+            .as_ref()
+            .filter(|(cached_scale, _, _)| *cached_scale == scale)
+            .cloned();
+        let (_, full, metrics) = cached.unwrap_or_else(|| {
+            let (full, metrics) = shape_full();
+            let shaped = (scale, full, metrics);
+            self.shaped_full.replace(Some(shaped.clone()));
+            shaped
+        });
+        let line = full.and_then(|line| self.fit(line, limit, shape_candidate));
         MeasuredLine {
             limit,
             line,
@@ -351,6 +384,7 @@ impl SingleLineLabel {
 }
 
 #[cfg(target_os = "macos")]
+#[derive(Clone)]
 struct LineMetrics {
     height: Pixels,
     baseline_from_top: Pixels,
@@ -378,6 +412,103 @@ impl LineMetrics {
         // Compensate for the baseline added by WrappedLine::paint.
         let paint_baseline = (self.height - layout.ascent - layout.descent) / 2. + layout.ascent;
         point(origin.x, self.baseline_at(origin.y) - paint_baseline)
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::{LineMetrics, SingleLineLabel, UiFonts};
+    use gpui::{
+        FontId, LineLayout, SharedString, TextOverflow, TextStyle, WrappedLine, WrappedLineLayout,
+        font, px,
+    };
+    use std::{cell::RefCell, sync::Arc};
+    use unicode_segmentation::UnicodeSegmentation;
+
+    #[test]
+    fn multi_limit_probes_reuse_full_shape_and_keep_ellipsis_and_metrics() {
+        fn shape(text: SharedString) -> WrappedLine {
+            let mut line = WrappedLine::default();
+            *line = Arc::new(WrappedLineLayout {
+                unwrapped_layout: Arc::new(LineLayout {
+                    width: px(10. * text.graphemes(true).count() as f32),
+                    len: text.len(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            line.text = text;
+            line
+        }
+
+        let text: SharedString = "Ae\u{301}界B".into();
+        let label = SingleLineLabel {
+            text: text.clone(),
+            fonts: UiFonts {
+                style: TextStyle {
+                    text_overflow: Some(TextOverflow::Truncate("…".into())),
+                    ..Default::default()
+                },
+                size: px(12.),
+                primary: font(".SystemUIFont"),
+                fallback: font("PingFang SC"),
+                primary_id: FontId(0),
+                fallback_id: FontId(1),
+            },
+            runs: Vec::new(),
+            normal_line_height: true,
+            shaped_full: RefCell::new(None),
+        };
+        let mut full_shapes = 0;
+        let mut candidate_shapes = 0;
+        for (limit, expected, needs_candidates) in [
+            (None, Some(text.as_ref()), false),
+            (Some(px(50.)), Some(text.as_ref()), false),
+            (Some(px(40.)), Some(text.as_ref()), false),
+            (Some(px(30.)), Some("Ae\u{301}…"), true),
+            (Some(px(10.)), Some("…"), true),
+            (Some(px(9.)), None, true),
+            (None, Some(text.as_ref()), false),
+        ] {
+            let previous_candidates = candidate_shapes;
+            let measured = label.measure_shaped(
+                limit,
+                2.,
+                || {
+                    full_shapes += 1;
+                    (
+                        Some(shape(text.clone())),
+                        LineMetrics::new(px(16.), px(24.), px(6.), 2.),
+                    )
+                },
+                |candidate| {
+                    candidate_shapes += 1;
+                    Some(shape(candidate))
+                },
+            );
+            assert_eq!(
+                measured.line.as_ref().map(|line| line.text.as_ref()),
+                expected
+            );
+            assert_eq!(measured.metrics.height, px(16.));
+            assert_eq!(measured.metrics.baseline_at(px(0.)), px(12.5));
+            assert_eq!(full_shapes, 1);
+            assert_eq!(candidate_shapes > previous_candidates, needs_candidates);
+        }
+
+        let measured = label.measure_shaped(
+            None,
+            1.,
+            || {
+                (
+                    Some(shape(text.clone())),
+                    LineMetrics::new(px(15.), px(12.), px(3.), 1.),
+                )
+            },
+            |_| unreachable!("unconstrained text should not shape a truncation candidate"),
+        );
+        assert_eq!(measured.metrics.height, px(15.));
+        assert_eq!(measured.metrics.baseline_at(px(0.)), px(12.));
     }
 }
 
