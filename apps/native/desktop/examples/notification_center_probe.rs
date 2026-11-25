@@ -213,6 +213,18 @@ mod workspace {
         }
 
         #[cfg(debug_assertions)]
+        pub(super) fn probe_task_title(
+            &mut self,
+            task: &str,
+            title: String,
+            cx: &mut Context<Self>,
+        ) -> String {
+            let task = self.tasks.iter_mut().find(|row| row.id == task).unwrap();
+            cx.notify();
+            std::mem::replace(&mut task.title, title)
+        }
+
+        #[cfg(debug_assertions)]
         pub(super) fn probe_clear(&mut self, cx: &mut Context<Self>) {
             self.clear_notifications(cx);
         }
@@ -340,8 +352,8 @@ mod probe {
         foundation::{NSInteger, NSPoint},
     };
     use gpui::{
-        AnyWindowHandle, AppContext, Application, AsyncApp, Bounds, Keystroke, WindowBounds,
-        WindowHandle, WindowOptions, point, px, size,
+        AnyWindowHandle, AppContext, Application, AsyncApp, Bounds, Keystroke, MouseButton, Pixels,
+        Point, WindowBounds, WindowHandle, WindowOptions, point, px, size,
     };
     use matou_native_core::hierarchy::HierarchyResult;
     use matou_native_runtime::host::{Command, Event, LaunchOptions, RuntimeHost};
@@ -425,7 +437,13 @@ mod probe {
         }
     }
 
-    fn mouse(window: WindowHandle<Workspace>, cx: &mut AsyncApp, x: f32, y: f32, click: bool) {
+    fn mouse(
+        window: WindowHandle<Workspace>,
+        cx: &mut AsyncApp,
+        x: f32,
+        y: f32,
+        button: Option<MouseButton>,
+    ) {
         let (view, location, number) = window
             .update(cx, |_, window, _| {
                 let RawWindowHandle::AppKit(appkit) =
@@ -453,15 +471,58 @@ mod probe {
         // Send input directly to the hidden probe view, outside the OS event queue.
         unsafe {
             let _: () = msg_send![view, mouseMoved: event(NSEventType::NSMouseMoved)];
-            if click {
-                let _: () = msg_send![view, mouseDown: event(NSEventType::NSLeftMouseDown)];
-                let _: () = msg_send![view, mouseUp: event(NSEventType::NSLeftMouseUp)];
+            match button {
+                None => {}
+                Some(MouseButton::Left) => {
+                    let _: () = msg_send![view, mouseDown: event(NSEventType::NSLeftMouseDown)];
+                    let _: () = msg_send![view, mouseUp: event(NSEventType::NSLeftMouseUp)];
+                }
+                Some(MouseButton::Right) => {
+                    use core_foundation::base::CFRelease;
+                    use core_graphics::{
+                        display::CGDisplay,
+                        event::{CGEventType, CGMouseButton},
+                        geometry::CGPoint,
+                    };
+                    use std::ffi::c_void;
+                    unsafe extern "C" {
+                        fn CGEventCreateMouseEvent(
+                            source: *const c_void,
+                            kind: CGEventType,
+                            position: CGPoint,
+                            button: CGMouseButton,
+                        ) -> *mut c_void;
+                    }
+                    // Build a right-button event with the button number GPUI reads.
+                    let position = CGPoint::new(
+                        location.x,
+                        CGDisplay::main().bounds().size.height - location.y,
+                    );
+                    let right_event = |kind| {
+                        let raw = CGEventCreateMouseEvent(
+                            std::ptr::null(),
+                            kind,
+                            position,
+                            CGMouseButton::Right,
+                        );
+                        assert!(!raw.is_null());
+                        let event = NSEvent::eventWithCGEvent_(nil, raw);
+                        CFRelease(raw);
+                        assert_eq!(event.buttonNumber(), 1);
+                        event
+                    };
+                    let _: () =
+                        msg_send![view, rightMouseDown: right_event(CGEventType::RightMouseDown)];
+                    let _: () =
+                        msg_send![view, rightMouseUp: right_event(CGEventType::RightMouseUp)];
+                }
+                _ => unreachable!(),
             }
         }
     }
 
     fn click(window: WindowHandle<Workspace>, cx: &mut AsyncApp, x: f32, y: f32) {
-        mouse(window, cx, x, y, true);
+        mouse(window, cx, x, y, Some(MouseButton::Left));
     }
 
     fn deliver(window: WindowHandle<Workspace>, cx: &mut AsyncApp, event: Event) {
@@ -557,6 +618,141 @@ mod probe {
             event["sceneId"] = json!(scene_id);
         }
         event
+    }
+
+    #[cfg(debug_assertions)]
+    async fn verify_task_actions(
+        window: WindowHandle<Workspace>,
+        cx: &mut AsyncApp,
+        sink: &runtime_bridge::ProbeReceiver,
+        owner: &HierarchyResult,
+        graph: &Value,
+        timestamp: u64,
+    ) {
+        let task = &owner.task.as_ref().unwrap().id;
+        let badge = format!("unread-task-{task}");
+        let more = format!("task-more:{task}");
+        let title = format!("task-title:{task}");
+        let menu = "task-context-menu";
+        let handle = AnyWindowHandle::from(window);
+        let long_title = "Long task title ".repeat(24);
+        let original_title = window
+            .update(cx, |view, _, cx| {
+                view.probe_task_title(task, long_title.clone(), cx)
+            })
+            .unwrap();
+        let viewport = window
+            .update(cx, |_, window, _| window.viewport_size())
+            .unwrap();
+        let row = |cx: &mut AsyncApp| {
+            window
+                .update(cx, |view, _, _| view.probe_task_bounds(task))
+                .unwrap()
+        };
+        let clear = |cx: &mut AsyncApp| {
+            window
+                .update(cx, |view, _, cx| view.probe_clear(cx))
+                .unwrap()
+        };
+        let notify = |cx: &mut AsyncApp| {
+            let mut event = payload("task-actions", "Task unread", owner, timestamp, false);
+            event.as_object_mut().unwrap().remove("sessionId");
+            let mut graph = graph.clone();
+            graph["agentNotifications"] = json!([event]);
+            deliver(window, cx, Event::Graph(graph));
+            window
+                .update(cx, |view, _, cx| {
+                    view.probe_task_title(task, long_title.clone(), cx)
+                })
+                .unwrap();
+        };
+        let click = |cx: &mut AsyncApp, button, position: Point<Pixels>| {
+            mouse(
+                window,
+                cx,
+                f32::from(position.x),
+                f32::from(position.y),
+                Some(button),
+            );
+        };
+
+        clear(cx);
+        for width in [720., 900., 1200.] {
+            window
+                .update(cx, |_, window, _| {
+                    window.resize(size(px(width), viewport.height))
+                })
+                .unwrap();
+            cx.background_executor()
+                .timer(Duration::from_millis(45))
+                .await;
+            let actual = window
+                .update(cx, |_, window, _| window.viewport_size().width)
+                .unwrap();
+            assert_eq!(actual, px(width));
+            let read = painted(window, cx);
+            let read_row = row(cx);
+            assert!(!read.contains_key(&badge));
+            click(cx, MouseButton::Left, read[&more].center());
+            assert!(painted(window, cx).contains_key(menu));
+            click(cx, MouseButton::Left, point(px(2.), px(2.)));
+
+            notify(cx);
+            let unread = painted(window, cx);
+            assert!(!unread.contains_key(&more));
+            let unread_badge = unread[&badge];
+            assert_eq!(row(cx), read_row);
+            assert_eq!(read_row.size.height, px(34.));
+            assert_eq!(unread_badge.size.height, px(16.));
+            assert_eq!(unread_badge.right(), read[&more].right());
+            assert_eq!(unread_badge.center().y, read[&more].center().y);
+            assert_eq!(unread[&title].left(), read[&title].left());
+            assert!(unread[&title].right() < unread_badge.left());
+            assert!(read[&title].right() < read[&more].left());
+
+            click(cx, MouseButton::Right, read_row.center());
+            let opened = painted(window, cx);
+            assert!(opened.contains_key(&badge));
+            assert!(!opened.contains_key(&more));
+            clear(cx);
+            let cleared = painted(window, cx);
+            assert!(!cleared.contains_key(&badge));
+            assert_eq!(cleared[&more], read[&more]);
+            assert_eq!(cleared[menu], opened[menu]);
+            click(cx, MouseButton::Left, point(px(2.), px(2.)));
+            assert!(!painted(window, cx).contains_key(menu));
+            println!(
+                "task actions {width}pt: 0→1→0, stable row and right edge, long title stays clear of controls, right-click menu survives clear"
+            );
+        }
+
+        for key in ["enter", "space"] {
+            while sink.try_recv().is_ok() {}
+            notify(cx);
+            assert!(painted(window, cx).contains_key(&badge));
+            let center = row(cx).center();
+            click(cx, MouseButton::Right, center);
+            painted(window, cx);
+            handle
+                .update(cx, |_, window, cx| {
+                    assert!(window.dispatch_keystroke(Keystroke::parse(key).unwrap(), cx));
+                })
+                .unwrap();
+            assert!(std::iter::from_fn(|| sink.try_recv().ok()).any(|command| {
+                matches!(command, Command::SelectTask { task_id } if &task_id == task)
+            }));
+            let selected = painted(window, cx);
+            assert!(!selected.contains_key(&badge));
+            assert!(selected.contains_key(&more));
+            clear(cx);
+        }
+        println!("task actions: focused unread row activates with Enter and Space");
+        window
+            .update(cx, |view, window, cx| {
+                view.probe_task_title(task, original_title, cx);
+                window.resize(viewport);
+            })
+            .unwrap();
     }
 
     #[cfg(debug_assertions)]
@@ -1278,7 +1474,7 @@ mod probe {
         );
 
         // Move over the first row, then hit its X once the hover style is rendered.
-        mouse(window, cx, 345., 118., false);
+        mouse(window, cx, 345., 118., None);
         draw(window, cx);
         click(window, cx, 345., 120.);
         draw(window, cx);
@@ -1303,13 +1499,16 @@ mod probe {
         host.commands
             .send(read_focus_command(&sink, target(&active)))
             .unwrap();
-        let (selected, _) = runtime_graph(&host, cx, window, true).await;
+        let (selected, _selected_graph) = runtime_graph(&host, cx, window, true).await;
         assert_eq!(target(&selected), target(&active));
         draw(window, cx);
         assert_center(cx, false, 0, &[]);
         println!("navigation: older payload resolved by the existing projection");
         #[cfg(debug_assertions)]
-        verify_trail(&host, window, cx, &background, &sibling, &active).await;
+        {
+            verify_task_actions(window, cx, &sink, &selected, &_selected_graph, timestamp).await;
+            verify_trail(&host, window, cx, &background, &sibling, &active).await;
+        }
         window
             .update(cx, |_, window, _| window.remove_window())
             .unwrap();

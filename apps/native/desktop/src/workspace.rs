@@ -8521,6 +8521,10 @@ impl Workspace {
                     .whitespace_nowrap()
                     .font_weight(FontWeight::MEDIUM)
                     .child(ui_text(task.title.clone()))
+                    .children(workspace_wiring::wiring_probe_bounds(format!(
+                        "task-title:{}",
+                        task.id
+                    )))
                     .child(
                         canvas(
                             |_, _, _| (),
@@ -8584,25 +8588,32 @@ impl Workspace {
                         }),
                 )
             })
-            .child(
-                self.button(
-                    div()
-                        .id(SharedString::from(format!("task-more:{}", task.id)))
-                        .size(px(22. * scale))
-                        .flex_none()
-                        .rounded(px(4. * scale))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .opacity(if menu_visible { 1. } else { 0. })
-                        .cursor_pointer()
-                        .hover(|s| s.bg(rgba(sidebar_palette.control_hover)))
-                        .child(icon("ellipsis", 14. * scale, rgba(sidebar_palette.icon))),
-                    &focus[1],
-                    move |this, _, cx| this.open_task_menu(&menu_id, true, cx),
-                    cx,
-                ),
-            )
+            .when(unread == 0, |row| {
+                row.child(
+                    self.button(
+                        div()
+                            .id(SharedString::from(format!("task-more:{}", task.id)))
+                            .relative()
+                            .size(px(22. * scale))
+                            .flex_none()
+                            .rounded(px(4. * scale))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .opacity(if menu_visible { 1. } else { 0. })
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgba(sidebar_palette.control_hover)))
+                            .children(workspace_wiring::wiring_probe_bounds(format!(
+                                "task-more:{}",
+                                task.id
+                            )))
+                            .child(icon("ellipsis", 14. * scale, rgba(sidebar_palette.icon))),
+                        &focus[1],
+                        move |this, _, cx| this.open_task_menu(&menu_id, true, cx),
+                        cx,
+                    ),
+                )
+            })
             .child(
                 canvas(
                     |_, _, _| (),
@@ -16483,6 +16494,9 @@ impl Workspace {
                     .border_color(rgba(0x00000000))
                     .left(position.x)
                     .top(position.y - px(62.25))
+                    .children(workspace_wiring::wiring_probe_bounds(
+                        "task-context-menu".into(),
+                    ))
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                         this.task_menu = None;
                         cx.notify();
