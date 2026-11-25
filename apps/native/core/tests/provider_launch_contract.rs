@@ -15,7 +15,10 @@ use matou_native_core::{
         validate_claude_role_assignments, validate_claude_web_search,
     },
     pty::ShellLaunch,
-    sessions::{read_claude_role_launch_preferences, save_claude_model_assignments},
+    sessions::{
+        current_interface_locale, read_claude_role_launch_preferences, read_locale_preference,
+        save_claude_model_assignments,
+    },
     storage::migrate,
 };
 use rusqlite::Connection;
@@ -831,7 +834,10 @@ fn active_subscription_source_reports_service_unavailable_even_with_an_api_opus_
         .context("subscription launch must fail")?;
     assert_eq!(
         error.to_string(),
-        "Subscription launch service is unavailable"
+        current_interface_locale(read_locale_preference(temp.path())).text(
+            "订阅服务未启动，请重新打开设置或重启码头",
+            "The subscription service hasn't started. Reopen Settings or restart Matou.",
+        )
     );
     Ok(())
 }
@@ -857,7 +863,10 @@ fn saved_subscription_targets_validate_but_an_offline_launch_still_requires_the_
         .context("offline subscription launch")?;
     assert_eq!(
         error.to_string(),
-        "Subscription launch service is unavailable"
+        current_interface_locale(read_locale_preference(temp.path())).text(
+            "订阅服务未启动，请重新打开设置或重启码头",
+            "The subscription service hasn't started. Reopen Settings or restart Matou.",
+        )
     );
     Ok(())
 }
@@ -1487,6 +1496,20 @@ fn projects_bound_api_provider_and_sanitizes_environment() -> Result<()> {
         .context("missing binding should fail")?;
     assert_eq!(error.to_string(), "会话绑定的供应商配置不存在");
     assert!(!format!("{error:?}").contains(key));
+    let error = prepare(
+        temp.path(),
+        json!({"providerConfigId": "removed", "model": "matou-chatgpt/matou-opus"}),
+        &[],
+    )
+    .err()
+    .context("removed subscription should fail")?;
+    assert_eq!(
+        error.to_string(),
+        current_interface_locale(read_locale_preference(temp.path())).text(
+            "还没有可用的订阅账号，请先在设置里添加并启用",
+            "No subscription account is available. Add and enable one in Settings.",
+        )
+    );
     assert!(fs::read_to_string(&path)? == stored);
     let stale = stored.replace("\"claude-code\":\"active\"", "\"claude-code\":\"stale\"");
     fs::write(&path, &stale)?;

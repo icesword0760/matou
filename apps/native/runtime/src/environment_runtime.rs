@@ -472,6 +472,9 @@ fn problem_reason(problem: EnvironmentProblem) -> anyhow::Error {
 }
 
 pub(crate) fn change_failure(kind: Kind, error: &anyhow::Error) -> String {
+    if let Some(message) = error.downcast_ref::<crate::subscription_service::LaunchMessage>() {
+        return message.0.clone();
+    }
     let reason = error.to_string();
     if matches!(
         reason.as_str(),

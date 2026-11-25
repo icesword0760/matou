@@ -46,7 +46,6 @@ use crate::{
         self, LaunchMode as AntigravityMode, PermissionMode as AntigravityPermission,
     },
     claude_request_gateway::{Gateway, ProxyEnvironment},
-    context_guard::{HandoffBrief, SessionContextGuard},
     codex_events::{self, title as codex_title},
     codex_fork::{
         CodexForkAuthority, CodexForkCandidate, CodexForkHook, CodexForkSettings, CodexForkSource,
@@ -54,6 +53,7 @@ use crate::{
     },
     codex_launch::CodexLaunch,
     codex_resume::{self, Resume as CodexResume},
+    context_guard::{HandoffBrief, SessionContextGuard},
     derived::{CwdTracker, WorkStatusTracker, terminal_summary_lines, utf16_tail},
     dsh_catalog::DshSessionCatalog,
     dsh_events::{DshEventOutcome, DshEvents, DshWorkStatus},
@@ -71,7 +71,9 @@ use crate::{
         self, FORK_REBUILD_FAILED, IDENTITY_MISMATCH, ResumeMonitor, SESSION_NOT_FOUND,
     },
     shell_input::ShellInput,
-    subscription_service::{PreparedClaudeLaunch, SessionSubscriptions, SubscriptionService},
+    subscription_service::{
+        LaunchIssue, PreparedClaudeLaunch, SessionSubscriptions, SubscriptionService,
+    },
     worker::{SessionWorker, WorkerCommand, WorkerEvent},
 };
 
@@ -2744,7 +2746,9 @@ impl ShellOwner {
         {
             ensure!(
                 subscriptions.is_some(),
-                "Subscription launch service is unavailable"
+                LaunchIssue::ServiceNotStarted.localized(sessions::current_interface_locale(
+                    sessions::read_locale_preference(&launch.data_root)
+                ))
             );
         }
         let gateway = plan.gateway;

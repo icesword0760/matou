@@ -19,7 +19,10 @@ use matou_native_core::{
     provider_launch::{
         ClaudeLaunch, PreparedSubscriptionLaunch, PreparedSubscriptionTarget, role_model_env_key,
     },
-    sessions::ClaudeRoleLaunchPreferences,
+    sessions::{
+        ClaudeRoleLaunchPreferences, InterfaceLocale, current_interface_locale,
+        read_locale_preference,
+    },
 };
 use serde_json::{Value, json};
 use tokio::sync::watch;
@@ -34,6 +37,111 @@ use crate::{
 };
 
 const POLL: Duration = Duration::from_millis(50);
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum LaunchIssue {
+    ServiceNotStarted,
+    AccountUnavailable,
+    SignInRequired,
+    CredentialInvalid,
+    ModelsMissing,
+    UnsupportedPlatform,
+}
+
+impl std::fmt::Display for LaunchIssue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::ServiceNotStarted => "Subscription launch service is unavailable",
+            Self::AccountUnavailable => "Subscription provider is unavailable",
+            Self::SignInRequired => "Subscription sign-in is required",
+            Self::CredentialInvalid => "Subscription credential is missing or no longer valid",
+            Self::ModelsMissing => "Subscription model is missing from the saved catalog",
+            Self::UnsupportedPlatform => "Subscriptions require macOS 15 or later",
+        })
+    }
+}
+
+impl std::error::Error for LaunchIssue {}
+
+impl LaunchIssue {
+    pub(crate) fn localized(self, locale: InterfaceLocale) -> LaunchMessage {
+        LaunchMessage(self.message(locale).into())
+    }
+
+    pub(crate) fn message(self, locale: InterfaceLocale) -> &'static str {
+        match self {
+            Self::ServiceNotStarted => locale.text(
+                "订阅服务未启动，请重新打开设置或重启码头",
+                "The subscription service hasn't started. Reopen Settings or restart Matou.",
+            ),
+            Self::AccountUnavailable => locale.text(
+                "还没有可用的订阅账号，请先在设置里添加并启用",
+                "No subscription account is available. Add and enable one in Settings.",
+            ),
+            Self::SignInRequired | Self::CredentialInvalid => locale.text(
+                "该订阅账号需要重新登录",
+                "Sign in to this subscription account again in Settings.",
+            ),
+            Self::ModelsMissing => locale.text(
+                "订阅账号的模型信息缺失，请刷新账号或重新登录",
+                "Model information is missing for this subscription account. Refresh the account or sign in again.",
+            ),
+            Self::UnsupportedPlatform => locale.text(
+                "订阅账号需要 macOS 15 或更新版本",
+                "Subscription accounts require macOS 15 or later.",
+            ),
+        }
+    }
+}
+
+/// Safe to display in the terminal card or the environment transition footer.
+#[derive(Debug)]
+pub(crate) struct LaunchMessage(pub(crate) String);
+
+impl std::fmt::Display for LaunchMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for LaunchMessage {}
+
+pub(crate) fn launch_issue_message(locale: InterfaceLocale, error: &anyhow::Error) -> String {
+    if let Some(issue) = error.downcast_ref::<LaunchIssue>() {
+        return issue.message(locale).into();
+    }
+    // Router, filesystem and upstream errors can carry private data. Display
+    // a fixed reason for known failures and omit the underlying error chain.
+    let reason = match error.to_string().as_str() {
+        "Model router binary is unavailable" | "Model router development binary is unavailable" => {
+            return LaunchIssue::ServiceNotStarted.message(locale).into();
+        }
+        message if message.starts_with("Model router version does not match ") => locale.text(
+            "本地服务版本不匹配，请更新码头",
+            "The local service version doesn't match. Update Matou.",
+        ),
+        "Model router did not become ready" | "Model router stopped after repeated crashes" => locale.text(
+            "本地服务没有响应，请重新打开设置或重启码头",
+            "The local service didn't respond. Reopen Settings or restart Matou.",
+        ),
+        "Subscription credential is not active" => locale.text(
+            "账号暂时未就绪，请在设置中刷新后重试",
+            "The account isn't ready. Refresh it in Settings and retry.",
+        ),
+        "Invalid subscription credential reference" => {
+            return LaunchIssue::CredentialInvalid.message(locale).into();
+        }
+        _ => locale.text(
+            "本地服务无法完成请求，请在设置中刷新账号后重试",
+            "The local service couldn't complete the request. Refresh the account in Settings and retry.",
+        ),
+    };
+    let prefix = locale.text(
+        "连接订阅服务失败：",
+        "Couldn't connect to the subscription service: ",
+    );
+    format!("{prefix}{reason}")
+}
 
 pub(crate) struct SubscriptionService {
     root: PathBuf,
@@ -204,6 +312,18 @@ impl SubscriptionService {
 
     pub fn prepare_session(
         self: &Arc<Self>,
+        launch: ClaudeLaunch,
+        preferences: &ClaudeRoleLaunchPreferences,
+    ) -> Result<PreparedClaudeLaunch> {
+        self.prepare_session_routes(launch, preferences)
+            .map_err(|error| {
+                let locale = current_interface_locale(read_locale_preference(&self.root));
+                LaunchMessage(launch_issue_message(locale, &error)).into()
+            })
+    }
+
+    fn prepare_session_routes(
+        self: &Arc<Self>,
         mut launch: ClaudeLaunch,
         preferences: &ClaudeRoleLaunchPreferences,
     ) -> Result<PreparedClaudeLaunch> {
@@ -222,7 +342,7 @@ impl SubscriptionService {
             let row = self
                 .store
                 .subscription(&target.provider_id)?
-                .context("Subscription provider is unavailable")?;
+                .context(LaunchIssue::AccountUnavailable)?;
             let account = self.prepare_account(&target, row)?;
             if let Some(model) = target.model.as_deref() {
                 self.prepare_exact_model(&account, model)?;
@@ -242,8 +362,25 @@ impl SubscriptionService {
                 let window = launch_window(
                     &account,
                     preferences.context_preference(&target.provider_id),
-                );
-                let projection = self.prepare_launch(&account, role, window, &names)?;
+                )
+                .into_iter()
+                .chain(
+                    launch
+                        .gateway
+                        .as_ref()
+                        .and_then(|gateway| gateway.context_window),
+                )
+                .min();
+                let mut projection = self.prepare_launch(&account, role, window, &names)?;
+                if launch.provider_config_id == target.provider_id
+                    && launch.subscription_role.is_none()
+                    && !launch.model.is_empty()
+                {
+                    let prefix = format!("{}/", target.prefix());
+                    let model = launch.model.strip_prefix(&prefix).unwrap_or(&launch.model);
+                    self.prepare_exact_model(&account, model)?;
+                    projection.main_model = format!("{prefix}{model}");
+                }
                 launch.apply_subscription_launch(projection);
             }
             let binding = self.bind(target.clone(), account)?;
@@ -266,14 +403,14 @@ impl SubscriptionService {
         let row = self
             .store
             .subscription(&target.provider_id)?
-            .context("Subscription provider is unavailable")?;
+            .context(LaunchIssue::AccountUnavailable)?;
         let account = self.prepare_account(target, row)?;
         self.prepare_exact_model(
             &account,
             target
                 .model
                 .as_deref()
-                .context("Missing subscription model")?,
+                .context(LaunchIssue::ModelsMissing)?,
         )?;
         self.bind(target.clone(), account)
     }
@@ -287,23 +424,21 @@ impl SubscriptionService {
             .and_then(|version| version.split('.').next()?.parse().ok());
         ensure!(
             subscription_launch::subscription_supported(cfg!(target_os = "macos"), major),
-            "Subscriptions require macOS 15 or later"
+            LaunchIssue::UnsupportedPlatform
         );
         ensure!(
             row.account["status"] != "needs-sign-in",
-            "Subscription sign-in is required"
+            LaunchIssue::SignInRequired
         );
         let provider = provider(&row)?;
         ensure!(
             provider.router_provider() == target.provider,
-            "Subscription provider changed during preparation"
+            LaunchIssue::AccountUnavailable
         );
         if model_router::credential_path(&self.root, &row.identity.credential_name).is_err() {
             self.store
                 .mark_subscription_needs_sign_in(&target.provider_id, &row.identity)?;
-            return Err(anyhow!(
-                "Subscription credential is missing or no longer valid"
-            ));
+            return Err(LaunchIssue::CredentialInvalid.into());
         }
         let (connection, lease) = self.manager.acquire()?;
         let client = ManagementClient::new(&connection);
@@ -317,9 +452,7 @@ impl SubscriptionService {
                 {
                     self.store
                         .mark_subscription_needs_sign_in(&target.provider_id, &row.identity)?;
-                    return Err(anyhow!(
-                        "Subscription credential is missing or no longer valid"
-                    ));
+                    return Err(LaunchIssue::CredentialInvalid.into());
                 }
                 if let Some(index) = file["auth_index"]
                     .as_str()
@@ -337,9 +470,7 @@ impl SubscriptionService {
             } else if Instant::now() >= deadline {
                 self.store
                     .mark_subscription_needs_sign_in(&target.provider_id, &row.identity)?;
-                return Err(anyhow!(
-                    "Subscription credential is missing or no longer valid"
-                ));
+                return Err(LaunchIssue::CredentialInvalid.into());
             }
             ensure!(
                 Instant::now() < deadline,
@@ -390,8 +521,11 @@ impl SubscriptionService {
                 context_window: window,
                 inherited_env_names: env,
             })
-            .map_err(|error| {
-                anyhow!("Subscription launch configuration is unavailable ({error:?})")
+            .map_err(|error| match error {
+                subscription_launch::LaunchError::MissingRoleModels(_) => {
+                    LaunchIssue::ModelsMissing.into()
+                }
+                _ => anyhow!("Subscription launch configuration is unavailable ({error:?})"),
             })
         };
         let mut plan = project(None)?;
@@ -473,7 +607,7 @@ impl SubscriptionService {
             !model.is_empty()
                 && model.encode_utf16().count() <= 240
                 && !model.chars().any(|c| c.is_control() || c.is_whitespace()),
-            "Invalid subscription model"
+            LaunchIssue::ModelsMissing
         );
         ensure!(
             account
@@ -481,7 +615,7 @@ impl SubscriptionService {
                 .model_metadata
                 .iter()
                 .any(|item| item["id"] == model),
-            "Subscription model is missing from the saved catalog"
+            LaunchIssue::ModelsMissing
         );
         let client = ManagementClient::new(&account.connection);
         let name = &account.row.identity.credential_name;
@@ -662,7 +796,7 @@ fn provider(row: &StoredSubscription) -> Result<SubscriptionProvider> {
     match row.provider.as_str() {
         "codex" => Ok(SubscriptionProvider::ChatGpt),
         "antigravity" => Ok(SubscriptionProvider::Antigravity),
-        _ => Err(anyhow!("Subscription provider is unavailable")),
+        _ => Err(LaunchIssue::AccountUnavailable.into()),
     }
 }
 

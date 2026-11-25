@@ -46,7 +46,7 @@ use crate::{
     search::{SearchRequest, SearchResult},
     shell_input::{InteractiveLaunch, ShellInput},
     subscription_launch::{self, SubscriptionProvider},
-    subscription_service::{PreparedClaudeLaunch, SubscriptionService},
+    subscription_service::{LaunchIssue, PreparedClaudeLaunch, SubscriptionService},
     update_download, update_http,
     worker::{SelectionCopy, ShellSubmission, WorkerCommand},
     workspace_paths::WorkspacePathChecks,
@@ -73,11 +73,10 @@ use matou_native_core::{
     provider_config::{ProviderConfigLocale, ProviderConfigStore},
     provider_launch::{
         CLAUDE_PERMISSION_MODES, ClaudeLaunch, ClaudeTarget, automatic_time_zone,
-        available_time_zones, official_time_zone_endpoint, prepare_claude_fork,
-        prepare_claude_launch, prepare_claude_permission_restart, prepare_managed_claude_launch,
-        prepare_new_claude_launch_with_budget, project_cli_time_zone, system_time_zone,
-        valid_claude_time_zone, validate_claude_compaction, validate_claude_role_assignments,
-        validate_claude_web_search, validate_cwd,
+        available_time_zones, official_time_zone_endpoint, prepare_managed_claude_launch,
+        project_cli_time_zone, system_time_zone, valid_claude_time_zone,
+        validate_claude_compaction, validate_claude_role_assignments, validate_claude_web_search,
+        validate_cwd,
     },
     pty::{LaunchProfile, ShellLaunch},
     sessions::{
@@ -3432,7 +3431,11 @@ impl ProviderSettingsWorker {
                                     store.subscription(&provider_id).and_then(|row| {
                                         ensure!(
                                             row.is_none(),
-                                            "Subscription launch service is unavailable"
+                                            LaunchIssue::ServiceNotStarted.localized(
+                                                current_interface_locale(read_locale_preference(
+                                                    &data_root
+                                                ))
+                                            )
                                         );
                                         store.set_active(&cli, &provider_id)
                                     })
@@ -4497,16 +4500,21 @@ fn run_writable(
         InterfaceLocale::Chinese => ProviderConfigLocale::ZhCn,
     };
     let provider_store = Arc::new(ProviderConfigStore::new(&data_root, locale));
-    let subscriptions = live_services
-        .then(|| {
-            SubscriptionService::new(
-                data_root.clone(),
-                Arc::clone(&provider_store),
-                owner.launch_environment(),
-            )
-            .map(Arc::new)
-        })
-        .transpose()?;
+    let subscriptions = if live_services {
+        match SubscriptionService::new(
+            data_root.clone(),
+            Arc::clone(&provider_store),
+            owner.launch_environment(),
+        ) {
+            Ok(service) => Some(Arc::new(service)),
+            Err(_) => {
+                eprintln!("[subscription] Could not start the model router supervisor");
+                None
+            }
+        }
+    } else {
+        None
+    };
     wiring.subscriptions = subscriptions.clone();
     owner.subscriptions = subscriptions.clone();
     let mut provider_settings =
@@ -9690,78 +9698,33 @@ fn prepare_launch(
                     let cwd = Path::new(&session.cwd);
                     let result = (|| {
                         let preferences = role_preferences.recv()?;
-                        let mut launch = if subscriptions.is_some() {
-                            let (binding, target) = if let Some(fork) = &fork {
-                                (&fork.metadata, Some(ClaudeTarget::Fork(&fork.source_id)))
-                            } else if fresh_launch {
-                                (
-                                    &metadata,
-                                    Some(ClaudeTarget::New {
-                                        assignments: Some(&preferences.assignments),
-                                        budget_preferences: Some((
-                                            &preferences,
-                                            &native_role_catalog,
-                                        )),
-                                    }),
-                                )
-                            } else if permission_fresh {
-                                (
-                                    &metadata,
-                                    Some(ClaudeTarget::PermissionRestart { remembered }),
-                                )
-                            } else {
-                                (&metadata, resume_id.as_deref().map(ClaudeTarget::Resume))
-                            };
-                            prepare_managed_claude_launch(
-                                &data_root,
-                                cwd,
-                                binding,
-                                target,
-                                environment,
-                                terminal.cols,
-                                terminal.rows,
-                            )
-                        } else if let Some(fork) = &fork {
-                            prepare_claude_fork(
-                                &data_root,
-                                cwd,
-                                &fork.metadata,
-                                &fork.source_id,
-                                environment,
-                                terminal.cols,
-                                terminal.rows,
-                            )
+                        let (binding, target) = if let Some(fork) = &fork {
+                            (&fork.metadata, Some(ClaudeTarget::Fork(&fork.source_id)))
                         } else if fresh_launch {
-                            prepare_new_claude_launch_with_budget(
-                                &data_root,
-                                cwd,
+                            (
                                 &metadata,
-                                (&preferences, &native_role_catalog),
-                                environment,
-                                terminal.cols,
-                                terminal.rows,
+                                Some(ClaudeTarget::New {
+                                    assignments: Some(&preferences.assignments),
+                                    budget_preferences: Some((&preferences, &native_role_catalog)),
+                                }),
                             )
                         } else if permission_fresh {
-                            prepare_claude_permission_restart(
-                                &data_root,
-                                cwd,
+                            (
                                 &metadata,
-                                remembered,
-                                environment,
-                                terminal.cols,
-                                terminal.rows,
+                                Some(ClaudeTarget::PermissionRestart { remembered }),
                             )
                         } else {
-                            prepare_claude_launch(
-                                &data_root,
-                                cwd,
-                                &metadata,
-                                resume_id.as_deref(),
-                                environment,
-                                terminal.cols,
-                                terminal.rows,
-                            )
-                        }?;
+                            (&metadata, resume_id.as_deref().map(ClaudeTarget::Resume))
+                        };
+                        let mut launch = prepare_managed_claude_launch(
+                            &data_root,
+                            cwd,
+                            binding,
+                            target,
+                            environment,
+                            terminal.cols,
+                            terminal.rows,
+                        )?;
                         if let Some(environment) = &restart_environment {
                             launch.capture_restart_gateway(
                                 &preferences,
@@ -9774,7 +9737,19 @@ fn prepare_launch(
                             .unwrap_or_else(|_| "auto".into());
                         let mut launch = match &subscriptions {
                             Some(service) => service.prepare_session(launch, &preferences)?,
-                            None => launch.into(),
+                            None => {
+                                ensure!(
+                                    launch.gateway.as_ref().is_none_or(|gateway| {
+                                        gateway.subscription_providers().next().is_none()
+                                    }),
+                                    LaunchIssue::ServiceNotStarted.localized(
+                                        current_interface_locale(read_locale_preference(
+                                            &data_root
+                                        ))
+                                    )
+                                );
+                                launch.into()
+                            }
                         };
                         launch.launch.project_time_zone_with_exit(
                             &zone,
