@@ -409,6 +409,45 @@ fn codex_launch_leaves_parameterized_commands_in_the_shell() -> Result<()> {
 }
 
 #[test]
+fn codex_launch_recovers_the_login_path_in_the_child() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let login_bin = root.path().join("login bin");
+    fs::create_dir(&login_bin)?;
+    let codex = login_bin.join("codex");
+    fs::write(
+        &codex,
+        "#!/bin/sh\ncase \":$PATH:\" in *\":$LOGIN_BIN:\"*) ;; *) exit 96 ;; esac\nprintf 'CODEX LOGIN PATH READY\\n'\nIFS= read -r line\n",
+    )?;
+    fs::set_permissions(codex, fs::Permissions::from_mode(0o700))?;
+    let mut child = RuntimeChild::spawn_configured_with(
+        root.path(),
+        &format!("PROMPT='{PROMPT} '\nexport PATH=\"$LOGIN_BIN:$PATH\"\n"),
+        Path::new("/bin/zsh"),
+        None,
+        |command| {
+            command
+                .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+                .env("SHELL", "/bin/zsh")
+                .env("LOGIN_BIN", &login_bin)
+                .env_remove("MATOU_CODEX_COMMAND")
+                .env_remove("MATOU_DISABLE_LOGIN_PATH_PROBE")
+                .env_remove("ZDOTDIR");
+        },
+    )?;
+    child.hello()?;
+    child.input("codex")?;
+    child.frame(|rows, _, _| rows.iter().any(|row| row == "CODEX LOGIN PATH READY"))?;
+    child.send(Command::Refresh)?;
+    let graph = graph_for(&mut child, "codex")?;
+    assert_same_card(&child, &graph);
+    child.send(Command::Shutdown)?;
+    assert!(child.closed()?.is_empty());
+    let (status, stderr) = child.wait()?;
+    ensure!(status.success(), "{stderr}");
+    Ok(())
+}
+
+#[test]
 fn codex_launch_rolls_back_missing_and_immediately_exiting_commands() -> Result<()> {
     for (executable, exit, expected) in [
         (
