@@ -67,13 +67,8 @@ impl AgentOptimizerCapabilities {
 
 /// Per-agent optimization switches.
 ///
-/// Defaults follow the safe observation-first policy:
-/// - `enabled`, `cache_monitor`, and `stall_rescue` start `true` (zero
-///   intrusion into agent tool calls).
-/// - Active interception (`noise_filter`, `read_dedup`), `cli_tools`, and
-///   `cache_keepalive` start `false` so the user explicitly opts in per agent.
-/// - `block_sensitive_reads` starts `true`, and `cache_expiry_notify` starts
-///   `false`. These preferences are saved separately per agent.
+/// The unqualified defaults also cover missing fields in older configurations.
+/// New known agents use the agent-specific recommendations.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentOptimizerSettings {
@@ -132,6 +127,17 @@ impl Default for AgentOptimizerSettings {
 }
 
 impl AgentOptimizerSettings {
+    pub fn recommended_for(agent_id: &str) -> Self {
+        let interception = agent_id == "claude-code";
+        Self {
+            noise_filter: interception,
+            read_dedup: interception,
+            block_sensitive_reads: interception,
+            cli_tools: true,
+            ..Self::default()
+        }
+    }
+
     /// Clamp numeric knobs and mask out switches unsupported by `agent_id`
     /// when computing effective runtime behavior.
     pub fn effective_for(&self, agent_id: &str) -> Self {
@@ -199,6 +205,22 @@ pub enum OptimizerToggle {
     BlockSensitiveReads,
 }
 
+impl OptimizerToggle {
+    pub fn checked(self, settings: &AgentOptimizerSettings) -> bool {
+        match self {
+            Self::MasterEnabled => settings.enabled,
+            Self::NoiseFilter => settings.noise_filter,
+            Self::ReadDedup => settings.read_dedup,
+            Self::CacheMonitor => settings.cache_monitor,
+            Self::CacheExpiryNotify => settings.cache_expiry_notify,
+            Self::CacheKeepalive => settings.cache_keepalive,
+            Self::StallRescue => settings.stall_rescue,
+            Self::CliTools => settings.cli_tools,
+            Self::BlockSensitiveReads => settings.block_sensitive_reads,
+        }
+    }
+}
+
 /// Availability in the settings panel. Keep this separate from the runtime
 /// flags so disabling a control does not change saved or effective settings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -209,6 +231,32 @@ pub enum OptimizerAvailability {
 }
 
 impl AgentOptimizerEntry {
+    /// Reapply the available recommendations without discarding preferences
+    /// for features that may become available in a later version.
+    pub fn restored_recommendations(&self) -> AgentOptimizerSettings {
+        use OptimizerToggle::*;
+
+        let mut defaults = AgentOptimizerSettings::recommended_for(&self.agent_id);
+        if self.availability(NoiseFilter) != OptimizerAvailability::Available {
+            defaults.noise_filter = self.settings.noise_filter;
+            defaults.max_log_bytes = self.settings.max_log_bytes;
+        }
+        if self.availability(ReadDedup) != OptimizerAvailability::Available {
+            defaults.read_dedup = self.settings.read_dedup;
+        }
+        if self.availability(BlockSensitiveReads) != OptimizerAvailability::Available {
+            defaults.block_sensitive_reads = self.settings.block_sensitive_reads;
+        }
+        if self.availability(CacheKeepalive) != OptimizerAvailability::Available {
+            defaults.cache_keepalive = self.settings.cache_keepalive;
+            defaults.cache_keepalive_max_per_turn = self.settings.cache_keepalive_max_per_turn;
+        }
+        if self.availability(CliTools) != OptimizerAvailability::Available {
+            defaults.cli_tools = self.settings.cli_tools;
+        }
+        defaults
+    }
+
     pub fn availability(&self, toggle: OptimizerToggle) -> OptimizerAvailability {
         use OptimizerAvailability::{Available, Pending, Unsupported};
         use OptimizerToggle::*;
@@ -222,10 +270,9 @@ impl AgentOptimizerEntry {
                     _ => Unsupported,
                 };
             }
-            CacheKeepalive => return Pending,
+            CacheKeepalive | CliTools => return Pending,
             CacheMonitor | CacheExpiryNotify => self.capabilities.cache_monitor,
             StallRescue => self.capabilities.stall_rescue,
-            CliTools => self.capabilities.cli_tools,
         };
         if available { Available } else { Unsupported }
     }
@@ -385,7 +432,10 @@ impl ContextOptimizerConfig {
     ) -> ContextOptimizerSnapshot {
         let mut agents = BTreeMap::new();
         for id in KNOWN_AGENT_IDS {
-            let settings = saved.remove(id).unwrap_or_default().normalized();
+            let settings = saved
+                .remove(id)
+                .unwrap_or_else(|| AgentOptimizerSettings::recommended_for(id))
+                .normalized();
             agents.insert(
                 id.to_owned(),
                 AgentOptimizerEntry {
@@ -433,7 +483,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn missing_file_returns_observation_first_defaults_for_all_known_agents() {
+    fn missing_file_returns_recommendations_for_all_known_agents() {
         let dir = tempfile::tempdir().unwrap();
         let store = ContextOptimizerConfig::for_data_root(dir.path());
         let snap = store.snapshot().unwrap();
@@ -443,10 +493,13 @@ mod tests {
             assert!(entry.settings.enabled);
             assert!(entry.settings.cache_monitor);
             assert!(entry.settings.stall_rescue);
-            assert!(!entry.settings.noise_filter);
-            assert!(!entry.settings.read_dedup);
+            let interception = id == "claude-code";
+            assert_eq!(entry.settings.noise_filter, interception);
+            assert_eq!(entry.settings.read_dedup, interception);
+            assert_eq!(entry.settings.block_sensitive_reads, interception);
             assert!(!entry.settings.cache_keepalive);
-            assert!(!entry.settings.cli_tools);
+            assert!(!entry.settings.cache_expiry_notify);
+            assert!(entry.settings.cli_tools);
         }
         assert!(snap.agents["claude-code"].capabilities.sync_hook_intercept);
         assert!(snap.agents["antigravity"].capabilities.sync_hook_intercept);
@@ -480,7 +533,10 @@ mod tests {
         assert_eq!(codex.max_log_bytes, MAX_MAX_LOG_BYTES);
 
         // Other agents remain untouched.
-        assert!(!snap.agents["claude-code"].settings.noise_filter);
+        assert_eq!(
+            snap.agents["claude-code"].settings,
+            AgentOptimizerSettings::recommended_for("claude-code")
+        );
 
         // Reload from disk verifies persistence.
         let reloaded = store.snapshot().unwrap();
@@ -549,8 +605,10 @@ mod tests {
     fn rejects_invalid_agent_id() {
         let dir = tempfile::tempdir().unwrap();
         let store = ContextOptimizerConfig::for_data_root(dir.path());
-        assert!(store
-            .set_agent_settings("../escape", AgentOptimizerSettings::default())
-            .is_err());
+        assert!(
+            store
+                .set_agent_settings("../escape", AgentOptimizerSettings::default())
+                .is_err()
+        );
     }
 }

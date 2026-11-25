@@ -1401,11 +1401,19 @@ mod tests {
             "tool_response": {"stdout": &full_log[..30_000], "stderr": "", "interrupted": false,
                 "isImage": false, "persistedOutputPath": path, "persistedOutputSize": full_log.len()}
         }).to_string();
+        let config = ContextOptimizerConfig::for_data_root(root.path());
+        config.set_agent_settings(
+            "claude-code",
+            AgentOptimizerSettings {
+                noise_filter: false,
+                ..AgentOptimizerSettings::recommended_for("claude-code")
+            },
+        )?;
         assert_eq!(claude_hook_reply(&server, &run, &payload)?, "{}");
         assert_eq!(claude_hook_reply(&server, &run, "{")?, "{}");
         assert_eq!(server.saved_noise_bytes("session"), 0);
         assert!(!root.path().join("context_guard.sqlite").exists());
-        ContextOptimizerConfig::for_data_root(root.path()).set_agent_settings(
+        config.set_agent_settings(
             "claude-code",
             AgentOptimizerSettings {
                 noise_filter: true,

@@ -2975,16 +2975,68 @@ mod probe {
                             | "dispatch-light"
                             | "dispatch-dark"
                             | "dispatch-narrow"
+                            | "context-optimizer"
                     ) =>
             {
                 Some(state.clone())
             }
             _ => panic!(
-                "usage: settings_shell_probe [--visible-state loading|empty|dispatch-light|dispatch-dark|dispatch-narrow]"
+                "usage: settings_shell_probe [--visible-state loading|empty|dispatch-light|dispatch-dark|dispatch-narrow|context-optimizer]"
             ),
         };
         Application::new().with_assets(NativeAssets).run(move |cx| {
-            if let Some(state @ ("dispatch-light" | "dispatch-dark" | "dispatch-narrow")) =
+            if state.as_deref() == Some("context-optimizer") {
+                let root = probe_root("context-optimizer");
+                let (window, sink) = open_window_at(state.as_deref(), 1000., cx);
+                window
+                    .update(cx, |view, window, cx| {
+                        view.set_locale_data_root(root);
+                        view.open_settings(window, cx);
+                    })
+                    .unwrap();
+                cx.activate(true);
+                cx.spawn(async move |cx| {
+                    request_id(&sink);
+                    assignment_request_id(&sink);
+                    window
+                        .update(cx, |view, window, cx| {
+                            view.settings_entity().unwrap().read(cx).probe_settings_nav_focus(
+                                SettingsPage::ContextOptimizer,
+                                window,
+                            );
+                        })
+                        .unwrap();
+                    draw(window, cx);
+                    press(window, "enter", cx);
+                    let Command::GetContextOptimizerStats { request_id } = business(&sink).unwrap()
+                    else {
+                        panic!("opening the optimizer must request statistics");
+                    };
+                    assert!(business(&sink).is_err());
+                    window
+                        .update(cx, |view, window, cx| {
+                            view.diagnostic_reply_for_probe(
+                                json!({
+                                    "type": "contextOptimizerStatsResult",
+                                    "requestId": request_id,
+                                    "result": {
+                                        "agents": {
+                                            "claude-code": {"bytes7d": 131072, "events7d": 5},
+                                            "antigravity": {"bytes7d": 0, "events7d": 0},
+                                            "codex": {"bytes7d": 0, "events7d": 0},
+                                            "dsh": {"bytes7d": 0, "events7d": 0}
+                                        }
+                                    }
+                                }),
+                                window,
+                                cx,
+                            );
+                        })
+                        .unwrap();
+                    println!("Context optimizer probe: one request, injected 131072 bytes for Claude Code");
+                })
+                .detach();
+            } else if let Some(state @ ("dispatch-light" | "dispatch-dark" | "dispatch-narrow")) =
                 state.as_deref()
             {
                 let root = std::env::temp_dir()
