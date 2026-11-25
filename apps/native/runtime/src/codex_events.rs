@@ -8,7 +8,7 @@ use std::{
     path::{Component, Path, PathBuf},
     sync::{Arc, mpsc},
     thread,
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use matou_native_core::pty::{ShellLaunch, get_var};
@@ -621,7 +621,9 @@ struct Hud {
     dirty: bool,
     model: Option<String>,
     effort: Option<String>,
-    context: Option<(f64, f64)>,
+    context: Option<(f64, u64)>,
+    context_used_tokens: Option<u64>,
+    usage_windows: Vec<CodexUsageWindow>,
     caught_up: bool,
     last_compaction_at: Option<f64>,
     compaction_completed: bool,
@@ -650,6 +652,8 @@ impl Default for Hud {
             model: None,
             effort: None,
             context: None,
+            context_used_tokens: None,
+            usage_windows: Vec::new(),
             caught_up: false,
             last_compaction_at: None,
             compaction_completed: false,
@@ -741,7 +745,9 @@ impl Hud {
             self.dirty |= self.model.take().is_some()
                 | self.effort.take().is_some()
                 | self.context.take().is_some()
+                | self.context_used_tokens.take().is_some()
                 | self.last_rollout_tool.take().is_some();
+            self.usage_windows.clear();
             self.rollout_completed.clear();
             self.rollout_only.clear();
             self.rollout_calls.clear();
@@ -764,12 +770,23 @@ impl Hud {
                     self.dirty |= self.effort != effort;
                     self.effort = effort;
                 }
-                HudUpdate::Context(context) => {
-                    self.dirty |= self.context != context;
+                HudUpdate::Context {
+                    context,
+                    used_tokens,
+                    usage_windows,
+                } => {
+                    self.dirty |=
+                        self.context != context || self.context_used_tokens != used_tokens;
                     self.context = context;
+                    self.context_used_tokens = used_tokens;
+                    if let Some(windows) = usage_windows {
+                        self.dirty |= self.usage_windows != windows;
+                        self.usage_windows = windows;
+                    }
                 }
                 HudUpdate::Compacted(at) => {
-                    self.dirty |= self.context.take().is_some();
+                    self.dirty |=
+                        self.context.take().is_some() | self.context_used_tokens.take().is_some();
                     if let Some(at) =
                         at.filter(|at| self.last_compaction_at.is_none_or(|last| *at > last))
                     {
@@ -854,6 +871,8 @@ impl Hud {
             self.dirty |= self.model.is_some()
                 || self.effort.is_some()
                 || self.context.is_some()
+                || self.context_used_tokens.is_some()
+                || !self.usage_windows.is_empty()
                 || !self.rollout_only.is_empty()
                 || self.rollout_todos.is_some();
         }
@@ -941,6 +960,24 @@ impl Hud {
                 value["contextPercent"] = json!(percent);
                 value["contextWindowSize"] = json!(window);
             }
+            if let Some(used) = self.context_used_tokens {
+                value["contextUsedTokens"] = json!(used);
+            }
+            if !self.usage_windows.is_empty() {
+                let now_ms = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs_f64()
+                    * 1000.;
+                let windows = Value::Array(
+                    self.usage_windows
+                        .iter()
+                        .map(|window| window.project(now_ms))
+                        .collect(),
+                );
+                value["usageWindows"] = windows.clone();
+                value["allUsageWindows"] = windows;
+            }
         }
         let mut counts: BTreeMap<_, _> = self
             .hook_counts
@@ -1007,6 +1044,93 @@ impl Hud {
     }
 }
 
+#[derive(PartialEq)]
+struct CodexUsageWindow {
+    label: String,
+    used_percent: f64,
+    resets_at_ms: Option<f64>,
+}
+
+impl CodexUsageWindow {
+    fn parse(entry: &Value, label: String) -> Option<Self> {
+        let used_percent = ["used_percent", "usedPercent", "used_percentage"]
+            .into_iter()
+            .find_map(|key| entry[key].as_f64().filter(|percent| percent.is_finite()))?;
+        let resets_at_ms = ["resets_at", "resetsAt"]
+            .into_iter()
+            .find_map(|key| {
+                entry[key]
+                    .as_f64()
+                    .filter(|time| time.is_finite() && *time > 0.)
+            })
+            .map(|time| if time < 1e12 { time * 1000. } else { time });
+        Some(Self {
+            label,
+            used_percent: used_percent.clamp(0., 100.),
+            resets_at_ms,
+        })
+    }
+
+    fn project(&self, now_ms: f64) -> Value {
+        let mut value = json!({"label": self.label, "usedPercent": self.used_percent});
+        if let Some(reset) = self.resets_at_ms {
+            // Keep the countdown format in sync with agent_hud_projection::reset_text.
+            let minutes = ((reset - now_ms).max(0.) / 60_000.).ceil() as u64;
+            value["resetText"] = json!(match minutes {
+                0 => "0m".into(),
+                1..=59 => format!("{minutes}m"),
+                60..=1439 => format!("{}h {}m", minutes / 60, minutes % 60),
+                _ => format!("{}d {}h", minutes / 1440, minutes % 1440 / 60),
+            });
+        }
+        value
+    }
+}
+
+fn codex_usage_windows(payload: &Value) -> Option<Vec<CodexUsageWindow>> {
+    let limits = ["rate_limits", "rateLimits"]
+        .into_iter()
+        .map(|key| &payload[key])
+        .find(|value| value.is_object())?;
+    let mut windows: Vec<_> = [("primary", "5h"), ("secondary", "Weekly")]
+        .into_iter()
+        .filter_map(|(key, default_label)| {
+            let entry = &limits[key];
+            let minutes = entry["window_minutes"]
+                .as_u64()
+                .or_else(|| entry["windowMinutes"].as_u64());
+            let label = match minutes {
+                Some(300) => "5h".into(),
+                Some(10080) => "Weekly".into(),
+                Some(0) => return None,
+                Some(m) if m % 1440 == 0 => format!("{}d", m / 1440),
+                Some(m) if m % 60 == 0 => format!("{}h", m / 60),
+                Some(m) => format!("{m}m"),
+                None => default_label.into(),
+            };
+            CodexUsageWindow::parse(entry, label)
+        })
+        .collect();
+    for (keys, label) in [
+        (["five_hour", "fiveHour"], "5h"),
+        (["seven_day", "sevenDay"], "Weekly"),
+    ] {
+        if !windows.iter().any(|window| window.label == label)
+            && let Some(window) = keys
+                .into_iter()
+                .find_map(|key| CodexUsageWindow::parse(&limits[key], label.to_owned()))
+        {
+            windows.push(window);
+        }
+    }
+    windows.sort_by_key(|window| match window.label.as_str() {
+        "5h" => 0,
+        "Weekly" => 1,
+        _ => 2,
+    });
+    Some(windows)
+}
+
 enum AgentOutcome {
     Started {
         call_id: Option<String>,
@@ -1038,7 +1162,11 @@ enum HudUpdate {
         model: Option<String>,
         effort: Option<String>,
     },
-    Context(Option<(f64, f64)>),
+    Context {
+        context: Option<(f64, u64)>,
+        used_tokens: Option<u64>,
+        usage_windows: Option<Vec<CodexUsageWindow>>,
+    },
     Compacted(Option<f64>),
     Command {
         id: String,
@@ -1158,16 +1286,26 @@ fn hud_update(line: &[u8]) -> Option<HudUpdate> {
         // The persisted compacted entry is the completion signal. The
         // companion status event can clear the display but doesn't reset alerts.
         ("compacted", _) if payload["error"].is_null() => HudUpdate::Compacted(time),
-        ("event_msg", Some("context_compacted")) => HudUpdate::Context(None),
+        ("event_msg", Some("context_compacted")) => HudUpdate::Context {
+            context: None,
+            used_tokens: None,
+            usage_windows: None,
+        },
         ("event_msg", Some("token_count")) => {
             let info = &payload["info"];
-            let context = info["last_token_usage"]["total_tokens"]
-                .as_f64()
-                .zip(info["model_context_window"].as_f64())
-                .filter(|(used, window)| *used >= 0. && *window > 0.)
-                .map(|(used, window)| ((100. * (used / window)).round(), window))
-                .filter(|(percent, _)| percent.is_finite());
-            HudUpdate::Context(context)
+            let used_tokens = info["last_token_usage"]["total_tokens"].as_u64();
+            let context = used_tokens
+                .zip(
+                    info["model_context_window"]
+                        .as_u64()
+                        .filter(|&window| window > 0),
+                )
+                .map(|(used, window)| ((100. * (used as f64 / window as f64)).round(), window));
+            HudUpdate::Context {
+                context,
+                used_tokens,
+                usage_windows: codex_usage_windows(payload),
+            }
         }
         ("event_msg", Some("item_completed")) => {
             let item = &payload["item"];
@@ -1690,6 +1828,108 @@ mod hud_tests {
     }
 
     #[test]
+    fn codex_token_count_projects_weekly_only_and_context_tokens() {
+        let mut hud = Hud::default();
+        replay(
+            &mut hud,
+            &[json!({"type": "event_msg", "payload": {
+                "type": "token_count",
+                "info": {
+                    "last_token_usage": {"total_tokens": 23_256},
+                    "model_context_window": 258_400
+                },
+                "rate_limits": {
+                    "limit_id": "codex",
+                    "limit_name": null,
+                    "primary": {"used_percent": 33.0, "window_minutes": 10080, "resets_at": 1796125684},
+                    "secondary": null,
+                    "plan_type": "promax"
+                }
+            }})],
+        );
+
+        let projected = hud.project(|_| true);
+        let reset_text = projected["usageWindows"][0]["resetText"].as_str().unwrap();
+        assert!(!reset_text.is_empty());
+        assert_eq!(
+            projected["usageWindows"],
+            json!([{"label": "Weekly", "usedPercent": 33.0, "resetText": reset_text}])
+        );
+        assert_eq!(projected["allUsageWindows"], projected["usageWindows"]);
+        assert_eq!(projected["contextPercent"].as_f64(), Some(9.));
+        assert_eq!(projected["contextUsedTokens"].as_u64(), Some(23_256));
+        assert_eq!(projected["contextWindowSize"].as_u64(), Some(258_400));
+        assert_eq!(hud.usage_windows[0].resets_at_ms, Some(1_796_125_684_000.));
+        assert_eq!(
+            hud.usage_windows[0].project(1_796_122_084_000.)["resetText"],
+            "1h 0m"
+        );
+        assert_eq!(
+            hud.usage_windows[0].project(1_796_125_684_000.)["resetText"],
+            "0m"
+        );
+    }
+
+    #[test]
+    fn codex_token_count_projects_both_windows_and_preserves_them_when_omitted() {
+        let mut hud = Hud::default();
+        replay(
+            &mut hud,
+            &[json!({"type": "event_msg", "payload": {
+                "type": "token_count",
+                "info": null,
+                "rate_limits": {
+                    "primary": {"used_percent": 12.5, "window_minutes": 300},
+                    "secondary": {"used_percent": 38.0, "window_minutes": 10080}
+                }
+            }})],
+        );
+        let windows = json!([
+            {"label": "5h", "usedPercent": 12.5},
+            {"label": "Weekly", "usedPercent": 38.0}
+        ]);
+        assert_eq!(hud.project(|_| true)["usageWindows"], windows);
+
+        replay(
+            &mut hud,
+            &[json!({"type": "event_msg", "payload": {
+                "type": "token_count",
+                "info": {
+                    "last_token_usage": {"total_tokens": 42_000},
+                    "model_context_window": 258_400
+                }
+            }})],
+        );
+        let projected = hud.project(|_| true);
+        assert_eq!(projected["usageWindows"], windows);
+        assert_eq!(projected["allUsageWindows"], windows);
+        assert_eq!(projected["contextUsedTokens"].as_u64(), Some(42_000));
+    }
+
+    #[test]
+    fn codex_token_count_prefers_current_windows_and_supports_aliases() {
+        let windows = codex_usage_windows(&json!({"rateLimits": {
+            "primary": {"usedPercent": 104.5, "windowMinutes": 10080},
+            "secondary": {"used_percent": -3, "window_minutes": 120},
+            "fiveHour": {"used_percentage": 21, "resetsAt": 1_796_125_684_000_u64},
+            "seven_day": {"used_percent": 88}
+        }}))
+        .unwrap();
+        let projected: Vec<_> = windows
+            .iter()
+            .map(|window| window.project(1_796_125_624_000.))
+            .collect();
+        assert_eq!(
+            json!(projected),
+            json!([
+                {"label": "5h", "usedPercent": 21.0, "resetText": "1m"},
+                {"label": "Weekly", "usedPercent": 100.0},
+                {"label": "2h", "usedPercent": 0.0}
+            ])
+        );
+    }
+
+    #[test]
     fn codex_compaction_signal_requires_a_new_successful_live_marker() {
         let mut hud = Hud::default();
         let old = json!({"type":"compacted","timestamp":1000,"payload":{}});
@@ -1716,10 +1956,15 @@ mod hud_tests {
             more: false,
             updates: vec![
                 HudUpdate::Compacted(Some(3000.)),
-                HudUpdate::Context(Some((90., 100.))),
+                HudUpdate::Context {
+                    context: Some((90., 100)),
+                    used_tokens: Some(90),
+                    usage_windows: None,
+                },
             ],
         });
-        assert_eq!(hud.context, Some((90., 100.)));
+        assert_eq!(hud.context, Some((90., 100)));
+        assert_eq!(hud.context_used_tokens, Some(90));
         assert!(!hud.compaction_completed);
     }
 
