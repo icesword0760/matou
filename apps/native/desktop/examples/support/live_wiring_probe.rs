@@ -1222,7 +1222,9 @@ pub(super) async fn verify(cx: &mut AsyncApp, root: PathBuf) {
             _ => None,
         })
         .await;
-    fixture.update(cx, |view, _, cx| view.submit_session_loader(cx));
+    fixture.update(cx, |view, window, cx| {
+        view.submit_session_loader(window, cx)
+    });
     assert_eq!(
         fixture.reply(cx, "dshSessionLoadResult").await["result"]["status"],
         "queued"
@@ -1466,7 +1468,9 @@ async fn verify_antigravity(
             .then_some(())
         })
         .await;
-    fixture.update(cx, |view, _, cx| view.submit_session_loader(cx));
+    fixture.update(cx, |view, window, cx| {
+        view.submit_session_loader(window, cx)
+    });
     let receipt = fixture.reply(cx, "antigravitySessionLoadResult").await;
     assert_eq!(receipt["result"]["status"], "restoring", "{receipt}");
     assert_eq!(receipt["result"]["sessionId"], target);
@@ -1649,11 +1653,11 @@ async fn verify_antigravity(
                 .then_some(())
         })
         .await;
-    fixture.update(cx, |view, _, cx| {
-        view.submit_session_loader(cx);
+    fixture.update(cx, |view, window, cx| {
+        view.submit_session_loader(window, cx);
         if matches!(&view.dialog, Some(TabDialog::SessionLoader(loader)) if loader.confirm_running)
         {
-            view.submit_session_loader(cx);
+            view.submit_session_loader(window, cx);
         }
     });
     fixture.agy_run(cx, 5).await.status(AGY_OTHER);

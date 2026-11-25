@@ -784,6 +784,20 @@ fn both_read_only_sources_can_browse_search_and_export_without_changing_source()
             bail!("expected read-only ready")
         };
         ensure!(actual == reason);
+        child.send(Command::LoadProviderSession {
+            session_id: "session-second".into(),
+            provider_session_id: "read-only-takeover".into(),
+            takeover_from: Some("session-first".into()),
+        })?;
+        let rejection = next(&mut child, |event| {
+            matches!(event, Event::StorageCommandRejected { .. })
+        })?;
+        assert!(matches!(
+            rejection,
+            Event::StorageCommandRejected { request_id: None, code, .. }
+                if code == "STORAGE_READ_ONLY"
+        ));
+
         child.send(Command::GetTimeZoneSettings { request_id: 21 })?;
         let event = next(&mut child, |event| {
             matches!(event, Event::TimeZoneSettings(_))
