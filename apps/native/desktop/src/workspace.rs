@@ -21,6 +21,7 @@ use matou_native_core::hierarchy::canvas::{ForkPlacement, ForkWorktreeMode};
 use matou_native_core::hierarchy::cards::RemoveScope;
 use matou_native_core::hierarchy::{HierarchyResult, Scene, Task, Workspace as HierarchyWorkspace};
 use matou_native_core::link_routing::{LinkRejection, LinkSource, route_link};
+use matou_native_core::pty::LaunchProfile;
 use matou_native_core::sessions::{
     InterfaceLocale, LocalePreference, current_interface_locale, read_locale_preference,
 };
@@ -6273,13 +6274,12 @@ impl Workspace {
                     self.finish_session_loader(&rows(errors), window, cx);
                     let details = rows(details);
                     for result in &details {
-                        if result["provider"].is_null() {
-                            for terminal in self.terminals.values() {
-                                terminal.update(cx, |terminal, cx| {
-                                    terminal.receive_history(result, cx)
-                                });
-                            }
-                        }
+                        self.receive_terminal_history(
+                            result["provider"].as_str(),
+                            result["requestId"].as_u64(),
+                            result,
+                            cx,
+                        );
                     }
                     self.loader_detail_result(&details, cx);
                     self.loader_search_result(&details, cx);
@@ -6670,17 +6670,19 @@ impl Workspace {
             if Self::team_member_node(node) {
                 continue;
             }
-            let history_binding = (node["currentMode"] == "claude-code")
-                .then(|| node["cwd"].as_str())
-                .flatten()
-                .map(|cwd| terminal_surface::session_history_seam::Binding {
-                    cwd: cwd.to_owned(),
-                    provider_session_id: trimmed_graph_text(&node["historyProviderSessionId"])
-                        .map(str::to_owned),
-                });
+            let history_binding = terminal_history_binding(node);
+            let history_without_live = matches!(
+                node["workStatus"].as_str(),
+                Some("exited" | "idle" | "starting")
+            );
             if let Some(terminal) = self.terminals.get(id) {
                 terminal.update(cx, |surface, cx| {
-                    surface.set_history_binding(history_binding, self.locale, cx)
+                    surface.set_history_binding(
+                        history_binding,
+                        history_without_live,
+                        self.locale,
+                        cx,
+                    )
                 });
                 continue;
             }
@@ -6707,7 +6709,7 @@ impl Workspace {
                 surface.set_theme(theme, cx);
                 surface.set_font_size(self.terminal_font_size, cx);
                 surface.begin_transport_generation(self.runtime_generation, cx);
-                surface.set_history_binding(history_binding, self.locale, cx);
+                surface.set_history_binding(history_binding, history_without_live, self.locale, cx);
                 surface.set_input_disabled(disabled || self.recovery_blocked(id), cx);
                 surface
             });
@@ -6781,9 +6783,11 @@ impl Workspace {
         {
             return;
         }
-        if !matches!(event.kind, SurfaceEventKind::Resize { .. })
-            && (self.recovery_blocked(session_id)
-                || self.provider_restore_hides_terminal(session_id))
+        if !matches!(
+            event.kind,
+            SurfaceEventKind::Resize { .. } | SurfaceEventKind::SessionHistory(_)
+        ) && (self.recovery_blocked(session_id)
+            || self.provider_restore_hides_terminal(session_id))
         {
             return;
         }
@@ -6806,18 +6810,32 @@ impl Workspace {
             SurfaceEventKind::FontZoom(_) => unreachable!(),
             SurfaceEventKind::SessionHistory(page) => {
                 let target = terminal.read(cx).history_binding().and_then(|binding| {
-                    let provider_session_id = binding.provider_session_id.clone()?;
-                    Some(Command::GetProviderSession {
-                        cwd: binding.cwd.clone(),
-                        provider_session_id,
-                        start_event_index: page.start(),
-                        limit: Some(page.limit()),
-                    })
+                    let id = binding.provider_session_id.clone()?;
+                    Some((binding.profile, binding.cwd.clone(), id))
                 });
-                if let Some(command) = target
-                    && self.commands.send_at(generation, command).is_ok()
-                {
-                    return;
+                if let Some((profile, cwd, provider_session_id)) = target {
+                    let request_id = if profile == LaunchProfile::ClaudeCode {
+                        None
+                    } else {
+                        self.loader_request_id += 1;
+                        Some(self.loader_request_id)
+                    };
+                    if let Some(command) = terminal_history_command(
+                        profile,
+                        cwd,
+                        provider_session_id,
+                        *page,
+                        request_id,
+                    ) {
+                        if let Some(request_id) = request_id {
+                            terminal.update(cx, |terminal, _| {
+                                terminal.set_history_request_id(request_id)
+                            });
+                        }
+                        if self.commands.send_at(generation, command).is_ok() {
+                            return;
+                        }
+                    }
                 }
                 terminal.update(cx, |terminal, cx| terminal.history_read_failed(*page, cx));
             }
@@ -11882,6 +11900,20 @@ impl Workspace {
             }
         }
         cx.notify();
+    }
+
+    fn receive_terminal_history(
+        &self,
+        provider: Option<&str>,
+        request_id: Option<u64>,
+        result: &Value,
+        cx: &mut Context<Self>,
+    ) {
+        for terminal in self.terminals.values() {
+            terminal.update(cx, |terminal, cx| {
+                terminal.receive_history(provider, request_id, result, cx);
+            });
+        }
     }
 
     fn receive_provider_loader_reply(
@@ -21714,6 +21746,50 @@ fn card_history_provider(node: &Value) -> Option<&'static str> {
         Some("antigravity") => Some("antigravity"),
         _ => None,
     }
+}
+
+fn terminal_history_binding(
+    node: &Value,
+) -> Option<terminal_surface::session_history_seam::Binding> {
+    let profile = match node["currentMode"].as_str()? {
+        "claude-code" => LaunchProfile::ClaudeCode,
+        "codex" => LaunchProfile::Codex,
+        _ => return None,
+    };
+    profile.history_seam()?;
+    Some(terminal_surface::session_history_seam::Binding {
+        profile,
+        cwd: node["cwd"].as_str()?.to_owned(),
+        provider_session_id: trimmed_graph_text(&node["historyProviderSessionId"])
+            .map(str::to_owned),
+    })
+}
+
+fn terminal_history_command(
+    profile: LaunchProfile,
+    cwd: String,
+    provider_session_id: String,
+    page: terminal_surface::session_history_seam::Page,
+    request_id: Option<u64>,
+) -> Option<Command> {
+    let limit = Some(page.limit());
+    Some(match profile {
+        LaunchProfile::ClaudeCode => Command::GetProviderSession {
+            cwd,
+            provider_session_id,
+            start_event_index: page.start(),
+            limit,
+        },
+        LaunchProfile::Codex => Command::GetCodexSession {
+            request_id: request_id?,
+            cwd,
+            provider_session_id,
+            start_event_index: page.start(),
+            around_event_index: None,
+            limit,
+        },
+        LaunchProfile::Antigravity | LaunchProfile::Dsh | LaunchProfile::Shell => return None,
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
