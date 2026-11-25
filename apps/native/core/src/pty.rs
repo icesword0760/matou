@@ -468,6 +468,14 @@ impl PtyProcess {
                     {
                         continue;
                     }
+                    if key == "MATOU_FOREMAN_ROLES_FILE"
+                        && get_var(&environment, key).is_some_and(|value| {
+                            Path::new(value)
+                                == launch.data_root.join(crate::dispatch_roles::ROLES_FILENAME)
+                        })
+                    {
+                        continue;
+                    }
                     remove_var(&mut environment, OsStr::new(key));
                 }
                 environment

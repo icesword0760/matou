@@ -1,857 +1,1892 @@
-//! GPUI panel for Matou-local per-agent ecological niche and default model/effort/speed settings.
+//! Unified Matou-local dispatch settings and the live Foreman instruction preview.
+
+use std::{
+    cell::{Cell, RefCell},
+    path::PathBuf,
+    rc::Rc,
+    time::Duration,
+};
 
 use gpui::{prelude::*, *};
-use matou_native_core::dispatch_roles::{
-    DispatchRoleMode, DispatchRolesConfig, DispatchRolesSnapshot, agent_display_name,
-    effort_is_fixed, effort_options, model_options, speed_options,
+use matou_native_core::{
+    dispatch_model_catalog::{DispatchModelCatalog, probe_local_cli_models},
+    dispatch_roles::{
+        AGY_EFFORTS, AgentRoleConfig, BUILTIN_AGENTS, CODEX_EFFORTS, DSH_EFFORTS, DispatchRoleMode,
+        DispatchRolesConfig, DispatchRolesSnapshot, DispatchRolesStore, ROLE_MAX_CHARS,
+        agent_display_name, agy_effort_suffix, default_role_text, effort_is_fixed, effort_label_zh,
+        format_roles_markdown, speed_options,
+    },
+    sessions::InterfaceLocale,
 };
 
 use crate::{
     rename_input::{RenameInput, RenameInputEvent},
-    settings_shell::{ACCENT, LINE, LINE_STRONG, MUTED, PANEL, PANEL_MUTED, TEXT},
-    theme_tokens::AppTheme,
-    workspace::workspace_theme_dark,
+    settings_shell::{FocusRingStyle, focus_ring_with, icon, shadow},
+    theme_tokens::{AppTheme, WorkspacePalette},
+    workspace::CardTooltip,
 };
 
-const TITLE: &str = "Agent 生态位与独立配置";
-const HEADING: &str = "为每个执行者独立设置启停、调度方式、默认模型、推理档位与职责；仅保存在码头应用目录，保存后即时生效。";
-const SUB_DISPATCH_TITLE: &str = "允许执行者二次转包";
-const SUB_DISPATCH_DESC: &str = "开启后，执行者干活时遇到其他「按职责自动派」Agent 擅长的部分可转派 1 层子任务（如 Codex 遇前端 UI 转派 DSH）；关闭后只允许顶层监工派活。";
-const RESTORE_DEFAULTS: &str = "恢复默认";
-const SAVE: &str = "保存";
-const SAVED_MESSAGE: &str = "已保存 · 对当前和新开会话即时生效";
+const NUMBER_LIMITS: [(f64, f64); 4] = [(1., 60.), (5., 180.), (1., 60.), (0., 5.)];
+const CHOICES: usize = 1 + BUILTIN_AGENTS.len() * 4;
 
-const ERROR_TEXT: u32 = 0xb34d47;
-const SUCCESS_TEXT: u32 = 0x16794b;
-const SUCCESS_BG: u32 = 0x22965a1f;
-const PILL_SELECTED_BG: u32 = 0xe4efff;
-const PILL_SELECTED_TEXT: u32 = 0x2679d8;
-
-/// Converts a frozen RGB constant to the packed `0xRRGGBBAA` form used by
-/// [`RolePanelColors`].
-const fn solid(rgb: u32) -> u32 {
-    rgb << 8 | 0xff
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Choice {
+    Default,
+    Mode(usize),
+    Model(usize),
+    Effort(usize),
+    Speed(usize),
 }
 
-/// Outer card, agent sub-card, control, pill, and status colors. Field values
-/// are packed as `0xRRGGBBAA`. Light keeps the frozen renderer values exactly;
-/// dark uses the settings/workspace tokens and never paints a white card.
-struct RolePanelColors {
-    /// Outer section card: `--workspace-panel-muted`, or `settings.providers`.
-    card: u32,
-    /// Agent sub-cards and the sub-dispatch toggle: `--workspace-panel`, or
-    /// `--workspace-panel-muted` in dark.
-    sub_card: u32,
-    line: u32,
-    line_strong: u32,
-    text: u32,
-    muted: u32,
-    /// Unchecked checkbox and unselected pill surface.
-    control: u32,
-    /// Role text field surface.
-    role_input: u32,
-    input_text: u32,
-    input_placeholder: u32,
-    accent: u32,
-    pill_selected_bg: u32,
-    pill_selected_text: u32,
-    /// Primary save button, matching `settings.language_primary`.
-    primary: u32,
-    error: u32,
-    success: u32,
-    success_bg: u32,
-}
-
-impl RolePanelColors {
-    fn for_dark(dark: bool) -> Self {
-        if dark {
-            let palette = AppTheme::Dark.palette();
-            let workspace = palette.workspace;
-            let settings = palette.settings;
-            Self {
-                card: settings.providers,
-                sub_card: workspace.panel_muted,
-                line: workspace.line,
-                line_strong: workspace.line_strong,
-                text: workspace.text,
-                muted: workspace.muted,
-                // `.model-provider__actions button` / `.provider-setup input`.
-                control: settings.provider_action_background,
-                role_input: settings.provider_action_background,
-                input_text: workspace.text,
-                input_placeholder: workspace.muted,
-                accent: workspace.accent,
-                pill_selected_bg: workspace.accent_soft,
-                pill_selected_text: workspace.accent,
-                primary: settings.language_primary,
-                error: 0xff9b94ff,
-                success: 0x57ab5aff,
-                success_bg: SUCCESS_BG,
-            }
-        } else {
-            Self {
-                card: solid(PANEL_MUTED),
-                sub_card: solid(PANEL),
-                line: LINE,
-                line_strong: LINE_STRONG,
-                text: solid(TEXT),
-                muted: solid(MUTED),
-                control: solid(PANEL),
-                role_input: solid(PANEL_MUTED),
-                // `RenameInput::search_style` defaults; kept identical so the
-                // frozen role fields do not change color in light mode.
-                input_text: solid(0x2f3547),
-                input_placeholder: solid(0x747474),
-                accent: solid(ACCENT),
-                pill_selected_bg: solid(PILL_SELECTED_BG),
-                pill_selected_text: solid(PILL_SELECTED_TEXT),
-                primary: solid(ACCENT),
-                error: solid(ERROR_TEXT),
-                success: solid(SUCCESS_TEXT),
-                success_bg: SUCCESS_BG,
-            }
+impl Choice {
+    fn slot(self) -> usize {
+        match self {
+            Self::Default => 0,
+            Self::Mode(index) => 1 + 4 * index,
+            Self::Model(index) => 2 + 4 * index,
+            Self::Effort(index) => 3 + 4 * index,
+            Self::Speed(index) => 4 + 4 * index,
         }
     }
 }
 
-/// Writes the theme colors into a child editor only when they differ, so a
-/// re-render in the same theme never emits a redundant child notification.
-fn sync_input_colors(input: &Entity<RenameInput>, text: u32, placeholder: u32, cx: &mut App) {
-    let text = rgba(text);
-    let placeholder = rgba(placeholder);
-    let changed = {
-        let current = input.read(cx);
-        current.text_color != Some(text) || current.placeholder_color != Some(placeholder)
-    };
-    if changed {
-        input.update(cx, |input, cx| {
-            input.text_color = Some(text);
-            input.placeholder_color = Some(placeholder);
-            cx.notify();
-        });
+const CHOICE_ORDER: [Choice; CHOICES] = [
+    Choice::Default,
+    Choice::Mode(0),
+    Choice::Model(0),
+    Choice::Effort(0),
+    Choice::Speed(0),
+    Choice::Mode(1),
+    Choice::Model(1),
+    Choice::Effort(1),
+    Choice::Speed(1),
+    Choice::Mode(2),
+    Choice::Model(2),
+    Choice::Effort(2),
+    Choice::Speed(2),
+];
+
+struct ChoiceItem {
+    value: String,
+    label: String,
+    group: String,
+}
+
+impl ChoiceItem {
+    fn new(value: &str, label: &str) -> Self {
+        Self {
+            value: value.into(),
+            label: label.into(),
+            group: String::new(),
+        }
+    }
+}
+
+struct Menu {
+    choice: Choice,
+    active: usize,
+}
+
+#[derive(Clone, Copy)]
+struct Colors {
+    palette: WorkspacePalette,
+    card: u32,
+    control: u32,
+    popup: u32,
+    error: u32,
+    success: u32,
+}
+
+impl Colors {
+    fn new(theme: AppTheme) -> Self {
+        let palette = theme.palette().workspace;
+        if theme == AppTheme::Dark {
+            Self {
+                palette,
+                card: 0x171b22ff,
+                control: 0x232936ff,
+                popup: 0x171b22ff,
+                error: 0xff9b94ff,
+                success: 0x72bd83ff,
+            }
+        } else {
+            Self {
+                palette,
+                card: 0xffffffff,
+                control: 0xffffffff,
+                popup: 0xffffffff,
+                error: 0xb34d47ff,
+                success: 0x16794bff,
+            }
+        }
+    }
+
+    fn card(self) -> Div {
+        div()
+            .flex()
+            .flex_col()
+            .min_w_0()
+            .gap(px(7.))
+            .px(px(12.))
+            .py(px(10.))
+            .rounded(px(8.))
+            .border_1()
+            .border_color(rgba(self.palette.line))
+            .bg(rgba(self.card))
+    }
+
+    fn field(self) -> Div {
+        div()
+            .relative()
+            .h(px(34.))
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .px(px(9.))
+            .min_w_0()
+            .rounded(px(6.))
+            .border_1()
+            .border_color(rgba(self.palette.line_strong))
+            .bg(rgba(self.control))
+            .text_size(px(12.))
     }
 }
 
 pub struct DispatchRolesPanel {
+    store: Rc<DispatchRolesStore>,
+    data_root: PathBuf,
     saved: DispatchRolesConfig,
     draft: DispatchRolesConfig,
-    path_display: String,
-    write: Box<dyn FnMut(DispatchRolesConfig) -> Result<DispatchRolesSnapshot, String>>,
-    role_inputs: Vec<Entity<RenameInput>>,
+    catalog: DispatchModelCatalog,
+    numbers: [Entity<RenameInput>; 4],
+    roles: [Entity<RenameInput>; 3],
+    search: Entity<RenameInput>,
+    locale: InterfaceLocale,
+    theme: AppTheme,
+    choice_focus: [FocusHandle; CHOICES],
+    anchor_bounds: Rc<RefCell<[Option<Bounds<Pixels>>; CHOICES]>>,
+    menu: Option<Menu>,
+    menu_scroll: ScrollHandle,
+    agent_scroll: ScrollHandle,
+    pane_width: Rc<Cell<Pixels>>,
+    refresh_focus: FocusHandle,
+    preview_focus: FocusHandle,
+    sub_dispatch_focus: FocusHandle,
+    enabled_focus: [FocusHandle; 3],
+    role_reset_focus: [FocusHandle; 3],
+    restore_focus: FocusHandle,
+    save_focus: FocusHandle,
+    preview: bool,
+    refreshing: bool,
+    refresh_status: Option<&'static str>,
+    refresh_generation: u64,
+    save_status: Option<Result<(), String>>,
     _subscriptions: Vec<Subscription>,
-    status: Option<Result<String, String>>,
 }
 
 impl DispatchRolesPanel {
     pub fn new(
+        store: Rc<DispatchRolesStore>,
         snapshot: DispatchRolesSnapshot,
-        write: impl FnMut(DispatchRolesConfig) -> Result<DispatchRolesSnapshot, String> + 'static,
+        locale: InterfaceLocale,
+        theme: AppTheme,
         cx: &mut Context<Self>,
     ) -> Self {
-        let path_display = snapshot.path.display().to_string();
-        let draft = snapshot.config.clone();
-        let mut role_inputs = Vec::with_capacity(draft.agents.len());
-        let mut subscriptions = Vec::with_capacity(draft.agents.len());
-        for (index, agent) in draft.agents.iter().enumerate() {
-            let text = agent.role.clone();
-            let input = cx.new(|cx| {
-                let mut editor = RenameInput::new(text, cx);
-                editor.search_style = true;
-                editor.placeholder = "填写这个 Agent 擅长的职责与使用场景…".into();
-                editor
-            });
-            subscriptions.push(cx.subscribe(&input, move |this, _, event, cx| {
-                if matches!(event, RenameInputEvent::Changed | RenameInputEvent::Confirm) {
-                    this.role_edited(index, cx);
+        let data_root = snapshot
+            .path
+            .parent()
+            .expect("dispatch roles data root")
+            .to_path_buf();
+        let catalog = DispatchModelCatalog::load(&data_root);
+        let saved = snapshot.config;
+        let mut subscriptions = Vec::new();
+        let numbers = std::array::from_fn(|index| {
+            let input = cx.new(|cx| Self::compact_input(Self::number_text(&saved, index), cx));
+            subscriptions.push(cx.subscribe(&input, move |this, input, event, cx| {
+                if matches!(event, RenameInputEvent::Changed) && !input.read(cx).composing() {
+                    this.number_edited(index, cx);
                 }
             }));
-            role_inputs.push(input);
-        }
-        Self {
-            saved: snapshot.config,
-            draft,
-            path_display,
-            write: Box::new(write),
-            role_inputs,
-            _subscriptions: subscriptions,
-            status: None,
-        }
-    }
-
-    fn dirty(&self) -> bool {
-        self.draft != self.saved
-    }
-
-    fn role_edited(&mut self, index: usize, cx: &mut Context<Self>) {
-        if let Some(input) = self.role_inputs.get(index)
-            && let Some(agent) = self.draft.agents.get_mut(index)
-        {
-            let text = input.read(cx).text.clone();
-            if text != agent.role {
-                agent.role = text;
-                self.status = None;
+            input
+        });
+        let roles = std::array::from_fn(|index| {
+            let focus = cx.focus_handle().tab_stop(true);
+            let input = cx.new(|cx| {
+                let mut input =
+                    RenameInput::instructions(saved.agents[index].role.clone(), focus, cx);
+                input.set_inline_document_layout(px(8.));
+                input
+            });
+            subscriptions.push(cx.subscribe(&input, move |this, input, event, cx| {
+                if matches!(event, RenameInputEvent::Changed)
+                    && !input.read(cx).composing()
+                    && this.draft.agents[index].role != input.read(cx).text
+                {
+                    this.draft.agents[index]
+                        .role
+                        .clone_from(&input.read(cx).text);
+                    this.changed(cx);
+                }
+            }));
+            input
+        });
+        let search = cx.new(|cx| Self::compact_input(String::new(), cx));
+        subscriptions.push(cx.subscribe(&search, |this, _, event, cx| {
+            if matches!(event, RenameInputEvent::Changed)
+                && let Some(menu) = &mut this.menu
+            {
+                menu.active = 0;
+                this.menu_scroll.set_offset(point(px(0.), px(0.)));
                 cx.notify();
             }
+        }));
+        let mut panel = Self {
+            store,
+            data_root,
+            draft: saved.clone(),
+            saved,
+            catalog,
+            numbers,
+            roles,
+            search,
+            locale,
+            theme,
+            choice_focus: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
+            anchor_bounds: Rc::default(),
+            menu: None,
+            menu_scroll: ScrollHandle::new(),
+            agent_scroll: ScrollHandle::new(),
+            pane_width: Rc::default(),
+            refresh_focus: cx.focus_handle().tab_stop(true),
+            preview_focus: cx.focus_handle().tab_stop(true),
+            sub_dispatch_focus: cx.focus_handle().tab_stop(true),
+            enabled_focus: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
+            role_reset_focus: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
+            restore_focus: cx.focus_handle().tab_stop(true),
+            save_focus: cx.focus_handle().tab_stop(true),
+            preview: false,
+            refreshing: false,
+            refresh_status: None,
+            refresh_generation: 0,
+            save_status: None,
+            _subscriptions: subscriptions,
+        };
+        panel.configure(locale, theme, cx);
+        if panel.catalog.is_stale() {
+            panel.refresh(false, cx);
         }
+        panel
     }
 
-    fn sync_role_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        for (index, agent) in self.draft.agents.iter().enumerate() {
-            if let Some(input) = self.role_inputs.get(index) {
-                let desired = agent.role.clone();
-                let length = {
-                    let current = input.read(cx);
-                    if current.text == desired {
-                        continue;
-                    }
-                    current.text.encode_utf16().count()
-                };
-                input.update(cx, |editor, cx| {
-                    editor.replace_text_in_range(Some(0..length), &desired, window, cx);
+    pub fn configure(&mut self, locale: InterfaceLocale, theme: AppTheme, cx: &mut Context<Self>) {
+        let changed = self.locale != locale || self.theme != theme;
+        self.locale = locale;
+        self.theme = theme;
+        let colors = Colors::new(theme).palette;
+        for input in self.numbers.iter().chain(&self.roles).chain([&self.search]) {
+            let placeholder = if *input == self.search {
+                self.text("搜索模型…", "Search models…")
+            } else {
+                ""
+            };
+            let current = input.read(cx);
+            if current.text_color != Some(rgba(colors.text))
+                || current.placeholder_color != Some(rgba(colors.muted))
+                || current.placeholder != placeholder
+            {
+                input.update(cx, |input, cx| {
+                    input.text_color = Some(rgba(colors.text));
+                    input.placeholder_color = Some(rgba(colors.muted));
+                    input.placeholder = placeholder.into();
+                    cx.notify();
                 });
             }
         }
+        if changed {
+            cx.notify();
+        }
     }
 
-    fn toggle_sub_dispatch(&mut self, cx: &mut Context<Self>) {
-        self.draft.allow_sub_dispatch = !self.draft.allow_sub_dispatch;
-        self.status = None;
-        cx.notify();
+    fn compact_input(text: String, cx: &mut Context<RenameInput>) -> RenameInput {
+        let mut input = RenameInput::new(text, cx);
+        input.search_style = true;
+        input.placeholder.clear();
+        input
     }
 
-    fn toggle_enabled(&mut self, index: usize, cx: &mut Context<Self>) {
-        if let Some(agent) = self.draft.agents.get(index) {
-            if agent.enabled
-                && self
-                    .draft
-                    .agents
-                    .iter()
-                    .filter(|item| item.enabled)
-                    .count()
-                    <= 1
-            {
-                self.status = Some(Err("至少保留一个启用的执行者".into()));
-                cx.notify();
-                return;
+    fn text(&self, zh: &'static str, en: &'static str) -> &'static str {
+        self.locale.text(zh, en)
+    }
+
+    fn agent_label(&self, id: &str) -> String {
+        if id == "agy" {
+            self.text("Antigravity（反重力）", "Antigravity").to_owned()
+        } else {
+            agent_display_name(id).to_owned()
+        }
+    }
+
+    fn number_text(config: &DispatchRolesConfig, index: usize) -> String {
+        match index {
+            0 => config.idle_min.to_string(),
+            1 => config.max_min.to_string(),
+            2 => config.ask_wait_min.to_string(),
+            _ => config.retries.to_string(),
+        }
+    }
+
+    fn parsed_number(&self, index: usize, cx: &App) -> Option<f64> {
+        let input = self.numbers[index].read(cx);
+        let raw = input.text.trim();
+        if index == 3 {
+            return raw
+                .parse::<u8>()
+                .ok()
+                .filter(|value| *value <= 5)
+                .map(f64::from);
+        }
+        let (min, max) = NUMBER_LIMITS[index];
+        raw.parse::<f64>()
+            .ok()
+            .filter(|value| (min..=max).contains(value))
+    }
+
+    fn number_edited(&mut self, index: usize, cx: &mut Context<Self>) {
+        let canonical_text = Self::number_text(&self.draft, index);
+        if let Some(value) = self.parsed_number(index, cx) {
+            match index {
+                0 => self.draft.idle_min = value,
+                1 => self.draft.max_min = value,
+                2 => self.draft.ask_wait_min = value,
+                _ => self.draft.retries = value as u8,
             }
         }
-        if let Some(agent) = self.draft.agents.get_mut(index) {
-            agent.enabled = !agent.enabled;
-            self.status = None;
+        if self.numbers[index].read(cx).text == canonical_text {
             cx.notify();
+        } else {
+            self.changed(cx);
         }
     }
 
-    fn set_mode(&mut self, index: usize, mode: DispatchRoleMode, cx: &mut Context<Self>) {
-        if let Some(agent) = self.draft.agents.get_mut(index)
-            && agent.enabled
-            && agent.mode != mode
-        {
-            agent.mode = mode;
-            self.status = None;
-            cx.notify();
-        }
-    }
-
-    fn set_model(&mut self, index: usize, model: &str, cx: &mut Context<Self>) {
-        if let Some(agent) = self.draft.agents.get_mut(index)
-            && agent.enabled
-            && agent.model != model
-        {
-            agent.model = model.to_owned();
-            self.status = None;
-            cx.notify();
-        }
-    }
-
-    fn set_effort(&mut self, index: usize, effort: &str, cx: &mut Context<Self>) {
-        if let Some(agent) = self.draft.agents.get_mut(index)
-            && agent.enabled
-            && agent.effort != effort
-        {
-            agent.effort = effort.to_owned();
-            self.status = None;
-            cx.notify();
-        }
-    }
-
-    fn set_speed(&mut self, index: usize, speed: &str, cx: &mut Context<Self>) {
-        if let Some(agent) = self.draft.agents.get_mut(index)
-            && agent.enabled
-            && agent.speed.as_deref() != Some(speed)
-        {
-            agent.speed = Some(speed.to_owned());
-            self.status = None;
-            cx.notify();
-        }
-    }
-
-    fn restore_defaults(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.draft = DispatchRolesConfig::default();
-        self.sync_role_inputs(window, cx);
-        self.status = None;
+    fn changed(&mut self, cx: &mut Context<Self>) {
+        self.save_status = None;
         cx.notify();
+    }
+
+    fn enabled_agent_exists(&self) -> bool {
+        self.draft.agents[..BUILTIN_AGENTS.len()]
+            .iter()
+            .any(|agent| agent.enabled)
+    }
+
+    fn can_save(&self, cx: &App) -> bool {
+        self.draft != self.saved
+            && self.enabled_agent_exists()
+            && (0..4).all(|index| self.parsed_number(index, cx).is_some())
+            && self.roles.iter().all(|input| {
+                let input = input.read(cx);
+                !input.composing()
+                    && input.text.replace("\r\n", "\n").chars().count() <= ROLE_MAX_CHARS
+            })
+            && self.numbers.iter().all(|input| !input.read(cx).composing())
+    }
+
+    fn replace_input(input: &Entity<RenameInput>, text: &str, window: &mut Window, cx: &mut App) {
+        let current = input.read(cx);
+        if current.text == text {
+            return;
+        }
+        let length = current.text.encode_utf16().count();
+        input.update(cx, |editor, cx| {
+            editor.replace_text_in_range(Some(0..length), text, window, cx)
+        });
+    }
+
+    fn sync_inputs(&self, window: &mut Window, cx: &mut Context<Self>) {
+        for (index, input) in self.numbers.iter().enumerate() {
+            Self::replace_input(input, &Self::number_text(&self.draft, index), window, cx);
+        }
+        for (index, input) in self.roles.iter().enumerate() {
+            Self::replace_input(input, &self.draft.agents[index].role, window, cx);
+        }
+    }
+
+    fn restore(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.draft = DispatchRolesConfig::default();
+        self.sync_inputs(window, cx);
+        self.changed(cx);
     }
 
     fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        match (self.write)(self.draft.clone()) {
+        if !self.can_save(cx) {
+            return;
+        }
+        match self.store.save(self.draft.clone()) {
             Ok(snapshot) => {
                 self.saved = snapshot.config.clone();
                 self.draft = snapshot.config;
-                self.path_display = snapshot.path.display().to_string();
-                self.sync_role_inputs(window, cx);
-                self.status = Some(Ok(SAVED_MESSAGE.into()));
+                self.sync_inputs(window, cx);
+                self.save_status = Some(Ok(()));
             }
-            Err(error) => {
-                self.status = Some(Err(error));
-            }
+            Err(error) => self.save_status = Some(Err(error.to_string())),
         }
         cx.notify();
     }
 
-    fn render_pill(
-        id: impl Into<ElementId>,
-        label: &'static str,
-        selected: bool,
-        disabled: bool,
-        colors: &RolePanelColors,
-        on_click: impl Fn(&mut Self, &mut Context<Self>) + 'static,
-        cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
-        let mut pill = div()
-            .id(id)
-            .px(px(8.))
-            .py(px(3.))
-            .rounded(px(6.))
-            .border_1()
-            .text_size(px(11.))
-            .cursor_pointer()
-            .border_color(if selected {
-                rgba(colors.accent)
-            } else {
-                rgba(colors.line_strong)
-            })
-            .bg(if selected {
-                rgba(colors.pill_selected_bg)
-            } else {
-                rgba(colors.control)
-            })
-            .text_color(if selected {
-                rgba(colors.pill_selected_text)
-            } else {
-                rgba(colors.text)
-            })
-            .child(label);
-        if disabled {
-            pill = pill.opacity(0.5).cursor_default();
-        } else {
-            pill = pill.on_click(cx.listener(move |this, _, _, cx| {
-                on_click(this, cx);
-            }));
+    fn refresh(&mut self, show_feedback: bool, cx: &mut Context<Self>) {
+        if self.refreshing {
+            return;
         }
-        pill
+        self.refreshing = true;
+        self.refresh_status = None;
+        self.refresh_generation += 1;
+        let generation = self.refresh_generation;
+        let root = self.data_root.clone();
+        let probe = cx
+            .background_executor()
+            .spawn(async move { probe_local_cli_models(&root) });
+        cx.spawn(async move |this, cx| {
+            let result = probe.await;
+            if this
+                .update(cx, |this, cx| {
+                    this.catalog = result.catalog;
+                    this.refreshing = false;
+                    this.refresh_status = show_feedback.then_some(
+                        match (
+                            result.codex_updated,
+                            result.agy_updated,
+                            result.cache_error.is_some(),
+                        ) {
+                            (false, false, _) => "failed",
+                            (_, _, true) => "cache",
+                            (true, true, false) => "ok",
+                            (true, false, false) => "codex",
+                            (false, true, false) => "agy",
+                        },
+                    );
+                    if let Some(menu) = &mut this.menu {
+                        menu.active = 0;
+                        this.menu_scroll.set_offset(point(px(0.), px(0.)));
+                    }
+                    cx.notify();
+                })
+                .is_err()
+                || !show_feedback
+            {
+                return;
+            }
+            cx.background_executor().timer(Duration::from_secs(4)).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.refresh_generation == generation {
+                    this.refresh_status = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
     }
 
-    fn render_agent_card(
-        &self,
-        index: usize,
-        colors: &RolePanelColors,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let agent = &self.draft.agents[index];
-        let enabled = agent.enabled;
-        let id = agent.id.clone();
-        let models = model_options(&id);
-        let efforts = effort_options(&id);
-        let speeds = speed_options(&id);
-        let fixed_effort = effort_is_fixed(&id, &agent.model);
+    fn mode_label(&self, mode: DispatchRoleMode) -> &'static str {
+        match mode {
+            DispatchRoleMode::Auto => self.text("按职责自动派", "Auto by responsibility"),
+            DispatchRoleMode::Explicit => self.text("仅点名时派", "Only when named"),
+        }
+    }
 
-        let checkbox = div()
-            .id(SharedString::from(format!("dispatch-role-enable-{id}")))
-            .w(px(15.))
-            .h(px(15.))
-            .rounded(px(4.))
+    fn effort_label(&self, effort: &str) -> String {
+        if self.locale == InterfaceLocale::Chinese {
+            return effort_label_zh(effort).to_owned();
+        }
+        match effort {
+            "off" => "Off",
+            "none" => "None",
+            "minimal" => "Minimal",
+            "low" => "Low",
+            "medium" => "Medium",
+            "high" => "High",
+            "xhigh" => "Extra high",
+            "max" => "Maximum",
+            other => other,
+        }
+        .to_owned()
+    }
+
+    fn efforts(&self, agent: &AgentRoleConfig) -> Vec<String> {
+        if effort_is_fixed(&agent.id, &agent.model) {
+            return Vec::new();
+        }
+        if agent.id == "agy"
+            && let Some(effort) = agy_effort_suffix(&agent.model)
+        {
+            return vec![effort.into()];
+        }
+        if let Some(model) = self
+            .catalog
+            .models(&agent.id)
+            .iter()
+            .find(|model| model.value == agent.model)
+        {
+            return model.efforts.clone();
+        }
+        let efforts: &[&str] = match agent.id.as_str() {
+            "codex" => &CODEX_EFFORTS,
+            "dsh" => &DSH_EFFORTS,
+            _ => &AGY_EFFORTS,
+        };
+        efforts.iter().map(|effort| (*effort).to_owned()).collect()
+    }
+
+    fn selected(&self, choice: Choice) -> &str {
+        match choice {
+            Choice::Default => &self.draft.default_agent,
+            Choice::Mode(index) => self.draft.agents[index].mode.as_str(),
+            Choice::Model(index) => &self.draft.agents[index].model,
+            Choice::Effort(index) => {
+                let agent = &self.draft.agents[index];
+                if agent.id == "agy" {
+                    agy_effort_suffix(&agent.model).unwrap_or(&agent.effort)
+                } else {
+                    &agent.effort
+                }
+            }
+            Choice::Speed(index) => self.draft.agents[index]
+                .speed
+                .as_deref()
+                .unwrap_or("default"),
+        }
+    }
+
+    fn model_label(&self, value: &str, label: &str) -> String {
+        if self.locale == InterfaceLocale::Chinese {
+            return label.into();
+        }
+        if let Some((_, suffix)) = label.split_once("（当前 ") {
+            return format!(
+                "{value} · Latest (currently {})",
+                suffix.trim_end_matches('）')
+            );
+        }
+        label
+            .replace("主力系列最新", "Latest main series")
+            .replace("跨系列最高", "Best series")
+            .replace("前沿系列最新", "Latest frontier series")
+            .replace("均衡系列最新", "Latest balanced series")
+            .replace("快速系列最新", "Latest fast series")
+            .replace("系列最新", "Latest series")
+            .replace("默认", "Default")
+            .replace('（', " (")
+            .replace('）', ")")
+    }
+
+    fn group_label(&self, group: &str) -> String {
+        if self.locale == InterfaceLocale::Chinese || group.is_empty() {
+            return group.into();
+        }
+        if group.starts_with("系列") {
+            "Dynamic series"
+        } else if group.starts_with("本机") {
+            "Installed models"
+        } else if group.starts_with("Orchestrator") {
+            "Orchestrators · No separate reasoning level"
+        } else if group.starts_with("Gemini") {
+            "Gemini series by reasoning level"
+        } else {
+            "Cross-ecosystem and fixed models"
+        }
+        .into()
+    }
+
+    fn choices(&self, choice: Choice) -> Vec<ChoiceItem> {
+        match choice {
+            Choice::Default => self.draft.agents[..3]
+                .iter()
+                .filter(|agent| agent.enabled)
+                .map(|agent| ChoiceItem::new(&agent.id, &self.agent_label(&agent.id)))
+                .collect(),
+            Choice::Mode(_) => [DispatchRoleMode::Auto, DispatchRoleMode::Explicit]
+                .into_iter()
+                .map(|mode| ChoiceItem::new(mode.as_str(), self.mode_label(mode)))
+                .collect(),
+            Choice::Model(index) => {
+                let agent = &self.draft.agents[index];
+                let entries = self.catalog.models(&agent.id);
+                let mut options = Vec::with_capacity(entries.len() + 1);
+                if !entries.iter().any(|entry| entry.value == agent.model) {
+                    options.push(ChoiceItem::new(
+                        &agent.model,
+                        &format!(
+                            "{}{}",
+                            agent.model,
+                            self.text("（当前已保存）", " (Current selection)")
+                        ),
+                    ));
+                }
+                options.extend(entries.iter().map(|entry| ChoiceItem {
+                    value: entry.value.clone(),
+                    label: self.model_label(&entry.value, &entry.label_for_effort(&agent.effort)),
+                    group: self.group_label(&entry.group),
+                }));
+                options
+            }
+            Choice::Effort(index) => self
+                .efforts(&self.draft.agents[index])
+                .into_iter()
+                .map(|effort| ChoiceItem::new(&effort, &self.effort_label(&effort)))
+                .collect(),
+            Choice::Speed(_) => speed_options("codex")
+                .iter()
+                .zip([
+                    "Normal (follow environment)",
+                    "Fast",
+                    "Ultra fast",
+                    "Priority",
+                    "Flex",
+                ])
+                .map(|((value, zh), en)| {
+                    let zh = if *value == "default" {
+                        "普通（跟随环境变量）"
+                    } else {
+                        zh
+                    };
+                    ChoiceItem::new(value, self.text(zh, en))
+                })
+                .collect(),
+        }
+    }
+
+    fn choice_disabled(&self, choice: Choice, options: &[ChoiceItem]) -> bool {
+        match choice {
+            Choice::Mode(index) => self.draft.default_agent == self.draft.agents[index].id,
+            Choice::Effort(_) => options.len() <= 1,
+            _ => options.is_empty(),
+        }
+    }
+
+    fn filtered_choices(&self, choice: Choice, cx: &App) -> Vec<ChoiceItem> {
+        let options = self.choices(choice);
+        if !matches!(choice, Choice::Model(_)) {
+            return options;
+        }
+        let query = self.search.read(cx).text.trim().to_lowercase();
+        options
+            .into_iter()
+            .filter(|option| {
+                option.value.to_lowercase().contains(&query)
+                    || option.label.to_lowercase().contains(&query)
+                    || option.group.to_lowercase().contains(&query)
+            })
+            .collect()
+    }
+
+    fn open_menu(&mut self, choice: Choice, window: &mut Window, cx: &mut Context<Self>) {
+        let options = self.choices(choice);
+        if self.choice_disabled(choice, &options) {
+            return;
+        }
+        if self.menu.as_ref().is_some_and(|menu| menu.choice == choice) {
+            self.close_menu(window, cx);
+            return;
+        }
+        self.menu = None;
+        self.search
+            .update(cx, |input, cx| input.clear_sensitive(cx));
+        let active = options
+            .iter()
+            .position(|item| item.value == self.selected(choice))
+            .unwrap_or(0);
+        self.menu = Some(Menu { choice, active });
+        self.menu_scroll.set_offset(point(px(0.), px(0.)));
+        if active > 0 {
+            self.menu_scroll.scroll_to_item(active);
+        }
+        if matches!(choice, Choice::Model(_)) {
+            window.focus(&self.search.read(cx).focus);
+        } else {
+            window.focus(&self.choice_focus[choice.slot()]);
+        }
+        cx.notify();
+    }
+
+    pub fn close_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(menu) = self.menu.take() else {
+            return false;
+        };
+        window.focus(&self.choice_focus[menu.choice.slot()]);
+        cx.notify();
+        true
+    }
+
+    pub fn composing(&self, cx: &App) -> bool {
+        self.numbers
+            .iter()
+            .chain(&self.roles)
+            .any(|input| input.read(cx).composing())
+            || (self.menu.is_some() && self.search.read(cx).composing())
+    }
+
+    fn apply_choice(
+        &mut self,
+        choice: Choice,
+        value: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_menu(window, cx);
+        match choice {
+            Choice::Default => {
+                self.draft.default_agent = value;
+                self.draft.normalize_default_agent();
+            }
+            Choice::Mode(index) => {
+                self.draft.agents[index].mode = if value == "auto" {
+                    DispatchRoleMode::Auto
+                } else {
+                    DispatchRoleMode::Explicit
+                };
+            }
+            Choice::Model(index) => {
+                let agent = &mut self.draft.agents[index];
+                if agent.model == value {
+                    return;
+                }
+                agent.model = value;
+                let efforts = self.efforts(&self.draft.agents[index]);
+                let agent = &mut self.draft.agents[index];
+                if !efforts.contains(&agent.effort) {
+                    if let Some(effort) = efforts
+                        .iter()
+                        .find(|effort| *effort == "high")
+                        .or_else(|| efforts.last())
+                    {
+                        agent.effort.clone_from(effort);
+                    }
+                }
+            }
+            Choice::Effort(index) => self.draft.agents[index].effort = value,
+            Choice::Speed(index) => self.draft.agents[index].speed = Some(value),
+        }
+        self.changed(cx);
+    }
+
+    fn menu_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(menu) = self.menu.as_ref() else {
+            return;
+        };
+        let choice = menu.choice;
+        let search = matches!(choice, Choice::Model(_));
+        if search && self.search.read(cx).composing() {
+            return;
+        }
+        let key = event.keystroke.key.as_str();
+        if event.keystroke.modifiers.modified() && key != "tab" {
+            return;
+        }
+        let options = self.filtered_choices(choice, cx);
+        let len = options.len();
+        let active = menu.active.min(len.saturating_sub(1));
+        match key {
+            "escape" => {
+                self.close_menu(window, cx);
+            }
+            "tab" => {
+                self.close_menu(window, cx);
+                if event.keystroke.modifiers.shift {
+                    window.focus_prev();
+                } else {
+                    window.focus_next();
+                }
+            }
+            "enter" | "space" if key == "enter" || !search => {
+                if let Some(option) = options.into_iter().nth(active) {
+                    self.apply_choice(choice, option.value, window, cx);
+                }
+            }
+            "up" | "down" | "home" | "end"
+                if len > 0 && (!search || matches!(key, "up" | "down")) =>
+            {
+                let next = match key {
+                    "up" => (active + len - 1) % len,
+                    "down" => (active + 1) % len,
+                    "home" => 0,
+                    _ => len - 1,
+                };
+                self.menu.as_mut().unwrap().active = next;
+                if next == 0 {
+                    self.menu_scroll.set_offset(point(px(0.), px(0.)));
+                } else {
+                    self.menu_scroll.scroll_to_item(next);
+                }
+                cx.notify();
+            }
+            _ => return,
+        }
+        cx.stop_propagation();
+    }
+
+    fn button(
+        id: impl Into<ElementId>,
+        base: Div,
+        focus: &FocusHandle,
+        enabled: bool,
+        action: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let button = base.id(id).relative();
+        if !enabled {
+            return button.opacity(0.55);
+        }
+        let action = Rc::new(action);
+        let key_action = action.clone();
+        let mouse_focus = focus.clone();
+        button
+            .track_focus(focus)
+            .cursor_pointer()
+            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                window.focus(&mouse_focus);
+                cx.stop_propagation();
+            })
+            .on_click(cx.listener(move |this, event, window, cx| {
+                if !matches!(event, ClickEvent::Keyboard(_)) {
+                    action(this, window, cx);
+                }
+                cx.stop_propagation();
+            }))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space")
+                    && !event.keystroke.modifiers.modified()
+                {
+                    key_action(this, window, cx);
+                    cx.stop_propagation();
+                }
+            }))
+            .child(focus_ring_with(
+                focus.clone(),
+                6.,
+                true,
+                FocusRingStyle::Shell,
+            ))
+    }
+
+    fn checkbox(checked: bool, colors: Colors) -> Div {
+        div()
+            .flex_none()
+            .size(px(15.))
+            .rounded(px(3.))
             .border_1()
             .flex()
             .items_center()
             .justify_center()
-            .cursor_pointer()
-            .border_color(if enabled {
-                rgba(colors.accent)
+            .border_color(rgba(if checked {
+                colors.palette.accent
             } else {
-                rgba(colors.line_strong)
-            })
-            .bg(if enabled {
-                rgba(colors.accent)
+                colors.palette.line_strong
+            }))
+            .bg(rgba(if checked {
+                colors.palette.accent
             } else {
-                rgba(colors.control)
-            })
-            .text_size(px(10.))
+                colors.control
+            }))
             .text_color(rgb(0xffffff))
-            .child(if enabled { "✓" } else { "" })
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.toggle_enabled(index, cx);
-            }));
+            .text_size(px(11.))
+            .line_height(relative(1.))
+            .when(checked, |el| el.child("✓"))
+    }
 
-        let mode_row = div()
+    fn action(colors: Colors, label: &'static str, primary: bool) -> Div {
+        div()
+            .h(px(28.))
             .flex()
+            .flex_none()
             .items_center()
-            .gap(px(6.))
-            .child(Self::render_pill(
-                SharedString::from(format!("dispatch-role-mode-auto-{id}")),
-                DispatchRoleMode::Auto.label_zh(),
-                agent.mode == DispatchRoleMode::Auto,
-                !enabled,
-                colors,
-                move |this, cx| this.set_mode(index, DispatchRoleMode::Auto, cx),
-                cx,
-            ))
-            .child(Self::render_pill(
-                SharedString::from(format!("dispatch-role-mode-explicit-{id}")),
-                DispatchRoleMode::Explicit.label_zh(),
-                agent.mode == DispatchRoleMode::Explicit,
-                !enabled,
-                colors,
-                move |this, cx| this.set_mode(index, DispatchRoleMode::Explicit, cx),
-                cx,
-            ));
+            .justify_center()
+            .px(px(11.))
+            .rounded(px(6.))
+            .border_1()
+            .font_weight(FontWeight(600.))
+            .text_size(px(11.))
+            .border_color(rgba(if primary {
+                colors.palette.accent
+            } else {
+                colors.palette.line_strong
+            }))
+            .text_color(rgba(if primary {
+                0xffffffff
+            } else {
+                colors.palette.text
+            }))
+            .bg(rgba(if primary {
+                colors.palette.accent
+            } else {
+                colors.control
+            }))
+            .child(label)
+    }
 
-        let header = div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap(px(8.))
+    fn label(colors: Colors, label: impl Into<SharedString>) -> Div {
+        div()
+            .text_size(px(11.))
+            .line_height(px(15.))
+            .text_color(rgba(colors.palette.muted))
+            .child(label.into())
+    }
+
+    fn trigger(
+        &self,
+        choice: Choice,
+        options: &[ChoiceItem],
+        colors: Colors,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let selected = self.selected(choice);
+        let disabled = self.choice_disabled(choice, options);
+        let open = self.menu.as_ref().is_some_and(|menu| menu.choice == choice);
+        let label = if let Choice::Effort(index) = choice {
+            if effort_is_fixed(
+                &self.draft.agents[index].id,
+                &self.draft.agents[index].model,
+            ) {
+                self.text("固定（无独立档位）", "Fixed (no separate level)")
+                    .to_owned()
+            } else if options.is_empty() {
+                self.text("无可选档位", "No available level").to_owned()
+            } else {
+                self.effort_label(selected)
+            }
+        } else {
+            options
+                .iter()
+                .find(|option| option.value == selected)
+                .map(|option| option.label.clone())
+                .unwrap_or_else(|| self.text("无可用执行者", "No enabled agent").to_owned())
+        };
+        let slot = choice.slot();
+        let bounds = self.anchor_bounds.clone();
+        let base = colors
+            .field()
+            .w_full()
+            .when(open, |el| el.border_color(rgba(colors.palette.accent)))
             .child(
                 div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .child(checkbox)
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .font_weight(FontWeight(650.))
-                            .text_color(rgba(colors.text))
-                            .child(agent_display_name(&id).to_owned()),
-                    )
-                    .when(!enabled, |row| {
-                        row.child(
-                            div()
-                                .px(px(6.))
-                                .py(px(1.))
-                                .rounded(px(4.))
-                                .border_1()
-                                .border_color(rgba(colors.line))
-                                .text_size(px(10.))
-                                .text_color(rgba(colors.muted))
-                                .child("已停用"),
-                        )
-                    }),
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(label),
             )
-            .child(mode_row);
+            .child(icon("chevron-down", 12., colors.palette.muted >> 8))
+            .when(!disabled, |el| {
+                el.child(
+                    canvas(
+                        |_, _, _| (),
+                        move |rect, _, window, _| {
+                            let previous = bounds.borrow_mut()[slot].replace(rect);
+                            if open && previous != Some(rect) {
+                                window.request_animation_frame();
+                            }
+                        },
+                    )
+                    .absolute()
+                    .inset_0()
+                    .size_full(),
+                )
+            });
+        Self::button(
+            ("dispatch-choice", slot),
+            base,
+            &self.choice_focus[slot],
+            !disabled,
+            move |this, window, cx| this.open_menu(choice, window, cx),
+            cx,
+        )
+        .when(!disabled, |el| {
+            el.hover(move |style| style.border_color(rgba(colors.palette.accent)))
+                .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                    if event.keystroke.key == "down" && !event.keystroke.modifiers.modified() {
+                        this.open_menu(choice, window, cx);
+                        cx.stop_propagation();
+                    }
+                }))
+        })
+    }
 
-        let mut model_group = div().flex().flex_wrap().items_center().gap(px(6.)).child(
-            div()
-                .w(px(64.))
-                .text_size(px(11.))
-                .text_color(rgba(colors.muted))
-                .child("默认模型"),
-        );
-        for &(value, label) in models {
-            model_group = model_group.child(Self::render_pill(
-                SharedString::from(format!("dispatch-role-model-{id}-{value}")),
-                label,
-                agent.model == value,
-                !enabled,
-                colors,
-                move |this, cx| this.set_model(index, value, cx),
-                cx,
-            ));
-        }
-
-        let mut effort_group = div().flex().flex_wrap().items_center().gap(px(6.)).child(
-            div()
-                .w(px(64.))
-                .text_size(px(11.))
-                .text_color(rgba(colors.muted))
-                .child("推理档位"),
-        );
-        if fixed_effort {
-            effort_group = effort_group.child(
-                div()
-                    .px(px(8.))
-                    .py(px(3.))
-                    .rounded(px(6.))
-                    .border_1()
-                    .border_color(rgba(colors.line))
-                    .bg(rgba(colors.sub_card))
-                    .text_size(px(11.))
-                    .text_color(rgba(colors.muted))
-                    .child("固定（无档位）"),
-            );
+    fn render_menu(
+        &self,
+        viewport: Size<Pixels>,
+        colors: Colors,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let menu = self.menu.as_ref()?;
+        let choice = menu.choice;
+        let anchor = self.anchor_bounds.borrow()[choice.slot()]?;
+        let options = self.filtered_choices(choice, cx);
+        let empty = options.is_empty();
+        let selected = self.selected(choice);
+        let search = matches!(choice, Choice::Model(_));
+        let margin = px(8.);
+        let gap = px(4.);
+        let width = anchor
+            .size
+            .width
+            .max(px(if search { 380. } else { 160. }))
+            .min(viewport.width - margin * 2.);
+        let preferred_height = px(if search { 438. } else { 230. });
+        let below = viewport.height - anchor.bottom() - margin - gap;
+        let above = anchor.top() - margin - gap;
+        let open_above = below < preferred_height && above > below;
+        let height = preferred_height.min(if open_above { above } else { below });
+        let x = anchor
+            .left()
+            .clamp(margin, (viewport.width - margin - width).max(margin));
+        let (corner, y) = if open_above {
+            (Corner::BottomLeft, anchor.top() - gap)
         } else {
-            for &(value, label) in efforts {
-                effort_group = effort_group.child(Self::render_pill(
-                    SharedString::from(format!("dispatch-role-effort-{id}-{value}")),
-                    label,
-                    agent.effort == value,
-                    !enabled,
-                    colors,
-                    move |this, cx| this.set_effort(index, value, cx),
-                    cx,
-                ));
-            }
-        }
-
-        let mut card = div()
+            (Corner::TopLeft, anchor.bottom() + gap)
+        };
+        let mut list = div()
+            .id("dispatch-menu-list")
+            .min_h_0()
+            .max_h((height - px(if search { 47. } else { 10. })).max(px(0.)))
             .flex()
             .flex_col()
-            .gap(px(8.))
-            .p(px(12.))
+            .overflow_y_scroll()
+            .track_scroll(&self.menu_scroll)
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation());
+        let mut group = String::new();
+        for (index, option) in options.into_iter().enumerate() {
+            let heading = if !option.group.is_empty() && group != option.group {
+                group.clone_from(&option.group);
+                Some(Self::label(colors, group.clone()).px(px(7.)).pt(px(4.)))
+            } else {
+                None
+            };
+            let selected = option.value == selected;
+            let active = index == menu.active;
+            let accent = colors.palette.accent_soft;
+            let row = div()
+                .id(("dispatch-menu-item", index))
+                .h(px(28.))
+                .px(px(7.))
+                .rounded(px(5.))
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .cursor_pointer()
+                .text_size(px(12.))
+                .when(selected || active, |el| el.bg(rgba(accent)))
+                .when(selected, |el| el.text_color(rgba(colors.palette.accent)))
+                .hover(move |el| el.bg(rgba(accent)))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.apply_choice(choice, option.value.clone(), window, cx);
+                    cx.stop_propagation();
+                }))
+                .child(
+                    div()
+                        .w(px(13.))
+                        .flex_none()
+                        .child(if selected { "✓" } else { "" }),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child(option.label),
+                );
+            list = list.child(div().flex_none().children(heading).child(row));
+        }
+        if empty {
+            list = list.child(
+                Self::label(colors, self.text("没有匹配的模型", "No matching models")).p(px(8.)),
+            );
+        }
+
+        let popup = div()
+            .id("dispatch-menu")
+            .w(width)
+            .max_h(height)
+            .flex()
+            .flex_col()
+            .gap(px(3.))
+            .p(px(4.))
             .rounded(px(8.))
             .border_1()
-            .border_color(rgba(colors.line))
-            .bg(rgba(colors.sub_card))
-            .when(!enabled, |card| card.opacity(0.6))
-            .child(header)
-            .when(!models.is_empty(), |card| card.child(model_group))
-            .when(!efforts.is_empty(), |card| card.child(effort_group));
-
-        if !speeds.is_empty() {
-            let mut speed_group = div().flex().flex_wrap().items_center().gap(px(6.)).child(
-                div()
-                    .w(px(64.))
-                    .text_size(px(11.))
-                    .text_color(rgba(colors.muted))
-                    .child("推理速度"),
-            );
-            let current_speed = agent.speed.as_deref().unwrap_or("default");
-            for &(value, label) in speeds {
-                speed_group = speed_group.child(Self::render_pill(
-                    SharedString::from(format!("dispatch-role-speed-{id}-{value}")),
-                    label,
-                    current_speed == value,
-                    !enabled,
-                    colors,
-                    move |this, cx| this.set_speed(index, value, cx),
-                    cx,
-                ));
-            }
-            card = card.child(speed_group);
-        }
-
-        if let Some(input) = self.role_inputs.get(index) {
-            card = card.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.))
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(rgba(colors.muted))
-                            .child("生态位与职责"),
-                    )
-                    .child(
-                        div()
-                            .px(px(8.))
-                            .py(px(5.))
-                            .rounded(px(6.))
-                            .border_1()
-                            .border_color(rgba(colors.line_strong))
-                            .bg(rgba(colors.role_input))
-                            .child(input.clone()),
-                    ),
-            );
-        }
-
-        card
+            .border_color(rgba(colors.palette.line_strong))
+            .bg(rgba(colors.popup))
+            .text_color(rgba(colors.palette.text))
+            .shadow(vec![shadow(0x0e1627, 0.25, 8., 24.)])
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .when(search, |el| {
+                el.child(colors.field().flex_none().child(self.search.clone()))
+            })
+            .child(list);
+        Some(
+            deferred(
+                anchored()
+                    .position(point(x, y))
+                    .anchor(corner)
+                    .snap_to_window_with_margin(margin)
+                    .child(popup),
+            )
+            .with_priority(101)
+            .into_any_element(),
+        )
     }
-}
 
-impl Render for DispatchRolesPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = RolePanelColors::for_dark(workspace_theme_dark(cx));
-        for input in &self.role_inputs {
-            sync_input_colors(input, colors.input_text, colors.input_placeholder, cx);
-        }
+    fn backdrop(&self, viewport: Size<Pixels>, cx: &mut Context<Self>) -> AnyElement {
+        deferred(
+            anchored().position(point(px(0.), px(0.))).child(
+                div()
+                    .id("dispatch-menu-backdrop")
+                    .w(viewport.width)
+                    .h(viewport.height)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                            let target = CHOICE_ORDER.into_iter().find(|choice| {
+                                this.anchor_bounds.borrow()[choice.slot()]
+                                    .is_some_and(|bounds| bounds.contains(&event.position))
+                                    && !this.choice_disabled(*choice, &this.choices(*choice))
+                            });
+                            if let Some(choice) = target {
+                                this.open_menu(choice, window, cx);
+                            } else {
+                                this.close_menu(window, cx);
+                            }
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .on_scroll_wheel(|_, _, cx| cx.stop_propagation()),
+            ),
+        )
+        .with_priority(100)
+        .into_any_element()
+    }
 
-        let header = div()
+    fn header(&self, colors: Colors, cx: &mut Context<Self>) -> Div {
+        let label = if self.refreshing {
+            self.text("正在刷新…", "Refreshing…")
+        } else {
+            self.text("↻ 刷新本机模型", "↻ Refresh local models")
+        };
+        let feedback = match self.refresh_status {
+            Some("failed") => self.text(
+                "刷新失败，沿用已有目录",
+                "Refresh failed. Kept the existing catalog.",
+            ),
+            Some("cache") => self.text(
+                "已更新可用结果，缓存写入失败",
+                "Updated available results. Could not write the cache.",
+            ),
+            Some("ok") => self.text("已刷新本机模型", "Local models refreshed"),
+            Some("codex") => self.text(
+                "Codex 已刷新，反重力沿用已有目录",
+                "Codex refreshed. Kept the Antigravity catalog.",
+            ),
+            Some("agy") => self.text(
+                "反重力已刷新，Codex 沿用已有目录",
+                "Antigravity refreshed. Kept the Codex catalog.",
+            ),
+            _ => "",
+        };
+        let refresh = Self::button(
+            "dispatch-refresh",
+            Self::action(colors, label, false),
+            &self.refresh_focus,
+            !self.refreshing,
+            |this, _, cx| this.refresh(true, cx),
+            cx,
+        );
+        div().flex().flex_col().gap(px(3.)).flex_none()
+            .child(div().flex().items_start().justify_between().gap(px(8.)).pr(px(36.))
+                .child(div().text_size(px(19.)).line_height(px(23.)).font_weight(FontWeight(680.))
+                    .child(self.text("派活", "Dispatch")))
+                .child(refresh))
+            .child(Self::label(colors, self.text(
+                "为码头托管会话统一设置各执行者的启停、默认模型、生态位职责与监督策略。",
+                "Set agent availability, default models, responsibilities and supervision for Matou-managed sessions.",
+            )))
+            .when(!feedback.is_empty(), |el| el.child(Self::label(colors, feedback)))
+    }
+
+    fn number_field(&self, index: usize, colors: Colors, cx: &mut Context<Self>) -> Div {
+        let (zh, en) = [
+            ("没动静判卡", "Idle timeout"),
+            ("单轮最长", "Round limit"),
+            ("等回答", "Answer wait"),
+            ("重试次数", "Retries"),
+        ][index];
+        let input = self.numbers[index].clone();
+        let focus = input.read(cx).focus.clone();
+        let invalid = self.parsed_number(index, cx).is_none();
+        let (min, max) = NUMBER_LIMITS[index];
+        div()
+            .flex_1()
+            .min_w_0()
             .flex()
             .flex_col()
             .gap(px(4.))
             .child(
                 div()
-                    .text_size(px(13.))
-                    .font_weight(FontWeight(680.))
-                    .text_color(rgba(colors.text))
-                    .child(TITLE),
+                    .text_size(px(11.))
+                    .font_weight(FontWeight(600.))
+                    .child(self.text(zh, en)),
             )
             .child(
                 div()
-                    .text_size(px(11.))
-                    .line_height(relative(1.65))
-                    .text_color(rgba(colors.muted))
-                    .whitespace_normal()
-                    .child(HEADING),
-            );
-
-        let sub_enabled = self.draft.allow_sub_dispatch;
-        let sub_toggle = div()
-            .id("dispatch-roles-allow-sub-dispatch")
-            .flex()
-            .items_start()
-            .gap(px(10.))
-            .p(px(12.))
-            .rounded(px(8.))
-            .border_1()
-            .border_color(rgba(colors.line))
-            .bg(rgba(colors.sub_card))
-            .cursor_pointer()
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.toggle_sub_dispatch(cx);
-            }))
-            .child(
-                div()
-                    .mt(px(2.))
-                    .w(px(15.))
-                    .h(px(15.))
-                    .rounded(px(4.))
-                    .border_1()
                     .flex()
                     .items_center()
-                    .justify_center()
-                    .border_color(if sub_enabled {
-                        rgba(colors.accent)
-                    } else {
-                        rgba(colors.line_strong)
-                    })
-                    .bg(if sub_enabled {
-                        rgba(colors.accent)
-                    } else {
-                        rgba(colors.control)
-                    })
-                    .text_size(px(10.))
-                    .text_color(rgb(0xffffff))
-                    .child(if sub_enabled { "✓" } else { "" }),
+                    .gap(px(5.))
+                    .child(
+                        colors
+                            .field()
+                            .id(("dispatch-number", index))
+                            .w(px(54.))
+                            .flex_none()
+                            .h(px(30.))
+                            .when(invalid, |el| el.border_color(rgba(colors.error)))
+                            .child(input)
+                            .child(focus_ring_with(focus, 6., true, FocusRingStyle::Shell)),
+                    )
+                    .child(Self::label(
+                        colors,
+                        if index == 3 {
+                            self.text("次", "tries")
+                        } else {
+                            self.text("分钟", "min")
+                        },
+                    )),
+            )
+            .when(invalid, |el| {
+                el.child(
+                    Self::label(
+                        colors,
+                        if index == 3 {
+                            format!("{} {min}–{max}", self.text("请输入整数", "Whole number"))
+                        } else {
+                            format!("{} {min}–{max}", self.text("范围", "Range"))
+                        },
+                    )
+                    .text_color(rgba(colors.error)),
+                )
+            })
+    }
+
+    fn policy(
+        &self,
+        narrow: bool,
+        compact: bool,
+        viewport: Size<Pixels>,
+        colors: Colors,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let targets = self
+            .draft
+            .sub_dispatch_targets()
+            .map(|agent| self.agent_label(&agent.id))
+            .collect::<Vec<_>>();
+        let inactive = self.draft.allow_sub_dispatch && targets.is_empty();
+        let description = if !self.draft.allow_sub_dispatch {
+            self.text(
+                "已关闭跨执行者二次转包，所有任务仅允许由顶层监工直接派活。",
+                "Sub-dispatch is off. Only the top-level supervisor can dispatch work.",
+            )
+            .to_owned()
+        } else if targets.is_empty() {
+            if let Some(agent) = self
+                .draft
+                .agents
+                .iter()
+                .find(|agent| agent.enabled && agent.mode == DispatchRoleMode::Auto)
+            {
+                let name = self.agent_label(&agent.id);
+                match self.locale {
+                    InterfaceLocale::Chinese => format!(
+                        "当前仅 {name} 处于「按职责自动派」，暂无其他自动派协作者可接收转包；仅由顶层监工直接派活。"
+                    ),
+                    InterfaceLocale::English => format!(
+                        "Only {name} is set to Auto by responsibility. With no eligible peer, the top-level supervisor dispatches all work."
+                    ),
+                }
+            } else {
+                self.text(
+                    "暂无可接收二次转包的协作者，仅由顶层监工直接派活。",
+                    "There are no eligible peers for sub-dispatch. Only the supervisor can dispatch work.",
+                ).to_owned()
+            }
+        } else {
+            let names = targets.join(self.text("、", ", "));
+            match self.locale {
+                InterfaceLocale::Chinese => format!(
+                    "开启后，执行者干活时遇到其他「按职责自动派」协作者（当前：{names}）擅长的部分，可跨执行者转派 1 层子任务。"
+                ),
+                InterfaceLocale::English => format!(
+                    "An agent can delegate one level of work to other agents set to Auto by responsibility when it matches their role (currently {names})."
+                ),
+            }
+        };
+        let default = self.choices(Choice::Default);
+        let fallback = div()
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .min_w_0()
+            .child(Self::label(colors, self.text("默认兜底执行者", "Default agent")).flex_none())
+            .child(div().flex_1().min_w_0().child(self.trigger(
+                Choice::Default,
+                &default,
+                colors,
+                cx,
+            )));
+        let toggle = Self::button(
+            "dispatch-sub-dispatch",
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .text_size(px(11.))
+                .font_weight(FontWeight(600.))
+                .child(Self::checkbox(self.draft.allow_sub_dispatch, colors))
+                .child(self.text(
+                    "允许执行者跨职责二次转包（1 层）",
+                    "Allow 1-level cross-agent sub-dispatch",
+                )),
+            &self.sub_dispatch_focus,
+            true,
+            |this, _, cx| {
+                this.draft.allow_sub_dispatch = !this.draft.allow_sub_dispatch;
+                this.changed(cx);
+            },
+            cx,
+        );
+        let number_row = |range: std::ops::Range<usize>, cx: &mut Context<Self>| {
+            div()
+                .flex()
+                .gap(px(8.))
+                .children(range.map(|index| self.number_field(index, colors, cx)))
+        };
+        let numbers = if compact {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(7.))
+                .child(number_row(0..2, cx))
+                .child(number_row(2..4, cx))
+        } else {
+            number_row(0..4, cx)
+        };
+        colors
+            .card()
+            .flex_none()
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .justify_between()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .font_weight(FontWeight(700.))
+                            .child(self.text("全局兜底与监督策略", "Fallback and supervision")),
+                    )
+                    .child(Self::button(
+                        "dispatch-preview-toggle",
+                        Self::label(
+                            colors,
+                            if self.preview {
+                                self.text("收起自动注入文本", "Hide injected text")
+                            } else {
+                                self.text("查看自动注入文本", "View injected text")
+                            },
+                        )
+                        .text_color(rgba(colors.palette.accent)),
+                        &self.preview_focus,
+                        true,
+                        |this, _, cx| {
+                            this.preview = !this.preview;
+                            cx.notify();
+                        },
+                        cx,
+                    )),
             )
             .child(
                 div()
                     .flex()
-                    .flex_col()
-                    .gap(px(2.))
+                    .gap(px(12.))
+                    .when(narrow, |el| el.flex_col().gap(px(6.)))
+                    .child(fallback.when(!narrow, |el| el.w(px(332.)).flex_none()))
                     .child(
                         div()
-                            .text_size(px(12.))
-                            .font_weight(FontWeight(600.))
-                            .text_color(rgba(colors.text))
-                            .child(SUB_DISPATCH_TITLE),
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(3.))
+                            .child(toggle)
+                            .child(
+                                Self::label(colors, description)
+                                    .pl(px(21.))
+                                    .when(inactive, |el| {
+                                        el.text_color(rgba(colors.palette.accent))
+                                    }),
+                            ),
+                    ),
+            )
+            .child(numbers)
+            .when(self.preview, |el| {
+                el.child(
+                    div()
+                        .id("dispatch-markdown-preview")
+                        .max_h((viewport.height / 3.).min(px(300.)))
+                        .overflow_y_scroll()
+                        .p(px(9.))
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(rgba(colors.palette.line))
+                        .bg(rgba(colors.control))
+                        .text_size(px(11.))
+                        .line_height(px(17.))
+                        .whitespace_normal()
+                        .font_family(if cfg!(windows) { "Consolas" } else { "Menlo" })
+                        .child(format_roles_markdown(&self.draft)),
+                )
+            })
+    }
+
+    fn agent_card(
+        &self,
+        index: usize,
+        narrow: bool,
+        compact: bool,
+        colors: Colors,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let agent = &self.draft.agents[index];
+        let fallback = self.draft.default_agent == agent.id && agent.enabled;
+        let fixed = effort_is_fixed(&agent.id, &agent.model);
+        let modes = self.choices(Choice::Mode(index));
+        let customized_role = agent.role != default_role_text(&agent.id);
+        let role_len = self.roles[index]
+            .read(cx)
+            .text
+            .replace("\r\n", "\n")
+            .chars()
+            .count();
+        let role_input = self.roles[index].clone();
+        let mut form = div()
+            .flex()
+            .flex_col()
+            .gap(px(5.))
+            .min_w_0()
+            .when(!narrow, |el| el.w(px(332.)).flex_none());
+        for (choice, label) in [
+            (Choice::Model(index), self.text("默认模型", "Default model")),
+            (Choice::Effort(index), self.text("推理档位", "Reasoning")),
+            (Choice::Speed(index), self.text("推理速度", "Speed")),
+        ] {
+            if matches!(choice, Choice::Speed(_)) && agent.id != "codex" {
+                continue;
+            }
+            let options = self.choices(choice);
+            form = form.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(5.))
+                    .child(Self::label(colors, label).w(px(67.)).flex_none())
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(self.trigger(choice, &options, colors, cx)),
+                    ),
+            );
+        }
+        if fixed {
+            form = form.child(
+                Self::label(
+                    colors,
+                    self.text(
+                        "Orchestrator 可自派子代理并行干活",
+                        "Orchestrator can run its own subagents in parallel",
+                    ),
+                )
+                .pl(px(72.)),
+            );
+        }
+        colors
+            .card()
+            .flex_none()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(6.))
+                    .when(compact, |el| el.flex_col().items_start())
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(7.))
+                            .min_w_0()
+                            .child(Self::button(
+                                ("dispatch-enabled", index),
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(7.))
+                                    .text_size(px(12.))
+                                    .font_weight(FontWeight(700.))
+                                    .child(Self::checkbox(agent.enabled, colors))
+                                    .child(self.agent_label(&agent.id)),
+                                &self.enabled_focus[index],
+                                true,
+                                move |this, _, cx| {
+                                    let agent = &mut this.draft.agents[index];
+                                    agent.enabled = !agent.enabled;
+                                    this.draft.normalize_default_agent();
+                                    this.changed(cx);
+                                },
+                                cx,
+                            ))
+                            .when(fallback, |el| {
+                                el.child(
+                                    Self::label(
+                                        colors,
+                                        self.text("默认兜底主力", "Default fallback"),
+                                    )
+                                    .text_size(px(10.))
+                                    .px(px(5.))
+                                    .rounded(px(5.))
+                                    .bg(rgba(colors.palette.accent_soft))
+                                    .text_color(rgba(colors.palette.accent)),
+                                )
+                            }),
                     )
                     .child(
                         div()
-                            .text_size(px(11.))
-                            .line_height(relative(1.55))
-                            .text_color(rgba(colors.muted))
-                            .whitespace_normal()
-                            .child(SUB_DISPATCH_DESC),
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .flex_none()
+                            .when(compact, |el| el.w_full())
+                            .child(
+                                Self::label(colors, self.text("调度方式", "Dispatch mode"))
+                                    .flex_none(),
+                            )
+                            .child(
+                                div()
+                                    .when(compact, |el| el.flex_1().min_w_0())
+                                    .when(!compact, |el| {
+                                        el.w(px(if self.locale == InterfaceLocale::English {
+                                            162.
+                                        } else {
+                                            146.
+                                        }))
+                                    })
+                                    .child(self.trigger(Choice::Mode(index), &modes, colors, cx)),
+                            ),
                     ),
-            );
-
-        let mut container = div()
-            .flex()
-            .flex_col()
-            .gap(px(10.))
-            .p(px(14.))
-            .rounded(px(10.))
-            .border_1()
-            .border_color(rgba(colors.line))
-            .bg(rgba(colors.card))
-            .child(sub_toggle);
-
-        for index in 0..self.draft.agents.len() {
-            container = container.child(self.render_agent_card(index, &colors, cx));
-        }
-
-        let dirty = self.dirty();
-        let save_button = div()
-            .id("dispatch-roles-save")
-            .px(px(14.))
-            .py(px(6.))
-            .rounded(px(7.))
-            .text_size(px(12.))
-            .font_weight(FontWeight(600.))
-            .bg(rgba(colors.primary))
-            .text_color(rgb(0xffffff))
-            .when(!dirty, |btn| btn.opacity(0.45).cursor_default())
-            .when(dirty, |btn| {
-                btn.cursor_pointer()
-                    .on_click(cx.listener(|this, _, window, cx| this.save(window, cx)))
-            })
-            .child(SAVE);
-
-        let restore_button = div()
-            .id("dispatch-roles-restore")
-            .px(px(10.))
-            .py(px(6.))
-            .rounded(px(7.))
-            .border_1()
-            .border_color(rgba(colors.line_strong))
-            .bg(rgba(colors.control))
-            .text_size(px(12.))
-            .text_color(rgba(colors.text))
-            .cursor_pointer()
-            .on_click(cx.listener(|this, _, window, cx| this.restore_defaults(window, cx)))
-            .child(RESTORE_DEFAULTS);
-
-        let status_view = match &self.status {
-            Some(Ok(message)) => Some(
-                div()
-                    .px(px(8.))
-                    .py(px(4.))
-                    .rounded(px(6.))
-                    .bg(rgba(colors.success_bg))
-                    .text_size(px(11.))
-                    .text_color(rgba(colors.success))
-                    .child(message.clone()),
-            ),
-            Some(Err(message)) => Some(
-                div()
-                    .text_size(px(11.))
-                    .text_color(rgba(colors.error))
-                    .child(message.clone()),
-            ),
-            None => None,
-        };
-
-        let actions = div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap(px(8.))
-            .pt(px(6.))
+            )
             .child(
                 div()
                     .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .child(restore_button)
-                    .children(status_view),
+                    .gap(px(16.))
+                    .when(narrow, |el| el.flex_col().gap(px(8.)))
+                    .child(form)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap(px(6.))
+                                    .child(Self::label(
+                                        colors,
+                                        format!(
+                                            "{}  {role_len} {}",
+                                            self.text("生态位与职责", "Responsibilities"),
+                                            self.text("字", "characters")
+                                        ),
+                                    ))
+                                    .child(Self::button(
+                                        ("dispatch-reset-role", index),
+                                        Self::label(
+                                            colors,
+                                            self.text("恢复默认文案", "Restore default text"),
+                                        )
+                                        .text_color(rgba(
+                                            if customized_role {
+                                                colors.palette.accent
+                                            } else {
+                                                colors.palette.muted
+                                            },
+                                        )),
+                                        &self.role_reset_focus[index],
+                                        customized_role,
+                                        move |this, window, cx| {
+                                            let agent = &mut this.draft.agents[index];
+                                            let role = default_role_text(&agent.id);
+                                            agent.role = role.into();
+                                            Self::replace_input(
+                                                &this.roles[index],
+                                                role,
+                                                window,
+                                                cx,
+                                            );
+                                            this.changed(cx);
+                                        },
+                                        cx,
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .h(px(84.))
+                                    .min_w_0()
+                                    .flex()
+                                    .rounded(px(6.))
+                                    .border_1()
+                                    .border_color(rgba(if role_len > ROLE_MAX_CHARS {
+                                        colors.error
+                                    } else {
+                                        colors.palette.line_strong
+                                    }))
+                                    .bg(rgba(colors.control))
+                                    .child(role_input),
+                            )
+                            .when(role_len > ROLE_MAX_CHARS, |el| {
+                                el.child(
+                                    Self::label(
+                                        colors,
+                                        format!(
+                                            "{} {ROLE_MAX_CHARS}",
+                                            self.text("职责文案字数上限", "Maximum characters"),
+                                        ),
+                                    )
+                                    .text_color(rgba(colors.error)),
+                                )
+                            }),
+                    ),
             )
-            .child(save_button);
+    }
 
-        container = container.child(actions);
-
+    fn footer(&self, compact: bool, colors: Colors, cx: &mut Context<Self>) -> Div {
+        let notice = if !self.enabled_agent_exists() {
+            Some((
+                self.text("至少保留一个启用的执行者", "Enable at least one agent")
+                    .to_owned(),
+                colors.error,
+            ))
+        } else {
+            self.save_status.as_ref().map(|status| match status {
+                Ok(()) => (self.text("已保存", "Saved").to_owned(), colors.success),
+                Err(error) => (
+                    format!("{} {error}", self.text("保存失败。", "Save failed.")),
+                    colors.error,
+                ),
+            })
+        };
+        let path = self.store.path().display().to_string();
+        let visible_path = if compact {
+            self.store
+                .path()
+                .file_name()
+                .map(|name| format!("…/{}", name.to_string_lossy()))
+                .unwrap_or_else(|| path.clone())
+        } else {
+            path.clone()
+        };
+        let path = SharedString::from(path);
+        let file = Self::label(
+            colors,
+            format!(
+                "{} {visible_path}",
+                self.text("配置文件：", "Configuration:")
+            ),
+        )
+        .id("dispatch-config-file")
+        .min_w_0()
+        .whitespace_nowrap()
+        .overflow_hidden()
+        .text_ellipsis()
+        .tooltip(move |_, cx| cx.new(|_| CardTooltip(path.clone())).into());
+        let scope = Self::label(
+            colors,
+            self.text(
+                "（仅作用于码头内会话，不修改外部全局配置）",
+                "(Applies to Matou-managed sessions only)",
+            ),
+        );
         div()
             .flex()
-            .flex_col()
-            .gap(px(10.))
-            .w_full()
-            .mt(px(22.))
-            .pt(px(20.))
+            .flex_none()
+            .justify_between()
+            .items_center()
+            .gap(px(8.))
+            .pt(px(8.))
             .border_t_1()
-            .border_color(rgba(colors.line))
-            .child(header)
-            .child(container)
+            .border_color(rgba(colors.palette.line))
+            .when(compact, |el| el.flex_col().items_start().gap(px(4.)))
             .child(
                 div()
-                    .text_size(px(11.))
-                    .text_color(rgba(colors.muted))
-                    .child(format!("生态位配置文件：{}", self.path_display)),
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.))
+                    .when(compact, |el| el.w_full())
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(5.))
+                            .min_w_0()
+                            .when(compact, |el| el.flex_col().gap(px(1.)))
+                            .child(file)
+                            .child(scope),
+                    )
+                    .children(notice.map(|(message, color)| {
+                        Self::label(colors, message).text_color(rgba(color))
+                    })),
             )
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .gap(px(8.))
+                    .when(compact, |el| el.w_full().justify_end())
+                    .child(Self::button(
+                        "dispatch-restore",
+                        Self::action(
+                            colors,
+                            self.text("恢复全部默认", "Restore all defaults"),
+                            false,
+                        ),
+                        &self.restore_focus,
+                        true,
+                        Self::restore,
+                        cx,
+                    ))
+                    .child(Self::button(
+                        "dispatch-save",
+                        Self::action(colors, self.text("保存", "Save"), true),
+                        &self.save_focus,
+                        self.can_save(cx),
+                        Self::save,
+                        cx,
+                    )),
+            )
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn probe_agent_scroll(&self) -> (Bounds<Pixels>, Pixels) {
+        (self.agent_scroll.bounds(), self.agent_scroll.offset().y)
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn probe_focus_model(&self, index: usize, window: &mut Window) {
+        window.focus(&self.choice_focus[Choice::Model(index).slot()]);
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn probe_focus_number(&self, index: usize, window: &mut Window, cx: &App) {
+        window.focus(&self.numbers[index].read(cx).focus);
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn probe_number_focused(&self, index: usize, window: &Window, cx: &App) -> bool {
+        self.numbers[index].read(cx).focus.is_focused(window)
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn probe_focus_save(&self, window: &mut Window) {
+        window.focus(&self.save_focus);
+    }
+}
+
+impl Render for DispatchRolesPanel {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let viewport = window.viewport_size();
+        let pane_width = self.pane_width.get();
+        let narrow = viewport.width < px(760.) || (pane_width > px(0.) && pane_width < px(620.));
+        let compact = if pane_width > px(0.) {
+            pane_width < px(380.)
+        } else {
+            narrow
+        };
+        let width = self.pane_width.clone();
+        let colors = Colors::new(self.theme);
+        // Previous-frame anchors are read by the menu. Each enabled trigger
+        // publishes its new bounds in the current frame.
+        let menu = self.render_menu(viewport, colors, cx);
+        let backdrop = menu.as_ref().map(|_| self.backdrop(viewport, cx));
+        div()
+            .id("dispatch-unified")
+            .flex()
+            .flex_col()
+            .h_full()
+            .min_h_0()
+            .w_full()
+            .gap(px(10.))
+            .text_color(rgba(colors.palette.text))
+            .capture_key_down(cx.listener(Self::menu_key))
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |bounds, _, window, _| {
+                        if width.replace(bounds.size.width) != bounds.size.width {
+                            window.request_animation_frame();
+                        }
+                    },
+                )
+                .absolute()
+                .inset_0()
+                .size_full(),
+            )
+            .child(self.header(colors, cx))
+            .child(self.policy(narrow, compact, viewport, colors, cx))
+            .child(
+                div()
+                    .id("dispatch-agent-scroll")
+                    .flex()
+                    .flex_col()
+                    .min_h_0()
+                    .gap(px(10.))
+                    .overflow_y_scroll()
+                    .track_scroll(&self.agent_scroll)
+                    .children(
+                        (0..3).map(|index| self.agent_card(index, narrow, compact, colors, cx)),
+                    ),
+            )
+            .child(self.footer(compact, colors, cx))
+            .children(backdrop)
+            .children(menu)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::RolePanelColors;
-    use crate::theme_tokens::AppTheme;
-
-    /// WCAG relative luminance of a packed `0xRRGGBBAA` color.
-    fn luminance(color: u32) -> f32 {
-        fn channel(color: u32, shift: u32) -> f32 {
-            let value = ((color >> shift) & 0xff) as f32 / 255.;
-            if value <= 0.03928 {
-                value / 12.92
-            } else {
-                ((value + 0.055) / 1.055).powf(2.4)
-            }
-        }
-        0.2126 * channel(color, 24) + 0.7152 * channel(color, 16) + 0.0722 * channel(color, 8)
-    }
-
-    /// Composites a translucent `fg` over an opaque `bg`.
-    fn over(fg: u32, bg: u32) -> u32 {
-        let alpha = (fg & 0xff) as f32 / 255.;
-        let mix = |shift: u32| {
-            (((fg >> shift & 0xff) as f32 * alpha + (bg >> shift & 0xff) as f32 * (1. - alpha))
-                .round()) as u32
-        };
-        mix(24) << 24 | mix(16) << 16 | mix(8) << 8 | 0xff
-    }
-
-    fn contrast(a: u32, b: u32) -> f32 {
-        let (a, b) = (luminance(a), luminance(b));
-        (a.max(b) + 0.05) / (a.min(b) + 0.05)
-    }
+    use super::{AppTheme, Colors};
 
     #[test]
-    fn role_panel_colors_keep_light_values_and_readable_dark_surfaces() {
-        let light = RolePanelColors::for_dark(false);
-        assert_eq!(light.card, 0xfbfcfdff);
-        assert_eq!(light.sub_card, 0xffffffff);
-        assert_eq!(light.line, 0x424b581a);
-        assert_eq!(light.line_strong, 0x424b5829);
-        assert_eq!(light.text, 0x303744ff);
-        assert_eq!(light.muted, 0x7e8794ff);
-        assert_eq!(light.control, 0xffffffff);
-        assert_eq!(light.role_input, 0xfbfcfdff);
-        assert_eq!(light.input_text, 0x2f3547ff);
-        assert_eq!(light.input_placeholder, 0x747474ff);
-        assert_eq!(light.accent, 0x347fd6ff);
-        assert_eq!(light.pill_selected_bg, 0xe4efffff);
-        assert_eq!(light.pill_selected_text, 0x2679d8ff);
-        assert_eq!(light.primary, 0x347fd6ff);
-        assert_eq!(light.error, 0xb34d47ff);
-        assert_eq!(light.success, 0x16794bff);
-        assert_eq!(light.success_bg, 0x22965a1f);
-
-        let dark = RolePanelColors::for_dark(true);
-        // Neither the main card nor the agent sub-card may stay white.
-        assert_eq!(dark.card, 0x25282dc7);
-        assert_eq!(dark.sub_card, 0x23262be0);
-        assert_ne!(dark.card, 0xffffffff);
-        assert_ne!(dark.sub_card, 0xffffffff);
-        assert_ne!(dark.control, 0xffffffff);
-        assert_ne!(dark.role_input, 0xffffffff);
-        assert_eq!(dark.control, 0xffffff0b);
-        assert_eq!(dark.role_input, 0xffffff0b);
-        assert_eq!(dark.line, 0xffffff16);
-        assert_eq!(dark.line_strong, 0xffffff26);
-        assert_eq!(dark.text, 0xe1e5ebff);
-        assert_eq!(dark.muted, 0x8d96a2ff);
-        assert_eq!(dark.accent, 0x67a6efff);
-        assert_eq!(dark.pill_selected_bg, 0x4a91e224);
-        assert_eq!(dark.pill_selected_text, 0x67a6efff);
-        assert_eq!(dark.input_text, 0xe1e5ebff);
-        assert_eq!(dark.input_placeholder, 0x8d96a2ff);
-        assert_eq!(dark.primary, 0x2f79dfff);
-        assert_eq!(dark.error, 0xff9b94ff);
-        assert_eq!(dark.success, 0x57ab5aff);
-
-        let canvas = AppTheme::Dark.palette().workspace.canvas;
-        let card = over(dark.card, canvas);
-        let sub_card = over(dark.sub_card, card);
-        let control = over(dark.control, sub_card);
-        let pill = over(dark.pill_selected_bg, sub_card);
-        assert_ne!(card, 0xffffffff);
-        assert_ne!(sub_card, 0xffffffff);
-        assert_ne!(control, 0xffffffff);
-        assert!(contrast(dark.text, card) >= 4.5);
-        assert!(contrast(dark.text, sub_card) >= 4.5);
-        assert!(contrast(dark.input_text, control) >= 4.5);
-        assert!(contrast(dark.input_placeholder, control) >= 4.0);
-        assert!(contrast(dark.pill_selected_text, pill) >= 4.0);
-        assert!(contrast(dark.success, control) >= 4.0);
-        assert!(contrast(dark.error, card) >= 4.5);
+    fn dark_dispatch_surfaces_are_opaque_and_themed() {
+        let light = Colors::new(AppTheme::Light);
+        let dark = Colors::new(AppTheme::Dark);
+        assert_eq!(light.card, 0xffffffff);
+        assert_eq!(light.popup, 0xffffffff);
+        for surface in [dark.card, dark.control, dark.popup] {
+            assert_eq!(surface & 0xff, 0xff);
+            assert_ne!(surface, 0xffffffff);
+        }
     }
 }

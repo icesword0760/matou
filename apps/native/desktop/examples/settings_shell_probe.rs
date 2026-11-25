@@ -219,7 +219,8 @@ mod workspace {
 #[cfg(all(target_os = "macos", debug_assertions))]
 mod probe {
     use gpui::*;
-    use matou_native_core::dispatch_config::DispatchConfig;
+    use matou_native_core::dispatch_model_catalog::{CATALOG_FILENAME, DispatchModelCatalog};
+    use matou_native_core::dispatch_roles::DispatchRolesStore;
     use matou_native_core::provider_config::{ProviderConfigLocale, ProviderConfigStore};
     use matou_native_core::sessions::{InterfaceLocale, LocalePreference, read_locale_preference};
     use matou_native_desktop::theme_tokens::{
@@ -566,6 +567,72 @@ mod probe {
         }
     }
 
+    fn scroll_hidden_view(
+        window: WindowHandle<Workspace>,
+        position: Point<Pixels>,
+        cx: &mut AsyncApp,
+    ) {
+        use cocoa::{
+            appkit::NSEvent,
+            base::{id, nil},
+        };
+        use core_foundation::base::CFRelease;
+        use core_graphics::{
+            display::CGDisplay,
+            event::{CGScrollEventUnit, ScrollEventUnit},
+            geometry::CGPoint,
+        };
+        use objc::{msg_send, sel, sel_impl};
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        use std::ffi::c_void;
+
+        unsafe extern "C" {
+            fn CGEventCreateScrollWheelEvent2(
+                source: *const c_void,
+                units: CGScrollEventUnit,
+                wheel_count: u32,
+                wheel1: i32,
+                wheel2: i32,
+                wheel3: i32,
+            ) -> *mut c_void;
+            fn CGEventSetLocation(event: *mut c_void, location: CGPoint);
+        }
+
+        let (view, height) = window
+            .update(cx, |_, window, _| {
+                let RawWindowHandle::AppKit(handle) =
+                    HasWindowHandle::window_handle(window).unwrap().as_raw()
+                else {
+                    unreachable!("hidden macOS window")
+                };
+                (handle.ns_view.as_ptr() as id, window.viewport_size().height)
+            })
+            .unwrap();
+        // Deliver the wheel event straight to the probe view, without posting
+        // anything to the desktop event queue.
+        unsafe {
+            let event = CGEventCreateScrollWheelEvent2(
+                std::ptr::null(),
+                ScrollEventUnit::PIXEL,
+                1,
+                -292,
+                0,
+                0,
+            );
+            assert!(!event.is_null());
+            CGEventSetLocation(
+                event,
+                CGPoint::new(
+                    f64::from(position.x),
+                    CGDisplay::main().bounds().size.height - f64::from(height - position.y),
+                ),
+            );
+            let native = NSEvent::eventWithCGEvent_(nil, event);
+            CFRelease(event);
+            let _: () = msg_send![view, scrollWheel: native];
+        }
+    }
+
     fn open_window(
         visible_state: Option<&str>,
         cx: &mut App,
@@ -650,9 +717,26 @@ mod probe {
         root
     }
 
+    fn seed_dispatch_catalog(root: &std::path::Path) {
+        // Keep the GUI probe offline while exercising the real cache reader.
+        let mut catalog = serde_json::to_value(DispatchModelCatalog::default()).unwrap();
+        catalog["refreshedAt"] = serde_json::json!(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        );
+        std::fs::write(
+            root.join(CATALOG_FILENAME),
+            serde_json::to_vec(&catalog).unwrap(),
+        )
+        .unwrap();
+    }
+
     fn verify_dispatch_window(cx: &mut AsyncApp) {
         let root = probe_root("dispatch");
-        let config = DispatchConfig::for_home(&root);
+        let config = DispatchRolesStore::for_data_root(&root);
+        seed_dispatch_catalog(&root);
         // A directory at the file path gives a deterministic read failure.
         std::fs::create_dir_all(config.path()).unwrap();
         let (window, _sink) = cx.update(|cx| open_window(None, cx)).unwrap();
@@ -660,7 +744,7 @@ mod probe {
             .update(cx, |view, window, cx| view.open_settings(window, cx))
             .unwrap();
         update_shell(window, cx, |shell, _, _| {
-            shell.probe_dispatch_config(DispatchConfig::for_home(&root));
+            shell.configure_data_root(Some(root.clone()));
         });
         let select_dispatch = |cx: &mut AsyncApp| {
             draw(window, cx);
@@ -691,6 +775,15 @@ mod probe {
             });
         };
         focus_number(0, cx);
+        draw(window, cx);
+        press(window, "tab", cx);
+        update_shell(window, cx, |shell, window, cx| {
+            assert!(shell.probe_dispatch_number_focused(1, window, cx));
+        });
+        press(window, "shift-tab", cx);
+        update_shell(window, cx, |shell, window, cx| {
+            assert!(shell.probe_dispatch_number_focused(0, window, cx));
+        });
         let edit_number = |cx: &mut AsyncApp, digits: &[&str]| {
             draw(window, cx);
             press(window, "cmd-a", cx);
@@ -704,7 +797,11 @@ mod probe {
                 shell.probe_dispatch_focus(None, window, cx)
             });
             draw(window, cx);
-            press(window, "enter", cx);
+            AnyWindowHandle::from(window)
+                .update(cx, |_, window, cx| {
+                    window.dispatch_keystroke(Keystroke::parse("enter").unwrap(), cx);
+                })
+                .unwrap();
             draw(window, cx);
         };
         edit_number(cx, &["0"]);
@@ -721,7 +818,7 @@ mod probe {
         std::fs::remove_dir(config.path()).unwrap();
         press(window, "enter", cx);
         draw(window, cx);
-        assert_eq!(config.snapshot().unwrap().defaults.idle_min, 13.);
+        assert_eq!(config.snapshot().unwrap().config.idle_min, 13.);
 
         update_shell(window, cx, |shell, window, _| {
             shell.probe_settings_nav_focus(SettingsPage::Language, window);
@@ -733,14 +830,81 @@ mod probe {
         focus_number(1, cx);
         edit_number(cx, &["4", "9"]);
         save(cx);
-        let saved = config.snapshot().unwrap().defaults;
+        let saved = config.snapshot().unwrap().config;
         assert_eq!((saved.idle_min, saved.max_min), (13., 49.));
+        update_shell(window, cx, |shell, window, cx| {
+            shell.probe_dispatch_model_focus(2, window, cx)
+        });
+        draw(window, cx);
+        press(window, "enter", cx);
+        draw(window, cx);
+        press(window, "escape", cx);
+        draw(window, cx);
+        press(window, "enter", cx);
+        draw(window, cx);
+        for key in ["o", "s", "s"] {
+            press(window, key, cx);
+        }
+        draw(window, cx);
+        press(window, "enter", cx);
+        draw(window, cx);
+        save(cx);
+        let saved = config.snapshot().unwrap().config;
+        assert_eq!(saved.agents[2].model, "gpt-oss-120b-medium");
+        assert_eq!(saved.agents[2].effort, "medium");
         window
             .update(cx, |_, window, _| window.remove_window())
             .unwrap();
         std::fs::remove_dir_all(root).unwrap();
         println!(
-            "Hidden GPUI dispatch: open, retry read and write failures, invalid number blocked, save, switch pages and re-read"
+            "Hidden GPUI dispatch: open, retry read and write failures, Tab focus, invalid number blocked, save, switch pages, model search with effort linkage and re-read"
+        );
+    }
+
+    fn verify_narrow_dispatch_scroll(cx: &mut AsyncApp) {
+        let root = probe_root("dispatch-narrow");
+        seed_dispatch_catalog(&root);
+        let (window, _sink) = cx.update(|cx| open_window_at(None, 720., cx)).unwrap();
+        window
+            .update(cx, |view, window, cx| view.open_settings(window, cx))
+            .unwrap();
+        update_shell(window, cx, |shell, window, cx| {
+            shell.configure_data_root(Some(root.clone()));
+            shell.select_dispatch_for_probe(window, cx);
+        });
+        draw(window, cx);
+        draw(window, cx);
+        let bounds = window
+            .update(cx, |view, _, cx| {
+                view.settings_entity()
+                    .unwrap()
+                    .read(cx)
+                    .probe_dispatch_agent_scroll(cx)
+                    .0
+            })
+            .unwrap();
+        assert!(
+            bounds.size.height > px(200.),
+            "narrow agent scroll viewport is {bounds:?}"
+        );
+        scroll_hidden_view(
+            window,
+            point(bounds.left() + px(32.), bounds.top() + px(50.)),
+            cx,
+        );
+        draw(window, cx);
+        check_shell(window, cx, |shell, cx| {
+            assert!(
+                shell.probe_dispatch_agent_scroll(cx).1 < px(0.),
+                "narrow cards did not scroll"
+            );
+        });
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        println!(
+            "Hidden GPUI dispatch 720pt: agent cards scroll beneath the policy above the saved actions"
         );
     }
 
@@ -2803,14 +2967,53 @@ mod probe {
         let state = match args.as_slice() {
             [] => None,
             [flag, state]
-                if flag == "--visible-state" && matches!(state.as_str(), "loading" | "empty") =>
+                if flag == "--visible-state"
+                    && matches!(
+                        state.as_str(),
+                        "loading"
+                            | "empty"
+                            | "dispatch-light"
+                            | "dispatch-dark"
+                            | "dispatch-narrow"
+                    ) =>
             {
                 Some(state.clone())
             }
-            _ => panic!("usage: settings_shell_probe [--visible-state loading|empty]"),
+            _ => panic!(
+                "usage: settings_shell_probe [--visible-state loading|empty|dispatch-light|dispatch-dark|dispatch-narrow]"
+            ),
         };
         Application::new().with_assets(NativeAssets).run(move |cx| {
-            if let Some(state) = state.as_deref() {
+            if let Some(state @ ("dispatch-light" | "dispatch-dark" | "dispatch-narrow")) =
+                state.as_deref()
+            {
+                let root = std::env::temp_dir()
+                    .join(format!("settings-dispatch-{}", uuid::Uuid::new_v4()));
+                std::fs::create_dir_all(&root).unwrap();
+                seed_dispatch_catalog(&root);
+                let theme = if state == "dispatch-light" {
+                    ThemePreference::Light
+                } else {
+                    ThemePreference::Dark
+                };
+                write_theme_preference(&root, theme).unwrap();
+                let width = if state == "dispatch-narrow" {
+                    720.
+                } else {
+                    1340.
+                };
+                let (window, _sink) = open_window_at(Some(state), width, cx);
+                window
+                    .update(cx, |view, window, cx| {
+                        view.load_theme_fixture(root, window);
+                        view.open_settings(window, cx);
+                        view.settings_entity()
+                            .unwrap()
+                            .update(cx, |shell, cx| shell.select_dispatch_for_probe(window, cx));
+                    })
+                    .unwrap();
+                cx.activate(true);
+            } else if let Some(state) = state.as_deref() {
                 let (window, sink) = open_window(Some(state), cx);
                 window
                     .update(cx, |view, window, cx| view.open_settings(window, cx))
@@ -2839,6 +3042,7 @@ mod probe {
                 verify_commands();
                 cx.spawn(async |cx| {
                     verify_dispatch_window(cx);
+                    verify_narrow_dispatch_scroll(cx);
                     verify_theme_window(cx);
                     verify_provider_editors(cx);
                     verify_subscription_window(cx);

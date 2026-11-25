@@ -372,11 +372,20 @@ When the user asks to delegate or hand off work to another coding agent (e.g. �
 2. Dispatch and supervise tasks with `mt-foreman` (`start`, `watch`, `answer`, `note`, `send`, `status`, `stop`) instead of raw `codex exec` or ad-hoc relay subagents.
 3. Do not dispatch recursively if this session is already a foreman worker (`MATOU_FOREMAN_DEPTH` is set).";
 
-pub(crate) fn compose_managed_instructions(base: &str, foreman_available: bool) -> String {
+pub(crate) fn compose_managed_instructions(
+    base: &str,
+    foreman_available: bool,
+    roles_markdown: Option<&str>,
+) -> String {
     if !foreman_available {
         return base.to_owned();
     }
-    format!("{}\n\n{}", base.trim_end(), FOREMAN_CAPABILITY_INDEX)
+    let mut instructions = format!("{}\n\n{}", base.trim_end(), FOREMAN_CAPABILITY_INDEX);
+    if let Some(roles) = roles_markdown {
+        instructions.push_str("\n\n");
+        instructions.push_str(roles);
+    }
+    instructions
 }
 
 pub(crate) struct Registration {
@@ -394,6 +403,7 @@ impl Registration {
         dump: &str,
         run_id: &str,
         foreman_available: bool,
+        roles_markdown: Option<&str>,
     ) -> Result<PathBuf> {
         let assets = tempfile::Builder::new()
             .prefix("dsh-")
@@ -419,6 +429,7 @@ impl Registration {
         let system_message = compose_managed_instructions(
             include_str!("../../../runtime/control-assets/providers/dsh-system-message.md"),
             foreman_available,
+            roles_markdown,
         );
         write_private(
             &assets.path().join("dsh-system-message.md"),
@@ -438,18 +449,21 @@ impl Registration {
         Ok(path)
     }
 
-    pub fn attach_antigravity_instructions(&mut self, foreman_available: bool) -> Result<PathBuf> {
-        let assets = tempfile::Builder::new()
-            .prefix("antigravity-")
-            .tempdir_in(
-                self.settings_path
-                    .parent()
-                    .context("Antigravity hook directory")?,
-            )?;
+    pub fn attach_antigravity_instructions(
+        &mut self,
+        foreman_available: bool,
+        roles_markdown: Option<&str>,
+    ) -> Result<PathBuf> {
+        let assets = tempfile::Builder::new().prefix("antigravity-").tempdir_in(
+            self.settings_path
+                .parent()
+                .context("Antigravity hook directory")?,
+        )?;
         let path = assets.path().join("antigravity-system-message.md");
         let system_message = compose_managed_instructions(
             include_str!("../../../runtime/control-assets/providers/antigravity-system-message.md"),
             foreman_available,
+            roles_markdown,
         );
         write_private(&path, system_message.as_bytes(), 0o600)?;
         self.provider_assets = Some(assets);
@@ -476,12 +490,18 @@ impl Registration {
         env
     }
 
-    pub fn attach_codex(&self, launch: &mut ShellLaunch, foreman_available: bool) -> Result<()> {
+    pub fn attach_codex(
+        &self,
+        launch: &mut ShellLaunch,
+        foreman_available: bool,
+        roles_markdown: Option<&str>,
+    ) -> Result<()> {
         let instructions = compose_managed_instructions(
             include_str!(
                 "../../../runtime/control-assets/providers/codex-developer-instructions.md"
             ),
             foreman_available,
+            roles_markdown,
         );
         let command = json!(callback_command(&self.url, &self.script_path)?);
         let status = if launch
@@ -1462,11 +1482,46 @@ mod tests {
         }
 
         let base = "Base host instructions.\n";
-        assert_eq!(compose_managed_instructions(base, false), base);
-        let composed = compose_managed_instructions(base, true);
+        assert_eq!(
+            compose_managed_instructions(base, false, Some("roles")),
+            base
+        );
+        let composed = compose_managed_instructions(base, true, Some("roles"));
         assert!(composed.starts_with("Base host instructions.\n\n"));
         assert!(composed.contains("mt-foreman guide"));
         assert!(composed.contains("MATOU_FOREMAN_DEPTH"));
+        assert!(composed.ends_with("\n\nroles"));
+        Ok(())
+    }
+
+    #[test]
+    fn managed_system_messages_append_the_same_roles_snapshot() -> Result<()> {
+        use matou_native_core::dispatch_roles::{DispatchRolesConfig, format_roles_markdown};
+
+        let root = tempfile::tempdir()?;
+        let server = ProviderHookServer::start()?;
+        let mut agy_scope = scope("agy");
+        agy_scope.profile = LaunchProfile::Antigravity;
+        let mut agy = server.register(root.path(), agy_scope)?;
+        let mut dsh_scope = scope("dsh");
+        dsh_scope.profile = LaunchProfile::Dsh;
+        let mut dsh = server.register(root.path(), dsh_scope)?;
+        let mut config = DispatchRolesConfig::default();
+        config.agents[2].role = "离线共用职责夹具".into();
+        let expected = format_roles_markdown(&config);
+        let agy_file = agy.attach_antigravity_instructions(true, Some(&expected))?;
+        let dsh_patch = dsh.attach_dsh(
+            "- id: dsh-tui\n  config:\n    model: offline\n",
+            "dsh",
+            true,
+            Some(&expected),
+        )?;
+        let directory = dsh_patch.parent().unwrap();
+        for path in [agy_file, directory.join("dsh-system-message.md")] {
+            let message = fs::read_to_string(path)?;
+            assert!(message.contains(FOREMAN_CAPABILITY_INDEX));
+            assert!(message.ends_with(&expected));
+        }
         Ok(())
     }
 

@@ -6,6 +6,7 @@ printf '%s\n' "$CODEX_HOME" "${TERM:-}" "${OPENAI_BASE_URL:-}" > "$CODEX_HOME/en
 if [ "${CODEX_FIXTURE_RESUME:-}" = 1 ]; then
     printf '%s\n' "${OPENAI_API_KEY:-}" >> "$CODEX_HOME/environment"
 fi
+printf '%s\n' "${MATOU_FOREMAN_ROLES_FILE:-}" "${MATOU_CONTROL_NODE_EXECUTABLE:-}" > "$CODEX_HOME/dispatch-environment"
 test -z "${MATOU_PROVIDER_HOOK_TOKEN:-}${CLAUDECODE:-}"
 test -d "${MATOU_AGENT_STATUS_DIR:?}"
 case "$MATOU_AGENT_STATUS_DIR" in
