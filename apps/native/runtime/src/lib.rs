@@ -36,6 +36,7 @@ pub mod mt_cli;
 pub mod owner;
 pub mod protocol;
 mod provider_catalog;
+pub use provider_catalog::{HistoryText, HistoryTextSource, history_text};
 mod provider_hook;
 mod provider_resume;
 pub mod retention_policy;

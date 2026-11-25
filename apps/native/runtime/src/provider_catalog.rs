@@ -52,6 +52,8 @@ pub(crate) struct PreviewEvent {
     text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_name: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    is_compact_summary: bool,
     matched: bool,
 }
 
@@ -519,6 +521,7 @@ fn preview_page(
         total += 1;
         event.index = total;
         event.timestamp = row.get("timestamp").cloned();
+        event.is_compact_summary = row["isCompactSummary"] == true;
         if let Some(start) = start {
             if total < start {
                 last_before_start = Some(event);
@@ -563,6 +566,7 @@ fn preview_page(
             timestamp: Some(time),
             text: "compact_boundary".into(),
             tool_name: None,
+            is_compact_summary: false,
             matched: false,
         });
     }
@@ -642,6 +646,7 @@ fn preview_event(message: &Value) -> Option<PreviewEvent> {
             trimmed.into()
         },
         tool_name: tool_name.filter(|name| !name.is_empty()).map(str::to_owned),
+        is_compact_summary: false,
         matched: false,
     })
 }
@@ -1139,11 +1144,135 @@ const SYNTHETIC_TAGS: &[&str] = &[
     "agent-message",
 ];
 
+pub enum HistoryText<'a> {
+    Plain(Cow<'a, str>),
+    Command { line: String, output: String },
+    CommandOutput(String),
+}
+
+pub enum HistoryTextSource {
+    Assistant,
+    User,
+    Envelope,
+}
+
+static HISTORY_ANSI: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(concat!(
+        r"(?:\x1b\[|\x{9b})[0-?]*[ -/]*[@-~]",
+        r"|(?:\x1b\]|\x{9d})[^\x07\x1b\x{9c}]*(?:\x07|\x1b\\|\x{9c}|\z)",
+        r"|(?:\x1b[PX^_]|[\x{90}\x{98}\x{9e}\x{9f}])[^\x1b\x{9c}]*(?:\x1b\\|\x{9c}|\z)",
+        r"|\x1b[ -/]*[0-~]|\x1b",
+    ))
+    .unwrap()
+});
+
+static HISTORY_WRAPPERS: LazyLock<Regex> = LazyLock::new(|| {
+    let patterns: Vec<_> = SYNTHETIC_TAGS
+        .iter()
+        .chain(&["command-name", "command-args", "command-message"])
+        .map(|tag| {
+            format!(
+                r"<{tag}(?:\s+[^>]*)?>(?:.*?</{tag}\s*>|.*\z)|</{tag}\s*>|</?{tag}(?:\s+[^>]*)?\z"
+            )
+        })
+        .collect();
+    Regex::new(&format!("(?is){}", patterns.join("|"))).unwrap()
+});
+
+/// Interpret transcript envelopes for the in-card history view.
+pub fn history_text(text: &str, source: HistoryTextSource) -> HistoryText<'_> {
+    let text = HISTORY_ANSI.replace_all(text, "");
+    let is_user = match source {
+        HistoryTextSource::Assistant => return HistoryText::Plain(text),
+        HistoryTextSource::User => true,
+        HistoryTextSource::Envelope => false,
+    };
+    if is_user
+        && starts_with_any(
+            strip_image_markers(trim_preview(&text)),
+            SYNTHETIC_USER_PREFIXES,
+        )
+    {
+        return HistoryText::Plain(Cow::Borrowed(""));
+    }
+    let text = if text.contains("tool_use_error>") {
+        Cow::Owned(
+            text.replace("<tool_use_error>", "")
+                .replace("</tool_use_error>", ""),
+        )
+    } else {
+        text
+    };
+    // The provider journals the injected notification preamble separately from
+    // the conversation, including when the task payload is an inner envelope.
+    if text
+        .trim_start()
+        .starts_with("[SYSTEM NOTIFICATION - NOT USER INPUT]")
+    {
+        return HistoryText::Plain(Cow::Borrowed(""));
+    }
+    if !text.contains('<') {
+        return HistoryText::Plain(text);
+    }
+    let mut command = String::new();
+    let mut args = String::new();
+    let mut output = String::new();
+    let plain = HISTORY_WRAPPERS.replace_all(&text, |capture: &regex::Captures<'_>| {
+        if let Some((tag, rest)) = capture[0].split_once('>')
+            && let Some(name) = tag
+                .strip_prefix('<')
+                .and_then(|tag| tag.split_whitespace().next())
+            && let Some((body, closing)) = rest.rsplit_once("</")
+            && closing
+                .trim_end_matches('>')
+                .trim()
+                .eq_ignore_ascii_case(name)
+        {
+            match name.to_ascii_lowercase().as_str() {
+                "command-name" if command.is_empty() => command.push_str(body.trim()),
+                "command-args" if args.is_empty() => args.push_str(body.trim()),
+                "local-command-stdout" if !body.trim().is_empty() => {
+                    if !output.is_empty() {
+                        output.push('\n');
+                    }
+                    output.push_str(body.trim());
+                }
+                _ => {}
+            }
+        }
+        ""
+    });
+    if matches!(plain, Cow::Borrowed(_)) {
+        return HistoryText::Plain(text);
+    }
+    let plain = trim_preview(&plain);
+    if is_user && starts_with_any(strip_image_markers(plain), SYNTHETIC_USER_PREFIXES) {
+        return HistoryText::Plain(Cow::Borrowed(""));
+    }
+    if !plain.is_empty() {
+        return HistoryText::Plain(Cow::Owned(plain.into()));
+    }
+    if !command.is_empty() {
+        if !args.is_empty() {
+            command.push(' ');
+            command.push_str(&args);
+        }
+        return HistoryText::Command {
+            line: command,
+            output,
+        };
+    }
+    if !output.is_empty() {
+        return HistoryText::CommandOutput(output);
+    }
+    HistoryText::Plain(Cow::Borrowed(""))
+}
+
 const SYNTHETIC_USER_PREFIXES: &[&str] = &[
     "Base directory for this skill:",
     "Launching skill:",
     "Stop hook feedback:",
-    "A session-scoped Stop hook is now active",
+    "A session-scoped Stop hook",
     "Goal check-in:",
     "[Request interrupted by user]",
     "[Image: source:",
@@ -1866,7 +1995,8 @@ mod tests {
             &[
                 transcript(cwd, json!("older")),
                 json!({"type": "system", "subtype": "compact_boundary", "timestamp": 1000}),
-                transcript(cwd, json!("recent")),
+                json!({"cwd": cwd, "isCompactSummary": true,
+                    "message": {"role": "user", "content": "Summary text"}}),
             ],
         )?;
         let read = |start| {
@@ -1881,7 +2011,13 @@ mod tests {
         let latest = read(None).map_err(anyhow::Error::msg)?;
         assert_eq!(latest.page.start_event_index, 2);
         assert_eq!(latest.page.total, 2);
+        assert_eq!(latest.events[0].text, "Summary text");
+        assert_eq!(
+            serde_json::to_value(&latest.events[0])?["isCompactSummary"],
+            true
+        );
         assert_eq!(latest.events[1].text, "compact_boundary");
+        assert!(!latest.events[1].is_compact_summary);
         assert_eq!(latest.events[1].timestamp, Some(json!(1000)));
         let earlier = read(Some(1)).map_err(anyhow::Error::msg)?;
         assert_eq!(earlier.events.len(), 1);

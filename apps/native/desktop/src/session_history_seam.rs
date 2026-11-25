@@ -12,6 +12,7 @@ use gpui::{
     WeakEntity, Window, div, prelude::*, px,
 };
 use matou_native_core::{pty::LaunchProfile, sessions::InterfaceLocale};
+use matou_native_runtime::{HistoryText, HistoryTextSource, history_text};
 use matou_native_terminal::{Color, Screen, Theme};
 use serde_json::Value;
 
@@ -429,6 +430,7 @@ struct Message {
     text: SharedString,
     longer: bool,
     tool_preview: Option<SharedString>,
+    command_output: Option<SharedString>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -438,6 +440,9 @@ enum MessageKind {
     Tool,
     Result,
     System,
+    Command,
+    CommandOutput,
+    CompactSummary,
 }
 
 impl Message {
@@ -446,14 +451,40 @@ impl Message {
             return None;
         }
         let tool_name = value["toolName"].as_str();
-        let kind = match value["kind"].as_str()? {
+        let mut kind = match value["kind"].as_str()? {
             "user" => MessageKind::User,
             "assistant" => MessageKind::Assistant,
             "tool" if tool_name == Some("tool_result") => MessageKind::Result,
             "tool" => MessageKind::Tool,
             _ => MessageKind::System,
         };
-        let text = value["text"].as_str()?;
+        let is_summary = value["isCompactSummary"] == true;
+        let source = match (kind, is_summary) {
+            (MessageKind::Assistant, false) => HistoryTextSource::Assistant,
+            (MessageKind::User, false) => HistoryTextSource::User,
+            _ => HistoryTextSource::Envelope,
+        };
+        let cleaned = history_text(value["text"].as_str()?, source);
+        let (text, command_output) = match &cleaned {
+            HistoryText::Plain(text) => (text.as_ref(), None),
+            HistoryText::Command { line, output } => {
+                kind = MessageKind::Command;
+                (
+                    line.as_str(),
+                    (!output.is_empty()).then_some(output.as_str()),
+                )
+            }
+            HistoryText::CommandOutput(output) => {
+                kind = MessageKind::CommandOutput;
+                (output.as_str(), None)
+            }
+        };
+        if text.trim().is_empty() {
+            return None;
+        }
+        if is_summary {
+            kind = MessageKind::CompactSummary;
+        }
         let (cap, longer) = truncate(text, EXPANDED_CHARS);
         Some(Self {
             index: value["index"].as_i64()?,
@@ -461,6 +492,8 @@ impl Message {
             timestamp: timestamp(value),
             text: cap.to_owned().into(),
             longer,
+            command_output: command_output
+                .map(|output| truncate(output, EXPANDED_CHARS + 1).0.to_owned().into()),
             tool_preview: match kind {
                 MessageKind::Tool => tool_name
                     .filter(|name| !name.trim().is_empty())
@@ -469,6 +502,16 @@ impl Message {
                 _ => None,
             },
         })
+    }
+
+    fn body(&self, expanded: bool) -> Option<(&str, bool)> {
+        if expanded {
+            Some((self.text.as_ref(), self.longer))
+        } else if self.kind == MessageKind::CompactSummary {
+            None
+        } else {
+            Some(truncate(&self.text, COLLAPSED_CHARS))
+        }
     }
 }
 
@@ -628,7 +671,7 @@ fn group(messages: impl IntoIterator<Item = Message>) -> Vec<Row> {
 }
 
 /// Match against the same bounded text range that the history view can show.
-fn anchor(screen: &Screen, input_rows: usize, rows: &[Value]) -> Option<(i64, usize)> {
+fn anchor(screen: &Screen, input_rows: usize, messages: &[Message]) -> Option<(i64, usize)> {
     let visible: Vec<_> = screen_lines(screen, screen.rows.saturating_sub(input_rows)).collect();
     // At the top of Claude's conversation, its startup decoration may occupy
     // several viewport rows before the first transcript line.
@@ -651,17 +694,19 @@ fn anchor(screen: &Screen, input_rows: usize, rows: &[Value]) -> Option<(i64, us
         return None;
     }
     let mut found: Option<(usize, i64, &str, usize)> = None;
-    for row in rows.iter().rev().filter(|row| !is_compaction(row)) {
-        let (Some(index), Some(text)) = (row["index"].as_i64(), row["text"].as_str()) else {
-            continue;
-        };
-        let searchable = normalized(truncate(text, EXPANDED_CHARS).0);
+    for message in messages
+        .iter()
+        .rev()
+        .filter(|message| message.kind != MessageKind::CompactSummary)
+    {
+        let text = message.text.as_ref();
+        let searchable = normalized(text);
         for (priority, needle) in needles.iter().enumerate() {
             if found.is_some_and(|(previous, ..)| previous <= priority) {
                 break;
             }
             if let Some(offset) = searchable.find(needle.as_str()) {
-                found = Some((priority, index, text, offset));
+                found = Some((priority, message.index, text, offset));
                 break;
             }
         }
@@ -796,30 +841,29 @@ impl HistoryView {
                         .find(|event| is_compaction(event))
                         .and_then(timestamp);
                 }
+                let messages: Vec<_> = events.iter().filter_map(Message::parse).collect();
                 let matched = self
                     .snapshot
                     .as_ref()
-                    .and_then(|screen| anchor(screen, input_rows(profile, screen), events));
-                let mut messages = events.iter().filter_map(|value| {
-                    let mut message = Message::parse(value)?;
+                    .and_then(|screen| anchor(screen, input_rows(profile, screen), &messages));
+                let messages = messages.into_iter().filter_map(|mut message| {
                     if let Some((index, offset)) = matched {
                         if message.index > index || (message.index == index && offset == 0) {
                             return None;
                         }
                         if message.index == index {
-                            let text = value["text"].as_str()?;
-                            let (prefix, longer) =
-                                truncate(text[..offset].trim_end(), EXPANDED_CHARS);
+                            let prefix = message.text[..offset].trim_end();
                             if prefix.is_empty() {
                                 return None;
                             }
                             message.text = prefix.to_owned().into();
-                            message.longer = longer;
+                            message.longer = false;
+                            message.command_output = None;
                         }
                     }
                     Some(message)
                 });
-                self.rows = group(&mut messages);
+                self.rows = group(messages);
                 self.first_index = first;
                 self.has_earlier = page["hasEarlier"] == true;
                 self.ready = true;
@@ -889,6 +933,9 @@ impl HistoryView {
                             .as_i64()
                             .is_some_and(|index| index > self.latest_index)
                             && matches!(event["kind"].as_str(), Some("user" | "assistant"))
+                            && Message::parse(event).is_some_and(|message| {
+                                matches!(message.kind, MessageKind::User | MessageKind::Assistant)
+                            })
                     })
                     .count();
                 self.latest_index = self.latest_index.max(last);
@@ -1033,25 +1080,73 @@ impl HistoryView {
             ..
         } = style;
         let open = self.full_text.contains(&message.index);
-        let (text, clipped) = if open {
-            (message.text.as_ref(), message.longer)
-        } else {
-            truncate(&message.text, COLLAPSED_CHARS)
-        };
+        let summary = message.kind == MessageKind::CompactSummary;
+        let content = message.body(open);
+        let output = message.command_output.as_ref().map(|output| {
+            truncate(
+                output,
+                if open {
+                    EXPANDED_CHARS
+                } else {
+                    COLLAPSED_CHARS
+                },
+            )
+        });
+        let clipped = content.is_some_and(|(_, clipped)| clipped)
+            || output.is_some_and(|(_, clipped)| clipped);
         let prefix = match (prefix_visible, message.kind) {
             (true, MessageKind::Assistant) => "⏺ ",
+            (true, MessageKind::Command) => style.user_row.prefix,
             _ => "",
         };
         let user = (prefix_visible && message.kind == MessageKind::User).then_some(style.user_row);
         let body = div()
             .min_w_0()
             .flex_1()
-            .child(div().whitespace_normal().child(if clipped {
-                format!("{text}…")
-            } else {
-                text.to_owned()
-            }))
-            .when(clipped && !open || open, |body| {
+            .overflow_x_hidden()
+            .when(summary, |body| {
+                body.child(
+                    div()
+                        .id(("history-summary", message.index as usize))
+                        .cursor_pointer()
+                        .on_click(click(surface, Action::Text(message.index)))
+                        .text_ellipsis()
+                        .child(match (locale, open) {
+                            (InterfaceLocale::Chinese, false) => "会话已压缩的摘要（显示全部）",
+                            (InterfaceLocale::Chinese, true) => "会话已压缩的摘要（收起）",
+                            (InterfaceLocale::English, false) => "Compaction summary (Show all)",
+                            (InterfaceLocale::English, true) => "Compaction summary (Collapse)",
+                        }),
+                )
+            })
+            .when_some(content, |body, (text, clipped)| {
+                body.child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .whitespace_normal()
+                        .child(if clipped {
+                            format!("{text}…")
+                        } else {
+                            text.to_owned()
+                        }),
+                )
+            })
+            .when_some(output, |body, (text, clipped)| {
+                body.child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .text_color(dim)
+                        .whitespace_normal()
+                        .child(if clipped {
+                            format!("{text}…")
+                        } else {
+                            text.to_owned()
+                        }),
+                )
+            })
+            .when(!summary && (clipped || open), |body| {
                 body.child(
                     div()
                         .id(("history-text", message.index as usize))
@@ -1092,11 +1187,24 @@ impl HistoryView {
                 )
                 .into_any_element();
         }
+        let muted = matches!(
+            message.kind,
+            MessageKind::CommandOutput | MessageKind::CompactSummary
+        );
         div()
-            .when(prefix_visible, |div| div.pb(style.spacing(10.)))
+            .w_full()
+            .min_w_0()
+            .when_some(style.grid_width, |div, width| div.max_w(width))
+            .when(
+                prefix_visible && message.kind != MessageKind::Command,
+                |div| div.pb(style.spacing(10.)),
+            )
+            .when(message.kind == MessageKind::CommandOutput, |div| {
+                div.px(style.cell_width * 2.)
+            })
             .flex()
             .gap(px(4.))
-            .text_color(foreground)
+            .text_color(if muted { dim } else { foreground })
             .when(!prefix.is_empty(), |div| {
                 div.child(div_prefix(prefix).text_color(style.accent))
             })
@@ -1139,11 +1247,16 @@ impl HistoryView {
             },
         )]);
         div()
+            .w_full()
+            .min_w_0()
+            .when_some(style.grid_width, |div, width| div.max_w(width))
             .pb(style.spacing(10.))
             .child(
                 div()
+                    .w_full()
+                    .min_w_0()
                     .relative()
-                    .pl(style.spacing(10.) + px(2.))
+                    .px(style.spacing(10.) + px(2.))
                     .child(
                         div()
                             .absolute()
@@ -1156,6 +1269,8 @@ impl HistoryView {
                     .child(
                         div()
                             .id(("history-tool", index as usize))
+                            .w_full()
+                            .min_w_0()
                             .flex()
                             .items_center()
                             .gap(style.spacing(6.))
@@ -1168,7 +1283,7 @@ impl HistoryView {
                                     .text_size(style.label_font_size)
                                     .child(if expanded { "▾" } else { "▸" }),
                             )
-                            .child(div().min_w_0().text_ellipsis().child(summary)),
+                            .child(div().flex_1().min_w_0().text_ellipsis().child(summary)),
                     )
                     .when(expanded, |div| {
                         let body_style = HistoryStyle {
@@ -1177,6 +1292,7 @@ impl HistoryView {
                         };
                         div.child(
                             gpui::div()
+                                .w_full()
                                 .mt(style.spacing(6.))
                                 .mb(style.spacing(2.))
                                 .min_w_0()
@@ -1557,15 +1673,145 @@ mod tests {
         terminal.feed(
             "Header line one\r\nHeader line two\r\nHeader line three\r\nHeader line four\r\nHeader line five\r\nConversation compacted\r\n❯ 核对入口卷起后的位置\r\n⏺ 保留刚才的画面\r\n".as_bytes(),
         );
-        let matches = anchor(
-            &terminal.screen()?,
-            5,
-            &[
-                json!({"index":29,"kind":"user","text":"核对入口卷起后的位置"}),
-                json!({"index":30,"kind":"assistant","text":"保留刚才的画面"}),
-            ],
-        );
+        let messages: Vec<_> = [
+            json!({"index":29,"kind":"user","text":"核对入口卷起后的位置"}),
+            json!({"index":30,"kind":"assistant","text":"保留刚才的画面"}),
+        ]
+        .iter()
+        .filter_map(Message::parse)
+        .collect();
+        let matches = anchor(&terminal.screen()?, 5, &messages);
         assert_eq!(matches, Some((29, 0)));
         Ok(())
+    }
+
+    #[test]
+    fn strips_terminal_escape_sequences_from_transcript_text() {
+        let message = Message::parse(&json!({
+            "index": 1, "kind": "assistant",
+            "text": "\u{1b}[2m已完成\u{1b}[22m。\u{1b}]8;;https://example.com\u{1b}\\结果\u{1b}]8;;\u{7}",
+        }))
+        .unwrap();
+        assert_eq!(message.text.as_ref(), "已完成。结果");
+        let result = Message::parse(&json!({
+            "index": 2, "kind": "tool", "toolName": "tool_result",
+            "text": "<tool_use_error>Error: could not open file</tool_use_error>",
+        }))
+        .unwrap();
+        assert_eq!(result.kind, MessageKind::Result);
+        assert_eq!(
+            result.tool_preview.as_ref().map(|preview| preview.as_ref()),
+            Some("Error: could not open file")
+        );
+    }
+
+    #[test]
+    fn assistant_history_preserves_literal_tags_and_strips_ansi() {
+        let replies = [
+            "这是 `<command-name>` 的例子。\n\n最后一段也应显示。",
+            "<command-name> 是一个未闭合的语法示例。\n\n最后一段也应显示。",
+            "<system-reminder>示例</system-reminder>\n\n最后一段也应显示。",
+            "围栏内的例子：\n\n```xml\n<system-reminder>示例</system-reminder>\n```\n\n最后一段也应显示。",
+            "<command-name>/example</command-name>\n\n这是字面 `[2m`，最后一段也应显示。",
+        ];
+        for expected in replies {
+            let message = Message::parse(&json!({
+                "index": 42, "kind": "assistant", "text": format!("\x1b[2m{expected}\x1b[22m"),
+            }))
+            .expect("assistant reply must remain visible");
+            assert_eq!(message.body(false), Some((expected, false)));
+            assert_eq!(message.kind, MessageKind::Assistant);
+            assert_eq!(message.index, 42);
+        }
+    }
+
+    #[test]
+    fn displays_slash_command_with_its_arguments() {
+        let message = Message::parse(&json!({
+            "index": 1, "kind": "user",
+            "text": "<command-name>/compact</command-name>\n<command-message>compact</command-message>\n<command-args>keep decisions</command-args>",
+        }))
+        .unwrap();
+        assert_eq!(message.kind, MessageKind::Command);
+        assert_eq!(message.text.as_ref(), "/compact keep decisions");
+    }
+
+    #[test]
+    fn omits_command_caveats_and_hidden_transcript_envelopes() {
+        let wrapped = [
+            "<local-command-caveat>Caveat</local-command-caveat>",
+            "<system-reminder>Reminder</system-reminder>",
+            "<task-notification><summary>Finished</summary></task-notification>",
+            r#"<teammate-message teammate_id="local">Agent activity</teammate-message>"#,
+            "<system-reminder>Reminder with no closing tag",
+            "<task-notification><summary>Truncated notification",
+            r#"<teammate-message teammate_id="local""#,
+            "[SYSTEM NOTIFICATION - NOT USER INPUT]\nAutomated preamble\n<task-notification>Finished</task-notification>",
+        ];
+        for text in wrapped {
+            assert!(Message::parse(&json!({"index": 1, "kind": "user", "text": text})).is_none());
+        }
+        let message = Message::parse(&json!({
+            "index": 2, "kind": "user",
+            "text": "保留这条消息\n<system-reminder>Reminder</system-reminder>",
+        }))
+        .unwrap();
+        assert_eq!(message.kind, MessageKind::User);
+        assert_eq!(message.text.as_ref(), "保留这条消息");
+    }
+
+    #[test]
+    fn synthetic_user_feedback_does_not_become_a_history_row() {
+        let events = [
+            "Stop hook feedback:\n[ok 完成该计划]: Transcript shows a task was still running.",
+            "\u{1b}[2mStop hook feedback:\u{1b}[22m Hidden feedback",
+            "<system-reminder>Internal context</system-reminder>\n[Image #1] Stop hook feedback: hidden",
+            "A session-scoped Stop hook was set",
+            "Base directory for this skill: /example",
+            "Launching skill: example",
+            "Goal check-in: keep working",
+            "[Request interrupted by user]",
+            "[Image: source: /example.png]",
+        ]
+        .map(|text| json!({"index": 1, "kind": "user", "text": text}));
+        assert!(group(events.iter().filter_map(Message::parse)).is_empty());
+
+        let quoted = Message::parse(&json!({
+            "index": 2, "kind": "assistant", "text": "Stop hook feedback: quoted from the log",
+        }))
+        .unwrap();
+        assert_eq!(quoted.kind, MessageKind::Assistant);
+    }
+
+    #[test]
+    fn displays_local_command_stdout_as_output() {
+        let stdout = "<local-command-stdout>\u{1b}[2mCompacted (ctrl+o to see full summary)\u{1b}[22m</local-command-stdout>";
+        let message = Message::parse(&json!({"index": 1, "kind": "user", "text": stdout})).unwrap();
+        assert_eq!(message.kind, MessageKind::CommandOutput);
+        assert_eq!(
+            message.text.as_ref(),
+            "Compacted (ctrl+o to see full summary)"
+        );
+        let combined = Message::parse(&json!({
+            "index": 2, "kind": "user",
+            "text": format!("<command-name>/compact</command-name>{stdout}"),
+        }))
+        .unwrap();
+        assert_eq!(combined.kind, MessageKind::Command);
+        assert_eq!(combined.command_output.as_ref(), Some(&message.text));
+    }
+
+    #[test]
+    fn compaction_summary_hides_its_body_until_expanded() {
+        let message = Message::parse(&json!({
+            "index": 1, "kind": "user", "isCompactSummary": true,
+            "text": "摘要".repeat(EXPANDED_CHARS),
+        }))
+        .unwrap();
+        assert_eq!(message.kind, MessageKind::CompactSummary);
+        assert_eq!(message.body(false), None);
+        let (body, clipped) = message.body(true).unwrap();
+        assert_eq!(body.chars().count(), EXPANDED_CHARS);
+        assert!(clipped);
     }
 }
