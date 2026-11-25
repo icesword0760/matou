@@ -249,9 +249,12 @@ test('Claude SessionStart injects the same dispatch roles as Foreman across life
   assert.match(legacy, /自动派」协作者（Codex）职责范围内的子任务时，跨执行者转派 1 层子任务/)
 
   const builtins = readHook('startup', { ...env, MATOU_FOREMAN_ROLES_FILE: '' })
-  assert.match(builtins, /\*\*Codex\*\*（默认兜底主力/)
-  assert.match(builtins, /\*\*DSH\*\*（按职责自动派/)
-  assert.match(builtins, /\*\*Antigravity（反重力）\*\*（仅点名时派/)
+  const defaultAgentLines = builtins.split('\n').filter(line => /^- \*\*(Codex|DSH|Antigravity（反重力）)\*\*/.test(line))
+  assert.deepEqual(defaultAgentLines, [
+    '- **Codex**（默认兜底主力 | 模型: sol · 推理: 高）：方案定好后的一切落地：细节设计、编码与测试、重构、源码阅读与调研、图片/媒体生成、数据处理与打包；电脑界面操作（含 Blender）自动派 terra 最新版子代理完成。',
+    '- **DSH**（按职责自动派 | 模型: deepseek-flash · 推理: 高）：前端 UI 设计与界面代码实现：页面和组件的视觉设计、布局、样式、交互外观，以及将其落地为前端界面代码。',
+    '- **Antigravity（反重力）**（仅点名时派 | 模型: gemini-pro-orchestrator · 无推理档位）：用户点名时接手落地执行：编码、调研与复杂任务执行（Orchestrator 可自派子代理并行推进；额度耗尽或型号不可用时直接停下汇报，不自动换人；纯提问参谋请走 asking-antigravity）。'
+  ])
   assert.match(builtins, /自动派」协作者（Codex、DSH）职责范围内的子任务时，跨执行者转派 1 层子任务/)
   await rm(rolesPath)
   assert.equal(readHook('resume'), builtins)

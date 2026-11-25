@@ -9,11 +9,11 @@ const DEFAULT_ROLES = {
   defaultAgent: 'codex',
   agents: [
     { id: 'codex', mode: 'auto', model: 'sol', effort: 'high', speed: 'default',
-      role: '方案定好后的编码落地、测试、重构、源码调研、数据处理与打包。' },
+      role: '方案定好后的一切落地：细节设计、编码与测试、重构、源码阅读与调研、图片/媒体生成、数据处理与打包；电脑界面操作（含 Blender）自动派 terra 最新版子代理完成。' },
     { id: 'dsh', mode: 'auto', model: 'deepseek-flash', effort: 'high',
-      role: '前端 UI 设计与界面实现：页面布局、视觉样式、交互外观与组件实现。' },
+      role: '前端 UI 设计与界面代码实现：页面和组件的视觉设计、布局、样式、交互外观，以及将其落地为前端界面代码。' },
     { id: 'agy', mode: 'explicit', model: 'gemini-pro-orchestrator', effort: 'high',
-      role: '深度咨询与方案评审：复杂问题第二意见、跨领域架构对比、长上下文调研。' },
+      role: '用户点名时接手落地执行：编码、调研与复杂任务执行（Orchestrator 可自派子代理并行推进；额度耗尽或型号不可用时直接停下汇报，不自动换人；纯提问参谋请走 asking-antigravity）。' },
   ],
 };
 
