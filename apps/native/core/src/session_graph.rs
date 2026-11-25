@@ -129,6 +129,7 @@ fn node_query(environment: bool, git: bool, fork: bool) -> String {
          sessions.status,
          sessions.work_status,
          sessions.title,
+         sessions.title_source,
          sessions.cwd,
          sessions.created_at AS session_created_at,
          sessions.updated_at AS session_updated_at,
@@ -386,6 +387,11 @@ fn map_node(
     );
     node["canFork"] = json!(can_fork);
     node["title"] = json!(row.get::<_, String>("title")?);
+    insert_optional(
+        &mut node,
+        "titleSource",
+        row.get::<_, Option<String>>("title_source")?,
+    );
     node["cwd"] = json!(cwd);
     insert_optional(&mut node, "environment", map_environment(row)?);
     node["hasOwnedWorktree"] = json!(

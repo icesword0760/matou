@@ -2216,27 +2216,66 @@ pub fn observe_provider_title(
     .map(Some)
 }
 
+pub(crate) fn default_session_title(kind: &str) -> Option<&'static str> {
+    Some(match kind {
+        "shell" => "Shell",
+        "claude-code" => "Claude",
+        "codex" => "Codex",
+        "dsh" => "DSH",
+        "antigravity" => "Antigravity",
+        _ => return None,
+    })
+}
+
+// Kept under its original name for the existing runtime command.
 pub fn restore_codex_title(
     db: &mut Connection,
     command: &CommandMetadata,
     session_id: &str,
     now: i64,
 ) -> Result<Option<DomainCommit>> {
-    let before = require_session(db, session_id)?;
     ensure!(
-        before.kind == "codex" && before.archived_at.is_none(),
-        "automatic title can only be restored for a current Codex card"
+        !db.is_readonly("main")?
+            && !db.pragma_query_value(None, "query_only", |row| row.get::<_, bool>(0))?,
+        "The database is in read-only recovery mode"
     );
-    let Some(title) = before
+    let before = require_session(db, session_id)?;
+    if before.title_source.as_deref() != Some("manual") {
+        return Ok(None);
+    }
+    ensure!(
+        before.archived_at.is_none(),
+        "archived Session cannot be renamed"
+    );
+    if let Some(title) = before
         .provider_title
         .as_deref()
         .map(trim)
-        .filter(|title| !title.is_empty() && before.title_source.as_deref() == Some("manual"))
-    else {
-        return Ok(None);
-    };
+        .filter(|title| !title.is_empty())
+    {
+        return execute(db, command, now, |tx, events| {
+            write_provider_title(tx, command, events, &before, title, false, now)
+        })
+        .map(Some);
+    }
+
+    let title = default_session_title(&before.kind)
+        .context("This session does not have a default title")?;
     execute(db, command, now, |tx, events| {
-        write_provider_title(tx, command, events, &before, title, false, now)
+        tx.execute(
+            "UPDATE sessions SET title = ?, title_source = 'default', updated_at = ?,
+                 version = version + 1 WHERE id = ?",
+            params![title, now, session_id],
+        )?;
+        let session = serde_json::to_value(require_session(tx, session_id)?)?;
+        events.push(session_event(
+            command,
+            "session.updated",
+            &before,
+            now,
+            json!({"session": session}),
+        ));
+        Ok(session)
     })
     .map(Some)
 }
@@ -2445,8 +2484,7 @@ mod tests {
         }
     }
 
-    fn claude_session_db() -> Result<Connection> {
-        let mut db = Connection::open_in_memory()?;
+    fn shell_session_fixture(mut db: Connection) -> Result<Connection> {
         configure_connection(&db)?;
         migrate(&mut db, 1)?;
         bootstrap_window(
@@ -2470,8 +2508,82 @@ mod tests {
             "Task",
             2,
         )?;
+        Ok(db)
+    }
+
+    fn claude_session_db() -> Result<Connection> {
+        let mut db = shell_session_fixture(Connection::open_in_memory()?)?;
         promote_shell_to_claude(&mut db, &command("promote"), "session", 3)?;
         Ok(db)
+    }
+
+    #[test]
+    fn restore_automatic_title_reuses_provider_or_creation_default() -> Result<()> {
+        for (profile, provider_title, expected) in [
+            (LaunchProfile::Shell, None, "Shell"),
+            (LaunchProfile::ClaudeCode, None, "Claude"),
+            (LaunchProfile::Codex, None, "Codex"),
+            (
+                LaunchProfile::Codex,
+                Some("Provider title"),
+                "Provider title",
+            ),
+            (LaunchProfile::Dsh, None, "DSH"),
+            (LaunchProfile::Antigravity, None, "Antigravity"),
+        ] {
+            let db_file = tempfile::NamedTempFile::new()?;
+            let mut db = shell_session_fixture(Connection::open(db_file.path())?)?;
+            if profile != LaunchProfile::Shell {
+                promote_shell_to_agent(&mut db, &command("promote"), "session", profile, 3)?;
+            }
+            rename_session(&mut db, &command("rename"), "session", "Manual title", 4, 4)?;
+            db.execute(
+                "UPDATE sessions SET provider_title = ? WHERE id = 'session'",
+                [provider_title],
+            )?;
+            let before = require_session(&db, "session")?;
+
+            let graph = crate::session_graph::project_scene_graph(&db, "scene", Some("window"))?;
+            assert_eq!(graph["nodes"][0]["titleSource"], "manual");
+            assert!(restore_codex_title(&mut db, &command("restore"), "session", 5)?.is_some());
+            drop(db);
+            let mut db = Connection::open(db_file.path())?;
+            let restored = require_session(&db, "session")?;
+            assert_eq!(restored.title, expected);
+            assert_eq!(
+                restored.title_source.as_deref(),
+                Some(if provider_title.is_some() {
+                    "auto"
+                } else {
+                    "default"
+                })
+            );
+            assert_eq!(restored.provider_title, before.provider_title);
+            assert_eq!(restored.cwd, before.cwd);
+            assert_eq!(restored.status, before.status);
+            assert_eq!(restored.execution_context_id, before.execution_context_id);
+            assert!(restore_codex_title(&mut db, &command("again"), "session", 6)?.is_none());
+            assert_eq!(require_session(&db, "session")?, restored);
+            let graph = crate::session_graph::project_scene_graph(&db, "scene", Some("window"))?;
+            assert_eq!(graph["nodes"][0]["title"], expected);
+            assert_eq!(
+                graph["nodes"][0]["titleSource"],
+                restored.title_source.unwrap()
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn restore_automatic_title_rejects_a_read_only_connection() -> Result<()> {
+        let mut db = shell_session_fixture(Connection::open_in_memory()?)?;
+        rename_session(&mut db, &command("rename"), "session", "Manual title", 3, 3)?;
+        let before = require_session(&db, "session")?;
+        db.pragma_update(None, "query_only", true)?;
+        let error = restore_codex_title(&mut db, &command("restore"), "session", 4).unwrap_err();
+        assert!(error.to_string().contains("read-only"));
+        assert_eq!(require_session(&db, "session")?, before);
+        Ok(())
     }
 
     fn start_claude_run(db: &mut Connection, id: &str, generation: &str, now: i64) -> Result<()> {

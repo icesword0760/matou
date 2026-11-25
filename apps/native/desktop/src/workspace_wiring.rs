@@ -166,6 +166,7 @@ pub(super) struct WorkspaceWiring {
     #[cfg(debug_assertions)]
     egress_probe_bounds: TriggerBounds,
     hud: HashMap<String, LiveHud>,
+    canvas_team_members: HashMap<String, Vec<CanvasTeamMember>>,
     banners: HashMap<String, EgressBannerState>,
     confirmation_focus: FocusHandle,
     _window_closed: Subscription,
@@ -175,8 +176,63 @@ pub(super) struct WorkspaceWiring {
 struct LiveHud {
     mode: Option<&'static str>,
     request: Option<u64>,
+    canvas: Option<String>,
     result: Value,
     refresh_at: Option<Duration>,
+}
+
+#[derive(Clone)]
+pub(super) struct CanvasTeamMember {
+    pub id: String,
+    lead: String,
+    teammate_id: String,
+    pub summary: Value,
+}
+
+fn observe_canvas_teammates(cards: &mut Vec<CanvasTeamMember>, lead: &str, members: &[Value]) {
+    for summary in members {
+        let Some(teammate_id) = trimmed_graph_text(&summary["teammateId"]) else {
+            continue;
+        };
+        if let Some(card) = cards
+            .iter_mut()
+            .find(|card| card.lead == lead && card.teammate_id == teammate_id)
+        {
+            card.summary = summary.clone();
+        } else if summary["workStatus"] != TeamMemberWorkStatus::Exited.wire() {
+            cards.push(CanvasTeamMember {
+                id: format!("team:{}:{lead}:{teammate_id}", lead.len()),
+                lead: lead.to_owned(),
+                teammate_id: teammate_id.to_owned(),
+                summary: summary.clone(),
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+#[::core::prelude::v1::test]
+fn canvas_teammates_keep_one_summary_per_identity_and_skip_new_ended_members() {
+    let mut cards = Vec::new();
+    let running = serde_json::json!({"teammateId":"member@team","workStatus":"running"});
+    observe_canvas_teammates(&mut cards, "lead", &[running.clone(), running.clone()]);
+    assert_eq!(cards.len(), 1);
+    let id = cards[0].id.clone();
+    observe_canvas_teammates(&mut cards, "other-lead", &[running]);
+    assert_eq!(cards.len(), 2);
+    let exited = serde_json::json!({"teammateId":"member@team","workStatus":"exited","latestLines":["done"]});
+    observe_canvas_teammates(
+        &mut cards,
+        "lead",
+        &[
+            exited.clone(),
+            serde_json::json!({"teammateId":"unseen@team","workStatus":"exited"}),
+        ],
+    );
+    observe_canvas_teammates(&mut cards, "lead", &[]);
+    assert_eq!(cards.len(), 2);
+    assert_eq!(cards[0].id, id);
+    assert_eq!(cards[0].summary, exited);
 }
 
 #[derive(Clone, Copy)]
@@ -274,6 +330,7 @@ impl WorkspaceWiring {
             #[cfg(debug_assertions)]
             egress_probe_bounds: TriggerBounds::default(),
             hud: HashMap::new(),
+            canvas_team_members: HashMap::new(),
             banners: HashMap::new(),
             confirmation_focus: cx.focus_handle().tab_stop(true),
             _window_closed: window_closed,
@@ -1366,6 +1423,7 @@ impl Workspace {
         };
         let kind = node["currentMode"].as_str().unwrap_or_default();
         let archived = !node["archivedAt"].is_null();
+        let has_terminal = self.terminals.contains_key(id);
         let can_mutate = self.card_action_available(id);
         let fork = self
             .fork_access(id, ForkPlacement::Peer)
@@ -1404,10 +1462,48 @@ impl Workspace {
                 storage_fault: self.storage_fault_sessions.contains(id),
                 environment_unavailable: !self.active_path_valid()
                     || self.environment_unavailable(id),
-                recovering: self.recovery_blocked(id),
+                recovering: has_terminal && self.recovery_blocked(id),
             },
             self.locale,
         );
+        if let Some(index) = menu
+            .items
+            .iter()
+            .position(|item| item.action == CardMenuAction::Rename)
+        {
+            let disabled_reason = menu.items[index].disabled_reason.clone().or_else(|| {
+                (node["titleSource"] != "manual").then(|| {
+                    self.locale
+                        .text(
+                            "当前会话已使用自动标题",
+                            "This session already uses an automatic title",
+                        )
+                        .into()
+                })
+            });
+            menu.items.insert(
+                index + 1,
+                CardMenuItem {
+                    action: CardMenuAction::RestoreAutomaticTitle,
+                    label: self
+                        .locale
+                        .text("恢复自动标题", "Restore automatic title")
+                        .into(),
+                    disabled_reason,
+                    show_readiness_hint: false,
+                    danger: false,
+                },
+            );
+        }
+        if presentation == CardPresentation::Attached && !has_terminal && can_mutate {
+            menu.items.push(CardMenuItem {
+                action: CardMenuAction::RemoveNode,
+                label: self.locale.text("移除节点…", "Remove node…").into(),
+                disabled_reason: None,
+                show_readiness_hint: false,
+                danger: true,
+            });
+        }
         if kind != "codex"
             && let Some(item) = menu
                 .items
@@ -1502,6 +1598,7 @@ impl Workspace {
                 }
                 match action {
                     CardMenuAction::Rename => self.open_session_rename(id.into(), window, cx),
+                    CardMenuAction::RestoreAutomaticTitle => self.restore_session_title(id, cx),
                     CardMenuAction::Fork => self.open_fork(id, ForkPlacement::Peer, window, cx),
                     CardMenuAction::ForkWorktree => self.open_fork_with_worktree(
                         id,
@@ -2671,6 +2768,13 @@ impl Workspace {
         let now = self.motion_clock.elapsed();
         for session_id in targets {
             let mode = self.hud_node(&session_id).and_then(agent_hud_mode);
+            let canvas = self
+                .active_scene_id()
+                .filter(|_| {
+                    self.level_focus() == Some(session_id.as_str())
+                        && !self.wiring.is_detached(&session_id)
+                })
+                .map(str::to_owned);
             let state = self.wiring.hud.entry(session_id.clone()).or_default();
             if state.mode != mode {
                 *state = LiveHud {
@@ -2693,7 +2797,9 @@ impl Workspace {
                 )
                 .is_ok()
             {
-                self.wiring.hud.entry(session_id).or_default().request = Some(request_id);
+                let state = self.wiring.hud.entry(session_id).or_default();
+                state.request = Some(request_id);
+                state.canvas = canvas;
             }
         }
     }
@@ -2851,9 +2957,22 @@ impl Workspace {
             state.request = None;
             state.result = reply["result"].clone();
             let target = id.clone();
+            let canvas = state.canvas.take();
             let interval = Duration::from_secs(2);
             let refresh_at = self.motion_clock.elapsed() + interval;
             state.refresh_at = Some(refresh_at);
+            if let Some(canvas) = canvas.filter(|id| self.active_scene_id() == Some(id.as_str()))
+                && self.graph_node(&target).is_some()
+                && !self.wiring.is_detached(&target)
+                && let Some(members) = reply["result"]["teammates"].as_array()
+                && !members.is_empty()
+            {
+                observe_canvas_teammates(
+                    self.wiring.canvas_team_members.entry(canvas).or_default(),
+                    &target,
+                    members,
+                );
+            }
             self.release_footer_git_projection(&target, request_id, reply);
             let generation = self.runtime_generation;
             cx.spawn(async move |this, cx| {
@@ -2871,6 +2990,31 @@ impl Workspace {
             .detach();
             cx.notify();
         }
+    }
+
+    pub(super) fn canvas_team_members(&self) -> Vec<CanvasTeamMember> {
+        if self.read_only.is_some() {
+            return Vec::new();
+        }
+        let Some(cards) = self
+            .active_scene_id()
+            .and_then(|scene| self.wiring.canvas_team_members.get(scene))
+        else {
+            return Vec::new();
+        };
+        let nodes = session_levels::nodes(&self.graph);
+        cards
+            .iter()
+            .filter(|card| {
+                self.order.contains(&card.lead)
+                    && !nodes.iter().any(|node| {
+                        Self::team_member_node(node)
+                            && session_levels::parent_id(node) == Some(card.lead.as_str())
+                            && node["teamMemberSummary"]["teammateId"] == card.teammate_id
+                    })
+            })
+            .cloned()
+            .collect()
     }
 
     pub(super) fn render_live_teammates(&self, id: &str) -> Option<Stateful<Div>> {

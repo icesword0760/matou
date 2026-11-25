@@ -627,6 +627,230 @@ fn submit_fork(fixture: &Fixture, cx: &mut AsyncApp, id: &str, action: CardMenuA
     });
 }
 
+async fn verify_live_team_card(fixture: &mut Fixture, cx: &mut AsyncApp, source: &str) -> String {
+    let lead = fixture.new_shell(cx, source).await;
+    fixture.update(cx, |view, window, cx| {
+        window.focus(&view.terminals[&lead].read(cx).focus)
+    });
+    let roll = fixture
+        .options
+        .shell_home
+        .join(format!("claude/projects/fixture/{SOURCE}.jsonl"));
+    fs::write(&roll, format!("{}\n{}\n",
+        json!({"type":"user","toolUseResult":{"status":"teammate_spawned","teammate_id":"reviewer@team","name":"reviewer","team_name":"team","prompt":"Check the fixture"}}),
+        json!({"type":"user","toolUseResult":{"listing":"Teammates (1):\n  reviewer [id]  ·  idle"}}),
+    )).unwrap();
+    fixture.input(&lead, b"claude\r");
+    let settings_marker = fixture.options.shell_home.join("claude-settings");
+    let settings = fixture
+        .wait(cx, "Claude hook settings", |_, _| {
+            fs::read_to_string(&settings_marker)
+                .ok()
+                .and_then(|path| fs::read(path.trim()).ok())
+        })
+        .await;
+    let settings: Value = serde_json::from_slice(&settings).unwrap();
+    // SessionStart uses a command hook that posts to the same receiver as the HTTP hooks.
+    assert_eq!(
+        settings["hooks"]["SessionStart"][0]["hooks"][0]["type"],
+        "command"
+    );
+    let url = settings["hooks"]["PreToolUse"][0]["hooks"][0]["url"]
+        .as_str()
+        .unwrap();
+    post(
+        url,
+        json!({"hook_event_name":"SessionStart","session_id":SOURCE,"transcript_path":roll,"cwd":fixture.options.workspace}),
+    );
+    // A hook response acknowledges receipt. Wait for the start event to be
+    // applied before sending observations that need the active run.
+    fixture
+        .state(
+            cx,
+            "Claude HUD and teammate after session start",
+            |view, _| {
+                (view.live_agent_hud(&lead).is_some() && view.canvas_team_members().len() == 1)
+                    .then_some(())
+            },
+        )
+        .await;
+    post(
+        &format!("{url}?kind=statusline"),
+        json!({"session_id":SOURCE,"context_window":{"used_percentage":21,"context_window_size":1000}}),
+    );
+    fixture
+        .state(cx, "Claude context meter", |view, _| {
+            (view.live_agent_hud(&lead)?["contextPercent"].as_f64() == Some(21.)).then_some(())
+        })
+        .await;
+    post(
+        url,
+        json!({"hook_event_name":"PreToolUse","session_id":SOURCE,"transcript_path":roll,"tool_name":"Read","tool_use_id":"probe-tool"}),
+    );
+    fixture
+        .state(cx, "team and tools HUD", |view, _| {
+            let hud = view.live_agent_hud(&lead)?;
+            (hud["contextPercent"].as_f64() == Some(21.)
+                && hud["runningTools"][0]["name"] == "Read"
+                && view.canvas_team_members().len() == 1)
+                .then_some(())
+        })
+        .await;
+    let card = fixture
+        .window
+        .update(cx, |view, window, cx| {
+            let cards = view.canvas_team_members();
+            assert_eq!(cards.len(), 1);
+            assert!(!view.terminals.contains_key(&cards[0].id));
+            assert!(view.terminals[&lead].read(cx).focus.is_focused(window));
+            assert_eq!(cards[0].summary["teammateId"], "reviewer@team");
+            cards[0].id.clone()
+        })
+        .unwrap();
+    assert!(draw(fixture.window.into(), cx).contains_key(&format!("team-member-{card}")));
+    println!(
+        "Live runtime: Claude teammate transcript projected through existing HUD, painted exactly one read-only canvas card, kept lead focus"
+    );
+    lead
+}
+
+pub(super) async fn verify_canvas_mount_output(cx: &mut AsyncApp, root: PathBuf) {
+    let mut fixture = Fixture::new(cx, root);
+    let mut source = fixture
+        .state(cx, "initial shell", |view, _| {
+            let id = view.level_focus()?;
+            (!view.recovery_blocked(id)).then(|| id.to_owned())
+        })
+        .await;
+    for _ in 0..6 {
+        source = fixture.new_shell(cx, &source).await;
+    }
+    let (target, before) = fixture
+        .wait(
+            cx,
+            "settled carousel with seven shells and a ready offscreen terminal",
+            |fixture, cx| {
+                draw(fixture.window.into(), cx);
+                fixture
+                    .window
+                    .update(cx, |view, _, _| {
+                        if view.order.len() != 7 {
+                            return None;
+                        }
+                        let target = view.order.iter().find(|id| {
+                            !view.carousel_mounted_terminals.contains(*id)
+                                && !view.recovery_blocked(id)
+                        })?;
+                        Some((target.clone(), view.carousel_mounted_terminals.len()))
+                    })
+                    .unwrap()
+            },
+        )
+        .await;
+    println!("Live runtime: seven Shell cards with {before} mounted surfaces before scrolling");
+
+    fixture.send(Command::Input {
+        session_id: target.clone(),
+        bytes: b"printf 'HIDDEN%s\\n' '_OUTPUT_OK'".into(),
+        defer_ordering: true,
+    });
+    fixture.send(Command::Input {
+        session_id: target.clone(),
+        bytes: b"\r".into(),
+        defer_ordering: true,
+    });
+    fixture
+        .state(cx, "offscreen journaled PTY output", |view, _| {
+            (!view.carousel_mounted_terminals.contains(&target)
+                && view.graph_node(&target)?["latestLines"]
+                    .as_array()?
+                    .iter()
+                    .any(|line| {
+                        line.as_str()
+                            .is_some_and(|line| line.trim() == "HIDDEN_OUTPUT_OK")
+                    }))
+            .then_some(())
+        })
+        .await;
+    println!("Live runtime: offscreen terminal output reached the retained session journal");
+    fixture.update(cx, |view, window, cx| {
+        let left = view
+            .card_geometry
+            .iter()
+            .find(|(id, _, _)| id == &target)
+            .unwrap()
+            .1;
+        view.move_carousel(px(-(left - 10.) as f32), point(px(0.), px(0.)), window, cx);
+    });
+    let painted = draw(fixture.window.into(), cx);
+    let bounds = painted[&format!("session-header-{target}")];
+    let cursor = bounds.origin + point(px(30.), px(17.));
+    fixture.update(cx, |view, _, _| {
+        assert!(view.carousel_mounted_terminals.contains(&target));
+    });
+    click(fixture.window.into(), cx, MouseButton::Left, cursor);
+    assert!(dispatch_key(fixture.window.into(), cx, "e"));
+    for key in [
+        "c", "h", "o", "space", "r", "e", "m", "o", "u", "n", "t", "e", "d", "enter",
+    ] {
+        assert!(dispatch_key(fixture.window.into(), cx, key));
+    }
+    fixture
+        .state(
+            cx,
+            "offscreen output and first input on remounted terminal",
+            |view, cx| {
+                let lines = view.graph_node(&target)?["latestLines"].as_array()?;
+                let output = |expected| {
+                    lines
+                        .iter()
+                        .any(|line| line.as_str().is_some_and(|line| line.trim() == expected))
+                };
+                (output("remounted")
+                    && view
+                        .terminals
+                        .get(&target)?
+                        .read(cx)
+                        .screen_contains_for_canvas_probe("HIDDEN_OUTPUT_OK"))
+                .then_some(())
+            },
+        )
+        .await;
+    println!(
+        "Live runtime, 7 PTYs: {before} surfaces painted before scrolling. Offscreen output received, remounted terminal accepted its first keystroke immediately"
+    );
+
+    fixture.send(Command::SetSessionTitle {
+        session_id: target.clone(),
+        title: Some("Manual fixture shell".into()),
+    });
+    fixture
+        .state(cx, "persisted Shell manual title", |view, _| {
+            (view.graph_node(&target)?["titleSource"] == "manual").then_some(())
+        })
+        .await;
+    card_action(
+        fixture.window,
+        cx,
+        &target,
+        CardMenuAction::RestoreAutomaticTitle,
+    );
+    fixture
+        .state(cx, "restored Shell graph title", |view, _| {
+            let node = view.graph_node(&target)?;
+            (node["title"] == "Shell" && node["titleSource"] == "default").then_some(())
+        })
+        .await;
+    println!(
+        "Live runtime: Shell restore from the actual menu updated the graph title to its creation default"
+    );
+    verify_live_team_card(&mut fixture, cx, &target).await;
+    fixture
+        .window
+        .update(cx, |_, window, _| window.remove_window())
+        .unwrap();
+}
+
 pub(super) async fn verify(cx: &mut AsyncApp, root: PathBuf) {
     let mut fixture = Fixture::new(cx, root);
     let source = fixture
@@ -896,6 +1120,7 @@ pub(super) async fn verify(cx: &mut AsyncApp, root: PathBuf) {
             [
                 CardMenuAction::Fork,
                 CardMenuAction::Rename,
+                CardMenuAction::RestoreAutomaticTitle,
                 CardMenuAction::OpenDetached,
                 CardMenuAction::ForkWorktree,
             ]
@@ -1045,76 +1270,7 @@ pub(super) async fn verify(cx: &mut AsyncApp, root: PathBuf) {
     }));
     println!("live DSH: catalog, preview, content search, queued load, confirmed identity and HUD");
 
-    let lead = fixture.new_shell(cx, &shell).await;
-    let roll = fixture
-        .options
-        .shell_home
-        .join(format!("claude/projects/fixture/{SOURCE}.jsonl"));
-    fs::write(&roll, format!("{}\n{}\n",
-        json!({"type":"user","toolUseResult":{"status":"teammate_spawned","teammate_id":"reviewer@team","name":"reviewer","team_name":"team","prompt":"Check the fixture"}}),
-        json!({"type":"user","toolUseResult":{"listing":"Teammates (1):\n  reviewer [id]  ·  idle"}}),
-    )).unwrap();
-    fixture.input(&lead, b"claude\r");
-    let settings_marker = fixture.options.shell_home.join("claude-settings");
-    let settings = fixture
-        .wait(cx, "Claude hook settings", |_, _| {
-            fs::read_to_string(&settings_marker)
-                .ok()
-                .and_then(|path| fs::read(path.trim()).ok())
-        })
-        .await;
-    let settings: Value = serde_json::from_slice(&settings).unwrap();
-    // SessionStart uses a command hook that posts to the same receiver as the HTTP hooks.
-    assert_eq!(
-        settings["hooks"]["SessionStart"][0]["hooks"][0]["type"],
-        "command"
-    );
-    let url = settings["hooks"]["PreToolUse"][0]["hooks"][0]["url"]
-        .as_str()
-        .unwrap();
-    post(
-        url,
-        json!({"hook_event_name":"SessionStart","session_id":SOURCE,"transcript_path":roll,"cwd":fixture.options.workspace}),
-    );
-    // A hook response acknowledges receipt. Wait for the start event to be
-    // applied before sending observations that need the active run.
-    fixture
-        .state(
-            cx,
-            "Claude HUD and teammate after session start",
-            |view, _| {
-                (view.live_agent_hud(&lead).is_some()
-                    && view.render_live_teammates(&lead).is_some())
-                .then_some(())
-            },
-        )
-        .await;
-    post(
-        &format!("{url}?kind=statusline"),
-        json!({"session_id":SOURCE,"context_window":{"used_percentage":21,"context_window_size":1000}}),
-    );
-    fixture
-        .state(cx, "Claude context meter", |view, _| {
-            (view.live_agent_hud(&lead)?["contextPercent"].as_f64() == Some(21.)).then_some(())
-        })
-        .await;
-    post(
-        url,
-        json!({"hook_event_name":"PreToolUse","session_id":SOURCE,"transcript_path":roll,"tool_name":"Read","tool_use_id":"probe-tool"}),
-    );
-    fixture
-        .state(cx, "team and tools HUD", |view, _| {
-            let hud = view.live_agent_hud(&lead)?;
-            (hud["contextPercent"].as_f64() == Some(21.)
-                && hud["runningTools"][0]["name"] == "Read"
-                && view.render_live_teammates(&lead).is_some())
-            .then_some(())
-        })
-        .await;
-    assert!(
-        draw(fixture.window.into(), cx).contains_key(&format!("team-member-{lead}-reviewer@team"))
-    );
-    println!("live team HUD: context meter, running tool and painted read-only teammate card");
+    let lead = verify_live_team_card(&mut fixture, cx, &shell).await;
 
     let agy = verify_antigravity(&mut fixture, cx, [&source, &shell, &lead]).await;
 
