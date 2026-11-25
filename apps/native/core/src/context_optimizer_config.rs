@@ -128,7 +128,7 @@ impl Default for AgentOptimizerSettings {
 
 impl AgentOptimizerSettings {
     pub fn recommended_for(agent_id: &str) -> Self {
-        let interception = agent_id == "claude-code";
+        let interception = matches!(agent_id, "claude-code" | "antigravity");
         Self {
             noise_filter: interception,
             read_dedup: interception,
@@ -265,8 +265,8 @@ impl AgentOptimizerEntry {
             MasterEnabled => true,
             NoiseFilter | ReadDedup | BlockSensitiveReads => {
                 return match self.agent_id.as_str() {
-                    "claude-code" => Available,
-                    "codex" | "antigravity" => Pending,
+                    "claude-code" | "antigravity" => Available,
+                    "codex" => Pending,
                     _ => Unsupported,
                 };
             }
@@ -494,7 +494,19 @@ mod tests {
             assert!(entry.settings.enabled);
             assert!(entry.settings.cache_monitor);
             assert!(entry.settings.stall_rescue);
-            let interception = id == "claude-code";
+            let availability = match id {
+                "claude-code" | "antigravity" => OptimizerAvailability::Available,
+                "codex" => OptimizerAvailability::Pending,
+                _ => OptimizerAvailability::Unsupported,
+            };
+            let interception = availability == OptimizerAvailability::Available;
+            for toggle in [
+                OptimizerToggle::NoiseFilter,
+                OptimizerToggle::ReadDedup,
+                OptimizerToggle::BlockSensitiveReads,
+            ] {
+                assert_eq!(entry.availability(toggle), availability);
+            }
             assert_eq!(entry.settings.noise_filter, interception);
             assert_eq!(entry.settings.read_dedup, interception);
             assert_eq!(entry.settings.block_sensitive_reads, interception);

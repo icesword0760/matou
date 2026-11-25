@@ -1672,22 +1672,42 @@ mod tests {
             )?)
         };
         let read = |path: &Path, step| json!({"toolCall":{"name":"view_file","args":{"AbsolutePath":path}}, "conversationId":"agy-host", "stepIdx":step});
+        // agy 1.5.17 sends the event and uses read_file with Path in the native CLI.
+        let native_read = |path: &Path, step: u64| {
+            json!({
+                "hookEventName": "PreToolUse",
+                "conversationId": "agy-host",
+                "stepIdx": step,
+                "cwd": root.path(),
+                "workspacePaths": [root.path()],
+                "toolCall": {"id": format!("call_{step}"), "name": "read_file", "args": {"Path": path}},
+            })
+        };
         assert_eq!(
             post("pre-tool-use", &read(&path, 19))?,
             json!({"decision":"allow"})
         );
         assert_eq!(post("post-tool-use", &read(&path, 19))?, json!({}));
-        let response = post("pre-tool-use", &read(&path, 20))?;
+        let response = post("pre-tool-use", &native_read(&path, 20))?;
         assert_eq!(response["decision"], "deny");
+        assert!(response["reason"].as_str().unwrap().contains("120s"));
         assert_eq!(server.saved_noise_bytes("session"), content.len() as u64);
         let stats = serde_json::to_value(get_saved_stats(root.path(), SystemTime::now()))?;
         assert_eq!(
             stats["agents"]["antigravity"],
             json!({"bytes7d":content.len(), "events7d":1})
         );
+        let blocked = post("pre-tool-use", &native_read(&root.path().join(".env"), 21))?;
+        assert_eq!(blocked["decision"], "deny");
+        assert!(
+            blocked["reason"]
+                .as_str()
+                .unwrap()
+                .contains("sensitive file")
+        );
         assert_eq!(
-            post("pre-tool-use", &read(&root.path().join(".env"), 21))?["decision"],
-            "deny"
+            post("pre-tool-use", &native_read(&root.path().join(".env.example"), 22))?,
+            json!({"decision":"allow"})
         );
         Ok(())
     }
