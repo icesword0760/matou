@@ -3658,7 +3658,13 @@ impl SettingsShell {
                         .to_owned()
                 })
                 .and_then(|config| {
-                    let panel = ContextOptimizerSettingsPanel::new(config, locale, theme)?;
+                    let panel = ContextOptimizerSettingsPanel::new(
+                        config,
+                        locale,
+                        theme,
+                        self.scroll.clone(),
+                        cx,
+                    )?;
                     Ok(cx.new(|_| panel))
                 }),
         );
