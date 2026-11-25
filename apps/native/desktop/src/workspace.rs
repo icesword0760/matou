@@ -26,6 +26,7 @@ use matou_native_core::sessions::{
 };
 use matou_native_core::workspace_paths::WorkspacePathState;
 use matou_native_desktop::split_tree::{SplitDirection, SplitRect};
+use matou_native_desktop::system_notifications::{self, Authorization, SystemRequest};
 use matou_native_desktop::theme_tokens::{
     AppTheme, ThemePalette, ThemePreference, ThemeState, read_theme_preference,
     write_theme_preference,
@@ -1927,6 +1928,32 @@ struct NotificationEntry {
     cooldown_key: Option<String>,
 }
 
+fn notification_entry_for_identifier(entries: &[NotificationEntry], identifier: &str) -> Option<u64> {
+    entries
+        .iter()
+        .find(|entry| entry.session_id.as_deref() == Some(identifier))
+        .or_else(|| {
+            let event_id = identifier.strip_prefix("event:")?;
+            entries.iter().find(|entry| entry.event_id == event_id)
+        })
+        .map(|entry| entry.id)
+}
+
+struct PushReceipt {
+    entry_id: u64,
+    unread: bool,
+}
+
+impl PushReceipt {
+    fn plays_sound(&self, value: &Value, enabled: bool) -> bool {
+        self.unread && enabled && value["sound"].as_bool() != Some(false)
+    }
+}
+
+fn should_post_system(unread: bool, enabled: bool, app_active: bool, authorized: bool) -> bool {
+    unread && enabled && !app_active && authorized
+}
+
 struct Notifications {
     entries: Vec<NotificationEntry>,
     // Last accepted receipt time and number of rows keeping each key alive.
@@ -1934,6 +1961,8 @@ struct Notifications {
     sequence: u64,
     sound_enabled: bool,
     sound_path: Option<PathBuf>,
+    system_enabled: bool,
+    system_path: Option<PathBuf>,
 }
 
 impl Notifications {
@@ -1948,19 +1977,39 @@ impl Notifications {
             sequence: 0,
             sound_enabled,
             sound_path,
+            system_enabled: true,
+            system_path: None,
         }
     }
 
+    fn with_system_path(mut self, path: Option<PathBuf>) -> Self {
+        self.system_enabled = path
+            .as_ref()
+            .and_then(|path| std::fs::read(path).ok())
+            .is_none_or(|bytes| bytes != b"0");
+        self.system_path = path;
+        self
+    }
+
+    #[allow(dead_code, reason = "the notification center probe checks the existing sound contract")]
     fn push(&mut self, value: &Value, focused: Option<&str>, now: u64) -> bool {
+        self.push_with_receipt(value, focused, now)
+            .is_some_and(|receipt| receipt.plays_sound(value, self.sound_enabled))
+    }
+
+    fn push_with_receipt(
+        &mut self,
+        value: &Value,
+        focused: Option<&str>,
+        now: u64,
+    ) -> Option<PushReceipt> {
         let text = |name| {
             value[name]
                 .as_str()
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
         };
-        let Some(event_id) = text("eventId") else {
-            return false;
-        };
+        let event_id = text("eventId")?;
         self.prune(now);
         let replacement_key = text("replacementKey");
         let replacement = replacement_key.and_then(|key| {
@@ -1972,10 +2021,10 @@ impl Notifications {
             if let Some(index) = replacement {
                 self.remove_at(index);
             }
-            return false;
+            return None;
         }
         if self.entries.iter().any(|entry| entry.event_id == event_id) {
-            return false;
+            return None;
         }
         let session_id = text("sessionId");
         let scene_id = text("sceneId");
@@ -2007,7 +2056,7 @@ impl Notifications {
             let key = format!("{owner}:{key}");
             let cooldown = self.cooldowns.entry(key.clone()).or_insert((now, 0));
             if cooldown.1 > 0 && now.saturating_sub(cooldown.0) < NOTIFICATION_COOLDOWN_MS {
-                return false;
+                return None;
             }
             *cooldown = (now, cooldown.1 + 1);
             if !context_reminder && let Some(session_id) = session_id {
@@ -2039,7 +2088,10 @@ impl Notifications {
             },
         );
         self.prune(now);
-        !read && value["sound"].as_bool() != Some(false) && self.sound_enabled
+        Some(PushReceipt {
+            entry_id: id,
+            unread: !read,
+        })
     }
 
     fn forget_cooldown(cooldowns: &mut HashMap<String, (u64, usize)>, entry: &NotificationEntry) {
@@ -2144,6 +2196,171 @@ impl Notifications {
             }
         }
     }
+
+    fn set_system(&mut self, enabled: bool) {
+        self.system_enabled = enabled;
+        if let Some(path) = &self.system_path {
+            let temporary = path.with_extension("tmp");
+            let bytes = if enabled { b"1" } else { b"0" };
+            if let Err(error) =
+                std::fs::write(&temporary, bytes).and_then(|_| std::fs::rename(&temporary, path))
+            {
+                eprintln!("Save system notification preference: {error}");
+            }
+        }
+    }
+
+}
+
+#[cfg(test)]
+mod system_notification_tests {
+    use serde_json::json;
+
+    use super::{Notifications, notification_entry_for_identifier, should_post_system};
+
+    #[test]
+    fn notification_entry_for_identifier_prefers_exact_session_match() {
+        let mut notifications = Notifications::new(None);
+        let session = notifications
+            .push_with_receipt(
+                &json!({"eventId": "session-event", "sessionId": "event:abc"}),
+                None,
+                10,
+            )
+            .unwrap();
+        notifications
+            .push_with_receipt(&json!({"eventId": "abc"}), None, 11)
+            .unwrap();
+
+        assert_eq!(
+            notification_entry_for_identifier(&notifications.entries, "event:abc"),
+            Some(session.entry_id)
+        );
+    }
+
+    #[test]
+    fn notification_entry_for_identifier_matches_prefixed_event() {
+        let mut notifications = Notifications::new(None);
+        let event = notifications
+            .push_with_receipt(&json!({"eventId": "abc"}), None, 10)
+            .unwrap();
+
+        assert_eq!(
+            notification_entry_for_identifier(&notifications.entries, "event:abc"),
+            Some(event.entry_id)
+        );
+    }
+
+    #[test]
+    fn notification_entry_for_identifier_returns_none_for_missing_event() {
+        let mut notifications = Notifications::new(None);
+        notifications
+            .push_with_receipt(&json!({"eventId": "other"}), None, 10)
+            .unwrap();
+
+        assert_eq!(
+            notification_entry_for_identifier(&notifications.entries, "event:abc"),
+            None
+        );
+    }
+
+    #[test]
+    fn notification_entry_for_identifier_requires_prefix_for_event_match() {
+        let mut notifications = Notifications::new(None);
+        notifications
+            .push_with_receipt(&json!({"eventId": "abc", "sessionId": "other"}), None, 10)
+            .unwrap();
+
+        assert_eq!(
+            notification_entry_for_identifier(&notifications.entries, "abc"),
+            None
+        );
+    }
+
+    #[test]
+    fn notification_entry_for_identifier_finds_current_session_replacement() {
+        let mut notifications = Notifications::new(None);
+        notifications
+            .push_with_receipt(
+                &json!({"eventId": "older", "sessionId": "session", "cooldownKey": "completion"}),
+                None,
+                10,
+            )
+            .unwrap();
+        let mut event = json!({
+            "eventId": "pending",
+            "sessionId": "session",
+            "replacementKey": "request",
+        });
+        notifications.push_with_receipt(&event, None, 11).unwrap();
+        event["eventId"] = json!("replacement");
+        let replacement = notifications.push_with_receipt(&event, None, 12).unwrap();
+
+        assert_eq!(notifications.entries.len(), 2);
+        assert_eq!(
+            notification_entry_for_identifier(&notifications.entries, "session"),
+            Some(replacement.entry_id)
+        );
+    }
+
+    #[test]
+    fn system_notification_defaults_on_and_persists() {
+        let path =
+            std::env::temp_dir().join(format!("notification-system-{}", uuid::Uuid::new_v4()));
+        let mut notifications = Notifications::new(None).with_system_path(Some(path.clone()));
+        assert!(notifications.system_enabled);
+
+        notifications.set_system(false);
+        assert_eq!(std::fs::read(&path).unwrap(), b"0");
+        let mut reopened = Notifications::new(None).with_system_path(Some(path.clone()));
+        assert!(!reopened.system_enabled);
+
+        reopened.set_system(true);
+        assert_eq!(std::fs::read(&path).unwrap(), b"1");
+        assert!(Notifications::new(None).with_system_path(Some(path.clone())).system_enabled);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn system_posts_only_for_unread_background_authorized() {
+        assert!(should_post_system(true, true, false, true));
+        assert!(!should_post_system(true, true, true, true));
+        assert!(!should_post_system(true, false, false, true));
+        assert!(!should_post_system(true, true, false, false));
+        assert!(!should_post_system(false, true, false, true));
+    }
+
+    #[test]
+    fn system_notification_receives_silent_replacements() {
+        let mut notifications = Notifications::new(None);
+        let mut event = serde_json::json!({
+            "eventId": "first",
+            "sessionId": "session",
+            "replacementKey": "request",
+            "sound": false,
+        });
+        let first = notifications.push_with_receipt(&event, None, 10).unwrap();
+        assert!(first.unread);
+        assert!(!first.plays_sound(&event, true));
+
+        event["eventId"] = "second".into();
+        let second = notifications.push_with_receipt(&event, None, 11).unwrap();
+        assert_eq!(first.entry_id, second.entry_id);
+        assert!(second.unread);
+        assert!(notifications.push_with_receipt(&event, None, 12).is_none());
+
+        event["eventId"] = "third".into();
+        let third = notifications
+            .push_with_receipt(&event, Some("session"), 13)
+            .unwrap();
+        assert!(!third.unread);
+        assert_eq!(first.entry_id, third.entry_id);
+
+        event["operation"] = "dismiss".into();
+        assert!(notifications.push_with_receipt(&event, None, 14).is_none());
+        assert!(notifications.entries.is_empty());
+    }
+
 }
 
 struct DatabaseRecoveryPageState {
@@ -3552,6 +3769,62 @@ impl Workspace {
         let data_root = launch_options
             .as_ref()
             .map(|options| options.data_root.clone());
+        let notifications = Notifications::new(
+            data_root.as_ref().map(|root| root.join("notification-sound")),
+        )
+        .with_system_path(data_root.as_ref().map(|root| root.join("notification-system")));
+        if system_notifications::is_available() {
+            if notifications.system_enabled {
+                system_notifications::request_authorization_once();
+            }
+            cx.observe_window_activation(window, |_, window, _| {
+                if window.is_window_active() {
+                    system_notifications::refresh_authorization();
+                }
+            })
+            .detach();
+            // The desktop has one event-receiving Workspace. Detached windows
+            // are views of that Workspace and do not consume system activations.
+            cx.spawn_in(window, async move |this, cx| {
+                let mut last_authorization = system_notifications::authorization();
+                loop {
+                    cx.background_executor().timer(Duration::from_millis(250)).await;
+                    if this.upgrade().is_none() {
+                        break;
+                    }
+
+                    let authorization = system_notifications::authorization();
+                    let activations = system_notifications::take_pending_activations();
+                    let authorization_changed = authorization != last_authorization;
+                    last_authorization = authorization;
+                    if !authorization_changed && activations.is_empty() {
+                        continue;
+                    }
+
+                    let applied = cx.update(|window, cx| {
+                        this.update(cx, |this, cx| {
+                            if authorization_changed
+                                && let Some((settings, _)) = &this.settings
+                            {
+                                settings.update(cx, |_, cx| cx.notify());
+                            }
+                            if !activations.is_empty() {
+                                window.activate_window();
+                                for identifier in activations {
+                                    this.open_notification_by_identifier(&identifier, window, cx);
+                                }
+                            }
+                        })
+                    });
+                    if !matches!(applied, Ok(Ok(()))) {
+                        break;
+                    }
+                }
+            })
+            .detach();
+            #[cfg(all(target_os = "macos", debug_assertions))]
+            Self::schedule_system_notification_probe(window, cx);
+        }
         let terminal_font_size = data_root
             .as_deref()
             .map(read_terminal_font_size)
@@ -3635,11 +3908,7 @@ impl Workspace {
             sidebar_glass_pointer: Rc::default(),
             sidebar_overflow: false,
             sidebar_scrollbar: SidebarScrollbarState::default(),
-            notifications: Notifications::new(
-                launch_options
-                    .as_ref()
-                    .map(|options| options.data_root.join("notification-sound")),
-            ),
+            notifications,
             notification_open: false,
             notification_scene_sessions: HashMap::new(),
             task_toast: None,
@@ -3843,6 +4112,7 @@ impl Workspace {
                 self.locale_save_pending,
             );
             settings.configure_theme(self.theme, cx);
+            settings.configure_system_notifications(self.notifications.system_enabled);
             settings.configure_diagnostics_cwd(diagnostics_cwd);
             settings.configure_data_root(self.data_root.clone());
             settings
@@ -3851,13 +4121,26 @@ impl Workspace {
             cx.subscribe_in(
                 &settings,
                 window,
-                |this, _, event, window, cx| match event {
+                |this, settings, event, window, cx| match event {
                     SettingsShellEvent::Close => this.close_settings(window, cx),
                     SettingsShellEvent::SaveLocale(preference) => {
                         this.save_interface_locale(*preference, window, cx);
                     }
                     SettingsShellEvent::ProviderActivated => {}
                     SettingsShellEvent::SaveTheme(preference) => this.save_theme(*preference, cx),
+                    SettingsShellEvent::SetSystemNotifications(enabled) => {
+                        if this.read_only.is_none() {
+                            this.notifications.set_system(*enabled);
+                            if *enabled {
+                                system_notifications::request_authorization_once();
+                            }
+                            settings.update(cx, |settings, cx| {
+                                settings.configure_system_notifications(*enabled);
+                                cx.notify();
+                            });
+                            cx.notify();
+                        }
+                    }
                     SettingsShellEvent::OpenProviderKeyPage(url) => {
                         this.open_external_link(
                             url,
@@ -4184,6 +4467,53 @@ impl Workspace {
         cx.notify();
     }
 
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    fn schedule_system_notification_probe(window: &mut Window, cx: &mut Context<Self>) {
+        static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if std::env::var("MATOU_SYSTEM_NOTIFICATION_PROBE").as_deref() != Ok("1")
+            || STARTED.swap(true, Ordering::Relaxed)
+        {
+            return;
+        }
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(3)).await;
+            let result = cx.update(|_, cx| {
+                this.update(cx, |this, _| {
+                    let enabled = this.notifications.system_enabled;
+                    let active = system_notifications::app_is_active();
+                    let authorization = system_notifications::authorization();
+                    if !should_post_system(
+                        true,
+                        enabled,
+                        active,
+                        authorization == Authorization::Authorized,
+                    ) {
+                        eprintln!(
+                            "[system-notification-probe] skipped: enabled={enabled}, active={active}, authorization={authorization:?}"
+                        );
+                        return None;
+                    }
+                    system_notifications::post(SystemRequest {
+                        identifier: "probe".into(),
+                        title: "码头系统通知测试".into(),
+                        subtitle: String::new(),
+                        body: "看到这条通知说明系统通知已接通".into(),
+                        thread_id: None,
+                        event_id: "probe".into(),
+                        play_sound: false,
+                    })
+                })
+            });
+            if let Ok(Ok(Some(result))) = result {
+                eprintln!(
+                    "[system-notification-probe] addNotificationRequest accepted={}",
+                    result.recv().await == Ok(true),
+                );
+            }
+        })
+        .detach();
+    }
+
     fn update_notifications(&mut self, graph: &mut Value, window: &Window, cx: &mut Context<Self>) {
         if let Some((scene, task)) = self
             .hierarchy
@@ -4205,12 +4535,58 @@ impl Workspace {
         if let Some(Value::Array(events)) = events {
             let focused = self.notification_foreground_session(window, cx);
             let now = notification_now();
+            let system_enabled =
+                self.notifications.system_enabled && system_notifications::is_available();
+            let app_active = !system_enabled || system_notifications::app_is_active();
+            let authorized = system_notifications::authorization() == Authorization::Authorized;
+            let sound_enabled = self.notifications.sound_enabled;
             let mut play_sound = false;
+            let mut system_requests = Vec::new();
             for event in &events {
-                play_sound |= self.notifications.push(event, focused.as_deref(), now);
+                let Some(receipt) =
+                    self.notifications.push_with_receipt(event, focused.as_deref(), now)
+                else {
+                    continue;
+                };
+                play_sound |= receipt.plays_sound(event, sound_enabled);
+                if !should_post_system(receipt.unread, system_enabled, app_active, authorized) {
+                    continue;
+                }
+                let Some(entry) = self
+                    .notifications
+                    .entries
+                    .iter()
+                    .find(|entry| entry.id == receipt.entry_id)
+                else {
+                    continue;
+                };
+                system_requests.extend(system_notifications::post(SystemRequest {
+                    identifier: system_notifications::notification_identifier(
+                        entry.session_id.as_deref(),
+                        &entry.event_id,
+                    ),
+                    title: entry.title.clone(),
+                    subtitle: entry.subtitle.clone(),
+                    body: entry.body.clone(),
+                    thread_id: entry.scene_id.clone().or_else(|| entry.session_id.clone()),
+                    event_id: entry.event_id.clone(),
+                    play_sound: sound_enabled,
+                }));
             }
             if play_sound {
-                play_notification_sound();
+                if system_requests.is_empty() {
+                    play_notification_sound();
+                } else {
+                    cx.spawn(async move |_, _| {
+                        for request in system_requests {
+                            if request.recv().await == Ok(true) {
+                                return;
+                            }
+                        }
+                        play_notification_sound();
+                    })
+                    .detach();
+                }
             }
             self.reconcile_notification_targets(graph);
             self.notifications_changed(cx);
@@ -4396,6 +4772,18 @@ impl Workspace {
             return None;
         }
         Some((scene_id, session_id))
+    }
+
+    fn open_notification_by_identifier(
+        &mut self,
+        identifier: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(id) = notification_entry_for_identifier(&self.notifications.entries, identifier)
+        {
+            self.open_notification(id, window, cx);
+        }
     }
 
     fn open_notification(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {

@@ -37,6 +37,7 @@ use matou_native_desktop::provider_context_editor::{
     context_mode_tokens, context_multi_model_hint, context_unknown_hint, context_window_badge_view,
     format_tokens, provider_switch_impact_row, provider_window_badge_label, resolve_context_tokens,
 };
+use matou_native_desktop::system_notifications::{self, Authorization};
 use matou_native_desktop::theme_tokens::{
     AppTheme, ThemePalette, ThemePreference, ThemeState, theme_preference_picker,
 };
@@ -1146,6 +1147,7 @@ pub(crate) enum SettingsPage {
     Dispatch,
     Diagnostics,
     ContextOptimizer,
+    Notifications,
 }
 
 impl SettingsPage {
@@ -1154,6 +1156,7 @@ impl SettingsPage {
             Self::ClaudeCode => "Claude Code",
             Self::Language => locale.text("语言与时区", "Language & time zone"),
             Self::Dispatch => locale.text("派活", "Dispatch"),
+            Self::Notifications => locale.text("通知", "Notifications"),
             Self::Diagnostics => locale.text("诊断", "Diagnostics"),
             Self::ContextOptimizer => locale.text("上下文优化", "Context optimizer"),
         }
@@ -1168,6 +1171,10 @@ impl SettingsPage {
             Self::Dispatch => locale.text(
                 "设置新派任务的全局默认执行者、模型、时限与重试次数。",
                 "Set the global defaults for new dispatched tasks: executor, model, time limits and retries.",
+            ),
+            Self::Notifications => locale.text(
+                "设置码头在后台时是否通过 macOS 通知中心提醒你。",
+                "Choose whether Matou notifies you through macOS while it is in the background.",
             ),
             Self::Diagnostics => locale.text(
                 "只读查看账号订阅、运行环境与受控浏览器状态，并手动运行保留清理。",
@@ -1187,23 +1194,71 @@ impl SettingsPage {
             Self::Dispatch => 2,
             Self::Diagnostics => 3,
             Self::ContextOptimizer => 4,
+            Self::Notifications => 5,
         }
     }
 }
 
-fn visible_settings_pages() -> [SettingsPage; 5] {
-    [
+fn visible_settings_pages() -> &'static [SettingsPage] {
+    &[
         SettingsPage::ClaudeCode,
         SettingsPage::Dispatch,
         SettingsPage::ContextOptimizer,
         SettingsPage::Language,
+        #[cfg(target_os = "macos")]
+        SettingsPage::Notifications,
         SettingsPage::Diagnostics,
     ]
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SystemToggleAction {
+    Flip(bool),
+    RequestAuthorization,
+    OpenSettings,
+}
+
+fn system_toggle_action(enabled: bool, authorization: Authorization) -> SystemToggleAction {
+    match (enabled, authorization) {
+        (true, Authorization::Denied) => SystemToggleAction::OpenSettings,
+        (true, Authorization::NotDetermined) => SystemToggleAction::RequestAuthorization,
+        _ => SystemToggleAction::Flip(!enabled),
+    }
+}
+
+#[cfg(test)]
+mod system_toggle_tests {
+    use super::{Authorization, SystemToggleAction, system_toggle_action};
+
+    #[test]
+    fn system_toggle_follows_authorization_and_preference() {
+        use Authorization::{Authorized, Denied, NotDetermined};
+        use SystemToggleAction::{Flip, OpenSettings, RequestAuthorization};
+
+        assert_eq!(system_toggle_action(true, Denied), OpenSettings);
+        assert_eq!(
+            system_toggle_action(true, NotDetermined),
+            RequestAuthorization
+        );
+        assert_eq!(system_toggle_action(false, Denied), Flip(true));
+        assert_eq!(system_toggle_action(false, NotDetermined), Flip(true));
+        assert_eq!(system_toggle_action(true, Authorized), Flip(false));
+        assert_eq!(system_toggle_action(false, Authorized), Flip(true));
+    }
 }
 
 #[cfg(test)]
 mod navigation_tests {
     use super::{SettingsPage, visible_settings_pages};
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn settings_pages_place_notifications_between_language_and_diagnostics() {
+        let pages = visible_settings_pages();
+        assert!(pages.windows(3).any(|pages| {
+            pages == [SettingsPage::Language, SettingsPage::Notifications, SettingsPage::Diagnostics]
+        }));
+    }
 
     #[test]
     fn visible_settings_pages_have_expected_order_and_unique_focus_indices() {
@@ -1215,12 +1270,14 @@ mod navigation_tests {
                 SettingsPage::Dispatch,
                 SettingsPage::ContextOptimizer,
                 SettingsPage::Language,
+                #[cfg(target_os = "macos")]
+                SettingsPage::Notifications,
                 SettingsPage::Diagnostics,
             ]
         );
-        let mut indices = pages.map(SettingsPage::index);
+        let mut indices = pages.iter().copied().map(SettingsPage::index).collect::<Vec<_>>();
         indices.sort_unstable();
-        assert_eq!(indices, [0, 1, 2, 3, 4]);
+        assert_eq!(indices, (0..pages.len()).collect::<Vec<_>>());
     }
 }
 
@@ -2034,6 +2091,7 @@ pub enum SettingsShellEvent {
     ProviderActivated,
     SaveLocale(LocalePreference),
     SaveTheme(ThemePreference),
+    SetSystemNotifications(bool),
     OpenProviderKeyPage(&'static str),
 }
 
@@ -2077,7 +2135,10 @@ pub struct SettingsShell {
     theme_error: Option<String>,
     keyboard_focus: bool,
     scroll: ScrollHandle,
-    nav_focus: [FocusHandle; 5],
+    nav_focus: [FocusHandle; 6],
+    system_notifications_enabled: bool,
+    system_notification_toggle_focus: FocusHandle,
+    system_notification_settings_focus: FocusHandle,
     diagnostics_cleanup_focus: FocusHandle,
     diagnostics_cwd: Option<std::path::PathBuf>,
     diagnostics_generation: Option<u64>,
@@ -2137,6 +2198,9 @@ impl SettingsShell {
             keyboard_focus: false,
             scroll: ScrollHandle::new(),
             nav_focus: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
+            system_notifications_enabled: true,
+            system_notification_toggle_focus: cx.focus_handle().tab_stop(true),
+            system_notification_settings_focus: cx.focus_handle().tab_stop(true),
             diagnostics_cleanup_focus: cx.focus_handle().tab_stop(true),
             diagnostics_cwd: None,
             diagnostics_generation: None,
@@ -3769,6 +3833,10 @@ impl SettingsShell {
         cx.notify();
     }
 
+    pub(crate) fn configure_system_notifications(&mut self, enabled: bool) {
+        self.system_notifications_enabled = enabled;
+    }
+
     pub(crate) fn configure_locale(
         &mut self,
         preference: LocalePreference,
@@ -4740,6 +4808,7 @@ impl SettingsShell {
                     self.load_dispatch(cx);
                 }
             }
+            SettingsPage::Notifications => system_notifications::refresh_authorization(),
             SettingsPage::Diagnostics => {
                 // Entering the page asks the host for fresh read-only
                 // account, environment and browser projections.
@@ -5306,7 +5375,7 @@ impl SettingsShell {
             self.locale.text("AI 服务", "AI services"),
             palette.workspace.muted,
         ));
-        for page in visible_settings_pages() {
+        for &page in visible_settings_pages() {
             let active = self.page == page;
             let focus = self.nav_focus[page.index()].clone();
             let icon_color = if active {
@@ -5373,6 +5442,9 @@ impl SettingsShell {
                         .whitespace_normal()
                         .child(language_zone_label(page.title(self.locale))),
                 ),
+                SettingsPage::Notifications => row
+                    .child(icon("bell", 15., icon_color))
+                    .child(page.title(self.locale)),
                 SettingsPage::Diagnostics => row
                     .child(icon("network", 15., icon_color))
                     .child(page.title(self.locale)),
@@ -5515,6 +5587,7 @@ impl SettingsShell {
                     .child(self.render_theme_section(cx));
             }
             SettingsPage::Dispatch => unreachable!("dispatch renders its own page"),
+            SettingsPage::Notifications => body = body.child(self.notifications_content(cx)),
             SettingsPage::Diagnostics => {
                 let content = self.diagnostics_content(cx);
                 body = body.child(content);
@@ -5525,6 +5598,133 @@ impl SettingsShell {
             }
         }
         div().flex().flex_col().w_full().child(header).child(body)
+    }
+
+    fn notifications_content(&self, cx: &mut Context<Self>) -> Div {
+        let palette = self.theme.effective().palette().workspace;
+        let available = system_notifications::is_available();
+        let authorization = system_notifications::authorization();
+        let interactive = available
+            && !matches!(self.commands.connection().1, ConnectionPhase::ReadOnly { .. });
+        let checked = available
+            && self.system_notifications_enabled
+            && authorization == Authorization::Authorized;
+        // Match the 44 × 26 switches in Context Optimizer.
+        let track_color = if checked {
+            palette.accent
+        } else if self.is_dark() {
+            0x3a4048ff
+        } else {
+            0xcfd4dcff
+        };
+        let switch = div()
+            .id("settings-system-notifications-toggle")
+            .w(px(44.))
+            .h(px(26.))
+            .flex_none()
+            .rounded_full()
+            .p(px(3.))
+            .flex()
+            .items_center()
+            .bg(rgba(track_color))
+            .child(
+                div()
+                    .size(px(20.))
+                    .rounded_full()
+                    .ml(px(if checked { 18. } else { 0. }))
+                    .bg(rgb(0xffffff)),
+            );
+        let switch = if interactive {
+            wire_button(
+                switch.cursor_pointer(),
+                &self.system_notification_toggle_focus,
+                13.,
+                true,
+                |this, _, cx| {
+                    match system_toggle_action(
+                        this.system_notifications_enabled,
+                        system_notifications::authorization(),
+                    ) {
+                        SystemToggleAction::Flip(enabled) => {
+                            cx.emit(SettingsShellEvent::SetSystemNotifications(enabled));
+                        }
+                        SystemToggleAction::RequestAuthorization => {
+                            system_notifications::request_authorization_once();
+                        }
+                        SystemToggleAction::OpenSettings => {
+                            system_notifications::open_notification_settings();
+                        }
+                    }
+                },
+                cx,
+            )
+        } else {
+            switch.opacity(0.55)
+        };
+        let mut detail = div()
+            .flex()
+            .flex_col()
+            .min_w_0()
+            .gap(px(5.))
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .font_weight(FontWeight(650.))
+                    .text_color(rgba(palette.text))
+                    .child(self.locale.text("系统通知", "System notifications")),
+            )
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .line_height(px(17.))
+                    .text_color(rgba(palette.muted))
+                    .child(self.locale.text(
+                        "码头不在前台时，在 macOS 通知中心显示所有 AI 会话的提醒。点击通知会回到对应卡片。",
+                        "Show alerts from all AI sessions in macOS Notification Center while Matou is in the background. Click a notification to return to its card.",
+                    )),
+            );
+        if !available {
+            detail = detail.child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(rgba(palette.muted))
+                    .child(self.locale.text(
+                        "仅在打包后的码头中可用",
+                        "Only available in the packaged Matou app",
+                    )),
+            );
+        } else if self.system_notifications_enabled && authorization == Authorization::Denied {
+            let link = div()
+                .id("settings-system-notifications-permission")
+                .text_size(px(12.))
+                .text_color(rgba(palette.accent))
+                .cursor_pointer()
+                .hover(|style| style.underline())
+                .child(self.locale.text(
+                    "macOS 已关闭通知，去系统设置开启",
+                    "Notifications are disabled in macOS. Open System Settings to enable them.",
+                ));
+            detail = detail.child(wire_button(
+                link,
+                &self.system_notification_settings_focus,
+                3.,
+                true,
+                |_, _, _| system_notifications::open_notification_settings(),
+                cx,
+            ));
+        }
+        div()
+            .w_full()
+            .mt(px(24.))
+            .pt(px(18.))
+            .border_t_1()
+            .border_color(rgba(palette.line))
+            .flex()
+            .items_start()
+            .justify_between()
+            .gap(px(18.))
+            .child(detail)
+            .child(switch)
     }
 
     /// Read-only diagnostics page. Each block owns a title and one agreed
