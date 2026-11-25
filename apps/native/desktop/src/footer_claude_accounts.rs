@@ -469,6 +469,7 @@ impl Workspace {
 
     pub(in crate::workspace) fn footer_account_trigger(
         &self,
+        compact: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
@@ -500,6 +501,7 @@ impl Workspace {
                 .text_color(color)
                 .whitespace_nowrap()
                 .cursor_pointer()
+                .when(compact, |trigger| trigger.ml_0().gap(px(3.)).px(px(3.)))
                 .when(open, |trigger| trigger.bg(rgba(0x518ef020)))
                 .hover(|style| style.bg(rgba(0x518ef019)).text_color(rgba(0x317bdbff)))
                 .tooltip(move |_, cx| {
@@ -516,13 +518,13 @@ impl Workspace {
                     .into()
                 })
                 .child(footer_user_icon(14., color))
-                .child(
+                .children((!compact).then(|| {
                     div()
                         .max_w(px(125.))
                         .overflow_hidden()
                         .text_ellipsis()
-                        .child(footer_text("account", label)),
-                )
+                        .child(footer_text("account", label))
+                }))
                 .children(current.filter(|a| a.needs_login).map(|_| {
                     div()
                         .flex_none()
@@ -530,7 +532,7 @@ impl Workspace {
                         .rounded_full()
                         .bg(rgba(0xd79842ff))
                 }))
-                .child(ui_text("⌃"))
+                .children((!compact).then(|| ui_text("⌃")))
                 .children(footer_bounds_probe("account"))
                 .children(wiring_probe_bounds("footer-account".into())),
             &self.control_focus["accounts"],

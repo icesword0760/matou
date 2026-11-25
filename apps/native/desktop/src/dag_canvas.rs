@@ -2141,6 +2141,26 @@ mod view {
             cx.stop_propagation();
         }
 
+        fn magnify(&mut self, event: &MagnifyEvent, window: &mut Window, cx: &mut Context<Self>) {
+            self.centering = None;
+            let factor = 1. + f64::from(event.magnification);
+            if !factor.is_finite() || factor <= 0. {
+                return;
+            }
+            let scale = self.canvas.transform.scale * factor;
+            let anchor = self
+                .bounds
+                .as_ref()
+                .map(|bounds| DagPoint {
+                    x: f64::from(event.position.x - bounds.left()),
+                    y: f64::from(event.position.y - bounds.top()),
+                })
+                .unwrap_or_else(|| self.canvas.viewport.center());
+            self.canvas.zoom_at(scale, anchor);
+            self.schedule_transform(window, cx);
+            cx.stop_propagation();
+        }
+
         fn render_toolbar(&self, window: &Window, cx: &mut Context<Self>) -> Div {
             let p = Palette::new(self.dark);
             let scale = self.canvas.transform.scale;
@@ -2699,6 +2719,7 @@ mod view {
                 .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
                 .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up_out))
                 .on_scroll_wheel(cx.listener(Self::scroll_wheel))
+                .on_magnify(cx.listener(Self::magnify))
                 .child(measure)
                 .child(grid)
                 .child(edge_layer)
@@ -3358,6 +3379,62 @@ mod view {
             assert_eq!(style.border_color, Some(rgb(border).into()));
             assert_eq!(style.text.as_ref().unwrap().color, Some(rgb(text).into()));
         }
+    }
+
+    #[cfg(test)]
+    #[::core::prelude::v1::test]
+    fn trackpad_pinch_zooms_around_the_pointer() {
+        use gpui::TestAppContext;
+
+        let graph = DagGraph::from_snapshot(&serde_json::json!({
+            "sceneId": "scene",
+            "runtimeGeneration": "first",
+            "eventSequence": 1,
+            "nodes": [{"sessionId": "root", "title": "Draft", "cwd": "/fixture"}],
+            "edges": [],
+        }))
+        .unwrap();
+        let state = DagCanvas::new(DagLayout::new(graph).unwrap(), "root", None);
+        let mut cx = TestAppContext::single();
+        let (view, cx) =
+            cx.add_window_view(|_, cx| DagCanvasView::new(state, InterfaceLocale::Chinese, cx));
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+
+        view.update(cx, |view, cx| {
+            view.canvas.transform = DagTransform {
+                x: 10.,
+                y: 20.,
+                scale: 1.,
+            };
+            cx.notify();
+        });
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+
+        cx.simulate_event(MagnifyEvent {
+            position: point(px(300.), px(200.)),
+            magnification: 0.5,
+            ..Default::default()
+        });
+
+        let transform = view.read_with(cx, |view, _| view.canvas.transform);
+        assert!(
+            (transform.scale - 1.5).abs() < 1e-9,
+            "pinch should scale the canvas: {transform:?}"
+        );
+        // The zoom keeps the pointer anchored: the same world point stays under
+        // the cursor when the gesture grows the canvas.
+        let cursor = DagPoint { x: 300., y: 200. };
+        let world_scale = 1.5;
+        let expected = DagPoint {
+            x: cursor.x - (cursor.x - 10.) / 1. * world_scale,
+            y: cursor.y - (cursor.y - 20.) / 1. * world_scale,
+        };
+        assert!(
+            (transform.x - expected.x).abs() < 1e-9 && (transform.y - expected.y).abs() < 1e-9,
+            "pinch should zoom around the pointer: {transform:?}"
+        );
     }
 }
 

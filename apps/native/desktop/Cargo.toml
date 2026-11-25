@@ -29,3 +29,9 @@ windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
 uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+gpui = { version = "=0.2.2", default-features = false, features = ["font-kit", "runtime_shaders", "test-support"] }
+
+[target.'cfg(target_os = "windows")'.dev-dependencies]
+gpui = { version = "=0.2.2", default-features = false, features = ["test-support"] }

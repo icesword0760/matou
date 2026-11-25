@@ -16,7 +16,8 @@ ARCHIVE_SHA256 = "979b45cfa6ec723b6f42330915a1b3769b930d02b2d505f9697f8ca602bee7
 FONT_PATCH = Path("patches/gpui-macos-synthetic-italic.patch")
 ATLAS_PATCH = Path("patches/gpui-macos-atlas-retirement.patch")
 WINDOWS_PATCH = Path("patches/gpui-windows-ime.patch")
-PATCHES = (FONT_PATCH, ATLAS_PATCH, WINDOWS_PATCH)
+PINCH_PATCH = Path("patches/gpui-macos-pinch-magnify.patch")
+PATCHES = (FONT_PATCH, ATLAS_PATCH, WINDOWS_PATCH, PINCH_PATCH)
 DESTINATION = ROOT / "vendor/gpui"
 FONT_SOURCE = Path("src/platform/mac/text_system.rs")
 ATLAS_SOURCE = Path("src/platform/mac/metal_atlas.rs")
@@ -26,7 +27,11 @@ PATCHED_SHA256 = {
     FONT_SOURCE.as_posix(): "784e9e1fa80eac701935e1689a2d693dae186489614c2b0ad0c42d0878dcd261",
     ATLAS_SOURCE.as_posix(): "362ddf60c6550e344a354fb6b6a977f2ff068bd442f3256bf5c81e535796459b",
     "src/platform.rs": "a7a8075608b61796ba7871aa118f4c2c3efab97c3bc3ec0553ad4de32547b24c",
-    "src/window.rs": "d28f4524f3a3c269b98ab0fcb98ed28d0ec8f20b837692e7de9b8efc9c1c2c50",
+    "src/window.rs": "8e92531b9b6c3601f70a8401ddd6c79494e7ed7cf4f7de2ee9dde33f31274296",
+    "src/interactive.rs": "172ba338ac2947c39512c8a69903b16b8bf5816012aaf95d91e67ec578cebbf1",
+    "src/elements/div.rs": "3c9325667dfc3a3a2b59655c9f48d673bf425f571a0700bd05c74449129f2cc1",
+    "src/platform/mac/events.rs": "56d64101a737b268e627b4451267a80242d1ea0b9c52ae2cdcf1a339ce0aa4b8",
+    "src/platform/mac/window.rs": "05c3daafd80dc14df263902b679f07c2885961b47450f7c6d3fa4e181a54c873",
     "src/platform/windows/direct_write.rs": "e345de60957683a982c560a00f7d685b17d23b91e1c9b45c52f930a4e4c0f609",
     "src/platform/windows/events.rs": "ee294c71a1324eda335786e9448b061a0c86e7abf858535715ef8dc38f0d3c1b",
     "src/platform/windows/platform.rs": "f56046900c173914859233aad5af10717ec115a701e545c905fe022f8de340a3",
@@ -39,6 +44,10 @@ ORIGINAL_SHA256 = {
     ATLAS_SOURCE.as_posix(): "243326441589a0f942f4e1ed83283c5829457007a0d58e9ee13cc04540195428",
     "src/platform.rs": "7106499142d5416edaf44168da5c7dcd778c527398cb86e487131ba6689b94ff",
     "src/window.rs": "40d58470971ccd658ead4d4f788219658fb68b9486aff73e143835c09237ab18",
+    "src/interactive.rs": "2c1b61bf1d6e999641a618810bf0d120236575e3e50f81884eae256d2fc56b57",
+    "src/elements/div.rs": "5c227b7b562aa7471d2f3e78b599ac668c6915b54ec994ce981ce6e29a55e9a6",
+    "src/platform/mac/events.rs": "c5fe96c1d637947d42bc17e68be2336cce44d3a9e24bd38840a682594641e87f",
+    "src/platform/mac/window.rs": "c21da3de36159b51e62f02666b335359d5fff8c20ddf79c4fc9e3195047c3f35",
     "src/platform/windows/direct_write.rs": "8047a0130272466935edd5c8a57aa309d3a3efbffdfe7c175cc5b3082566820c",
     "src/platform/windows/events.rs": "ad86330b2c3d26342ce8c45759a07c8ac57007fecedc7dd7bf861dfdfa2727c7",
     "src/platform/windows/platform.rs": "81ca3093537e9320e2e8a28bc15d9883080546b96a685c0662158d853e090334",
@@ -47,6 +56,7 @@ ORIGINAL_SHA256 = {
 PREVIOUS_SHA256 = {
     "src/window.rs": (
         "8560e49d65f7fcec992d2309d1fbff1d32cecac9fe4f39aab77f20d51e0fc639",
+        "d28f4524f3a3c269b98ab0fcb98ed28d0ec8f20b837692e7de9b8efc9c1c2c50",
     ),
     "src/platform/windows/events.rs": (
         "01f741c6822215d75d76d46d3066bc0386d5d6f5667ee4fb8a6d877d27d223a5",

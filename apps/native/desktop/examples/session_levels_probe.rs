@@ -6700,8 +6700,20 @@ mod probe {
             }
             let title = assert_footer_text(window, cx, "label", &format!("{TITLE} 的子会话"), true);
             println!("footer {width} | painted child title={title}");
-            assert_footer_text(window, cx, "count", "· 4 个会话", false);
-            let name = assert_footer_text(window, cx, "name", "Sonnet", width == 720.);
+            if width < 1200. {
+                assert!(footer_bounds(window, cx, "count").is_none());
+            } else {
+                assert_footer_text(window, cx, "count", "· 4 个会话", false);
+            }
+            let name = if footer_bounds(window, cx, "name").is_some() {
+                assert_footer_text(window, cx, "name", "Sonnet", false)
+            } else {
+                assert!(
+                    f32::from(footer_bounds(window, cx, "status").unwrap().size.width) - 13.
+                        <= 210.
+                );
+                "模型按宽度折叠".into()
+            };
             let environment = assert_footer_text(window, cx, "environment", "待处理", false);
             let secondary = footer_bounds(window, cx, "secondary").unwrap();
             let environment_bounds = footer_bounds(window, cx, "environment").unwrap();
@@ -6847,13 +6859,11 @@ mod probe {
 
         const LONG_MODEL: &str =
             "fixture-long-model-name-for-testing-single-line-ellipsis-in-the-current-codex-run";
-        let long_label = format!("{LONG_MODEL} (high) (1.2M context)");
         let root_hud = json!({
             "model": LONG_MODEL, "effort": "high", "contextPercent": 86.0,
             "contextWindowSize": 1_200_000.0,
             "runningTools": [{"name": "Read", "target": "fixture.txt"}],
             "toolCounts": [{"name": "Bash", "count": 2}],
-            "usageWindows": [{"label":"quota","percent":7}], "agents": [{"label":"hidden"}],
             "todos":[{"content":"hidden"}], "configCounts":{"mcpServers":2,"hooks":4},
             "teamRole":"hidden",
         });
@@ -6865,10 +6875,17 @@ mod probe {
             "model": "fixture-child", "effort": "medium", "contextPercent": 70.0,
             "contextWindowSize": 200_000.0, "toolCounts":[{"name":"Bash","count":4}]
         });
-        let fitted = |window: WindowHandle<Workspace>, cx: &mut AsyncApp, model: &str| {
+        let content_width = |window: WindowHandle<Workspace>, cx: &mut AsyncApp| {
             let status = footer_bounds(window, cx, "status").expect("HUD status");
-            let width = f32::from(status.size.width) - 13.;
-            if width > 210. {
+            let inset = if footer_bounds(window, cx, "count").is_some() {
+                13.
+            } else {
+                5.
+            };
+            f32::from(status.size.width) - inset
+        };
+        let fitted = |window: WindowHandle<Workspace>, cx: &mut AsyncApp, model: &str| {
+            if content_width(window, cx) > 210. {
                 window
                     .update(cx, |_, _, _| {
                         Workspace::assert_fitted_footer_text("name", model)
@@ -6879,13 +6896,7 @@ mod probe {
                 "模型按宽度折叠".into()
             }
         };
-        for (width, show_model, show_context) in [
-            (610., false, false),
-            (650., true, false),
-            (720., true, true),
-            (900., true, true),
-            (1200., true, true),
-        ] {
+        for width in [610., 650., 720., 900., 1200.] {
             let mut fixture = Fixture::new();
             let Some(BootstrapResult::Writable { connection, .. }) = &fixture.db else {
                 unreachable!()
@@ -6926,8 +6937,11 @@ mod probe {
             deliver(window, cx, update(&fixture, Some(&child_hud)));
             draw(window, cx);
             draw(window, cx);
+            let status_width = content_width(window, cx);
+            let show_model = status_width > 210.;
+            let show_context = status_width > 250.;
             let displayed = if show_model {
-                assert_footer_text(window, cx, "name", &long_label, width < 1200.)
+                fitted(window, cx, LONG_MODEL)
             } else {
                 assert!(footer_bounds(window, cx, "name").is_none());
                 "模型折叠".into()
@@ -6938,13 +6952,12 @@ mod probe {
                 assert!(footer_bounds(window, cx, "context").is_none());
                 "上下文折叠".into()
             };
-            assert_footer_text(window, cx, "tools", "3 Tools", false);
             let mut previous = footer_bounds(window, cx, "permission").unwrap();
             for (field, active) in [
                 ("name", show_model),
                 ("context", show_context),
-                ("tools", true),
                 ("egress", true),
+                ("stats", true),
                 ("account", false),
             ] {
                 if !active {
@@ -6958,9 +6971,15 @@ mod probe {
                 assert!((previous.center().y - bounds.center().y).abs() <= px(1.));
                 previous = bounds;
             }
-            assert_eq!(previous.right(), px(width - 20.));
+            let padding = if footer_bounds(window, cx, "count").is_some() {
+                20.
+            } else {
+                10.
+            };
+            assert_eq!(previous.right(), px(width - padding));
             for hidden in [
                 "quota",
+                "tools",
                 "todos",
                 "team",
                 "agents",
@@ -6974,11 +6993,9 @@ mod probe {
                     "{hidden} rendered"
                 );
             }
-            let status_width =
-                f32::from(footer_bounds(window, cx, "status").unwrap().size.width) - 13.;
             println!(
-                "codex HUD GPUI | {width} pt | status content {status_width} pt | {displayed} / {context} / 3 Tools on one line, exit at {} pt, hidden fields omitted",
-                width - 20.
+                "codex HUD GPUI | {width} pt | status content {status_width} pt | {displayed} / {context} / stats trigger on one line, row ends at {} pt",
+                width - padding
             );
             if width < 720. {
                 window
@@ -7000,11 +7017,11 @@ mod probe {
             assert_focus(fixture.process(window, cx, &sink), PARENT);
             deliver(window, cx, update(&fixture, Some(&child_hud)));
             draw(window, cx);
-            let parent = fitted(window, cx, "fixture-parent (low) (999 context)");
+            let parent = fitted(window, cx, "fixture-parent");
             assert_footer_text(window, cx, "context", "0%", false);
-            assert_footer_text(window, cx, "tools", "1 Tools", false);
+            assert_footer_text(window, cx, "stats", "⋯", false);
             println!(
-                "codex HUD GPUI | {width} pt | activated root card shows {parent}, 0% and 1 Tools"
+                "codex HUD GPUI | {width} pt | activated root card shows {parent}, 0% and a stats trigger"
             );
 
             window
@@ -7016,22 +7033,21 @@ mod probe {
             deliver(window, cx, update(&fixture, Some(&child_hud)));
             draw(window, cx);
             draw(window, cx);
-            let model = fitted(window, cx, "fixture-child (medium) (200K context)");
-            let status = footer_bounds(window, cx, "status").unwrap();
-            let context = if f32::from(status.size.width) - 13. > 250. {
+            let model = fitted(window, cx, "fixture-child");
+            let context = if content_width(window, cx) > 250. {
                 assert_footer_text(window, cx, "context", "70%", false)
             } else {
                 assert!(footer_bounds(window, cx, "context").is_none());
                 "上下文按宽度折叠".into()
             };
-            assert_footer_text(window, cx, "tools", "4 Tools", false);
+            assert_footer_text(window, cx, "stats", "⋯", false);
             println!(
-                "codex HUD GPUI | {width} pt | child level shows {model}, {context} and 4 Tools"
+                "codex HUD GPUI | {width} pt | child level shows {model}, {context} and a stats trigger"
             );
 
             deliver(window, cx, update(&fixture, None));
             draw(window, cx);
-            for field in ["name", "context", "tools"] {
+            for field in ["name", "context", "stats"] {
                 assert!(
                     footer_bounds(window, cx, field).is_none(),
                     "{field} leaked from former run"
@@ -7044,7 +7060,7 @@ mod probe {
             draw(window, cx);
             fitted(window, cx, "fixture-resumed");
             assert!(footer_bounds(window, cx, "context").is_none());
-            assert!(footer_bounds(window, cx, "tools").is_none());
+            assert!(footer_bounds(window, cx, "stats").is_none());
             println!(
                 "codex HUD GPUI | {width} pt | replacement graph clears old fields and shows the new run model when it arrives"
             );
@@ -7054,7 +7070,7 @@ mod probe {
             assert_focus(fixture.process(window, cx, &sink), PARENT);
             deliver(window, cx, update(&fixture, Some(&resumed)));
             draw(window, cx);
-            fitted(window, cx, "fixture-parent (low) (999 context)");
+            fitted(window, cx, "fixture-parent");
             println!("codex HUD GPUI | {width} pt | back arrow restored parent HUD");
             window
                 .update(cx, |_, window, _| window.remove_window())
@@ -7090,7 +7106,6 @@ mod probe {
         const MODEL: &str =
             "gpt-6-hud-acceptance-model-with-a-deliberately-long-visible-name-and-distinct-suffix";
         const SHORT_CWD: &str = "~/current-directory-with-a-name-long-enough-to-require-ellipsis";
-        let model_label = format!("{MODEL} (high) (200K context)");
         let mut previous_model_width = px(0.);
 
         for width in [720., 900., 1200.] {
@@ -7221,14 +7236,19 @@ mod probe {
             let egress = footer_bounds(window, cx, "egress").unwrap();
             assert!(entry.left() >= status.left() && entry.right() < permission.left());
             assert_eq!(entry.center().y, permission.center().y);
-            assert_eq!(egress.right(), px(width - 20.));
+            let stats = footer_bounds(window, cx, "stats").unwrap();
+            let padding = if width == 720. { 10. } else { 20. };
+            assert_eq!(stats.right(), px(width - padding));
             assert_footer_text(window, cx, "instructions", "AGENTS.md", false);
-            let tools = footer_bounds(window, cx, "tools").unwrap();
-            assert!(tools.left() > permission.right() && tools.right() < egress.left());
+            assert!(stats.left() > egress.right());
             assert_footer_text(window, cx, "label", "根会话", false);
-            assert_footer_text(window, cx, "count", "· 2 个会话", false);
+            if width == 720. {
+                assert!(footer_bounds(window, cx, "count").is_none());
+            } else {
+                assert_footer_text(window, cx, "count", "· 2 个会话", false);
+            }
             assert_footer_text(window, cx, "context", "26%", false);
-            assert_footer_text(window, cx, "tools", "1 Tools", false);
+            assert_footer_text(window, cx, "stats", "⋯", false);
             let environment = footer_bounds(window, cx, "environment").unwrap();
             assert_eq!(environment.size, size(px(22.), px(22.)));
             let model = footer_bounds(window, cx, "name").unwrap();
@@ -7237,17 +7257,17 @@ mod probe {
             let visible_model = if width == 1200. {
                 let visible = window
                     .update(cx, |_, _, _| {
-                        Workspace::assert_fitted_footer_text("name", &model_label)
+                        Workspace::assert_fitted_footer_text("name", MODEL)
                     })
                     .unwrap();
-                assert!(visible.starts_with(&format!("{MODEL} (high)")), "{visible}");
+                assert_eq!(visible, MODEL);
                 visible
             } else {
-                assert_footer_text(window, cx, "name", &model_label, true)
+                assert_footer_text(window, cx, "name", MODEL, true)
             };
             let cwd = match footer_bounds(window, cx, "cwd") {
                 Some(cwd) => {
-                    assert!(cwd.left() >= tools.right() && cwd.right() <= environment.left());
+                    assert!(cwd.left() >= model.right() && cwd.right() <= environment.left());
                     assert_footer_text(window, cx, "cwd", SHORT_CWD, true)
                 }
                 None => "hidden".to_owned(),
@@ -7259,11 +7279,14 @@ mod probe {
                 "permission",
                 "name",
                 "context",
-                "tools",
                 "environment",
                 "egress",
+                "stats",
             ] {
-                let bounds = footer_bounds(window, cx, key).unwrap();
+                let Some(bounds) = footer_bounds(window, cx, key) else {
+                    assert_eq!((width, key), (720., "count"));
+                    continue;
+                };
                 assert!(
                     bounds.left() >= previous.right(),
                     "{key} overlaps its predecessor"
@@ -7271,7 +7294,7 @@ mod probe {
                 previous = bounds;
             }
             println!(
-                "instructions | {width} pt | model {} pt: {visible_model}, cwd: {cwd}, complete breadcrumb/icon, context/tools and neutral gray entry",
+                "instructions | {width} pt | model {} pt: {visible_model}, cwd: {cwd}, breadcrumb/icon, context, stats and neutral gray entry",
                 f32::from(model.size.width)
             );
 
