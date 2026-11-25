@@ -10,6 +10,8 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
+#[cfg(unix)]
+use matou_native_core::provider_launch::resolve_command_with_login_path;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -190,7 +192,7 @@ fn set_env(environment: &mut BTreeMap<OsString, OsString>, key: OsString, value:
     environment.insert(key, value);
 }
 
-/// Resolve arguments and run-local environment without spawning a CLI or shell.
+/// Prepare the launch, probing the login-shell PATH if the CLI is missing.
 pub fn prepare(input: LaunchInput<'_>) -> Result<LaunchPlan> {
     let mut mode = input.mode;
     if let LaunchMode::Resume(id) | LaunchMode::Fork(id) = &mut mode {
@@ -256,6 +258,9 @@ pub fn prepare(input: LaunchInput<'_>) -> Result<LaunchPlan> {
     argv.extend(input.permission.args().iter().map(OsString::from));
 
     let command_path = Path::new(&command);
+    #[cfg(unix)]
+    let executable = resolve_command_with_login_path(command_path, &cwd, &mut environment).ok();
+    #[cfg(not(unix))]
     let executable = if command.is_empty() {
         None
     } else if command_path.file_name() != Some(&command) {
@@ -266,8 +271,8 @@ pub fn prepare(input: LaunchInput<'_>) -> Result<LaunchPlan> {
             .flat_map(std::env::split_paths)
             .filter(|dir| !dir.as_os_str().is_empty())
             .find_map(|dir| executable_at(cwd.join(dir).join(command_path)))
-    }
-    .with_context(|| {
+    };
+    let executable = executable.with_context(|| {
         let command = command.to_string_lossy();
         if env_value(&environment, "MATOU_LOCALE") == Some(OsStr::new("en")) {
             format!(
@@ -296,6 +301,7 @@ fn checked_path(cwd: &Path, path: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
+#[cfg(not(unix))]
 fn executable_at(path: PathBuf) -> Option<PathBuf> {
     #[cfg(windows)]
     if path.extension().is_none() {
@@ -303,13 +309,6 @@ fn executable_at(path: PathBuf) -> Option<PathBuf> {
     }
     if !path.is_file() {
         return None;
-    }
-    #[cfg(unix)]
-    {
-        let path_string = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).ok()?;
-        if unsafe { libc::access(path_string.as_ptr(), libc::X_OK) } != 0 {
-            return None;
-        }
     }
     Some(path)
 }

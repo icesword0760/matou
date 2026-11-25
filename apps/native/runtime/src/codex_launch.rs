@@ -8,6 +8,8 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
+#[cfg(unix)]
+use matou_native_core::provider_launch::resolve_command_with_login_path;
 use matou_native_core::{
     provider_launch::{EFFORTS, validate_cwd},
     pty::{LaunchProfile, ShellLaunch, get_var},
@@ -64,10 +66,15 @@ pub(crate) fn prepare(
     validate_cwd(cwd)?;
     let command = get_var(&environment, "MATOU_CODEX_COMMAND")
         .filter(|value| !value.is_empty())
-        .unwrap_or(OsStr::new("codex"));
-    let path = Path::new(command);
+        .unwrap_or(OsStr::new("codex"))
+        .to_owned();
+    let path = Path::new(&command);
     let cwd = std::path::absolute(cwd)?;
-    let executable = resolve_executable(path, &cwd, &environment).with_context(|| {
+    #[cfg(unix)]
+    let executable = resolve_command_with_login_path(path, &cwd, &mut environment).ok();
+    #[cfg(not(unix))]
+    let executable = resolve_executable(path, &cwd, &environment);
+    let executable = executable.with_context(|| {
         // Show the command name in the prompt without exposing a local path.
         let command = path.file_name().unwrap_or(OsStr::new("codex")).to_string_lossy();
         MissingCommand(if environment.get(OsStr::new("MATOU_LOCALE")).is_some_and(|value| value == "en") {

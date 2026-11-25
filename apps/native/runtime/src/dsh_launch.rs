@@ -7,6 +7,8 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
+#[cfg(unix)]
+use matou_native_core::provider_launch::resolve_command_with_login_path;
 use serde_json::json;
 
 use crate::dsh_events::{js_whitespace, valid_session_id};
@@ -150,7 +152,7 @@ pub fn prepare(input: DshLaunchInput<'_>) -> Result<DshLaunchPlan> {
     #[cfg(unix)]
     environment.insert("PWD".into(), cwd.clone().into_os_string());
 
-    let executable = discover_executable(&cwd, &environment)?;
+    let executable = discover_executable(&cwd, &mut environment)?;
     let mut argv = vec![TUI.into()];
     if let Some(path) = input.patch_path.filter(|path| !path.as_os_str().is_empty()) {
         argv.extend([OsString::from("--patch"), path.as_os_str().to_owned()]);
@@ -186,12 +188,19 @@ fn env_value<'a>(environment: &'a BTreeMap<OsString, OsString>, name: &str) -> O
     }
 }
 
-fn discover_executable(cwd: &Path, environment: &BTreeMap<OsString, OsString>) -> Result<PathBuf> {
+fn discover_executable(
+    cwd: &Path,
+    environment: &mut BTreeMap<OsString, OsString>,
+) -> Result<PathBuf> {
     let command = env_value(environment, COMMAND_OVERRIDE)
         .filter(|value| !value.is_empty())
-        .unwrap_or(OsStr::new("dsh"));
-    let path = Path::new(command);
-    let executable = if path.file_name() != Some(command) {
+        .unwrap_or(OsStr::new("dsh"))
+        .to_owned();
+    let path = Path::new(&command);
+    #[cfg(unix)]
+    let executable = resolve_command_with_login_path(path, cwd, environment).ok();
+    #[cfg(not(unix))]
+    let executable = if path.file_name() != Some(command.as_os_str()) {
         executable_at(cwd.join(path))
     } else {
         env_value(environment, "PATH")
@@ -210,6 +219,7 @@ fn discover_executable(cwd: &Path, environment: &BTreeMap<OsString, OsString>) -
     })
 }
 
+#[cfg(not(unix))]
 fn executable_at(path: PathBuf) -> Option<PathBuf> {
     #[cfg(windows)]
     if path.extension().is_none() {
@@ -217,13 +227,6 @@ fn executable_at(path: PathBuf) -> Option<PathBuf> {
     }
     if !path.is_file() {
         return None;
-    }
-    #[cfg(unix)]
-    {
-        let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).ok()?;
-        if unsafe { libc::access(name.as_ptr(), libc::X_OK) } != 0 {
-            return None;
-        }
     }
     Some(path)
 }
