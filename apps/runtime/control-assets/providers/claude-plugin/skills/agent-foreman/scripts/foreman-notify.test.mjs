@@ -163,6 +163,9 @@ test('a failed delivery or unavailable mt leaves the new round intact', { skip: 
   assert.deepEqual(delivered.lastExternalSend.caller, caller);
   assert.match(f.readLog('supervisor.log'), /第 2 轮通知发起会话失败：TARGET_NOT_FOUND/);
 
+  const legacyState = f.state();
+  delete legacyState.ownerSession;
+  fs.writeFileSync(f.stateFile, JSON.stringify(legacyState));
   fs.unlinkSync(f.mt);
   await f.restart('resume', caller);
   await f.waitForSupervisor();
@@ -170,11 +173,13 @@ test('a failed delivery or unavailable mt leaves the new round intact', { skip: 
   assert.equal(status.status, 'completed');
   assert.equal(status.turns.length, 3);
   assert.deepEqual(status.lastExternalSend, delivered.lastExternalSend);
+  assert.equal(f.state().ownerSession, undefined);
   assert.match(f.readLog('feed.log'), /✉ 外部 send（调用者未知）/);
+  assert.doesNotMatch(f.readLog('feed.log'), /✉ 旧任务/);
   assert.deepEqual(f.calls(), [identifyArgs, identifyArgs, listArgs, sentArgs(caller, 2)]);
 });
 
-test('legacy tasks record the caller without guessing the owner', { skip: process.platform === 'win32' }, async (t) => {
+test('a legacy task registers the first caller and notifies them of a later external send', { skip: process.platform === 'win32' }, async (t) => {
   const f = setup(t);
   await f.start();
   await f.waitForSupervisor();
@@ -182,14 +187,21 @@ test('legacy tasks record the caller without guessing the owner', { skip: proces
   delete legacyState.ownerSession;
   fs.writeFileSync(f.stateFile, JSON.stringify(legacyState));
 
+  await f.restart('send', owner);
+  await f.waitForSupervisor();
+  assert.deepEqual(f.state().ownerSession, owner);
+  assert.equal((await f.status()).lastExternalSend, null);
+  assert.match(f.readLog('feed.log'), /✉ 旧任务，已把 验收会话 记为所有者（此前无记录）/);
+  assert.doesNotMatch(f.readLog('feed.log'), /✉ 外部 send/);
+  assert.deepEqual(f.calls(), [identifyArgs, identifyArgs]);
+
   await f.restart('send', caller);
   await f.waitForSupervisor();
-  const status = await f.status();
-  assert.equal(status.status, 'completed');
-  assert.deepEqual(status.lastExternalSend.caller, caller);
-  assert.equal(f.state().ownerSession, undefined);
+  await f.waitFor(() => f.calls().length >= 5, '旧任务后续的外部 send 未投递');
+  assert.deepEqual(f.state().ownerSession, owner);
+  assert.deepEqual((await f.status()).lastExternalSend.caller, caller);
   assert.match(f.readLog('feed.log'), /✉ 外部 send by 外部会话/);
-  assert.deepEqual(f.calls(), [identifyArgs, identifyArgs]);
+  assert.deepEqual(f.calls(), [identifyArgs, identifyArgs, identifyArgs, listArgs, sentArgs(caller, 3)]);
 });
 
 test('an unsuccessful worker spawn does not publish or send an external notification', { skip: process.platform === 'win32' }, async (t) => {

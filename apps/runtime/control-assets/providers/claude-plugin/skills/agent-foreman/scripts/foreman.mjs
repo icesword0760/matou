@@ -1906,7 +1906,10 @@ async function launchRun(cmd, task, opts, prompt) {
     state.ownerSession = caller;
   } else {
     delete state.pendingExternalSend;
-    if (!caller || caller.ref !== state.ownerSession?.ref) {
+    if (caller && !state.ownerSession?.ref) {
+      state.ownerSession = caller;
+      feed(state, `✉ 旧任务，已把 ${terminalLine(caller.title)} 记为所有者（此前无记录）`);
+    } else if (!caller || caller.ref !== state.ownerSession.ref) {
       state.pendingExternalSend = { caller, at: now() };
     }
   }
