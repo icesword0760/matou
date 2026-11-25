@@ -38,7 +38,7 @@ use matou_native_desktop::{
     windows_titlebar,
     workspace_board::{
         BOARD_FEEDBACK_DURATION, BoardFeedback, BoardMoveRequest, BoardView, WorkspaceBoard,
-        render_workspace_board_with_sessions,
+        render_workspace_board,
     },
 };
 use matou_native_runtime::{
@@ -53,18 +53,6 @@ enum Overlay {
     Update,
     Egress,
     Accounts,
-}
-
-#[derive(Clone)]
-struct BoardSession {
-    scene: String,
-    id: String,
-    title: String,
-}
-
-struct BoardScene {
-    task: String,
-    sessions: Vec<BoardSession>,
 }
 
 struct DetachedCard {
@@ -140,7 +128,6 @@ pub(super) struct WorkspaceWiring {
     copy_link: Rc<LinkCopier>,
     link_in_progress: bool,
     pub(super) board_open: bool,
-    board_scenes: HashMap<String, BoardScene>,
     board_request_id: u64,
     board_moves: Vec<(u64, BoardMoveRequest)>,
     board_feedback: Option<(u64, String, BoardFeedback)>,
@@ -293,7 +280,6 @@ impl WorkspaceWiring {
             }),
             link_in_progress: false,
             board_open: false,
-            board_scenes: HashMap::new(),
             board_request_id: 0,
             board_moves: Vec::new(),
             board_feedback: None,
@@ -1220,32 +1206,6 @@ impl Workspace {
     pub(super) fn sync_wiring_graph(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.dismiss_ineligible_account_overlay(window, cx);
         let graph_scene = self.graph["sceneId"].as_str();
-        let active_scene = self.hierarchy.as_ref().and_then(|h| h.scene.as_ref());
-        if let Some(scene) = active_scene.filter(|scene| graph_scene == Some(scene.id.as_str())) {
-            let sessions = session_levels::nodes(&self.graph)
-                .iter()
-                .filter(|node| {
-                    node["archivedAt"].is_null() && node["currentMode"] != "agent-team-member"
-                })
-                .filter_map(|node| {
-                    Some(BoardSession {
-                        scene: scene.id.clone(),
-                        id: node["sessionId"].as_str()?.into(),
-                        title: node["title"].as_str().unwrap_or_default().into(),
-                    })
-                })
-                .collect();
-            self.wiring.board_scenes.insert(
-                scene.id.clone(),
-                BoardScene {
-                    task: scene.task_id.clone(),
-                    sessions,
-                },
-            );
-            self.wiring.board_scenes.retain(|id, snapshot| {
-                snapshot.task != scene.task_id || self.scenes.iter().any(|scene| scene.id == *id)
-            });
-        }
         if self
             .hierarchy
             .as_ref()
@@ -1291,33 +1251,7 @@ impl Workspace {
         self.refresh_live_wiring(cx);
     }
 
-    pub(super) fn forget_board_scene(&mut self, scene_id: &str) {
-        self.wiring.board_scenes.remove(scene_id);
-    }
-
-    fn board_sessions(&self) -> HashMap<String, Vec<BoardSession>> {
-        let active_scene = self.active_scene_id();
-        let mut scenes: Vec<_> = self.wiring.board_scenes.iter().collect();
-        scenes.sort_by_key(|(id, _)| (Some(id.as_str()) != active_scene, id.as_str()));
-        let mut groups = HashMap::<String, Vec<BoardSession>>::new();
-        let mut seen = HashSet::new();
-        for (_, scene) in scenes {
-            for session in &scene.sessions {
-                if seen.insert(&session.id) {
-                    groups
-                        .entry(scene.task.clone())
-                        .or_default()
-                        .push(session.clone());
-                }
-            }
-        }
-        groups
-    }
-
-    fn board_projection(
-        &self,
-        groups: &HashMap<String, Vec<BoardSession>>,
-    ) -> Option<WorkspaceBoard> {
+    fn board_projection(&self) -> Option<WorkspaceBoard> {
         let hierarchy = self.hierarchy.as_ref()?;
         let workspace = hierarchy.workspace.as_ref()?;
         let active_task = hierarchy.task.as_ref().map(|task| task.id.as_str());
@@ -1327,9 +1261,11 @@ impl Workspace {
             &workspace.name,
             active_task,
             &self.tasks,
-            |task| match counts {
-                Some(counts) => counts.get(task).and_then(Value::as_u64).unwrap_or(0) as usize,
-                None => groups.get(task).map_or(0, Vec::len),
+            |task| {
+                counts
+                    .and_then(|counts| counts.get(task))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as usize
             },
         );
         // Replay pending moves on each fresh projection so unrelated updates do
@@ -1350,7 +1286,7 @@ impl Workspace {
         let request_id = self.wiring.board_request_id;
         self.wiring.board_feedback = None;
         let valid_drop = self
-            .board_projection(&self.board_sessions())
+            .board_projection()
             .is_some_and(|board| board.after_drop(&request).is_ok());
         if valid_drop
             && self
@@ -1410,7 +1346,7 @@ impl Workspace {
         .detach();
     }
 
-    fn board_view(&self, groups: &HashMap<String, Vec<BoardSession>>) -> Option<BoardView> {
+    fn board_view(&self) -> Option<BoardView> {
         let workspace = self.hierarchy.as_ref()?.workspace.as_ref()?;
         let feedback = self
             .wiring
@@ -1418,97 +1354,25 @@ impl Workspace {
             .as_ref()
             .filter(|(_, owner, _)| *owner == workspace.id)
             .map(|(_, _, feedback)| *feedback);
-        Some(self.board_projection(groups)?.view(self.locale, feedback))
+        Some(self.board_projection()?.view(self.locale, feedback))
     }
 
     pub(super) fn render_board(&self, cx: &Context<Self>) -> Option<AnyElement> {
         if !self.wiring.board_open {
             return None;
         }
-        let groups = self.board_sessions();
-        let view = self.board_view(&groups)?;
+        let view = self.board_view()?;
         let owner = cx.weak_entity();
-        let move_owner = owner.clone();
-        let palette = self.theme_palette().workspace;
         Some(
-            render_workspace_board_with_sessions(
+            render_workspace_board(
                 &view,
                 self.wiring_dark(),
                 Rc::new(move |request, _, cx| {
-                    let _ = move_owner.update(cx, |this, cx| this.move_task_on_board(request, cx));
-                }),
-                Rc::new(move |task| {
-                    groups
-                        .get(task)
-                        .into_iter()
-                        .flatten()
-                        .map(|session| {
-                            let target = session.clone();
-                            let owner = owner.clone();
-                            div()
-                                .id(SharedString::from(format!("board-session-{}", session.id)))
-                                .focusable()
-                                .tab_index(0)
-                                .mt(px(5.))
-                                .px(px(6.))
-                                .py(px(3.))
-                                .rounded(px(4.))
-                                .text_color(rgba(palette.text))
-                                .hover(move |style| style.bg(rgba(palette.accent_soft)))
-                                .truncate()
-                                .cursor_pointer()
-                                .relative()
-                                .children(wiring_probe_bounds(format!(
-                                    "board-session-{}",
-                                    session.id
-                                )))
-                                .child(session.title.clone())
-                                .on_click(move |_, window, cx| {
-                                    let _ = owner.update(cx, |this, cx| {
-                                        this.select_board_session(&target, window, cx)
-                                    });
-                                })
-                                .into_any_element()
-                        })
-                        .collect()
+                    let _ = owner.update(cx, |this, cx| this.move_task_on_board(request, cx));
                 }),
             )
             .into_any_element(),
         )
-    }
-
-    fn select_board_session(
-        &mut self,
-        target: &BoardSession,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.wiring.board_open {
-            return;
-        }
-        self.toggle_board(window, cx);
-        window.focus(&self.control_focus["sidebar-board"]);
-        if self.active_scene_id() == Some(target.scene.as_str())
-            && self.graph_node(&target.id).is_some()
-        {
-            let parent = self
-                .graph_node(&target.id)
-                .and_then(session_levels::parent_id)
-                .map(str::to_owned);
-            self.level_parent_by_scene
-                .insert(target.scene.clone(), parent);
-            self.refresh_level(cx);
-            self.restore_geometry = false;
-            self.focus_follow_until =
-                Some(self.motion_clock.elapsed().as_secs_f64() * 1000. + 440.);
-            self.activate_session_card(&target.id, window, cx);
-            if let Some(focus) = self.card_controls.get(&target.id) {
-                window.focus(focus);
-            }
-        } else {
-            self.send_card_focus(&target.scene, &target.id, cx);
-            self.level_parent_by_scene.remove(&target.scene);
-        }
     }
 
     pub(super) fn wiring_card_menu(&self, id: &str) -> CardMenu {
@@ -2179,9 +2043,6 @@ impl Workspace {
                 .update(cx, |_, window, _| window.remove_window());
         }
         self.wiring.banners.remove(id);
-        for snapshot in self.wiring.board_scenes.values_mut() {
-            snapshot.sessions.retain(|session| session.id != id);
-        }
     }
 
     fn reap_detached(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3476,7 +3337,7 @@ impl Workspace {
     }
 
     pub(super) fn board_view_for_probe(&self) -> Option<BoardView> {
-        self.board_view(&self.board_sessions())
+        self.board_view()
     }
 
     pub(super) fn mock_external_links_for_probe(

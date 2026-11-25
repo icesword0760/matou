@@ -97,6 +97,7 @@ mod workspace {
     const A: &str = "shell-a";
     const B: &str = "shell-b";
     const TEAM: &str = "teammate";
+    const FIXTURE_BOARD_CARD: &str = "board-card:workspace:task";
 
     fn graph() -> Value {
         json!({"sceneId":"main", "workspaceSessionCount":3, "nodes":[
@@ -703,11 +704,6 @@ mod workspace {
                     click(window.into(), cx, MouseButton::Left, task);
                 }
                 assert_view(cx, false, false, &case);
-                if board {
-                    window
-                        .update(cx, |view, _, _| assert!(view.restore_geometry))
-                        .unwrap();
-                }
                 let commands: Vec<_> = std::iter::from_fn(|| sink.try_recv().ok()).collect();
                 assert_eq!(
                     commands
@@ -729,6 +725,13 @@ mod workspace {
                     );
                 }
                 assert_terminal_input(window, &sink, cx, A);
+                if board {
+                    let restored = card_bounds(window, cx, A);
+                    assert!(restored.size.width > px(0.) && restored.size.height > px(0.));
+                    window
+                        .update(cx, |view, _, _| assert_eq!(view.level_focus(), Some(A)))
+                        .unwrap();
+                }
             }
         }
 
@@ -813,7 +816,12 @@ mod workspace {
                     );
                     assert_eq!(view.focused.as_deref(), Some(B));
                     assert!(!view.notification_open);
-                    assert!(view.notifications.entries[0].read);
+                    assert!(
+                        view.notifications
+                            .entries
+                            .iter()
+                            .all(|entry| entry.event_id != "sidebar-return")
+                    );
                     view.clear_notifications(cx);
                     install_fixture(view, window, cx);
                 })
@@ -824,6 +832,83 @@ mod workspace {
             .unwrap();
         println!(
             "sidebar return: task click, Enter and Space; settings editor and subscription cleanup, board/settings toggles, notification jumps and terminal focus"
+        );
+    }
+
+    async fn verify_board_card_return(window: Handle, cx: &mut AsyncApp) {
+        window
+            .update(cx, |view, window, cx| {
+                view.open_search(window, cx);
+                view.search.as_mut().unwrap().query = "keep this query".into();
+                window.focus(&view.control_focus["sidebar-board"]);
+            })
+            .unwrap();
+        draw(window.into(), cx);
+        let board_toggle = draw(window.into(), cx)["sidebar-board"].center();
+        click(window.into(), cx, MouseButton::Left, board_toggle);
+        draw(window.into(), cx);
+        cx.background_executor()
+            .timer(Duration::from_millis(220))
+            .await;
+        let card = draw_board(window, cx)[FIXTURE_BOARD_CARD];
+        window
+            .update(cx, |view, _, cx| {
+                assert!(view.graph["workspaceSessionCountByTask"].is_null());
+                let board = view.board_view_for_probe().unwrap();
+                assert_eq!(
+                    board.columns[0].cards[0].session_count,
+                    view.locale.text("0 个会话", "0 sessions")
+                );
+                view.graph["workspaceSessionCountByTask"] = json!({"task": 13});
+                cx.notify();
+            })
+            .unwrap();
+        let many_sessions = draw_board(window, cx)[FIXTURE_BOARD_CARD];
+        assert_eq!(many_sessions.size.height, card.size.height);
+        window
+            .update(cx, |view, _, _| {
+                let board = view.board_view_for_probe().unwrap();
+                assert_eq!(
+                    board.columns[0].cards[0].session_count,
+                    view.locale.text("13 个会话", "13 sessions")
+                );
+            })
+            .unwrap();
+        click(window.into(), cx, MouseButton::Left, many_sessions.center());
+        window
+            .update(cx, |view, _, _| {
+                assert!(view.wiring.board_open);
+                assert_eq!(view.level_focus(), Some(A));
+            })
+            .unwrap();
+        let board_toggle = draw(window.into(), cx)["sidebar-board"].center();
+        click(window.into(), cx, MouseButton::Left, board_toggle);
+        window
+            .update(cx, |view, _, _| {
+                assert!(!view.wiring.board_open);
+                assert_eq!(view.level_focus(), Some(A));
+                let search = view.search.as_ref().unwrap();
+                assert!(search.open);
+                assert_eq!(search.query, "keep this query");
+                view.graph
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("workspaceSessionCountByTask");
+            })
+            .unwrap();
+        window
+            .update(cx, |view, window, cx| {
+                view.close_search(window, cx);
+                view.pending_focus = None;
+                view.level_focus_request = None;
+                view.focused = Some(A.into());
+                view.refresh_level(cx);
+                window.focus(&view.control_focus["sidebar-board"]);
+            })
+            .unwrap();
+        draw(window.into(), cx);
+        println!(
+            "board: 0 and 13 sessions paint at the same height; card click stays on board; return preserves search and canvas selection"
         );
     }
 
@@ -1035,49 +1120,7 @@ mod workspace {
             "accounts: immediate private sign-in, visible browser error and pending cancellation"
         );
 
-        window
-            .update(cx, |view, window, cx| {
-                view.open_search(window, cx);
-                view.search.as_mut().unwrap().query = "keep this query".into();
-                window.focus(&view.control_focus["sidebar-board"]);
-            })
-            .unwrap();
-        draw(window.into(), cx);
-        let board_toggle = draw(window.into(), cx)["sidebar-board"].center();
-        click(window.into(), cx, MouseButton::Left, board_toggle);
-        let board = draw(window.into(), cx);
-        assert!(board.contains_key("board-session-shell-a"));
-        click(
-            window.into(),
-            cx,
-            MouseButton::Left,
-            board["board-session-shell-b"].center(),
-        );
-        window
-            .update(cx, |view, _, _| {
-                assert!(!view.wiring.board_open);
-                assert_eq!(view.level_focus(), Some(B));
-                let search = view.search.as_ref().unwrap();
-                assert!(search.open);
-                assert_eq!(search.query, "keep this query");
-            })
-            .unwrap();
-        assert!(std::iter::from_fn(|| sink.try_recv().ok()).any(|command|
-            matches!(command, Command::FocusSession { scene_id, session_id } if scene_id == "main" && session_id == B)));
-        window
-            .update(cx, |view, window, cx| {
-                view.close_search(window, cx);
-                view.pending_focus = None;
-                view.level_focus_request = None;
-                view.focused = Some(A.into());
-                view.refresh_level(cx);
-                window.focus(&view.control_focus["sidebar-board"]);
-            })
-            .unwrap();
-        draw(window.into(), cx);
-        println!(
-            "board: keyboard view toggle, actual session row click, canvas selection and preserved search"
-        );
+        verify_board_card_return(window, cx).await;
 
         let header = card_header(window, cx, A);
         click(window.into(), cx, MouseButton::Right, header);
@@ -1380,7 +1423,7 @@ mod workspace {
                     draw(window.into(), cx);
                     press(window, cx, "escape");
                     press(window, cx, "enter");
-                    assert!(draw(window.into(), cx).contains_key("board-session-shell-a"));
+                    assert!(draw_board(window, cx).contains_key(FIXTURE_BOARD_CARD));
                     press(window, cx, "enter");
                     draw(window.into(), cx);
                     let header = card_header(window, cx, A);
@@ -4274,15 +4317,180 @@ mod workspace {
             .unwrap();
     }
 
+    fn show_board_preview(cx: &mut AsyncApp, theme: ThemePreference) -> Handle {
+        let (window, _sink) = open_probe_window(cx, 1220., Some("Matou · 看板验收"));
+        window
+            .update(cx, |view, window, cx| {
+                view.locale = InterfaceLocale::Chinese;
+                view.theme.set_preference(theme);
+                view.apply_theme_palette(cx);
+                let mut current = view.tasks[0].clone();
+                current.title = "原生看板卡片对齐".into();
+                let mut tasks = vec![current.clone()];
+                let mut counts = serde_json::Map::from_iter([("task".into(), json!(13))]);
+                for (id, title, status, count) in [
+                    ("provider", "模型供应商配置验收", "planned", 0),
+                    ("main-page", "统一主页面视觉样式", "active", 3),
+                    ("notifications", "通知状态反馈优化", "active", 1),
+                    ("settings", "设置入口迁移", "completed", 2),
+                ] {
+                    tasks.push(Task {
+                        id: id.into(),
+                        title: title.into(),
+                        status: status.into(),
+                        sort_key: format!("b{}", tasks.len()),
+                        ..current.clone()
+                    });
+                    counts.insert(id.into(), json!(count));
+                }
+                view.apply_tasks(tasks, cx);
+                view.graph["workspaceSessionCountByTask"] = counts.into();
+                view.toggle_board(window, cx);
+                window.activate_window();
+            })
+            .unwrap();
+        println!("Matou · 看板验收 ready ({theme:?})");
+        window
+    }
+
+    async fn capture_board_preview(
+        window: Handle,
+        cx: &mut AsyncApp,
+        theme: ThemePreference,
+        output: &std::path::Path,
+    ) {
+        use cocoa::base::{id, nil};
+        use objc::{msg_send, sel, sel_impl};
+
+        let handle: AnyWindowHandle = window.into();
+        let (native_view, _) = native_view(handle, cx);
+        let window_number: isize = unsafe {
+            let native_window: id = msg_send![native_view, window];
+            msg_send![native_window, windowNumber]
+        };
+        let draw = |cx: &mut AsyncApp| {
+            let bounds = matou_native_desktop::workspace_board::capture_board_bounds(|| {
+                handle
+                    .update(cx, |_, window, cx| {
+                        window.refresh();
+                        window.draw(cx).clear();
+                    })
+                    .unwrap();
+            });
+            unsafe {
+                let _: () = msg_send![native_view, displayLayer: nil];
+            }
+            bounds
+        };
+        let executor = cx.background_executor().clone();
+        let save = |name: &'static str| {
+            let executor = executor.clone();
+            async move {
+                executor.timer(Duration::from_millis(100)).await;
+                let path = output.join(name);
+                let result = std::process::Command::new("/usr/sbin/screencapture")
+                    .args(["-x", "-o", "-t", "png", "-l"])
+                    .arg(window_number.to_string())
+                    .arg(&path)
+                    .output()
+                    .unwrap();
+                assert!(
+                    result.status.success() && path.is_file(),
+                    "capture {}: {}",
+                    path.display(),
+                    String::from_utf8_lossy(&result.stderr)
+                );
+                println!("Saved {}", path.display());
+            }
+        };
+        let move_mouse = |cx: &mut AsyncApp, position, pressed_button| {
+            dispatch_mouse(
+                window,
+                cx,
+                MouseMoveEvent {
+                    position,
+                    pressed_button,
+                    ..Default::default()
+                },
+            );
+        };
+        draw(cx);
+        cx.background_executor()
+            .timer(Duration::from_millis(400))
+            .await;
+        move_mouse(cx, point(px(16.), px(120.)), None);
+        let normal = draw(cx);
+        if theme == ThemePreference::Dark {
+            save("dark-board.png").await;
+            return;
+        }
+        save("light-board.png").await;
+
+        let target = "board-card:workspace:main-page";
+        move_mouse(cx, normal[target].center(), None);
+        assert_eq!(draw(cx)[target].top(), normal[target].top() - px(1.));
+        save("light-hover.png").await;
+
+        let from = normal["board-card:workspace:provider"].center();
+        let to = normal[target].center() + point(px(12.), px(9.));
+        move_mouse(cx, from, None);
+        draw(cx);
+        dispatch_mouse(window, cx, mouse_down(from, Modifiers::default()));
+        for position in [from + point(px(10.), px(0.)), to] {
+            move_mouse(cx, position, Some(MouseButton::Left));
+            draw(cx);
+        }
+        assert!(window.update(cx, |_, _, cx| cx.has_active_drag()).unwrap());
+        save("light-drop-before.png").await;
+
+        let tail = normal["board-column-tail:workspace:blocked"].center();
+        move_mouse(cx, tail, Some(MouseButton::Left));
+        draw(cx);
+        save("light-column-drop.png").await;
+        dispatch_mouse(window, cx, mouse_up(tail));
+        draw(cx);
+    }
+
     pub(super) fn run() {
         if let Ok(mode) = std::env::var("MATOU_CANVAS_CARDS_PROBE") {
             canvas_cards::run(mode);
             return;
         }
+        if let Ok(theme) = std::env::var("MATOU_BOARD_PREVIEW") {
+            let theme = match theme.as_str() {
+                "light" => ThemePreference::Light,
+                "dark" => ThemePreference::Dark,
+                _ => panic!("MATOU_BOARD_PREVIEW requires light or dark"),
+            };
+            let screenshots = std::env::var_os("MATOU_BOARD_SCREENSHOTS");
+            Application::new().with_assets(NativeAssets).run(move |cx| {
+                cx.spawn(async move |cx| {
+                    let window = show_board_preview(cx, theme);
+                    if let Some(output) = screenshots {
+                        capture_board_preview(window, cx, theme, std::path::Path::new(&output))
+                            .await;
+                        cx.update(|cx| cx.quit()).unwrap();
+                    }
+                })
+                .detach();
+            });
+            return;
+        }
         let fixture_root = live_wiring::prepare();
+        let board_only = std::env::var_os("MATOU_BOARD_PROBE").is_some();
         let footer_probe = std::env::var("MATOU_FOOTER_PROBE").ok();
         Application::new().with_assets(NativeAssets).run(move |cx| {
             cx.spawn(async move |cx| {
+                if board_only {
+                    let (window, _sink) = open_probe_at(cx, 1260.);
+                    verify_board_card_return(window, cx).await;
+                    window
+                        .update(cx, |_, window, _| window.remove_window())
+                        .unwrap();
+                    live_wiring::verify_board(cx, fixture_root.join("board")).await;
+                    cx.update(|cx| cx.quit()).unwrap();
+                    return;
+                }
                 if let Some(probe) = footer_probe {
                     if let Some(path) = probe.strip_prefix("screenshots:") {
                         capture_footer_stats(cx, &fixture_root, std::path::Path::new(path)).await;

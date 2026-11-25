@@ -5636,9 +5636,6 @@ impl Workspace {
                 {
                     self.notifications_changed(cx);
                 }
-                for id in &ids {
-                    self.forget_board_scene(id);
-                }
                 if self
                     .history_request
                     .as_ref()
