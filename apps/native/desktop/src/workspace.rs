@@ -1924,7 +1924,6 @@ struct ArchivedMatches {
     matches: Vec<HistoryLine>,
     gap_count: usize,
     has_more: bool,
-    show_summary: bool,
 }
 
 struct TerminalSearchState {
@@ -3031,10 +3030,9 @@ impl Workspace {
         let Some(search) = self.search.as_mut().filter(|search| search.open) else {
             return;
         };
-        let Some(archive) = &mut search.archive else {
+        let Some(archive) = &search.archive else {
             return;
         };
-        archive.show_summary = true;
         search.archive_count = Some((archive.index, archive.matches.len()));
         if search.dismissed_sequence == Some(search.sequence) {
             return;
@@ -3159,9 +3157,6 @@ impl Workspace {
             self.dismiss_history_context(cx);
             if let Some(search) = &mut self.search {
                 search.dismissed_sequence = Some(search.sequence);
-                if let Some(archive) = &mut search.archive {
-                    archive.show_summary = false;
-                }
             }
             self.sync_terminal_input(window, cx);
             cx.notify();
@@ -3286,7 +3281,6 @@ impl Workspace {
                             matches,
                             gap_count: result.gaps.len(),
                             has_more: result.has_more,
-                            show_summary: true,
                         });
                         self.open_history_context(window, cx);
                     }
@@ -3294,9 +3288,6 @@ impl Workspace {
                         // Frozen archive RPC failures quietly return to the live view.
                         if self.read_only.is_some() || has_transcript {
                             search.error = Some(error);
-                        }
-                        if let Some(archive) = &mut search.archive {
-                            archive.show_summary = false;
                         }
                         self.dismiss_history_context(cx);
                     }
@@ -3389,9 +3380,6 @@ impl Workspace {
         self.dismiss_history_context(cx);
         if let Some(search) = self.search.as_mut() {
             search.dismissed_sequence = Some(search.sequence);
-            if let Some(archive) = &mut search.archive {
-                archive.show_summary = false;
-            }
         }
         if self.read_only.is_some() {
             self.request_read_only_history(None, window, cx);
@@ -3410,91 +3398,6 @@ impl Workspace {
             window.focus(&terminal.read(cx).focus);
         }
         cx.notify();
-    }
-
-    fn archive_summary(&self, session_id: &str) -> Option<Div> {
-        let dark = self.wiring_dark();
-        let search = self
-            .search
-            .as_ref()
-            .filter(|search| search.open && search.session_id.as_deref() == Some(session_id))?;
-        let archive = search
-            .archive
-            .as_ref()
-            .filter(|a| a.show_summary && (!a.matches.is_empty() || a.gap_count > 0))?;
-        if self
-            .history_request
-            .as_ref()
-            .is_some_and(|request| request.session_id == session_id)
-        {
-            return None;
-        }
-        let text = archive
-            .matches
-            .get(archive.index)
-            .map_or("该范围存在不可读的历史片段", |line| {
-                line.text.as_str()
-            });
-        let meta = format!(
-            "{}/{}{}{}",
-            archive.index + 1,
-            archive.matches.len(),
-            if archive.has_more { "+" } else { "" },
-            if archive.gap_count > 0 {
-                format!(" · {} 处历史缺口", archive.gap_count)
-            } else {
-                String::new()
-            }
-        );
-        Some(
-            div()
-                .absolute()
-                .right(px(12.))
-                .bottom(px(10.))
-                .max_w(px(720.))
-                .left(px(12.))
-                .px(px(10.))
-                .py(px(7.))
-                .border_1()
-                .border_color(if dark {
-                    rgba(0xffffff24)
-                } else {
-                    rgba(0x30384826)
-                })
-                .rounded(px(7.))
-                .bg(if dark {
-                    rgba(0x13161df0)
-                } else {
-                    rgba(0xfffffff5)
-                })
-                .text_color(if dark { rgb(0xd7dbe5) } else { rgb(0x303848) })
-                .shadow(vec![if dark {
-                    shadow(0x000000, 0.28, 8., 14.)
-                } else {
-                    shadow(0x2c374e, 0.16, 8., 14.)
-                }])
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .font_family("SFMono-Regular")
-                .text_size(px(11.))
-                .child(
-                    div()
-                        .flex_none()
-                        .text_color(rgb(0xff9a3d))
-                        .child("归档历史"),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .whitespace_nowrap()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .child(text.to_owned()),
-                )
-                .child(div().flex_none().text_color(rgb(0x8d95a7)).child(meta)),
-        )
     }
 
     fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3636,9 +3539,6 @@ impl Workspace {
         search.sequence += 1;
         search.previous = previous;
         search.error = None;
-        if let Some(archive) = &mut search.archive {
-            archive.show_summary = false;
-        }
         if self.read_only.is_some() {
             let command = if search.query.is_empty() {
                 search.archive = None;
@@ -3800,9 +3700,25 @@ impl Workspace {
             self.locale.text("搜索中…", "Searching…").into()
         } else if let Some((index, count)) = search.archive_count {
             if count == 0 {
-                "0/0".into()
+                match search.archive.as_ref().map_or(0, |archive| archive.gap_count) {
+                    0 => "0/0".into(),
+                    gaps => match self.locale {
+                        InterfaceLocale::Chinese => format!("0/0 · {gaps} 处历史缺口"),
+                        InterfaceLocale::English if gaps == 1 => "0/0 · 1 history gap".into(),
+                        InterfaceLocale::English => format!("0/0 · {gaps} history gaps"),
+                    },
+                }
             } else {
-                format!("{}/{}", index + 1, count)
+                let more = if search
+                    .archive
+                    .as_ref()
+                    .is_some_and(|archive| archive.has_more)
+                {
+                    "+"
+                } else {
+                    ""
+                };
+                format!("{}/{}{}", index + 1, count, more)
             }
         } else {
             search.result.as_ref().map_or("0/0".into(), |r| {
@@ -19678,7 +19594,6 @@ impl Render for Workspace {
                                 })
                                 .map(|view| div().absolute().inset_0().child(view.clone())),
                         )
-                        .children(self.archive_summary(id))
                         .children(
                             fork_progress.map(|progress| fork_progress_body(progress, now, dark)),
                         )

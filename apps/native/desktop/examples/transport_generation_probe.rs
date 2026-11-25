@@ -295,7 +295,6 @@ mod workspace {
                 }],
                 gap_count: 0,
                 has_more: false,
-                show_summary: true,
             });
             let old_search_sequence = search.sequence;
             self.open_history_context(window, cx);
