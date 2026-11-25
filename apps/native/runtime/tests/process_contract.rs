@@ -3963,10 +3963,9 @@ exec /bin/sleep 60
                     .keys()
                     .map(String::as_str)
                     .collect::<Vec<_>>(),
-                ["hooks", "statusLine", "tui"],
-                "{scenario}: direct launch writes the hook settings and keeps the primary terminal buffer",
+                ["hooks", "statusLine"],
+                "{scenario}: the hook settings leave the terminal mode to Claude",
             );
-            assert_eq!(settings["tui"], "default");
         }
         let expected: &[&str] = if scenario == "save" {
             &[

@@ -1605,6 +1605,7 @@ fn settings_precede_existing_flags_and_bypass_only_loopback() -> Result<()> {
         &[
             ("HTTPS_PROXY", "http://localhost:1234"),
             ("NO_PROXY", "example.invalid"),
+            ("CLAUDE_CODE_NO_FLICKER", "1"),
         ],
     )?;
     let settings = temp.path().join("private settings.json");
@@ -1618,6 +1619,7 @@ fn settings_precede_existing_flags_and_bypass_only_loopback() -> Result<()> {
         ["--model", "fixture-model", "--permission-mode", "plan"]
     );
     assert_env(&launch, "HTTPS_PROXY", "http://localhost:1234");
+    assert_env(&launch, "CLAUDE_CODE_NO_FLICKER", "1");
     #[cfg(not(windows))]
     for name in ["NO_PROXY", "no_proxy"] {
         assert_env(&launch, name, "example.invalid,127.0.0.1");

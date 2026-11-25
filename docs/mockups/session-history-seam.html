@@ -1,0 +1,588 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>会话历史无缝接续</title>
+<style>
+  /* Direction: a product-spec page whose artifact is the card itself; scroll it for real. */
+  /* Palette: Matou's light tokens from terminal-themes.ts and terminal.css. */
+  /* Type: SF Pro / PingFang for chrome, SF Mono for terminal content. No external faces. */
+
+  :root {
+    --bg: #eceff4;
+    --fg: #17202b;
+    --muted: #5c6a7d;
+    --line: #d5dce6;
+    --panel: #ffffff;
+    --accent: #2f6fd0;
+    --accent-soft: #e7effa;
+
+    --app-canvas: #e9edf2;
+    --app-card: #fcfcfd;
+    --app-card-head: #ffffff;
+    --app-text: #303744;
+    --app-muted: #8a919b;
+    --app-faint: #a3aab4;
+    --app-line: rgba(66, 75, 88, .10);
+    --app-line-strong: rgba(66, 75, 88, .18);
+
+    --term-bg: #FCFCFD;
+    --term-fg: #2F3547;
+    --term-dim: #8a919b;
+    --term-blue: #4078f2;
+    --term-green: #50a14f;
+    --term-amber: #c18401;
+    --term-red: #e45649;
+    --term-rule: #d5dce6;
+    --term-accent-bg: #eef3ff;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font: 14px/1.6 -apple-system, "SF Pro Text", "PingFang SC", "Helvetica Neue", sans-serif;
+    -webkit-font-smoothing: antialiased;
+    padding: 28px 24px 48px;
+  }
+
+  .page { max-width: 1120px; margin: 0 auto; }
+
+  .page-head { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
+  .page-head h1 { margin: 0; font-size: 22px; font-weight: 650; letter-spacing: -.015em; }
+  .page-head p { margin: 2px 0 0; color: var(--muted); font-size: 13.5px; }
+  .page-head .hint { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; }
+  .switch { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; user-select: none; }
+  .switch input { position: absolute; opacity: 0; pointer-events: none; }
+  .switch .track {
+    width: 30px; height: 18px; border-radius: 999px; background: #cfd6e0;
+    position: relative; transition: background .16s ease;
+  }
+  .switch .track::after {
+    content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px;
+    border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(16,24,40,.22);
+    transition: transform .16s ease;
+  }
+  .switch input:checked + .track { background: var(--accent); }
+  .switch input:checked + .track::after { transform: translateX(12px); }
+
+  .stage {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 264px;
+    gap: 22px;
+    align-items: start;
+    background: var(--app-canvas);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 22px;
+  }
+
+  /* ---- card ---- */
+  .card {
+    background: var(--app-card);
+    border: 1px solid var(--app-line);
+    border-radius: 12px;
+    box-shadow: 0 1px 2px rgba(16,24,40,.05), 0 12px 28px rgba(16,24,40,.06);
+    overflow: hidden;
+    display: flex; flex-direction: column;
+    height: 620px;
+  }
+  .card-head {
+    height: 52px; flex: 0 0 auto;
+    display: flex; align-items: center; gap: 12px;
+    padding: 0 14px 0 18px;
+    background: var(--app-card-head);
+    border-bottom: 1px solid var(--app-line);
+  }
+  .card-head .mark {
+    width: 22px; height: 22px; border-radius: 6px; background: #f3e7df;
+    color: #c4622d; font: 700 12px/22px "SF Mono", Menlo, monospace; text-align: center;
+  }
+  .card-head strong { font-size: 13.5px; font-weight: 600; }
+  .badge {
+    font-size: 11px; color: #9a6a2c; background: #f6ecd9;
+    border-radius: 5px; padding: 1px 7px;
+  }
+  .card-head .spacer { flex: 1; }
+  .icon-btn {
+    width: 26px; height: 26px; border-radius: 7px; border: 0; background: transparent;
+    color: var(--app-muted); display: grid; place-items: center; cursor: default;
+  }
+  .icon-btn.is-active { color: var(--accent); background: var(--accent-soft); }
+
+  /* ---- terminal surface ---- */
+  .term {
+    position: relative;
+    flex: 1 1 auto;
+    min-height: 0;
+    background: var(--term-bg);
+    font: 12.5px/1.62 "SF Mono", Menlo, "PingFang SC", monospace;
+    color: var(--term-fg);
+    overflow: hidden;
+  }
+  .scroll {
+    position: absolute; inset: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 14px 16px 10px;
+    scrollbar-width: thin;
+    scrollbar-color: #c9d0da transparent;
+  }
+  .scroll::-webkit-scrollbar { width: 9px; }
+  .scroll::-webkit-scrollbar-thumb { background: #c9d0da; border-radius: 9px; border: 2px solid var(--term-bg); }
+
+  .line { white-space: pre-wrap; word-break: break-word; margin: 0; }
+  .line.dim { color: var(--term-dim); }
+  .line.user { color: var(--term-fg); }
+  .line.user .chev { color: var(--accent); }
+  .line.tool .name { color: var(--term-fg); }
+  .line.tool .meta { color: var(--term-dim); }
+  .dot { color: var(--term-blue); }
+
+  .msg { margin: 0 0 10px; }
+  .msg:last-child { margin-bottom: 0; }
+
+  /* seam + history surface */
+  .seam {
+    display: flex; align-items: center; gap: 10px;
+    margin: 18px 0 16px;
+    color: var(--term-dim);
+    font-size: 11.5px;
+    user-select: none;
+  }
+  .seam::before, .seam::after { content: ""; height: 1px; flex: 1; background: var(--term-rule); }
+
+  .history {
+    position: relative;
+    border-radius: 8px;
+    transition: outline-color .16s ease;
+    outline: 1px dashed transparent;
+    outline-offset: 6px;
+  }
+  body[data-debug="on"] .history { outline-color: #b6a1ff; }
+  body[data-debug="on"] .live { outline: 1px dashed #7cc4a0; outline-offset: 6px; border-radius: 8px; }
+  .tag {
+    display: none;
+    position: absolute; top: -22px; right: 4px;
+    font: 10.5px/1.4 "SF Mono", Menlo, monospace;
+    color: #6b5bd6; background: #f1edff; border-radius: 4px; padding: 1px 6px;
+  }
+  body[data-debug="on"] .tag { display: inline-block; }
+
+  .compact-row {
+    margin: 4px 0 14px;
+    color: var(--term-amber);
+    font-size: 11.5px;
+  }
+
+  .older {
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    margin: 4px 0 18px;
+    color: var(--term-dim);
+    font-size: 11.5px;
+    cursor: default;
+  }
+  .older .dotpulse { width: 6px; height: 6px; border-radius: 50%; background: #b9c2cf; }
+
+  /* tool row */
+  .tool {
+    border-left: 2px solid var(--app-line);
+    padding-left: 10px;
+    margin: 0 0 10px;
+    cursor: pointer;
+  }
+  .tool:hover { border-left-color: var(--app-line-strong); }
+  .tool .row { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+  .tool .caret { color: var(--term-dim); font-size: 10px; transition: transform .14s ease; }
+  .tool.open .caret { transform: rotate(90deg); }
+  .tool .more { color: var(--term-dim); font-size: 11.5px; }
+  .tool .body {
+    display: none;
+    margin: 6px 0 2px;
+    padding: 8px 10px;
+    background: #f4f6f9;
+    border-radius: 6px;
+    color: #5a6475;
+    font-size: 11.5px;
+    white-space: pre-wrap;
+  }
+  .tool.open .body { display: block; }
+
+  /* live (Claude-rendered) region bottom */
+  .live { padding-bottom: 2px; }
+
+  /* jump button */
+  .jump {
+    position: absolute; left: 50%; bottom: 14px; transform: translate(-50%, 8px);
+    display: flex; align-items: center; gap: 6px;
+    padding: 5px 12px;
+    border-radius: 999px;
+    border: 1px solid var(--app-line-strong);
+    background: #fff;
+    box-shadow: 0 2px 10px rgba(16,24,40,.10);
+    color: #4a5262;
+    font: 11.5px/1 -apple-system, "SF Pro Text", "PingFang SC", sans-serif;
+    opacity: 0; pointer-events: none;
+    transition: opacity .14s ease, transform .14s ease;
+    cursor: pointer;
+  }
+  .jump.show { opacity: 1; pointer-events: auto; transform: translate(-50%, 0); }
+  .jump b { font-weight: 600; color: var(--accent); }
+
+  /* input + status, fixed at card bottom like fullscreen rendering */
+  .inputbar {
+    flex: 0 0 auto;
+    margin: 0 14px;
+    padding: 8px 2px 6px;
+    border-top: 1px solid var(--term-rule);
+    font: 12.5px/1.6 "SF Mono", Menlo, "PingFang SC", monospace;
+    color: var(--term-dim);
+    display: flex; gap: 8px;
+  }
+  .inputbar .prompt { color: var(--accent); }
+  .statusbar {
+    flex: 0 0 auto;
+    padding: 0 16px 9px;
+    font: 11px/1.5 "SF Mono", Menlo, monospace;
+    color: var(--term-dim);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .statusbar .mode { color: var(--term-red); }
+  .statusbar .sep { color: #c9d0da; }
+
+  /* ---- notes ---- */
+  .notes { display: flex; flex-direction: column; gap: 14px; }
+  .note {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 13px 14px;
+    font-size: 12.5px;
+    color: #3b4657;
+  }
+  .note h3 { margin: 0 0 7px; font-size: 14px; font-weight: 650; letter-spacing: -.005em; color: var(--fg); }
+  .note p { margin: 0 0 6px; color: var(--muted); }
+  .note p:last-child { margin-bottom: 0; }
+  .note code { font: 11.5px/1.5 "SF Mono", Menlo, monospace; background: #f1f3f6; border-radius: 4px; padding: 0 4px; }
+  .state { display: flex; gap: 8px; align-items: baseline; margin-bottom: 6px; color: var(--muted); }
+  .state i {
+    flex: 0 0 auto; width: 18px; height: 18px; border-radius: 50%;
+    background: var(--accent-soft); color: var(--accent);
+    font: 600 10.5px/18px "SF Mono", Menlo, monospace; text-align: center; font-style: normal;
+  }
+  .kbd {
+    display: inline-block; font: 10.5px/1.5 "SF Mono", Menlo, monospace;
+    border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px;
+    padding: 0 4px; color: #4a5262; background: #fff;
+  }
+
+  /* ---- three-agent comparison ---- */
+  .compare { margin-top: 30px; }
+  .compare-head { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
+  .compare-head h2 { margin: 0; font-size: 16px; font-weight: 650; letter-spacing: -.01em; }
+  .compare-head p { margin: 0; color: var(--muted); font-size: 12.5px; }
+  .compare-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+
+  .mini {
+    background: var(--app-card);
+    border: 1px solid var(--app-line);
+    border-radius: 12px;
+    box-shadow: 0 1px 2px rgba(16,24,40,.05);
+    overflow: hidden;
+    display: flex; flex-direction: column;
+  }
+  .mini-head {
+    display: flex; align-items: center; gap: 8px;
+    padding: 9px 12px;
+    background: #fff;
+    border-bottom: 1px solid var(--app-line);
+  }
+  .mini-head .mark {
+    width: 18px; height: 18px; border-radius: 5px;
+    font: 700 10px/18px "SF Mono", Menlo, monospace; text-align: center;
+  }
+  .mark.claude { background: #f3e7df; color: #c4622d; }
+  .mark.codex { background: #e8edf5; color: #3c4a63; }
+  .mark.agy { background: #e9f1ff; color: #2f6fd0; }
+  .mini-head strong { font-size: 12.5px; font-weight: 600; }
+  .mini-head .sub { font-size: 11px; color: var(--app-muted); margin-left: auto; }
+
+  .mini-body {
+    flex: 1 1 auto;
+    padding: 12px 12px 14px;
+    background: var(--term-bg);
+    font: 11.5px/1.6 "SF Mono", Menlo, "PingFang SC", monospace;
+    color: var(--term-fg);
+  }
+  .mini-body .msg { margin-bottom: 8px; }
+  .mini-body .tool { margin-bottom: 8px; }
+  .mini-body .older { margin: 0 0 12px; justify-content: flex-start; }
+  .mini-body .seam { margin: 14px 0 12px; font-size: 10.5px; }
+  .mini-foot {
+    padding: 8px 12px;
+    border-top: 1px solid var(--app-line);
+    background: #fff;
+    color: var(--app-muted);
+    font-size: 11px;
+  }
+  .mini-foot .kbd { margin-left: 2px; }
+
+  /* per-agent live-area styling: the history above stays identical */
+  .cx-user { color: #5a6475; }
+  .cx-user .chev { color: #3c4a63; }
+  .cx-bullet { color: #3c4a63; }
+  .cx-tool .name { color: var(--term-fg); }
+  .cx-tool .out { color: var(--term-dim); padding-left: 14px; display: block; }
+  .agy-tool { color: var(--term-fg); }
+  .agy-tool .glyph { color: #2f6fd0; }
+  .agy-think { color: var(--term-dim); }
+  .agy-text { padding-left: 14px; display: block; }
+
+  @media (max-width: 960px) {
+    .stage { grid-template-columns: 1fr; }
+    .card { height: 560px; }
+    .compare-grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="page-head">
+    <div>
+      <h1>会话历史无缝接续</h1>
+      <p>B3 · 滑到 Claude 列表尽头继续上滑，历史原地接上，不弹窗、不跳变</p>
+    </div>
+    <div class="hint">
+      <label class="switch">
+        <input type="checkbox" id="debug">
+        <span class="track"></span>
+        <span>标注渲染来源</span>
+      </label>
+    </div>
+  </div>
+
+  <div class="stage">
+    <section class="card" aria-label="灯光问题 会话卡片">
+      <header class="card-head">
+        <span class="mark">A</span>
+        <strong>灯光问题</strong>
+        <span class="badge">共享工作目录</span>
+        <span class="spacer"></span>
+        <button class="icon-btn is-active" title="会话历史" aria-label="会话历史">
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+            <circle cx="8" cy="8" r="6.1"/><path d="M8 4.4V8l2.5 1.6"/>
+          </svg>
+        </button>
+        <button class="icon-btn" aria-label="更多">
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><circle cx="3.5" cy="8" r="1.2"/><circle cx="8" cy="8" r="1.2"/><circle cx="12.5" cy="8" r="1.2"/></svg>
+        </button>
+      </header>
+
+      <div class="term">
+        <div class="scroll" id="scroll">
+          <!-- Matou-rendered history (older than what Claude keeps) -->
+          <div class="history" id="history">
+            <span class="tag">Matou 渲染</span>
+            <div class="older"><span class="dotpulse"></span>已到会话开头 · 11 月 23 日 11:51</div>
+
+            <div class="msg">
+              <p class="line user"><span class="chev">❯</span> 先看下 G5 那四行统一补齐做到哪了，缺口在哪</p>
+            </div>
+            <div class="msg">
+              <p class="line"><span class="dot">⏺</span> 我读了 <span class="name">2026-11-25-unified-four-row-gap-fill.md</span>，四行里第一行已经有采样对照，二三四行还缺浏览器端的编辑重开验证。</p>
+            </div>
+            <div class="tool" data-tool>
+              <div class="row"><span class="caret">▸</span><span class="name">Bash(node tooling/g4b-lushao-package-and-upgrade-rollback.mjs)</span><span class="more">3/3 通过 · 152 节真音频包 · TUF 升级/回退</span></div>
+              <div class="body">✓ 152 节真音频包校验通过
+✓ 独立 TUF 签名升级、故障恢复、回退
+✓ 4 节 7 条连续轨四行浏览器编辑重开
+✓ 63,344 个原生采样对照
+
+退出码 0 · 用时 214s</div>
+            </div>
+            <div class="msg">
+              <p class="line"><span class="dot">⏺</span> 四行的缺口补完后，我又把所有子代理退出后独立复跑了一遍收口门禁。</p>
+            </div>
+            <div class="tool" data-tool>
+              <div class="row"><span class="caret">▸</span><span class="name">Bash(pnpm -r --if-present run test)</span><span class="more">201 份目录校验 · 三端 tsc · 0 违规</span></div>
+              <div class="body">packages/domain  ✓ 84 tests
+packages/contracts ✓ 61 tests
+apps/runtime      ✓ 149/150
+apps/desktop      ✓ 78 tests
+主题守卫 0 待修 · 反硬编码守卫 0 违规</div>
+            </div>
+            <div class="msg">
+              <p class="line user"><span class="chev">❯</span> 还差灯光，先别急着收</p>
+            </div>
+            <div class="msg">
+              <p class="line"><span class="dot">⏺</span> 好，灯光这条我单独开一树改。</p>
+            </div>
+
+            <div class="seam">更早的会话记录</div>
+          </div>
+
+          <!-- Claude-rendered live region -->
+          <div class="live" id="live">
+            <span class="tag" style="position:static;display:none"></span>
+            <div class="compact-row">── 会话已压缩 · 03:04 ──</div>
+
+            <div class="msg">
+              <p class="line user"><span class="chev">❯</span> 灯光问题的子项还有几个对不上</p>
+            </div>
+            <div class="msg">
+              <p class="line"><span class="dot">⏺</span> 我对照了参考实现，差异集中在三个地方：关灯后的环境亮度、过渡曲线、以及按钮色和关灯色不是一回事。</p>
+            </div>
+            <div class="tool" data-tool>
+              <div class="row"><span class="caret">▸</span><span class="name">Bash(node tooling/lighting-check.mjs)</span><span class="more">3/3 通过</span></div>
+              <div class="body">✓ 关灯后环境亮度 3 → 0 渐变
+✓ 过渡曲线与参考一致（ease-out 320ms）
+✓ 按钮色 / 关灯色独立取色
+
+退出码 0 · 用时 41s</div>
+            </div>
+            <div class="msg">
+              <p class="line"><span class="dot">⏺</span> 灯光方案检查完成，剩最后一处取色要你看一眼。</p>
+            </div>
+            <div class="msg">
+              <p class="line dim">✻ 正在整理差异清单… (12s · ↑ 3.4k tokens)</p>
+            </div>
+          </div>
+        </div>
+
+        <button class="jump" id="jump">回到最新 <b>↓</b></button>
+      </div>
+
+      <div class="inputbar"><span class="prompt">❯</span><span>继续改灯光那三处…</span></div>
+      <div class="statusbar">
+        <span class="mode">⏵⏵ bypass permissions on</span>
+        <span class="sep">·</span>
+        <span>matou-role/haiku</span>
+        <span class="sep">·</span>
+        <span>high effort</span>
+      </div>
+    </section>
+
+    <aside class="notes">
+      <div class="note">
+        <h3>怎么试</h3>
+        <div class="state"><i>1</i><span>在中间这块里一直往上滑，越过「会话已压缩」那行。</span></div>
+        <div class="state"><i>2</i><span>再往上就是压缩前的记录，位置接着刚才的顶部，没有跳变。</span></div>
+        <div class="state"><i>3</i><span>往下滑回底部，或点「回到最新」，回到实时画面。</span></div>
+        <div class="state"><i>4</i><span>点任意一条工具调用，看展开的样子。</span></div>
+      </div>
+      <div class="note">
+        <h3>触发规则</h3>
+        <p>Claude 自己滚动到顶后，<b>连续两次上滑画面没有变化</b>才接管。避免手抖或它正忙时误触。</p>
+        <p>接管发生在<b>输入框以上</b>的区域：底部的输入框和状态栏始终是实时的，不影响你边翻边输入。</p>
+      </div>
+      <div class="note">
+        <h3>哪些是新的</h3>
+        <p>压缩前的消息由 Matou 从会话记录里读出来画，所以能看到 Claude 自己已经忘掉的部分。</p>
+        <p>工具调用默认一行摘要，点开加载完整输出。搜索 v1 不做，用右上角时钟图标的历史视图。</p>
+      </div>
+      <div class="note">
+        <h3>三家对齐</h3>
+        <p>Claude、Codex、Antigravity 都是画在第二块屏上，问题一样，处理也一样：同一套接管判定、同一行接缝、同一套历史读法。</p>
+        <p>差别只留两处：实时区各自画法不动；特征行按各家事实显示（Claude 有压缩边界，另两家标会话开头）。</p>
+        <p>数据来源是 Matou 已有的会话记录接口，四家读取器返回同一种事件结构，历史层只写一版。</p>
+      </div>
+      <div class="note">
+        <h3>不做什么</h3>
+        <p>不给 Codex 加 <code>--no-alt-screen</code>，也不改 Claude 的 <code>tui: fullscreen</code>——这会破坏三家手感一致。两个开关只作为出问题时的兜底。</p>
+        <p>不改会话内容、不发请求、不重建上下文。</p>
+      </div>
+    </aside>
+  </div>
+
+  <section class="compare" aria-label="三家 agent 对照">
+    <div class="compare-head">
+      <h2>同一套逻辑，三家一样</h2>
+      <p>接缝的样子、接管时机、回到最新的方式都一致；只有实时区的画法和特征行各自保留。</p>
+    </div>
+    <div class="compare-grid">
+
+      <article class="mini" data-agent="claude">
+        <header class="mini-head"><span class="mark claude">A</span><strong>Claude Code</strong><span class="sub">灯光问题</span></header>
+        <div class="mini-body">
+          <div class="older">已到会话开头 · 11 月 23 日 11:51</div>
+          <p class="line user"><span class="chev">❯</span> 灯光那三处先别动，我对完再改</p>
+          <p class="line"><span class="dot">⏺</span> 好，等你确认。</p>
+          <div class="tool">
+            <div class="row"><span class="caret">▸</span><span class="name">Bash(node tooling/lighting-check.mjs)</span><span class="more">3/3 通过</span></div>
+          </div>
+          <div class="seam">更早的会话记录</div>
+          <p class="compact-row">── 会话已压缩 · 03:04 ──</p>
+          <p class="line user"><span class="chev">❯</span> 继续改灯光那三处</p>
+          <p class="line"><span class="dot">⏺</span> 改完了，差异清单也整理好了。</p>
+          <p class="line dim">✻ 正在整理差异清单… (12s)</p>
+        </div>
+        <footer class="mini-foot">接缝落在「会话已压缩」之上 · 回到最新 <span class="kbd">Ctrl+End</span></footer>
+      </article>
+
+      <article class="mini" data-agent="codex">
+        <header class="mini-head"><span class="mark codex">C</span><strong>Codex</strong><span class="sub">四行补齐</span></header>
+        <div class="mini-body">
+          <div class="older">已到会话开头 · 11 月 23 日 14:02</div>
+          <p class="line user"><span class="chev">❯</span> 四行的缺口先列出来</p>
+          <p class="line"><span class="dot">⏺</span> 二三四行还缺浏览器端编辑重开验证。</p>
+          <div class="tool">
+            <div class="row"><span class="caret">▸</span><span class="name">Ran pnpm -r test</span><span class="more">149/150 通过</span></div>
+          </div>
+          <div class="seam">更早的会话记录</div>
+          <p class="line cx-user"><span class="chev">›</span> 继续把四行补齐</p>
+          <p class="line"><span class="cx-bullet">•</span> 四行已经补完，收口门禁也过了。</p>
+          <p class="line cx-tool"><span class="cx-bullet">•</span> <span class="name">Ran pnpm g5a–g5f</span><span class="out">└ 全部通过 · 201 份目录校验</span></p>
+          <p class="line dim">◦ Working (2m 10s · esc to interrupt)</p>
+        </div>
+        <footer class="mini-foot">接缝落在本次会话开头 · 回到最新 <span class="kbd">待实测</span></footer>
+      </article>
+
+      <article class="mini" data-agent="agy">
+        <header class="mini-head"><span class="mark agy">G</span><strong>Antigravity</strong><span class="sub">灯光核对</span></header>
+        <div class="mini-body">
+          <div class="older">已到会话开头 · 11 月 23 日 16:20</div>
+          <p class="line user"><span class="chev">❯</span> 对照参考实现找差异</p>
+          <p class="line"><span class="dot">⏺</span> 差异在环境亮度、过渡曲线、取色三处。</p>
+          <div class="tool">
+            <div class="row"><span class="caret">▸</span><span class="name">Bash(node tooling/lighting-check.mjs)</span><span class="more">3/3 通过</span></div>
+          </div>
+          <div class="seam">更早的会话记录</div>
+          <p class="line cx-user"><span class="chev">&gt;</span> 让 codex 看看灯光那三处</p>
+          <p class="line"><span class="agy-tool"><span class="glyph">●</span> Ran 3 commands <span class="dim">(ctrl+o to expand)</span></span></p>
+          <p class="line agy-think">▸ Thought for 6s, 202 tokens</p>
+          <p class="line"><span class="agy-text">本地 Codex 已查完返回结果，差异集中在三处。</span></p>
+        </div>
+        <footer class="mini-foot">接缝落在会话开头 · 回到最新 <span class="kbd">待实测</span></footer>
+      </article>
+
+    </div>
+  </section>
+</div>
+
+<script>
+  const scroll = document.getElementById('scroll')
+  const jump = document.getElementById('jump')
+  const debug = document.getElementById('debug')
+
+  const toBottom = () => { scroll.scrollTop = scroll.scrollHeight }
+
+  const updateJump = () => {
+    const atBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 24
+    jump.classList.toggle('show', !atBottom)
+  }
+
+  scroll.addEventListener('scroll', updateJump, { passive: true })
+  jump.addEventListener('click', () => scroll.scrollTo({ top: scroll.scrollHeight, behavior: 'smooth' }))
+  debug.addEventListener('change', () => { document.body.dataset.debug = debug.checked ? 'on' : 'off' })
+
+  document.querySelectorAll('[data-tool]').forEach((row) => {
+    row.addEventListener('click', () => row.classList.toggle('open'))
+  })
+
+  // open at the live bottom, like walking back to a running card
+  requestAnimationFrame(() => { toBottom(); updateJump() })
+</script>
+</body>
+</html>

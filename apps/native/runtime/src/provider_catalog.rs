@@ -504,8 +504,15 @@ fn preview_page(
     let mut total = 0;
     let mut events = VecDeque::with_capacity(limit);
     let mut last_before_start = None;
+    let mut compact_boundary = None;
     while let Some(row) = read_row(&mut reader, &mut line, skipped, false)? {
         observe_workspace_origin(&mut effective_origin, &row);
+        if start.is_none() && row["type"] == "system" && row["subtype"] == "compact_boundary" {
+            compact_boundary = row
+                .get("timestamp")
+                .cloned()
+                .map(|timestamp| (total, timestamp));
+        }
         let Some(mut event) = preview_event(&row["message"]) else {
             continue;
         };
@@ -543,6 +550,22 @@ fn preview_page(
     }
     let start_event_index = events.front().map_or(0, |event| event.index);
     let end_event_index = events.back().map_or(0, |event| event.index + 1);
+    // The latest window carries its compaction marker alongside the page.
+    // It does not consume a transcript index or a slot in the message window.
+    if total > 0
+        && let Some((index, timestamp_value)) = compact_boundary
+        && let Some(time) = preview_timestamp(timestamp_value, timestamp)
+    {
+        events.push_back(PreviewEvent {
+            index: index.max(1),
+            kind: "system",
+            role: None,
+            timestamp: Some(time),
+            text: "compact_boundary".into(),
+            tool_name: None,
+            matched: false,
+        });
+    }
     Ok(Some(SessionDetail {
         events: events.into(),
         page: EventPage {
@@ -1828,6 +1851,41 @@ mod tests {
             );
         }
         assert_eq!(before, (fs::read(&path)?, fs::metadata(&path)?.modified()?));
+        Ok(())
+    }
+
+    #[test]
+    fn latest_preview_carries_compaction_without_changing_the_event_window() -> anyhow::Result<()> {
+        let root = tempfile::tempdir()?;
+        let cwd = root.path();
+        let projects = cwd.join("projects");
+        let bucket = projects.join(encode(cwd));
+        fs::create_dir_all(&bucket)?;
+        write_rows(
+            &bucket.join("compacted.jsonl"),
+            &[
+                transcript(cwd, json!("older")),
+                json!({"type": "system", "subtype": "compact_boundary", "timestamp": 1000}),
+                transcript(cwd, json!("recent")),
+            ],
+        )?;
+        let read = |start| {
+            detail(
+                Some(&projects),
+                cwd.to_str().unwrap(),
+                "compacted",
+                start,
+                Some(1),
+            )
+        };
+        let latest = read(None).map_err(anyhow::Error::msg)?;
+        assert_eq!(latest.page.start_event_index, 2);
+        assert_eq!(latest.page.total, 2);
+        assert_eq!(latest.events[1].text, "compact_boundary");
+        assert_eq!(latest.events[1].timestamp, Some(json!(1000)));
+        let earlier = read(Some(1)).map_err(anyhow::Error::msg)?;
+        assert_eq!(earlier.events.len(), 1);
+        assert!(earlier.page.has_later);
         Ok(())
     }
 
