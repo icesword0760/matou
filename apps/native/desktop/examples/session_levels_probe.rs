@@ -292,14 +292,9 @@ mod workspace {
             self.select_card_menu_action_for_probe(CardMenuAction::Rename, cx);
         }
 
-        pub(super) fn restore_auto_title_for_probe(&mut self, cx: &mut Context<Self>) {
-            self.send(
-                Command::SetSessionTitle {
-                    session_id: PEER.into(),
-                    title: None,
-                },
-                cx,
-            );
+        pub(super) fn focus_restore_auto_title_menu_item(&mut self, cx: &mut Context<Self>) {
+            use matou_native_desktop::card_context_menu::CardMenuAction;
+            self.select_card_menu_action_for_probe(CardMenuAction::RestoreAutomaticTitle, cx);
         }
 
         pub(super) fn replace_title_input(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -348,7 +343,7 @@ mod workspace {
                 "exited",
                 "idle",
             ] {
-                let color = Self::compact_session_status(status)
+                let color = Self::compact_session_status(status, InterfaceLocale::Chinese)
                     .style()
                     .text
                     .as_ref()
@@ -5132,20 +5127,22 @@ mod probe {
                 );
                 if width == 1200. && case < 2 {
                     let restore = case == 1;
-                    if restore {
-                        window
-                            .update(cx, |view, _, cx| view.restore_auto_title_for_probe(cx))
-                            .unwrap();
-                    } else {
-                        let position = window
-                            .update(cx, |view, _, _| view.fork_card_header(PEER))
-                            .unwrap();
-                        fork_click(window, cx, MouseButton::Right, position);
-                        draw(window, cx);
-                        window
-                            .update(cx, |view, _, cx| view.focus_title_menu_item(cx))
-                            .unwrap();
-                        press(window, cx, "enter");
+                    let position = window
+                        .update(cx, |view, _, _| view.fork_card_header(PEER))
+                        .unwrap();
+                    fork_click(window, cx, MouseButton::Right, position);
+                    draw(window, cx);
+                    window
+                        .update(cx, |view, _, cx| {
+                            if restore {
+                                view.focus_restore_auto_title_menu_item(cx);
+                            } else {
+                                view.focus_title_menu_item(cx);
+                            }
+                        })
+                        .unwrap();
+                    press(window, cx, "enter");
+                    if !restore {
                         window
                             .update(cx, |view, window, cx| view.replace_title_input(window, cx))
                             .unwrap();

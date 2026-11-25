@@ -8,6 +8,7 @@ const DANGER_TOP_GAP: f32 = 4.;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CardMenuAction {
     Rename,
+    RestoreAutomaticTitle,
     Fork,
     ForkWorktree,
     OpenDetached,

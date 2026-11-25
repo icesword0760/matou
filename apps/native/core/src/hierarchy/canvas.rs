@@ -357,13 +357,8 @@ pub fn create_session_sibling(
         let (title, title_source) = match &input.title {
             Some(title) => (required_title(title, "Session title")?, "manual"),
             None => (
-                match profile.kind {
-                    crate::pty::LaunchProfile::Shell => "Shell",
-                    crate::pty::LaunchProfile::ClaudeCode => "Claude",
-                    crate::pty::LaunchProfile::Codex => "Codex",
-                    crate::pty::LaunchProfile::Dsh => "DSH",
-                    crate::pty::LaunchProfile::Antigravity => "Antigravity",
-                },
+                crate::sessions::default_session_title(profile.kind.kind())
+                    .expect("launch profile has a default session title"),
                 "default",
             ),
         };
