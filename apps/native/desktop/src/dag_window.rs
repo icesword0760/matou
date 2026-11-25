@@ -238,6 +238,16 @@ impl DagWindow {
         }
     }
 
+    pub(super) fn set_notifications(&mut self, sessions: &[String], cx: &mut Context<Self>) {
+        self.canvas
+            .update(cx, |view, cx| view.set_notifications(sessions, cx));
+    }
+
+    #[cfg(debug_assertions)]
+    pub(super) fn has_notification_for_probe(&self, session: &str, cx: &App) -> bool {
+        self.canvas.read(cx).has_notification_for_probe(session)
+    }
+
     fn canvas_event(
         &mut self,
         canvas: &Entity<DagCanvasView>,
@@ -279,6 +289,7 @@ impl DagWindow {
                                 );
                             }
                         } else {
+                            workspace.dismiss_session_notification(&session_id, cx);
                             workspace.send_card_focus(&scene, &session_id, cx);
                             if active {
                                 workspace.refresh_level(cx);

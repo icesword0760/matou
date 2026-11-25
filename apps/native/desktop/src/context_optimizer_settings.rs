@@ -1,32 +1,24 @@
 //! Standalone GPUI panel and presentation helpers for per-agent context &
 //! KV-cache optimizer settings (`<data_root>/context-optimizer.json`).
 
-use std::rc::Rc;
+use std::{collections::BTreeMap, rc::Rc};
 
 use gpui::{prelude::*, *};
 use matou_native_core::{
     context_optimizer_config::{
-        AgentOptimizerCapabilities, AgentOptimizerEntry, AgentOptimizerSettings,
-        ContextOptimizerConfig, ContextOptimizerSnapshot, KNOWN_AGENT_IDS,
+        AgentOptimizerEntry, AgentOptimizerSettings, ContextOptimizerConfig,
+        ContextOptimizerSnapshot, KNOWN_AGENT_IDS, OptimizerAvailability,
     },
     sessions::InterfaceLocale,
 };
 use serde_json::Value;
 
-use crate::theme_tokens::{AppTheme, ThemePalette};
+use crate::{
+    theme_tokens::{AppTheme, ThemePalette},
+    workspace::CardTooltip,
+};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OptimizerToggle {
-    MasterEnabled,
-    NoiseFilter,
-    ReadDedup,
-    CacheMonitor,
-    CacheExpiryNotify,
-    CacheKeepalive,
-    StallRescue,
-    CliTools,
-    BlockSensitiveReads,
-}
+pub use matou_native_core::context_optimizer_config::OptimizerToggle;
 
 /// Pure, testable state controller for the per-agent optimizer settings view.
 pub struct ContextOptimizerPanelState {
@@ -89,7 +81,7 @@ impl ContextOptimizerPanelState {
         let Some(entry) = self.snapshot.agents.get(&self.selected_agent) else {
             return false;
         };
-        if !toggle_supported(field, entry.capabilities) {
+        if !can_toggle(field, entry) {
             return false;
         }
         let mut next = entry.settings.clone();
@@ -112,7 +104,28 @@ impl ContextOptimizerPanelState {
     }
 
     pub fn restore_defaults(&mut self) -> bool {
-        self.save_current(AgentOptimizerSettings::default())
+        let Some(entry) = self.current_entry() else {
+            return false;
+        };
+        let saved = &entry.settings;
+        let mut defaults = AgentOptimizerSettings::default();
+        if entry.availability(OptimizerToggle::NoiseFilter) != OptimizerAvailability::Available {
+            defaults.noise_filter = saved.noise_filter;
+            defaults.max_log_bytes = saved.max_log_bytes;
+        }
+        if entry.availability(OptimizerToggle::ReadDedup) != OptimizerAvailability::Available {
+            defaults.read_dedup = saved.read_dedup;
+        }
+        if entry.availability(OptimizerToggle::BlockSensitiveReads)
+            != OptimizerAvailability::Available
+        {
+            defaults.block_sensitive_reads = saved.block_sensitive_reads;
+        }
+        if entry.availability(OptimizerToggle::CacheKeepalive) != OptimizerAvailability::Available {
+            defaults.cache_keepalive = saved.cache_keepalive;
+            defaults.cache_keepalive_max_per_turn = saved.cache_keepalive_max_per_turn;
+        }
+        self.save_current(defaults)
     }
 
     fn save_current(&mut self, next: AgentOptimizerSettings) -> bool {
@@ -120,11 +133,7 @@ impl ContextOptimizerPanelState {
             Ok(updated) => {
                 self.snapshot = updated;
                 self.error_message = None;
-                self.status_message = Some(
-                    self.locale
-                        .text("已保存并即时生效", "Saved and applied")
-                        .to_owned(),
-                );
+                self.status_message = Some(self.locale.text("已保存", "Saved").to_owned());
                 true
             }
             Err(err) => {
@@ -136,16 +145,52 @@ impl ContextOptimizerPanelState {
     }
 }
 
-pub fn toggle_supported(field: OptimizerToggle, caps: AgentOptimizerCapabilities) -> bool {
-    match field {
-        OptimizerToggle::MasterEnabled => true,
-        OptimizerToggle::NoiseFilter
-        | OptimizerToggle::ReadDedup
-        | OptimizerToggle::BlockSensitiveReads => caps.sync_hook_intercept,
-        OptimizerToggle::CacheMonitor | OptimizerToggle::CacheExpiryNotify => caps.cache_monitor,
-        OptimizerToggle::CacheKeepalive => caps.cache_keepalive,
-        OptimizerToggle::StallRescue => caps.stall_rescue,
-        OptimizerToggle::CliTools => caps.cli_tools,
+fn can_toggle(field: OptimizerToggle, entry: &AgentOptimizerEntry) -> bool {
+    entry.availability(field) == OptimizerAvailability::Available
+        && (field == OptimizerToggle::MasterEnabled || entry.settings.enabled)
+}
+
+fn unavailable_reason(
+    field: OptimizerToggle,
+    entry: &AgentOptimizerEntry,
+    locale: InterfaceLocale,
+) -> Option<&'static str> {
+    use OptimizerAvailability::{Available, Pending, Unsupported};
+    use OptimizerToggle::{CacheKeepalive, NoiseFilter};
+    match (entry.availability(field), field, entry.agent_id.as_str()) {
+        (Available, _, _) => None,
+        (Pending, CacheKeepalive, _) => Some(locale.text(
+            "暂无可靠的静默续命方式，自动发送会进入对话并消耗额度。有可验证的静默方式后再开放。",
+            "Silent keepalive is unavailable. Automatic messages would appear in the conversation and use quota. This will open once silent delivery can be verified.",
+        )),
+        (Pending, NoiseFilter, "codex") => Some(locale.text(
+            "待适配。Codex 当前版本不支持在输出交给 AI 前替换结果，自动剪裁暂不可用。",
+            "Pending integration. This Codex version cannot replace tool output before it reaches the model, so automatic trimming is unavailable.",
+        )),
+        (Pending, NoiseFilter, "antigravity") => Some(locale.text(
+            "待适配和验证。反重力支持执行前改写命令，Matou 完成适配并登录验证后开放。",
+            "Pending integration and testing. Antigravity can rewrite commands before execution. Matou will enable trimming after integration and signed-in testing.",
+        )),
+        (Pending, _, "codex") => Some(locale.text(
+            "待适配。Codex 通过 Bash 读文件，当前读保护未覆盖该路径。",
+            "Pending integration. Codex reads files through Bash, which the current read protection does not cover.",
+        )),
+        (Pending, _, "antigravity") => Some(locale.text(
+            "待验证。Matou 需适配反重力的专用读文件工具，并在登录后验证保护生效。",
+            "Pending validation. Matou needs to integrate Antigravity's dedicated file reader and verify protection in a signed-in session.",
+        )),
+        (Pending, _, _) => Some(locale.text(
+            "待适配或验证，确认可用后开放。",
+            "Pending integration or validation. This will open once verified.",
+        )),
+        (Unsupported, OptimizerToggle::NoiseFilter | OptimizerToggle::ReadDedup | OptimizerToggle::BlockSensitiveReads, _) => Some(locale.text(
+            "该 Agent 仅支持观察，不支持自动拦截。",
+            "This agent supports observation only. Automatic interception is unsupported.",
+        )),
+        (Unsupported, _, _) => Some(locale.text(
+            "该 Agent 不支持此功能。",
+            "This agent does not support this feature.",
+        )),
     }
 }
 
@@ -312,6 +357,11 @@ pub struct ContextOptimizerSettingsPanel {
     state: ContextOptimizerPanelState,
     palette: ThemePalette,
     dark: bool,
+    agent_focus: BTreeMap<String, FocusHandle>,
+    toggle_focus: [FocusHandle; OptimizerToggle::BlockSensitiveReads as usize + 1],
+    restore_focus: FocusHandle,
+    last_focus: Option<FocusHandle>,
+    scroll: ScrollHandle,
 }
 
 impl ContextOptimizerSettingsPanel {
@@ -319,11 +369,19 @@ impl ContextOptimizerSettingsPanel {
         config: Rc<ContextOptimizerConfig>,
         locale: InterfaceLocale,
         theme: AppTheme,
+        scroll: ScrollHandle,
+        cx: &App,
     ) -> Result<Self, String> {
+        let state = ContextOptimizerPanelState::load(config, locale)?;
         Ok(Self {
-            state: ContextOptimizerPanelState::load(config, locale)?,
+            state,
             palette: *theme.palette(),
             dark: theme == AppTheme::Dark,
+            agent_focus: BTreeMap::new(),
+            toggle_focus: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
+            restore_focus: cx.focus_handle().tab_stop(true),
+            last_focus: None,
+            scroll,
         })
     }
 
@@ -345,17 +403,18 @@ impl ContextOptimizerSettingsPanel {
         desc: &'static str,
         field: OptimizerToggle,
         checked: bool,
-        master_on: bool,
-        caps: AgentOptimizerCapabilities,
+        entry: &AgentOptimizerEntry,
+        reveal_focus: Option<&FocusHandle>,
         cx: &mut Context<Self>,
-    ) -> Div {
-        let supported = toggle_supported(field, caps);
-        let interactive = supported && (field == OptimizerToggle::MasterEnabled || master_on);
-        let unsupported_hint = (!supported).then(|| {
-            self.state.locale.text(
-                "该 Agent 当前仅支持观测，暂不支持此项自动拦截",
-                "This agent currently supports observation only for this feature",
-            )
+    ) -> Stateful<Div> {
+        let interactive = can_toggle(field, entry);
+        let reason = unavailable_reason(field, entry, self.state.locale);
+        let focus = &self.toggle_focus[field as usize];
+        let accent = rgba(self.palette.workspace.accent);
+        let title_color = rgba(if interactive {
+            self.palette.workspace.text
+        } else {
+            self.palette.workspace.muted
         });
 
         let pill_bg = if !interactive {
@@ -372,6 +431,7 @@ impl ContextOptimizerSettingsPanel {
             .id(SharedString::from(format!("ctx-opt-toggle-{id}")))
             .w(px(36.))
             .h(px(20.))
+            .flex_none()
             .rounded(px(10.))
             .p(px(2.))
             .flex()
@@ -382,15 +442,19 @@ impl ContextOptimizerSettingsPanel {
                 div()
                     .size(px(16.))
                     .rounded(px(8.))
-                    .ml(if checked && supported { px(16.) } else { px(0.) })
+                    .ml(if checked { px(16.) } else { px(0.) })
                     .bg(rgb(0xffffff)),
             );
 
         if interactive {
-            pill = pill.cursor_pointer().on_click(cx.listener(move |this, _, _, cx| {
-                this.state.toggle(field);
-                cx.notify();
-            }));
+            pill = pill
+                .track_focus(focus)
+                .focus(|style| style.shadow(vec![outline_shadow(accent)]))
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.state.toggle(field);
+                    cx.notify();
+                }));
         } else {
             pill = pill.opacity(0.45);
         }
@@ -405,7 +469,7 @@ impl ContextOptimizerSettingsPanel {
                 div()
                     .text_size(px(12.))
                     .font_weight(FontWeight(600.))
-                    .text_color(rgba(self.palette.workspace.text))
+                    .text_color(title_color)
                     .child(title),
             )
             .child(
@@ -415,19 +479,32 @@ impl ContextOptimizerSettingsPanel {
                     .text_color(rgba(self.palette.workspace.muted))
                     .child(desc),
             );
-        if let Some(hint) = unsupported_hint {
+        if let Some(reason) = reason {
+            // Keep the explanation reachable by Tab while the switch has
+            // neither a focus target nor an activation handler.
             text_col = text_col.child(
                 div()
-                    .text_size(px(10.))
-                    .text_color(rgb(0xb45309))
-                    .child(hint),
+                    .id(("ctx-opt-reason", field as usize))
+                    .track_focus(focus)
+                    .rounded(px(3.))
+                    .focus(|style| style.shadow(vec![outline_shadow(accent)]))
+                    .text_size(px(10.5))
+                    .line_height(px(14.5))
+                    .text_color(rgba(self.palette.workspace.muted))
+                    .child(reason),
             );
         }
 
-        div()
+        let row = reveal_on_focus(div(), &self.scroll, reveal_focus == Some(focus))
+            .id(("ctx-opt-row", field as usize))
             .w_full()
             .py(px(10.))
-            .px(px(12.))
+            .pr(px(12.))
+            .pl(if field == OptimizerToggle::BlockSensitiveReads {
+                px(24.)
+            } else {
+                px(12.)
+            })
             .flex()
             .items_center()
             .justify_between()
@@ -435,24 +512,81 @@ impl ContextOptimizerSettingsPanel {
             .border_b_1()
             .border_color(rgba(self.palette.workspace.line))
             .child(text_col)
-            .child(pill)
+            .child(pill);
+        if let Some(reason) = reason {
+            row.tooltip(move |_, cx| cx.new(|_| CardTooltip(reason.into())).into())
+        } else {
+            row
+        }
     }
 }
 
+fn outline_shadow(color: Rgba) -> BoxShadow {
+    BoxShadow {
+        color: color.into(),
+        offset: point(px(0.), px(0.)),
+        blur_radius: px(0.),
+        spread_radius: px(2.),
+    }
+}
+
+fn reveal_on_focus(element: Div, scroll: &ScrollHandle, newly_focused: bool) -> Div {
+    element.when(newly_focused, |element| {
+        let scroll = scroll.clone();
+        element.on_children_prepainted(move |children, window, cx| {
+            let Some(child) = children.first() else {
+                return;
+            };
+            let viewport = scroll.bounds();
+            let inset = px(4.);
+            let delta = if child.top() < viewport.top() + inset {
+                viewport.top() + inset - child.top()
+            } else if child.bottom() > viewport.bottom() - inset {
+                viewport.bottom() - inset - child.bottom()
+            } else {
+                return;
+            };
+            let focus = window.focused(cx);
+            let scroll = scroll.clone();
+            window.on_next_frame(move |window, cx| {
+                if window.focused(cx) != focus {
+                    return;
+                }
+                let mut offset = scroll.offset();
+                offset.y += delta;
+                scroll.set_offset(offset);
+                window.refresh();
+            });
+        })
+    })
+}
+
 impl Render for ContextOptimizerSettingsPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let locale = self.state.locale;
         let selected = self.state.selected_agent().to_owned();
         let agent_ids = self.state.agent_ids();
+        let accent = rgba(self.palette.workspace.accent);
+        let previous_focus = std::mem::replace(&mut self.last_focus, window.focused(cx));
+        let reveal_focus = self
+            .last_focus
+            .as_ref()
+            .filter(|focus| Some(*focus) != previous_focus.as_ref());
 
         let mut tabs = div().flex().flex_wrap().gap(px(6.)).mb(px(12.));
         for id in agent_ids {
             let active = id == selected;
             let label = agent_display_name(&id).to_owned();
             let id_click = id.clone();
+            let focus: &FocusHandle = self
+                .agent_focus
+                .entry(id.clone())
+                .or_insert_with(|| cx.focus_handle().tab_stop(true));
             tabs = tabs.child(
-                div()
+                reveal_on_focus(div(), &self.scroll, reveal_focus == Some(focus))
                     .id(SharedString::from(format!("ctx-opt-agent-{id}")))
+                    .track_focus(focus)
+                    .focus(|style| style.shadow(vec![outline_shadow(accent)]))
                     .px(px(12.))
                     .py(px(6.))
                     .rounded(px(7.))
@@ -484,10 +618,13 @@ impl Render for ContextOptimizerSettingsPanel {
         }
 
         let Some(entry) = self.state.current_entry().cloned() else {
-            return div().child(locale.text("未找到 Agent 配置", "Agent configuration unavailable"));
+            return div()
+                .child(locale.text("未找到 Agent 配置", "Agent configuration unavailable"));
         };
         let s = &entry.settings;
-        let caps = entry.capabilities;
+        let row = |id, title, desc, field, checked, cx: &mut Context<Self>| {
+            self.render_toggle_row(id, title, desc, field, checked, &entry, reveal_focus, cx)
+        };
 
         let rows = div()
             .w_full()
@@ -496,20 +633,18 @@ impl Render for ContextOptimizerSettingsPanel {
             .border_color(rgba(self.palette.workspace.line))
             .flex()
             .flex_col()
-            .child(self.render_toggle_row(
+            .child(row(
                 "master",
                 locale.text("为该 Agent 启用上下文与缓存优化", "Enable context & cache optimizer"),
                 locale.text(
-                    "关闭后零注入、零拦截、零 HUD 额外状态，不改动该 Agent 原有行为。",
-                    "When off, zero hooks, zero interception, and zero prompt changes are applied.",
+                    "开启后可调整下方设置。关闭时会保留已保存的偏好。",
+                    "Enable to change the settings below. Turning this off keeps your saved preferences.",
                 ),
                 OptimizerToggle::MasterEnabled,
                 s.enabled,
-                s.enabled,
-                caps,
                 cx,
             ))
-            .child(self.render_toggle_row(
+            .child(row(
                 "cache-monitor",
                 locale.text("KV-Cache 监控与水位预警", "KV-cache countdown & context alerts"),
                 locale.text(
@@ -518,11 +653,9 @@ impl Render for ContextOptimizerSettingsPanel {
                 ),
                 OptimizerToggle::CacheMonitor,
                 s.cache_monitor,
-                s.enabled,
-                caps,
                 cx,
             ))
-            .child(self.render_toggle_row(
+            .child(row(
                 "stall-rescue",
                 locale.text("卡死检测与一键交接救援", "Stall watchdog & rescue handoff"),
                 locale.text(
@@ -531,11 +664,9 @@ impl Render for ContextOptimizerSettingsPanel {
                 ),
                 OptimizerToggle::StallRescue,
                 s.stall_rescue,
-                s.enabled,
-                caps,
                 cx,
             ))
-            .child(self.render_toggle_row(
+            .child(row(
                 "noise-filter",
                 locale.text("终端噪音剪裁与密钥脱敏", "Terminal noise trimming & secret redaction"),
                 locale.text(
@@ -544,24 +675,31 @@ impl Render for ContextOptimizerSettingsPanel {
                 ),
                 OptimizerToggle::NoiseFilter,
                 s.noise_filter,
-                s.enabled,
-                caps,
                 cx,
             ))
-            .child(self.render_toggle_row(
+            .child(row(
                 "read-dedup",
                 locale.text("防重复读与大文件分级保护", "Duplicate-read guard & tiered read caps"),
                 locale.text(
-                    "拦下未修改大文件的重复读取，120 秒内二次重试自动放行。",
-                    "Avoids re-reading unchanged large files; second attempt within 120s passes through.",
+                    "保护专用读文件工具。拦下未修改大文件的重复读取，120 秒内再试一次会放行。",
+                    "Protects dedicated file reads. A repeated read of an unchanged large file is blocked, and retrying within 120 seconds is allowed.",
                 ),
                 OptimizerToggle::ReadDedup,
                 s.read_dedup,
-                s.enabled,
-                caps,
                 cx,
             ))
-            .child(self.render_toggle_row(
+            .child(row(
+                "block-sensitive-reads",
+                locale.text(".env 与敏感文件保护", "Protect .env and sensitive files"),
+                locale.text(
+                    "阻止专用读文件工具读取 .env 等敏感文件，放行 .env.example 等样板文件。",
+                    "Blocks dedicated file reads of sensitive files such as .env and lets templates such as .env.example through.",
+                ),
+                OptimizerToggle::BlockSensitiveReads,
+                s.block_sensitive_reads,
+                cx,
+            ))
+            .child(row(
                 "cli-tools",
                 locale.text("内置提速工具（mt ctx）", "Built-in CLI helpers (mt ctx)"),
                 locale.text(
@@ -570,21 +708,28 @@ impl Render for ContextOptimizerSettingsPanel {
                 ),
                 OptimizerToggle::CliTools,
                 s.cli_tools,
-                s.enabled,
-                caps,
                 cx,
             ))
-            .child(self.render_toggle_row(
+            .child(row(
                 "cache-keepalive",
-                locale.text("KV-Cache 临过期自动保活（默认关闭）", "Optional KV-cache keepalive (off by default)"),
+                locale.text("自动续命", "Automatic cache keepalive"),
                 locale.text(
-                    "主会话缓存快过期前自动发一次短请求续命，每轮默认最多 1 次。",
-                    "Sends a short ping before primary-chat cache expiry (default max 1 per user turn).",
+                    "在主会话缓存快过期时尝试延长有效期。",
+                    "Attempts to extend the cache lifetime shortly before it expires.",
                 ),
                 OptimizerToggle::CacheKeepalive,
                 s.cache_keepalive,
-                s.enabled,
-                caps,
+                cx,
+            ))
+            .child(row(
+                "cache-expiry-notify",
+                locale.text("临过期提醒", "Cache expiry reminder"),
+                locale.text(
+                    "KV-Cache 监控开启时，缓存快过期会提醒，不会向 Agent 发送请求。",
+                    "With KV-cache monitoring on, shows a reminder shortly before expiry without sending a request to the agent.",
+                ),
+                OptimizerToggle::CacheExpiryNotify,
+                s.cache_expiry_notify,
                 cx,
             ));
 
@@ -594,21 +739,27 @@ impl Render for ContextOptimizerSettingsPanel {
             .items_center()
             .justify_between()
             .child(
-                div()
-                    .id("ctx-opt-restore-defaults")
-                    .px(px(10.))
-                    .py(px(5.))
-                    .rounded(px(6.))
-                    .border_1()
-                    .border_color(rgba(self.palette.workspace.line))
-                    .cursor_pointer()
-                    .text_size(px(11.))
-                    .text_color(rgba(self.palette.workspace.text))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.state.restore_defaults();
-                        cx.notify();
-                    }))
-                    .child(locale.text("恢复该 Agent 默认值", "Restore defaults")),
+                reveal_on_focus(
+                    div(),
+                    &self.scroll,
+                    reveal_focus == Some(&self.restore_focus),
+                )
+                .id("ctx-opt-restore-defaults")
+                .track_focus(&self.restore_focus)
+                .focus(|style| style.shadow(vec![outline_shadow(accent)]))
+                .px(px(10.))
+                .py(px(5.))
+                .rounded(px(6.))
+                .border_1()
+                .border_color(rgba(self.palette.workspace.line))
+                .cursor_pointer()
+                .text_size(px(11.))
+                .text_color(rgba(self.palette.workspace.text))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.state.restore_defaults();
+                    cx.notify();
+                }))
+                .child(locale.text("恢复可用项默认值", "Restore available defaults")),
             );
 
         if let Some(err) = self.state.error_message() {
@@ -641,42 +792,114 @@ impl Render for ContextOptimizerSettingsPanel {
 #[cfg(test)]
 mod tests {
     use super::{
-        ContextGuardHudView, ContextOptimizerConfig, ContextOptimizerPanelState, HudPillTone,
-        InterfaceLocale, OptimizerToggle, format_cache_countdown, format_saved_noise_bytes,
+        AgentOptimizerSettings, ContextGuardHudView, ContextOptimizerConfig,
+        ContextOptimizerPanelState, HudPillTone, InterfaceLocale, OptimizerAvailability,
+        OptimizerToggle, can_toggle, format_cache_countdown, format_saved_noise_bytes,
+        unavailable_reason,
     };
     use std::rc::Rc;
 
     #[test]
-    fn panel_state_persists_per_agent_toggles_and_blocks_unsupported_dsh_switches() {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("matou-ctx-opt-test-{unique}"));
+    fn panel_enforces_matrix_and_preserves_unavailable_preferences_across_reload() {
+        use OptimizerAvailability::{Available, Pending, Unsupported};
+        use OptimizerToggle::*;
+
+        let dir = std::env::temp_dir().join(format!("matou-ctx-opt-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let config = Rc::new(ContextOptimizerConfig::for_data_root(&dir));
-        let mut state =
-            ContextOptimizerPanelState::load(Rc::clone(&config), InterfaceLocale::Chinese)
+        for id in ["claude-code", "codex", "antigravity", "dsh"] {
+            config
+                .set_agent_settings(
+                    id,
+                    AgentOptimizerSettings {
+                        noise_filter: true,
+                        read_dedup: true,
+                        cache_keepalive: true,
+                        cache_keepalive_max_per_turn: 3,
+                        max_log_bytes: 32_768,
+                        ..Default::default()
+                    },
+                )
                 .unwrap();
-
+        }
+        let mut state =
+            ContextOptimizerPanelState::load(Rc::clone(&config), InterfaceLocale::Chinese).unwrap();
         assert_eq!(state.selected_agent(), "claude-code");
-        assert!(state.toggle(OptimizerToggle::NoiseFilter));
-        assert!(state.current_entry().unwrap().settings.noise_filter);
+        for (id, interception) in [
+            ("claude-code", Available),
+            ("codex", Pending),
+            ("antigravity", Pending),
+            ("dsh", Unsupported),
+        ] {
+            state.select_agent(id);
+            let entry = state.current_entry().unwrap().clone();
+            assert!(entry.settings.block_sensitive_reads, "{id}");
+            assert!(!entry.settings.cache_expiry_notify, "{id}");
+            for (field, availability) in [
+                (NoiseFilter, interception),
+                (ReadDedup, interception),
+                (BlockSensitiveReads, interception),
+                (CacheKeepalive, Pending),
+                (CacheExpiryNotify, Available),
+                (CacheMonitor, Available),
+                (StallRescue, Available),
+                (CliTools, Available),
+            ] {
+                assert_eq!(entry.availability(field), availability, "{id} {field:?}");
+                let available = availability == Available;
+                assert_eq!(can_toggle(field, &entry), available, "{id} {field:?}");
+                assert_eq!(state.toggle(field), available, "{id} {field:?}");
+                for locale in [InterfaceLocale::Chinese, InterfaceLocale::English] {
+                    let reason = unavailable_reason(field, &entry, locale);
+                    assert_eq!(reason.is_none(), available, "{id} {field:?} {locale:?}");
+                }
+            }
+            let settings = &state.current_entry().unwrap().settings;
+            assert!(
+                settings.cache_keepalive && settings.cache_expiry_notify,
+                "{id}"
+            );
+            assert!(!settings.cache_monitor, "{id}");
+            assert!(!settings.stall_rescue, "{id}");
+            assert!(settings.cli_tools, "{id}");
+            assert_eq!(settings.noise_filter, interception != Available, "{id}");
+            assert_eq!(settings.read_dedup, interception != Available, "{id}");
+            assert_eq!(
+                settings.block_sensitive_reads,
+                interception != Available,
+                "{id}"
+            );
+        }
 
-        // Switch to DSH: noise_filter is unsupported so toggle must be ignored.
-        state.select_agent("dsh");
-        assert!(!state.toggle(OptimizerToggle::NoiseFilter));
-        assert!(!state.current_entry().unwrap().settings.noise_filter);
-        // DSH supports cli_tools.
-        assert!(state.toggle(OptimizerToggle::CliTools));
-        assert!(state.current_entry().unwrap().settings.cli_tools);
+        // Loading a fresh panel from disk simulates reopening after restart.
+        let new_store = Rc::new(ContextOptimizerConfig::for_data_root(&dir));
+        let mut reopened =
+            ContextOptimizerPanelState::load(new_store, InterfaceLocale::English).unwrap();
+        assert!(
+            !reopened
+                .current_entry()
+                .unwrap()
+                .settings
+                .block_sensitive_reads
+        );
+        for id in ["codex", "antigravity", "dsh"] {
+            reopened.select_agent(id);
+            let saved = &reopened.current_entry().unwrap().settings;
+            assert!(
+                saved.noise_filter && saved.read_dedup && saved.block_sensitive_reads,
+                "{id}"
+            );
+            assert!(saved.cache_keepalive && saved.cache_expiry_notify, "{id}");
+        }
+        reopened.select_agent("codex");
+        assert!(reopened.restore_defaults());
+        let saved = &config.snapshot().unwrap().agents["codex"].settings;
+        assert!(saved.noise_filter && saved.read_dedup && saved.block_sensitive_reads);
+        assert!(saved.cache_keepalive && !saved.cache_expiry_notify);
+        assert_eq!(saved.cache_keepalive_max_per_turn, 3);
+        assert_eq!(saved.max_log_bytes, 32_768);
 
-        // Reload verifies persistence on disk.
-        let reloaded =
-            ContextOptimizerPanelState::load(config, InterfaceLocale::English).unwrap();
-        assert!(reloaded.snapshot.agents["claude-code"].settings.noise_filter);
-        assert!(reloaded.snapshot.agents["dsh"].settings.cli_tools);
-        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

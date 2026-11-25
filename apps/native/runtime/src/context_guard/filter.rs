@@ -109,7 +109,65 @@ pub fn trim_terminal_output(
     }
 }
 
-fn strip_ansi_and_progress(input: &str) -> String {
+/// Summarize already redacted output within the smaller of the host's original
+/// model body and the replacement budget, reserving space for the log ID.
+pub(super) fn summarize_tool_output(
+    cleaned: &str,
+    command: &str,
+    budget: usize,
+    source_id: &str,
+    partial: bool,
+) -> Option<String> {
+    let saved = if partial {
+        "Available output"
+    } else {
+        "Full log"
+    };
+    let footer = format!(
+        "\n\n[matou context-guard] Output trimmed. {saved} saved as `{source_id}`. Read with `mt ctx log {source_id}`."
+    );
+    let body_budget = budget.checked_sub(footer.len())?;
+    let json_summary = (!cleaned.contains('\n') && looks_like_json(cleaned))
+        .then(|| crush_json(cleaned))
+        .flatten();
+    let body = if let Some(summary) = json_summary {
+        truncate_utf8(&summary, body_budget).to_owned()
+    } else {
+        let errors: Vec<_> = cleaned.lines().filter(|line| is_error_line(line)).collect();
+        let context = compress_log_lines(cleaned, command);
+        let error_bytes = errors.iter().map(|line| line.len() + 1).sum::<usize>();
+        if errors.is_empty() {
+            let preview = context
+                .lines()
+                .map(|line| truncate_utf8(line, 512))
+                .collect::<Vec<_>>()
+                .join("\n");
+            truncate_utf8(&preview, body_budget).to_owned()
+        } else if context.len() <= body_budget && errors.iter().all(|line| context.contains(line)) {
+            context
+        } else if error_bytes.saturating_sub(1) <= body_budget {
+            errors.join("\n")
+        } else {
+            let kept = errors.len().min(2);
+            let note = format!(
+                "[{} errors; {} error lines omitted]",
+                errors.len(),
+                errors.len() - kept
+            );
+            let available = body_budget.checked_sub(note.len() + kept)?;
+            let first = error_excerpt(errors[0], available.div_ceil(kept));
+            if kept == 1 {
+                format!("{first}\n{note}")
+            } else {
+                let last = error_excerpt(errors[errors.len() - 1], available - first.len());
+                format!("{first}\n{note}\n{last}")
+            }
+        }
+    };
+    Some(format!("{body}{footer}"))
+}
+
+pub(super) fn strip_ansi_and_progress(input: &str) -> String {
     let no_ansi = ANSI_RE.replace_all(input, "");
     let mut out = String::with_capacity(no_ansi.len().min(65_536));
     for (idx, raw_line) in no_ansi.split('\n').enumerate() {
@@ -253,6 +311,34 @@ fn is_important_line(line: &str) -> bool {
         || l.contains("--> ")
 }
 
+fn is_error_line(line: &str) -> bool {
+    error_marker(line).is_some()
+}
+
+fn error_marker(line: &str) -> Option<usize> {
+    let line = line.to_ascii_lowercase();
+    [
+        "error",
+        "fail",
+        "panic",
+        "assert",
+        "exception",
+        "traceback",
+        "fatal:",
+    ]
+    .iter()
+    .filter_map(|keyword| line.find(keyword))
+    .min()
+    .or_else(|| line.starts_with("e   ").then_some(0))
+}
+
+fn error_excerpt(line: &str, budget: usize) -> &str {
+    let start = error_marker(line)
+        .filter(|index| *index + 12 > budget)
+        .unwrap_or(0);
+    truncate_utf8(&line[start..], budget)
+}
+
 fn is_pure_noise_line(line: &str) -> bool {
     let trimmed = line.trim();
     trimmed.starts_with("Compiling ")
@@ -324,5 +410,18 @@ mod tests {
         assert!(res.text.len() <= HARD_CAP_BYTES);
         assert!(res.text.contains("JSON Array (300 items)"));
         assert!(res.text.contains("timeout on /api/pay"));
+    }
+
+    #[test]
+    fn dense_errors_keep_the_first_last_and_counts_under_the_host_budget() {
+        let log = (0..600)
+            .map(|i| format!("ERROR cause-{i:04} {}\n", "界".repeat(32)))
+            .collect::<String>();
+        let summary = summarize_tool_output(&log, "fixture", 2_300, "log_0001", false).unwrap();
+        assert!(summary.len() <= 2_300);
+        assert!(summary.contains("ERROR cause-0000"));
+        assert!(summary.contains("ERROR cause-0599"));
+        assert!(summary.contains("600 errors; 598 error lines omitted"));
+        assert!(summary.ends_with("`mt ctx log log_0001`."));
     }
 }

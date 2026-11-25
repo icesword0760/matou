@@ -46,7 +46,6 @@ use crate::{
         self, LaunchMode as AntigravityMode, PermissionMode as AntigravityPermission,
     },
     claude_request_gateway::{Gateway, ProxyEnvironment},
-    context_guard::{HandoffBrief, SessionContextGuard},
     codex_events::{self, title as codex_title},
     codex_fork::{
         CodexForkAuthority, CodexForkCandidate, CodexForkHook, CodexForkSettings, CodexForkSource,
@@ -54,6 +53,7 @@ use crate::{
     },
     codex_launch::CodexLaunch,
     codex_resume::{self, Resume as CodexResume},
+    context_guard::{HandoffBrief, SessionContextGuard},
     derived::{CwdTracker, WorkStatusTracker, terminal_summary_lines, utf16_tail},
     dsh_catalog::DshSessionCatalog,
     dsh_events::{DshEventOutcome, DshEvents, DshWorkStatus},
@@ -71,7 +71,9 @@ use crate::{
         self, FORK_REBUILD_FAILED, IDENTITY_MISMATCH, ResumeMonitor, SESSION_NOT_FOUND,
     },
     shell_input::ShellInput,
-    subscription_service::{PreparedClaudeLaunch, SessionSubscriptions, SubscriptionService},
+    subscription_service::{
+        LaunchIssue, PreparedClaudeLaunch, SessionSubscriptions, SubscriptionService,
+    },
     worker::{SessionWorker, WorkerCommand, WorkerEvent},
 };
 
@@ -142,6 +144,7 @@ struct RunningShell {
     exit_error: Option<String>,
     retiring: bool,
     stop_completion: Option<mpsc::Sender<Result<()>>>,
+    catalog_stop: bool,
     environment_stop: bool,
     provider_startup_pending: bool,
     promotion_process_check: Option<Arc<OnceLock<Result<()>>>>,
@@ -283,6 +286,7 @@ impl std::fmt::Debug for ClaudeForkRebuild {
 /// Serialized database-side owner, used on the runtime thread, never the UI thread.
 pub struct ShellOwner {
     shells: HashMap<String, RunningShell>,
+    catalog_exit_retries: HashMap<String, CatalogExit>,
     summaries: HashMap<String, Summary>,
     send: mpsc::Sender<WorkerEvent>,
     receive: mpsc::Receiver<WorkerEvent>,
@@ -310,6 +314,35 @@ pub struct ShellOwner {
     codex_forks: CodexForks,
 }
 
+struct CatalogExit {
+    run: String,
+    pid: u32,
+    status: matou_native_core::pty::ProcessExit,
+    time: i64,
+}
+
+pub(crate) const CATALOG_EXIT_NOT_SAVED: &str =
+    "The process exited, but its exit record could not be saved";
+
+impl CatalogExit {
+    fn persist(&self, db: &mut Connection) -> Result<DomainCommit> {
+        sessions::finish_run(
+            db,
+            &command(
+                format!("runtime-exit-{}", self.run),
+                "session.run-exit",
+                format!("exit:{}:{}", self.run, self.pid),
+            ),
+            &self.run,
+            i64::from(self.status.exit_code),
+            self.status.signal.map(i64::from),
+            self.time,
+            self.time,
+        )
+        .map_err(|error| anyhow::anyhow!("{CATALOG_EXIT_NOT_SAVED}: {error:#}"))
+    }
+}
+
 #[derive(PartialEq, Eq)]
 enum EgressUpdate {
     Sample,
@@ -334,6 +367,7 @@ impl ShellOwner {
         let (send, receive) = mpsc::channel();
         let mut owner = Self {
             shells: HashMap::new(),
+            catalog_exit_retries: HashMap::new(),
             summaries: HashMap::new(),
             send,
             receive,
@@ -1584,6 +1618,10 @@ impl ShellOwner {
 
     /// Stop runs without blocking the other sessions. The stable sessions remain in storage.
     pub fn retire_sessions(&mut self, disposed: &[String]) {
+        self.retire_sessions_inner(disposed, true);
+    }
+
+    fn retire_sessions_inner(&mut self, disposed: &[String], queue_shutdown: bool) {
         for id in disposed {
             self.egress.unregister_session(id, now() as u64);
             self.summaries.remove(id);
@@ -1603,7 +1641,9 @@ impl ShellOwner {
                 shell.cwd_capture = None;
                 // Keep the run registered until its final exit record is handled.
                 // If the channel already closed, poll will reap and report the worker.
-                let _ = shell.worker.send(WorkerCommand::Shutdown { reply: None });
+                if queue_shutdown {
+                    let _ = shell.worker.send(WorkerCommand::Shutdown { reply: None });
+                }
             }
         }
     }
@@ -1697,14 +1737,16 @@ impl ShellOwner {
         input: &sessions::ClaudeCatalogLoad<'_>,
         provider: &str,
         completed_turn: bool,
+        replacement: Option<sessions::ClaudeCatalogReplacement<'_>>,
     ) -> Result<i64> {
         let id = (self.next_id)();
-        let commit = sessions::load_provider_catalog_binding(
+        let commit = sessions::load_provider_catalog_binding_with_rollback(
             &mut self.connection,
             &command(id.clone(), "session.load-provider-catalog", id),
             input,
             provider,
             completed_turn,
+            replacement,
             now(),
         )?;
         let revision = commit.result["spawnRevision"]
@@ -1712,6 +1754,41 @@ impl ShellOwner {
             .context("catalog binding is missing its spawn revision")?;
         self.pending.push(OwnerEvent::Domain(commit));
         Ok(revision)
+    }
+
+    pub(crate) fn claude_catalog_source(
+        &self,
+        scene_id: &str,
+        target: &str,
+        provider_session_id: &str,
+        expected_source: Option<&str>,
+    ) -> Result<Option<String>> {
+        sessions::claude_catalog_source(
+            &self.connection,
+            scene_id,
+            target,
+            provider_session_id,
+            expected_source,
+        )
+    }
+
+    pub(crate) fn cancel_claude_catalog_load(
+        &mut self,
+        session_id: &str,
+        revision: i64,
+    ) -> Result<()> {
+        let id = (self.next_id)();
+        sessions::cancel_claude_catalog_load(
+            &mut self.connection,
+            &command(id.clone(), "session.cancel-catalog-load", id),
+            session_id,
+            revision,
+            now(),
+        )
+    }
+
+    pub(crate) fn rollback_interrupted_catalog_loads(&mut self) -> Result<()> {
+        sessions::rollback_interrupted_catalog_loads(&mut self.connection, now())
     }
 
     pub(crate) fn catalog_binding_owners(
@@ -2073,6 +2150,38 @@ impl ShellOwner {
         shell.stop_completion = Some(send);
         self.retire_sessions(&[session_id.to_owned()]);
         Ok(receive)
+    }
+
+    pub(crate) fn stop_for_catalog_load(
+        &mut self,
+        session_id: &str,
+    ) -> Result<mpsc::Receiver<Result<()>>> {
+        let shell = self
+            .shells
+            .get_mut(session_id)
+            .context("Card has no worker to stop")?;
+        ensure!(
+            !shell.retiring && shell.stop_completion.is_none(),
+            "Card is already being stopped"
+        );
+        shell
+            .worker
+            .send(WorkerCommand::Shutdown { reply: None })
+            .context("Could not request that the process stop")?;
+        let (send, receive) = mpsc::channel();
+        shell.stop_completion = Some(send);
+        shell.catalog_stop = true;
+        self.retire_sessions_inner(&[session_id.to_owned()], false);
+        Ok(receive)
+    }
+
+    pub(crate) fn retry_catalog_exit(&mut self, session_id: &str) -> Result<()> {
+        if let Some(exit) = self.catalog_exit_retries.get(session_id) {
+            let commit = exit.persist(&mut self.connection)?;
+            self.catalog_exit_retries.remove(session_id);
+            self.pending.push(OwnerEvent::Domain(commit));
+        }
+        Ok(())
     }
 
     pub(crate) fn environment_worker_active(&self, session_id: &str) -> bool {
@@ -2744,7 +2853,9 @@ impl ShellOwner {
         {
             ensure!(
                 subscriptions.is_some(),
-                "Subscription launch service is unavailable"
+                LaunchIssue::ServiceNotStarted.localized(sessions::current_interface_locale(
+                    sessions::read_locale_preference(&launch.data_root)
+                ))
             );
         }
         let gateway = plan.gateway;
@@ -3650,6 +3761,7 @@ impl ShellOwner {
                 exit_error: None,
                 retiring: false,
                 stop_completion: None,
+                catalog_stop: false,
                 environment_stop: false,
                 provider_startup_pending: permission_starting,
                 promotion_process_check: None,
@@ -3841,6 +3953,9 @@ impl ShellOwner {
                 let result = stopped.and_then(|()| {
                     ensure!(shell.ended, "Shell stopped before recording its exit");
                     if let Some(error) = &shell.exit_error {
+                        if shell.catalog_stop {
+                            anyhow::bail!("{error}");
+                        }
                         anyhow::bail!("persist Shell exit: {error}");
                     }
                     Ok(())
@@ -6158,6 +6273,22 @@ impl ShellOwner {
         } else {
             ("runtime-exit", "exit")
         };
+        if shell.catalog_stop {
+            let exit = CatalogExit {
+                run,
+                pid,
+                status,
+                time,
+            };
+            match exit.persist(&mut self.connection) {
+                Ok(commit) => events.push(OwnerEvent::Domain(commit)),
+                Err(error) => {
+                    self.catalog_exit_retries.insert(id.to_owned(), exit);
+                    return Err(error);
+                }
+            }
+            return Ok(());
+        }
         let commit = sessions::finish_run(
             &mut self.connection,
             &command(

@@ -82,7 +82,7 @@ fn projection_and_status_transactions_match_the_frozen_database() -> Result<()> 
                         .with_context(|| format!("step {index}: {label}"))?;
                 }
                 compare_result(
-                    project_scene_graph(&db, &scene_id, window_id.as_deref()),
+                    graph_with_frozen_fields(&db, &scene_id, window_id.as_deref()),
                     result,
                     error,
                     &format!("step {index}: {label}"),
@@ -422,6 +422,29 @@ fn permission_and_model_come_from_the_latest_valid_binding() -> Result<()> {
     Ok(())
 }
 
+fn graph_with_frozen_fields(
+    db: &Connection,
+    scene_id: &str,
+    window_id: Option<&str>,
+) -> Result<Value> {
+    let mut graph = project_scene_graph(db, scene_id, window_id)?;
+    for node in graph["nodes"]
+        .as_array_mut()
+        .context("projected graph nodes")?
+    {
+        let id = text(node, "sessionId")?;
+        let stored_source: Option<String> = db.query_row(
+            "SELECT title_source FROM sessions WHERE id = ?",
+            [id],
+            |row| row.get(0),
+        )?;
+        // Existing desktop title metadata is additive to the frozen graph.
+        let projected_source = node.as_object_mut().unwrap().remove("titleSource");
+        assert_eq!(projected_source, stored_source.map(Value::String));
+    }
+    Ok(graph)
+}
+
 fn compare_result(
     actual: Result<Value>,
     result: Option<Value>,
@@ -429,7 +452,8 @@ fn compare_result(
     label: &str,
 ) -> Result<()> {
     match (actual, result, error) {
-        (Ok(actual), Some(mut expected), None) => {
+        (Ok(mut actual), Some(mut expected), None) => {
+            omit_embedded_graph_title_source(&mut actual);
             apply_permission_default(&mut expected);
             assert_eq!(actual, expected, "{label}");
         }
@@ -467,6 +491,18 @@ fn read_rows(db: &Connection, table: &str) -> Result<Vec<Value>> {
     Ok(output)
 }
 
+// The frozen work-status command embeds its graph in the result and event.
+fn omit_embedded_graph_title_source(value: &mut Value) {
+    if let Some(nodes) = value
+        .get_mut("graph")
+        .and_then(|graph| graph["nodes"].as_array_mut())
+    {
+        for node in nodes.iter_mut().filter_map(Value::as_object_mut) {
+            node.remove("titleSource");
+        }
+    }
+}
+
 fn normalize_json_columns(mut rows: Vec<Value>) -> Result<Vec<Value>> {
     for row in &mut rows {
         for (column, value) in row
@@ -479,6 +515,7 @@ fn normalize_json_columns(mut rows: Vec<Value>) -> Result<Vec<Value>> {
                 let mut parsed: Value = serde_json::from_str(text)
                     .with_context(|| format!("invalid JSON text in {column}"))?;
                 apply_permission_default(&mut parsed);
+                omit_embedded_graph_title_source(&mut parsed);
                 *value = json!({ "json": parsed });
             }
         }

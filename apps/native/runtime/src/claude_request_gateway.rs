@@ -49,7 +49,9 @@ use crate::{
     http_proxy::{AbortOnDrop, connect_http1, direct_https, http_connector},
     model_router::RouterConnection,
     subscription_launch::RouterRequest,
-    subscription_service::{SessionSubscriptions, TargetBinding},
+    subscription_service::{
+        LaunchIssue, SessionSubscriptions, TargetBinding, launch_issue_message,
+    },
 };
 
 #[cfg(test)]
@@ -456,9 +458,9 @@ impl State {
         }
         let label = message_response.authentication_label.unwrap_or("main");
         let (mut response, mut body) = if connection.subscription.is_some() {
-            let subscriptions = self.subscriptions.as_ref().ok_or(Fault::bad_gateway(
-                "Subscription launch service is unavailable",
-            ))?;
+            let subscriptions = self.subscriptions.as_ref().ok_or_else(|| {
+                Fault::bad_gateway(LaunchIssue::ServiceNotStarted.message(self.locale))
+            })?;
             let (response, body, binding) = self
                 .send_subscription(
                     subscriptions,
@@ -571,8 +573,8 @@ impl State {
                         tokio::task::spawn_blocking(move || service.prepare_model_target(&target))
                             .await
                             .map_err(|_| Fault::bad_gateway(CONNECTION_ERROR))?
-                            .map_err(|_| {
-                                Fault::bad_gateway("Subscription compaction target is unavailable")
+                            .map_err(|error| {
+                                Fault::bad_gateway(launch_issue_message(self.locale, &error))
                             })?;
                     *cached = Some(Arc::clone(&binding));
                     binding
@@ -588,11 +590,7 @@ impl State {
                 tokio::task::spawn_blocking(move || service.connection(&binding, failed_generation))
                     .await
                     .map_err(|_| Fault::bad_gateway(CONNECTION_ERROR))?
-                    .map_err(|_| {
-                        Fault::bad_gateway(
-                            "Subscription route is unavailable. Check the account and try again.",
-                        )
-                    })
+                    .map_err(|error| Fault::bad_gateway(launch_issue_message(self.locale, &error)))
             }
         };
         let mut revoked = Box::pin(binding.cancelled());
@@ -629,10 +627,19 @@ impl State {
                         full_body(buffered.expect("replayable request")),
                     ),
                 )
-                .await?
+                .await
             }
-            result => result?,
-        };
+            result => result,
+        }
+        .map_err(|mut fault| {
+            if fault.1 == CONNECTION_ERROR {
+                fault.1 = Cow::Borrowed(self.locale.text(
+                    "连接订阅服务失败：本地服务没有响应，请重新打开设置或重启码头",
+                    "Couldn't connect to the subscription service: the local service didn't respond. Reopen Settings or restart Matou.",
+                ));
+            }
+            fault
+        })?;
         drop(revoked);
         let active = Arc::clone(&binding);
         body.cancelled = Some(Box::pin(async move { active.cancelled().await }));

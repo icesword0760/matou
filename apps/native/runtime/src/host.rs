@@ -46,7 +46,7 @@ use crate::{
     search::{SearchRequest, SearchResult},
     shell_input::{InteractiveLaunch, ShellInput},
     subscription_launch::{self, SubscriptionProvider},
-    subscription_service::{PreparedClaudeLaunch, SubscriptionService},
+    subscription_service::{LaunchIssue, PreparedClaudeLaunch, SubscriptionService},
     update_download, update_http,
     worker::{SelectionCopy, ShellSubmission, WorkerCommand},
     workspace_paths::WorkspacePathChecks,
@@ -73,16 +73,15 @@ use matou_native_core::{
     provider_config::{ProviderConfigLocale, ProviderConfigStore},
     provider_launch::{
         CLAUDE_PERMISSION_MODES, ClaudeLaunch, ClaudeTarget, automatic_time_zone,
-        available_time_zones, official_time_zone_endpoint, prepare_claude_fork,
-        prepare_claude_launch, prepare_claude_permission_restart, prepare_managed_claude_launch,
-        prepare_new_claude_launch_with_budget, project_cli_time_zone, system_time_zone,
-        valid_claude_time_zone, validate_claude_compaction, validate_claude_role_assignments,
-        validate_claude_web_search, validate_cwd,
+        available_time_zones, official_time_zone_endpoint, prepare_managed_claude_launch,
+        project_cli_time_zone, system_time_zone, valid_claude_time_zone,
+        validate_claude_compaction, validate_claude_role_assignments, validate_claude_web_search,
+        validate_cwd,
     },
     pty::{LaunchProfile, ShellLaunch},
     sessions::{
-        ClaudeCatalogLoad, ClaudeRestore, ClaudeRoleLaunchPreferences, InterfaceLocale,
-        LOCALE_FILE, LocalePreference, ProviderBinding, current_interface_locale,
+        ClaudeCatalogLoad, ClaudeCatalogReplacement, ClaudeRestore, ClaudeRoleLaunchPreferences,
+        InterfaceLocale, LOCALE_FILE, LocalePreference, ProviderBinding, current_interface_locale,
         read_claude_role_launch_preferences, read_claude_time_zone, read_locale_preference,
         save_claude_model_preferences, save_claude_time_zone,
     },
@@ -786,6 +785,8 @@ pub enum Command {
     LoadProviderSession {
         session_id: String,
         provider_session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        takeover_from: Option<String>,
     },
     ListCodexSessions {
         request_id: u64,
@@ -3443,7 +3444,11 @@ impl ProviderSettingsWorker {
                                     store.subscription(&provider_id).and_then(|row| {
                                         ensure!(
                                             row.is_none(),
-                                            "Subscription launch service is unavailable"
+                                            LaunchIssue::ServiceNotStarted.localized(
+                                                current_interface_locale(read_locale_preference(
+                                                    &data_root
+                                                ))
+                                            )
                                         );
                                         store.set_active(&cli, &provider_id)
                                     })
@@ -4500,6 +4505,7 @@ fn run_writable(
     let mut scene_id = hierarchy.scene.as_ref().map(|scene| scene.id.clone());
     let mut active_task = hierarchy.task.as_ref().map(|task| task.id.clone());
     let mut owner = ShellOwner::new(connection, ownership, id)?;
+    owner.rollback_interrupted_catalog_loads()?;
     owner.provider_environment = wiring.fixtures.provider_environment.take();
     owner.dsh_session_root = wiring
         .fixtures
@@ -4514,16 +4520,21 @@ fn run_writable(
         InterfaceLocale::Chinese => ProviderConfigLocale::ZhCn,
     };
     let provider_store = Arc::new(ProviderConfigStore::new(&data_root, locale));
-    let subscriptions = live_services
-        .then(|| {
-            SubscriptionService::new(
-                data_root.clone(),
-                Arc::clone(&provider_store),
-                owner.launch_environment(),
-            )
-            .map(Arc::new)
-        })
-        .transpose()?;
+    let subscriptions = if live_services {
+        match SubscriptionService::new(
+            data_root.clone(),
+            Arc::clone(&provider_store),
+            owner.launch_environment(),
+        ) {
+            Ok(service) => Some(Arc::new(service)),
+            Err(_) => {
+                eprintln!("[subscription] Could not start the model router supervisor");
+                None
+            }
+        }
+    } else {
+        None
+    };
     wiring.subscriptions = subscriptions.clone();
     owner.subscriptions = subscriptions.clone();
     let mut provider_settings =
@@ -5602,6 +5613,11 @@ fn run_writable(
                                 shell_submissions.remove(id);
                                 shell_promotions.remove(id);
                                 if let Some(load) = catalog_loads.remove(id) {
+                                    if load.provider == "claude-code"
+                                        && let Some(revision) = load.spawn_revision
+                                    {
+                                        owner.cancel_claude_catalog_load(id, revision)?;
+                                    }
                                     let error =
                                         anyhow!("Card was closed while loading the conversation");
                                     if !load.antigravity_requests.is_empty() {
@@ -5699,7 +5715,7 @@ fn run_writable(
                             !startup_deferred.contains(id)
                                 && !failed_launches.contains_key(id)
                                 && !launch_retries.contains_key(id)
-                                && !catalog_loads.contains_key(id)
+                                && !catalog_card_busy(&catalog_loads, id)
                                 && !permission_changes.contains_key(id)
                                 && !shell_promotions.contains_key(id)
                         });
@@ -6365,7 +6381,7 @@ fn run_writable(
                                 && !recovering.contains_key(&session_id)
                                 && !launch_retries.contains_key(&session_id)
                                 && !shell_promotions.contains_key(&session_id)
-                                && !catalog_loads.contains_key(&session_id),
+                                && !catalog_card_busy(&catalog_loads, &session_id),
                             "AI Session is already stopping or recovering"
                         );
                         let binding = owner.permission_binding(&session_id)?;
@@ -6572,37 +6588,53 @@ fn run_writable(
                 | Command::LoadCodexSession { .. }
                 | Command::LoadDshSession { .. }
                 | Command::LoadAntigravitySession { .. }) => {
-                    let (provider, session_id, provider_session_id, request_id) = match command {
-                        Command::LoadProviderSession {
-                            session_id,
-                            provider_session_id,
-                        } => ("claude-code", session_id, provider_session_id, None),
-                        Command::LoadCodexSession {
-                            session_id,
-                            provider_session_id,
-                        } => (
-                            "codex",
-                            session_id,
-                            provider_session_id.to_ascii_lowercase(),
-                            None,
-                        ),
-                        Command::LoadDshSession {
-                            request_id,
-                            session_id,
-                            provider_session_id,
-                        } => ("dsh", session_id, provider_session_id, Some(request_id)),
-                        Command::LoadAntigravitySession {
-                            request_id,
-                            session_id,
-                            provider_session_id,
-                        } => (
-                            "antigravity",
-                            session_id,
-                            provider_session_id,
-                            Some(request_id),
-                        ),
-                        _ => unreachable!(),
-                    };
+                    let (provider, session_id, provider_session_id, request_id, takeover_from) =
+                        match command {
+                            Command::LoadProviderSession {
+                                session_id,
+                                provider_session_id,
+                                takeover_from,
+                            } => (
+                                "claude-code",
+                                session_id,
+                                provider_session_id,
+                                None,
+                                takeover_from,
+                            ),
+                            Command::LoadCodexSession {
+                                session_id,
+                                provider_session_id,
+                            } => (
+                                "codex",
+                                session_id,
+                                provider_session_id.to_ascii_lowercase(),
+                                None,
+                                None,
+                            ),
+                            Command::LoadDshSession {
+                                request_id,
+                                session_id,
+                                provider_session_id,
+                            } => (
+                                "dsh",
+                                session_id,
+                                provider_session_id,
+                                Some(request_id),
+                                None,
+                            ),
+                            Command::LoadAntigravitySession {
+                                request_id,
+                                session_id,
+                                provider_session_id,
+                            } => (
+                                "antigravity",
+                                session_id,
+                                provider_session_id,
+                                Some(request_id),
+                                None,
+                            ),
+                            _ => unreachable!(),
+                        };
                     let attempt = (|| -> Result<()> {
                         anyhow::ensure!(
                             foreground_sessions.contains(&session_id),
@@ -6627,7 +6659,8 @@ fn run_writable(
                         if let Some(loading) = catalog_loads.get_mut(&session_id) {
                             anyhow::ensure!(
                                 loading.provider == provider
-                                    && loading.provider_session_id == provider_session_id,
+                                    && loading.provider_session_id == provider_session_id
+                                    && loading.takeover_from == takeover_from,
                                 "Another conversation is already loading"
                             );
                             if provider == "antigravity"
@@ -6642,14 +6675,45 @@ fn run_writable(
                             }
                             return Ok(());
                         }
-                        if provider == "claude-code"
-                            && let Some(identity) = owner.already_loaded_catalog_identity(
+                        anyhow::ensure!(
+                            !catalog_card_busy(&catalog_loads, &session_id)
+                                && takeover_from.as_ref().is_none_or(|source| {
+                                    !catalog_card_busy(&catalog_loads, source)
+                                }),
+                            "A card is already taking part in a conversation load"
+                        );
+                        if provider == "claude-code" {
+                            anyhow::ensure!(
+                                !catalog_loads.values().any(|load| {
+                                    load.provider == provider
+                                        && load.provider_session_id == provider_session_id
+                                }),
+                                "This session is already loading in another card"
+                            );
+                            let source = owner.claude_catalog_source(
+                                scene_id.as_deref().context("No active scene")?,
                                 &session_id,
                                 &provider_session_id,
-                            )?
-                        {
-                            provider_identity_events.push(identity);
-                            return Ok(());
+                                takeover_from.as_deref(),
+                            )?;
+                            if source.is_none() && takeover_from.is_some() {
+                                let binding = owner
+                                    .claude_binding(&session_id)?
+                                    .context("The completed takeover is no longer available")?;
+                                provider_identity_events.push(json!({
+                                    "result": "confirmed", "reason": "already-loaded", "provider": "claude-code",
+                                    "sessionId": session_id, "providerSessionId": provider_session_id,
+                                    "bindingId": binding.id, "spawnRevision": binding.metadata["spawnRevision"]
+                                }));
+                                return Ok(());
+                            }
+                            if let Some(identity) = owner.already_loaded_catalog_identity(
+                                &session_id,
+                                &provider_session_id,
+                            )? {
+                                provider_identity_events.push(identity);
+                                return Ok(());
+                            }
                         }
                         if launch_retries.contains_key(&session_id)
                             || owner.waiting_for_provider_restore(&session_id)
@@ -6716,6 +6780,10 @@ fn run_writable(
                                 provider_session_id: provider_session_id.clone(),
                                 spawn_revision: None,
                                 stopping: None,
+                                takeover_from,
+                                source_stopped: false,
+                                target_stopped: false,
+                                failed_target_retiring: false,
                                 antigravity_requests: request_id
                                     .filter(|_| provider == "antigravity")
                                     .into_iter()
@@ -6781,7 +6849,7 @@ fn run_writable(
                         || environment_changes.contains_key(session_id)
                         || permission_changes.contains_key(session_id)
                         || shell_promotions.contains_key(session_id)
-                        || catalog_loads.contains_key(session_id)
+                        || catalog_card_busy(&catalog_loads, session_id)
                         || pending_launch.contains(session_id)
                         || ((codex || antigravity) && recovering.contains_key(session_id))
                         || launch_retries.contains_key(session_id)
@@ -6880,7 +6948,7 @@ fn run_writable(
                         || permission_changes.contains_key(id)
                         || shell_promotions.contains_key(id)
                         || shell_submissions.contains_key(id)
-                        || catalog_loads.contains_key(id)
+                        || catalog_card_busy(&catalog_loads, id)
                         || provider_starting.contains_key(id)
                     {
                         send.send_blocking(request.reply(EnvironmentChangeResult::rejected(
@@ -6910,7 +6978,7 @@ fn run_writable(
                         .session(session_id)?
                         .is_some_and(|session| session.kind == "codex");
                     if environment_changes.contains_key(session_id)
-                        || catalog_loads.contains_key(session_id)
+                        || catalog_card_busy(&catalog_loads, session_id)
                         || permission_changes.contains_key(session_id)
                         || shell_promotions.contains_key(session_id)
                         || launch_retries.contains_key(session_id)
@@ -7068,7 +7136,7 @@ fn run_writable(
                         !startup_deferred.contains(id)
                             && !failed_launches.contains_key(id)
                             && !launch_retries.contains_key(id)
-                            && !catalog_loads.contains_key(id)
+                            && !catalog_card_busy(&catalog_loads, id)
                             && !permission_changes.contains_key(id)
                             && !shell_promotions.contains_key(id)
                     });
@@ -7212,7 +7280,8 @@ fn run_writable(
                         Err(anyhow!("Shell worker did not report its retirement"))
                     }
                 };
-                Some((load.stopping.take().unwrap().selection, Some(stopped)))
+                let stopping = load.stopping.take().unwrap();
+                Some((stopping.selection, Some((stopping.source, stopped))))
             })
             .collect();
         for (reply, stopped) in stopped_loads
@@ -7304,10 +7373,15 @@ fn run_writable(
                 // The navigation command already rejected and disposed this load.
                 continue;
             };
-            let replaced = stopped.is_some();
+            let target_stop = stopped.as_ref().is_some_and(|(source, _)| !source);
             let attempt = (|| -> Result<Option<(String, i64)>> {
-                if let Some(result) = stopped {
+                if let Some((source, result)) = stopped {
                     result?;
+                    if source {
+                        load.source_stopped = true;
+                    } else {
+                        load.target_stopped = true;
+                    }
                 }
                 anyhow::ensure!(
                     scene_id.as_ref() == Some(&requested_scene)
@@ -7318,22 +7392,74 @@ fn run_writable(
                     !pending_launch.contains(&session_id)
                         && !recovering.contains_key(&session_id)
                         && !launch_retries.contains_key(&session_id)
+                        && !environment_changes.contains_key(&session_id)
                         && !owner.waiting_for_provider_restore(&session_id),
                     "Card already has a running or starting process"
                 );
                 let entry = result.map_err(|error| anyhow!(error))?;
+                anyhow::ensure!(
+                    owner.session(&session_id)?.is_some_and(|session| {
+                        session.archived_at.is_none() && session.cwd == cwd
+                    }),
+                    "Card is no longer available in this working directory"
+                );
                 if provider == "codex" {
                     owner.ensure_codex_catalog_available(&session_id, &provider_session_id)?;
                 }
+                if provider == "claude-code" {
+                    let source = owner.claude_catalog_source(
+                        &requested_scene,
+                        &session_id,
+                        &provider_session_id,
+                        load.takeover_from.as_deref(),
+                    )?;
+                    if source.is_some() {
+                        let source = load
+                            .takeover_from
+                            .as_deref()
+                            .expect("confirmed source card");
+                        anyhow::ensure!(
+                            !pending_launch.contains(source)
+                                && !recovering.contains_key(source)
+                                && !launch_retries.contains_key(source)
+                                && !permission_changes.contains_key(source)
+                                && !shell_promotions.contains_key(source)
+                                && !environment_changes.contains_key(source)
+                                && !owner.waiting_for_provider_restore(source),
+                            "The source card is already stopping or recovering"
+                        );
+                        owner.retry_catalog_exit(source)?;
+                        if !owner.can_launch_provider(source) {
+                            anyhow::ensure!(
+                                !load.source_stopped && owner.can_replace_catalog_run(source),
+                                "The source card could not be stopped"
+                            );
+                            let completion = owner.stop_for_catalog_load(source)?;
+                            load.stopping = Some(CatalogStop {
+                                selection: CatalogReply::Load {
+                                    cwd,
+                                    target: CatalogLoadTarget {
+                                        provider,
+                                        scene_id: requested_scene,
+                                        session_id: session_id.clone(),
+                                        provider_session_id: provider_session_id.clone(),
+                                    },
+                                    result: Ok(entry),
+                                },
+                                completion,
+                                source: true,
+                            });
+                            return Ok(None);
+                        }
+                    }
+                }
+                owner.retry_catalog_exit(&session_id)?;
                 if !owner.can_launch_provider(&session_id) {
-                    anyhow::ensure!(!replaced, "Card already has a running or starting process");
                     anyhow::ensure!(
-                        owner.session(&session_id)?.is_some_and(|session| {
-                            session.archived_at.is_none() && session.cwd == cwd
-                        }),
-                        "Card is no longer available in this working directory"
+                        !load.target_stopped,
+                        "Card already has a running or starting process"
                     );
-                    let completion = owner.stop_for_provider_relaunch(&session_id)?;
+                    let completion = owner.stop_for_catalog_load(&session_id)?;
                     load.stopping = Some(CatalogStop {
                         selection: CatalogReply::Load {
                             cwd,
@@ -7346,6 +7472,7 @@ fn run_writable(
                             result: Ok(entry),
                         },
                         completion,
+                        source: false,
                     });
                     return Ok(None);
                 }
@@ -7366,6 +7493,11 @@ fn run_writable(
                     },
                     provider,
                     entry.completed_turn,
+                    (provider == "claude-code"
+                        && (load.takeover_from.is_some() || load.target_stopped))
+                        .then_some(ClaudeCatalogReplacement {
+                            takeover_from: load.takeover_from.as_deref(),
+                        }),
                 )?;
                 Ok(Some((workspace_id, revision)))
             })();
@@ -7386,6 +7518,7 @@ fn run_writable(
                 }
             }
             match attempt {
+                Ok(None) if load.stopping.as_ref().is_some_and(|stop| stop.source) => {}
                 Ok(launch) => {
                     failed_launches.remove(&session_id);
                     deferred_recovery.remove(&session_id);
@@ -7415,7 +7548,7 @@ fn run_writable(
                     }
                 }
                 Err(error) => {
-                    if replaced {
+                    if target_stop || load.target_stopped {
                         claude_launch_targets.remove(&session_id);
                         let failure =
                             report_launch_failure(send, &session_id, true, error.to_string())?;
@@ -7481,7 +7614,19 @@ fn run_writable(
                                 && result["provider"] == load.provider
                         })
                     {
-                        catalog_loads.remove(session_id);
+                        let load = catalog_loads
+                            .get_mut(session_id)
+                            .expect("checked catalog load");
+                        if result["result"] == "restore-failed"
+                            && load.takeover_from.is_some()
+                            && !owner.can_launch_provider(session_id)
+                        {
+                            // Ownership rolled back, but retain the source
+                            // reservation until the failed worker is reaped.
+                            load.failed_target_retiring = true;
+                        } else {
+                            catalog_loads.remove(session_id);
+                        }
                     }
                     if matches!(
                         result["result"].as_str(),
@@ -7603,6 +7748,8 @@ fn run_writable(
                 }
             }
         }
+        catalog_loads
+            .retain(|id, load| !load.failed_target_retiring || !owner.can_launch_provider(id));
         let mut finished_promotions = Vec::new();
         for (id, promotion) in &mut shell_promotions {
             match promotion.advance(
@@ -8014,6 +8161,11 @@ fn run_writable(
                         shell_submissions.remove(id);
                         shell_promotions.remove(id);
                         if let Some(load) = catalog_loads.remove(id) {
+                            if load.provider == "claude-code"
+                                && let Some(revision) = load.spawn_revision
+                            {
+                                owner.cancel_claude_catalog_load(id, revision)?;
+                            }
                             let error = anyhow!("Card was closed while loading the conversation");
                             if !load.antigravity_requests.is_empty() {
                                 let projection = active_graph(
@@ -8098,7 +8250,7 @@ fn run_writable(
                     !startup_deferred.contains(id)
                         && !failed_launches.contains_key(id)
                         && !launch_retries.contains_key(id)
-                        && !catalog_loads.contains_key(id)
+                        && !catalog_card_busy(&catalog_loads, id)
                         && !permission_changes.contains_key(id)
                         && !shell_promotions.contains_key(id)
                 });
@@ -8859,7 +9011,18 @@ struct CatalogLoad {
     provider_session_id: String,
     spawn_revision: Option<i64>,
     stopping: Option<CatalogStop>,
+    takeover_from: Option<String>,
+    source_stopped: bool,
+    target_stopped: bool,
+    failed_target_retiring: bool,
     antigravity_requests: Vec<u64>,
+}
+
+fn catalog_card_busy(loads: &HashMap<String, CatalogLoad>, id: &str) -> bool {
+    loads.contains_key(id)
+        || loads
+            .values()
+            .any(|load| load.takeover_from.as_deref() == Some(id))
 }
 
 fn ensure_codex_catalog_not_pending(
@@ -8879,6 +9042,7 @@ fn ensure_codex_catalog_not_pending(
 struct CatalogStop {
     selection: CatalogReply,
     completion: Receiver<Result<()>>,
+    source: bool,
 }
 
 struct CatalogLoadTarget {
@@ -9741,78 +9905,33 @@ fn prepare_launch(
                     let cwd = Path::new(&session.cwd);
                     let result = (|| {
                         let preferences = role_preferences.recv()?;
-                        let mut launch = if subscriptions.is_some() {
-                            let (binding, target) = if let Some(fork) = &fork {
-                                (&fork.metadata, Some(ClaudeTarget::Fork(&fork.source_id)))
-                            } else if fresh_launch {
-                                (
-                                    &metadata,
-                                    Some(ClaudeTarget::New {
-                                        assignments: Some(&preferences.assignments),
-                                        budget_preferences: Some((
-                                            &preferences,
-                                            &native_role_catalog,
-                                        )),
-                                    }),
-                                )
-                            } else if permission_fresh {
-                                (
-                                    &metadata,
-                                    Some(ClaudeTarget::PermissionRestart { remembered }),
-                                )
-                            } else {
-                                (&metadata, resume_id.as_deref().map(ClaudeTarget::Resume))
-                            };
-                            prepare_managed_claude_launch(
-                                &data_root,
-                                cwd,
-                                binding,
-                                target,
-                                environment,
-                                terminal.cols,
-                                terminal.rows,
-                            )
-                        } else if let Some(fork) = &fork {
-                            prepare_claude_fork(
-                                &data_root,
-                                cwd,
-                                &fork.metadata,
-                                &fork.source_id,
-                                environment,
-                                terminal.cols,
-                                terminal.rows,
-                            )
+                        let (binding, target) = if let Some(fork) = &fork {
+                            (&fork.metadata, Some(ClaudeTarget::Fork(&fork.source_id)))
                         } else if fresh_launch {
-                            prepare_new_claude_launch_with_budget(
-                                &data_root,
-                                cwd,
+                            (
                                 &metadata,
-                                (&preferences, &native_role_catalog),
-                                environment,
-                                terminal.cols,
-                                terminal.rows,
+                                Some(ClaudeTarget::New {
+                                    assignments: Some(&preferences.assignments),
+                                    budget_preferences: Some((&preferences, &native_role_catalog)),
+                                }),
                             )
                         } else if permission_fresh {
-                            prepare_claude_permission_restart(
-                                &data_root,
-                                cwd,
+                            (
                                 &metadata,
-                                remembered,
-                                environment,
-                                terminal.cols,
-                                terminal.rows,
+                                Some(ClaudeTarget::PermissionRestart { remembered }),
                             )
                         } else {
-                            prepare_claude_launch(
-                                &data_root,
-                                cwd,
-                                &metadata,
-                                resume_id.as_deref(),
-                                environment,
-                                terminal.cols,
-                                terminal.rows,
-                            )
-                        }?;
+                            (&metadata, resume_id.as_deref().map(ClaudeTarget::Resume))
+                        };
+                        let mut launch = prepare_managed_claude_launch(
+                            &data_root,
+                            cwd,
+                            binding,
+                            target,
+                            environment,
+                            terminal.cols,
+                            terminal.rows,
+                        )?;
                         if let Some(environment) = &restart_environment {
                             launch.capture_restart_gateway(
                                 &preferences,
@@ -9825,7 +9944,19 @@ fn prepare_launch(
                             .unwrap_or_else(|_| "auto".into());
                         let mut launch = match &subscriptions {
                             Some(service) => service.prepare_session(launch, &preferences)?,
-                            None => launch.into(),
+                            None => {
+                                ensure!(
+                                    launch.gateway.as_ref().is_none_or(|gateway| {
+                                        gateway.subscription_providers().next().is_none()
+                                    }),
+                                    LaunchIssue::ServiceNotStarted.localized(
+                                        current_interface_locale(read_locale_preference(
+                                            &data_root
+                                        ))
+                                    )
+                                );
+                                launch.into()
+                            }
                         };
                         launch.launch.project_time_zone_with_exit(
                             &zone,

@@ -43,6 +43,15 @@ mod terminal_surface {
             self.scrollport_hovered
         }
 
+        pub(crate) fn screen_contains_for_canvas_probe(&self, expected: &str) -> bool {
+            self.screen.as_ref().is_some_and(|screen| {
+                screen.cells.chunks(screen.cols.max(1)).any(|row| {
+                    let line: String = row.iter().map(|cell| cell.text.as_str()).collect();
+                    line.contains(expected)
+                })
+            })
+        }
+
         pub(crate) fn assert_no_terminal_drag_for_split_probe(&self) {
             assert!(!self.selecting, "divider started a terminal selection");
             assert!(
@@ -63,6 +72,10 @@ mod workspace {
 
     mod live_wiring {
         include!("support/live_wiring_probe.rs");
+    }
+
+    mod canvas_cards {
+        include!("support/canvas_cards_probe.rs");
     }
 
     use crate::assets::NativeAssets;
@@ -1066,7 +1079,11 @@ mod workspace {
                     .collect::<Vec<_>>();
                 assert_eq!(
                     actions,
-                    [CardMenuAction::Rename, CardMenuAction::OpenDetached]
+                    [
+                        CardMenuAction::Rename,
+                        CardMenuAction::RestoreAutomaticTitle,
+                        CardMenuAction::OpenDetached
+                    ]
                 );
             })
             .unwrap();
@@ -2236,7 +2253,11 @@ mod workspace {
                         .collect();
                     assert_eq!(
                         actions,
-                        [CardMenuAction::Rename, CardMenuAction::OpenDetached]
+                        [
+                            CardMenuAction::Rename,
+                            CardMenuAction::RestoreAutomaticTitle,
+                            CardMenuAction::OpenDetached
+                        ]
                     );
                 })
                 .unwrap();
@@ -3594,6 +3615,10 @@ mod workspace {
     }
 
     pub(super) fn run() {
+        if let Ok(mode) = std::env::var("MATOU_CANVAS_CARDS_PROBE") {
+            canvas_cards::run(mode);
+            return;
+        }
         let fixture_root = live_wiring::prepare();
         Application::new().with_assets(NativeAssets).run(move |cx| {
             cx.spawn(async move |cx| {

@@ -26,9 +26,7 @@ pub const MAX_MAX_LOG_BYTES: usize = 131_072;
 pub const DEFAULT_KEEPALIVE_MAX_PER_TURN: u8 = 1;
 pub const MAX_KEEPALIVE_PER_TURN: u8 = 5;
 
-/// Static capability flags describing what the runtime can enforce for a given
-/// agent provider. UI uses these flags to disable unsupported toggles with a
-/// clear reason rather than silently ignoring them.
+/// Runtime capability flags used when computing effective settings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentOptimizerCapabilities {
@@ -74,6 +72,8 @@ impl AgentOptimizerCapabilities {
 ///   intrusion into agent tool calls).
 /// - Active interception (`noise_filter`, `read_dedup`), `cli_tools`, and
 ///   `cache_keepalive` start `false` so the user explicitly opts in per agent.
+/// - `block_sensitive_reads` starts `true`, and `cache_expiry_notify` starts
+///   `false`. These preferences are saved separately per agent.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentOptimizerSettings {
@@ -184,6 +184,51 @@ pub struct AgentOptimizerEntry {
     pub agent_id: String,
     pub capabilities: AgentOptimizerCapabilities,
     pub settings: AgentOptimizerSettings,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OptimizerToggle {
+    MasterEnabled,
+    NoiseFilter,
+    ReadDedup,
+    CacheMonitor,
+    CacheExpiryNotify,
+    CacheKeepalive,
+    StallRescue,
+    CliTools,
+    BlockSensitiveReads,
+}
+
+/// Availability in the settings panel. Keep this separate from the runtime
+/// flags so disabling a control does not change saved or effective settings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OptimizerAvailability {
+    Available,
+    Pending,
+    Unsupported,
+}
+
+impl AgentOptimizerEntry {
+    pub fn availability(&self, toggle: OptimizerToggle) -> OptimizerAvailability {
+        use OptimizerAvailability::{Available, Pending, Unsupported};
+        use OptimizerToggle::*;
+
+        let available = match toggle {
+            MasterEnabled => true,
+            NoiseFilter | ReadDedup | BlockSensitiveReads => {
+                return match self.agent_id.as_str() {
+                    "claude-code" => Available,
+                    "codex" | "antigravity" => Pending,
+                    _ => Unsupported,
+                };
+            }
+            CacheKeepalive => return Pending,
+            CacheMonitor | CacheExpiryNotify => self.capabilities.cache_monitor,
+            StallRescue => self.capabilities.stall_rescue,
+            CliTools => self.capabilities.cli_tools,
+        };
+        if available { Available } else { Unsupported }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -440,6 +485,28 @@ mod tests {
         // Reload from disk verifies persistence.
         let reloaded = store.snapshot().unwrap();
         assert_eq!(reloaded.agents["codex"].settings, *codex);
+    }
+
+    #[test]
+    fn old_settings_keep_saved_choices_and_default_newly_exposed_switches() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ContextOptimizerConfig::for_data_root(dir.path());
+        fs::write(
+            store.path(),
+            r#"{"version":1,"agents":{"claude-code":{"noiseFilter":true,"cacheKeepalive":true},"codex":{"readDedup":true,"blockSensitiveReads":false}}}"#,
+        )
+        .unwrap();
+
+        let snapshot = store.snapshot().unwrap();
+        assert!(snapshot.exists);
+        let claude = &snapshot.agents["claude-code"].settings;
+        assert!(claude.noise_filter);
+        assert!(claude.cache_keepalive);
+        assert!(!claude.cache_expiry_notify);
+        assert!(claude.block_sensitive_reads);
+        let codex = &snapshot.agents["codex"].settings;
+        assert!(codex.read_dedup);
+        assert!(!codex.block_sensitive_reads);
     }
 
     #[test]

@@ -7,10 +7,6 @@ use matou_native_core::link_routing::{
     BROWSER_RELEASES_URL, ConfirmationAction, ControlledBrowserFailure, LinkSource, OpenFailure,
     route_link, system_browser_confirmation,
 };
-#[cfg(not(target_os = "windows"))]
-use matou_native_desktop::detach_window::detached_window_header;
-#[cfg(target_os = "windows")]
-use matou_native_desktop::detach_window::detached_window_header_with_caption as detached_window_header;
 use matou_native_desktop::{
     card_context_menu::{
         CardMenu, CardMenuAction, CardMenuContext, CardMenuEvent, CardMenuItem, CardPresentation,
@@ -18,7 +14,7 @@ use matou_native_desktop::{
     },
     detach_window::{
         DetachOutcome, DetachedHeaderStatus, DetachedMount, DetachedWindowAction, DetachedWindows,
-        detached_placeholder,
+        detached_placeholder, detached_window_header_with_notification,
     },
     egress_panel::{
         EgressAction, EgressBannerState, EgressCheck, EgressCheckKind, EgressCheckResult,
@@ -166,6 +162,7 @@ pub(super) struct WorkspaceWiring {
     #[cfg(debug_assertions)]
     egress_probe_bounds: TriggerBounds,
     hud: HashMap<String, LiveHud>,
+    canvas_team_members: HashMap<String, Vec<CanvasTeamMember>>,
     banners: HashMap<String, EgressBannerState>,
     confirmation_focus: FocusHandle,
     _window_closed: Subscription,
@@ -175,8 +172,63 @@ pub(super) struct WorkspaceWiring {
 struct LiveHud {
     mode: Option<&'static str>,
     request: Option<u64>,
+    canvas: Option<String>,
     result: Value,
     refresh_at: Option<Duration>,
+}
+
+#[derive(Clone)]
+pub(super) struct CanvasTeamMember {
+    pub id: String,
+    lead: String,
+    teammate_id: String,
+    pub summary: Value,
+}
+
+fn observe_canvas_teammates(cards: &mut Vec<CanvasTeamMember>, lead: &str, members: &[Value]) {
+    for summary in members {
+        let Some(teammate_id) = trimmed_graph_text(&summary["teammateId"]) else {
+            continue;
+        };
+        if let Some(card) = cards
+            .iter_mut()
+            .find(|card| card.lead == lead && card.teammate_id == teammate_id)
+        {
+            card.summary = summary.clone();
+        } else if summary["workStatus"] != TeamMemberWorkStatus::Exited.wire() {
+            cards.push(CanvasTeamMember {
+                id: format!("team:{}:{lead}:{teammate_id}", lead.len()),
+                lead: lead.to_owned(),
+                teammate_id: teammate_id.to_owned(),
+                summary: summary.clone(),
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+#[::core::prelude::v1::test]
+fn canvas_teammates_keep_one_summary_per_identity_and_skip_new_ended_members() {
+    let mut cards = Vec::new();
+    let running = serde_json::json!({"teammateId":"member@team","workStatus":"running"});
+    observe_canvas_teammates(&mut cards, "lead", &[running.clone(), running.clone()]);
+    assert_eq!(cards.len(), 1);
+    let id = cards[0].id.clone();
+    observe_canvas_teammates(&mut cards, "other-lead", &[running]);
+    assert_eq!(cards.len(), 2);
+    let exited = serde_json::json!({"teammateId":"member@team","workStatus":"exited","latestLines":["done"]});
+    observe_canvas_teammates(
+        &mut cards,
+        "lead",
+        &[
+            exited.clone(),
+            serde_json::json!({"teammateId":"unseen@team","workStatus":"exited"}),
+        ],
+    );
+    observe_canvas_teammates(&mut cards, "lead", &[]);
+    assert_eq!(cards.len(), 2);
+    assert_eq!(cards[0].id, id);
+    assert_eq!(cards[0].summary, exited);
 }
 
 #[derive(Clone, Copy)]
@@ -274,6 +326,7 @@ impl WorkspaceWiring {
             #[cfg(debug_assertions)]
             egress_probe_bounds: TriggerBounds::default(),
             hud: HashMap::new(),
+            canvas_team_members: HashMap::new(),
             banners: HashMap::new(),
             confirmation_focus: cx.focus_handle().tab_stop(true),
             _window_closed: window_closed,
@@ -1366,6 +1419,7 @@ impl Workspace {
         };
         let kind = node["currentMode"].as_str().unwrap_or_default();
         let archived = !node["archivedAt"].is_null();
+        let has_terminal = self.terminals.contains_key(id);
         let can_mutate = self.card_action_available(id);
         let fork = self
             .fork_access(id, ForkPlacement::Peer)
@@ -1404,10 +1458,48 @@ impl Workspace {
                 storage_fault: self.storage_fault_sessions.contains(id),
                 environment_unavailable: !self.active_path_valid()
                     || self.environment_unavailable(id),
-                recovering: self.recovery_blocked(id),
+                recovering: has_terminal && self.recovery_blocked(id),
             },
             self.locale,
         );
+        if let Some(index) = menu
+            .items
+            .iter()
+            .position(|item| item.action == CardMenuAction::Rename)
+        {
+            let disabled_reason = menu.items[index].disabled_reason.clone().or_else(|| {
+                (node["titleSource"] != "manual").then(|| {
+                    self.locale
+                        .text(
+                            "当前会话已使用自动标题",
+                            "This session already uses an automatic title",
+                        )
+                        .into()
+                })
+            });
+            menu.items.insert(
+                index + 1,
+                CardMenuItem {
+                    action: CardMenuAction::RestoreAutomaticTitle,
+                    label: self
+                        .locale
+                        .text("恢复自动标题", "Restore automatic title")
+                        .into(),
+                    disabled_reason,
+                    show_readiness_hint: false,
+                    danger: false,
+                },
+            );
+        }
+        if presentation == CardPresentation::Attached && !has_terminal && can_mutate {
+            menu.items.push(CardMenuItem {
+                action: CardMenuAction::RemoveNode,
+                label: self.locale.text("移除节点…", "Remove node…").into(),
+                disabled_reason: None,
+                show_readiness_hint: false,
+                danger: true,
+            });
+        }
         if kind != "codex"
             && let Some(item) = menu
                 .items
@@ -1502,6 +1594,7 @@ impl Workspace {
                 }
                 match action {
                     CardMenuAction::Rename => self.open_session_rename(id.into(), window, cx),
+                    CardMenuAction::RestoreAutomaticTitle => self.restore_session_title(id, cx),
                     CardMenuAction::Fork => self.open_fork(id, ForkPlacement::Peer, window, cx),
                     CardMenuAction::ForkWorktree => self.open_fork_with_worktree(
                         id,
@@ -1734,6 +1827,12 @@ impl Workspace {
                             },
                         )
                     });
+                    let notification_activation = cx.observe_window_activation(
+                        window,
+                        |child: &mut DetachedCardView, window, cx| {
+                            child.finish_notification_focus(window, cx);
+                        },
+                    );
                     let child_window = window.window_handle();
                     let shortcut_owner = owner.clone();
                     let keyboard = cx.intercept_keystrokes(move |event, window, cx| {
@@ -1770,7 +1869,9 @@ impl Workspace {
                         terminal,
                         presentation,
                         hud_ready: false,
+                        notification_focus: None,
                         _owner_updates: owner_updates,
+                        _notification_activation: notification_activation,
                         _keyboard: keyboard,
                     }
                 })
@@ -1828,6 +1929,31 @@ impl Workspace {
             .iter()
             .find(|(_, child)| AnyWindowHandle::from(child.window) == window)
             .map(|(id, _)| id.as_str())
+    }
+
+    pub(super) fn active_detached_notification_session(&self, cx: &mut App) -> Option<String> {
+        self.wiring.children.iter().find_map(|(session, child)| {
+            child
+                .window
+                .update(cx, |_, window, _| notification_window_active(window))
+                .ok()
+                .filter(|active| *active)
+                .map(|_| session.clone())
+        })
+    }
+
+    pub(super) fn open_detached_notification(&self, id: u64, session: &str, cx: &mut App) {
+        if let Some(child) = self.wiring.children.get(session) {
+            let _ = child.window.update(cx, |child, window, cx| {
+                child.notification_focus = Some(id);
+                child.terminal.read(cx).focus.focus(window);
+                if notification_window_active(window) {
+                    child.finish_notification_focus(window, cx);
+                } else if self.wiring.visible {
+                    window.activate_window();
+                }
+            });
+        }
     }
 
     pub(super) fn wiring_visible(&self) -> bool {
@@ -2047,7 +2173,10 @@ impl Workspace {
             !self.wiring_dark(),
             move |action, window, cx| {
                 let _ = owner.update(cx, |this, cx| match action {
-                    DetachedWindowAction::Focus => this.focus_detached_card(&target, cx),
+                    DetachedWindowAction::Focus => {
+                        this.dismiss_session_notification(&target, cx);
+                        this.focus_detached_card(&target, cx);
+                    }
                     DetachedWindowAction::ReturnToMain => {
                         this.return_detached_card(&target, window, cx)
                     }
@@ -2671,6 +2800,13 @@ impl Workspace {
         let now = self.motion_clock.elapsed();
         for session_id in targets {
             let mode = self.hud_node(&session_id).and_then(agent_hud_mode);
+            let canvas = self
+                .active_scene_id()
+                .filter(|_| {
+                    self.level_focus() == Some(session_id.as_str())
+                        && !self.wiring.is_detached(&session_id)
+                })
+                .map(str::to_owned);
             let state = self.wiring.hud.entry(session_id.clone()).or_default();
             if state.mode != mode {
                 *state = LiveHud {
@@ -2693,7 +2829,9 @@ impl Workspace {
                 )
                 .is_ok()
             {
-                self.wiring.hud.entry(session_id).or_default().request = Some(request_id);
+                let state = self.wiring.hud.entry(session_id).or_default();
+                state.request = Some(request_id);
+                state.canvas = canvas;
             }
         }
     }
@@ -2851,9 +2989,22 @@ impl Workspace {
             state.request = None;
             state.result = reply["result"].clone();
             let target = id.clone();
+            let canvas = state.canvas.take();
             let interval = Duration::from_secs(2);
             let refresh_at = self.motion_clock.elapsed() + interval;
             state.refresh_at = Some(refresh_at);
+            if let Some(canvas) = canvas.filter(|id| self.active_scene_id() == Some(id.as_str()))
+                && self.graph_node(&target).is_some()
+                && !self.wiring.is_detached(&target)
+                && let Some(members) = reply["result"]["teammates"].as_array()
+                && !members.is_empty()
+            {
+                observe_canvas_teammates(
+                    self.wiring.canvas_team_members.entry(canvas).or_default(),
+                    &target,
+                    members,
+                );
+            }
             self.release_footer_git_projection(&target, request_id, reply);
             let generation = self.runtime_generation;
             cx.spawn(async move |this, cx| {
@@ -2871,6 +3022,31 @@ impl Workspace {
             .detach();
             cx.notify();
         }
+    }
+
+    pub(super) fn canvas_team_members(&self) -> Vec<CanvasTeamMember> {
+        if self.read_only.is_some() {
+            return Vec::new();
+        }
+        let Some(cards) = self
+            .active_scene_id()
+            .and_then(|scene| self.wiring.canvas_team_members.get(scene))
+        else {
+            return Vec::new();
+        };
+        let nodes = session_levels::nodes(&self.graph);
+        cards
+            .iter()
+            .filter(|card| {
+                self.order.contains(&card.lead)
+                    && !nodes.iter().any(|node| {
+                        Self::team_member_node(node)
+                            && session_levels::parent_id(node) == Some(card.lead.as_str())
+                            && node["teamMemberSummary"]["teammateId"] == card.teammate_id
+                    })
+            })
+            .cloned()
+            .collect()
     }
 
     pub(super) fn render_live_teammates(&self, id: &str) -> Option<Stateful<Div>> {
@@ -2985,6 +3161,15 @@ pub(super) fn wiring_probe_bounds(_id: String) -> Option<Canvas<()>> {
 impl Workspace {
     pub(super) fn hide_wiring_children_for_probe(&mut self) {
         self.wiring.visible = false;
+    }
+
+    pub(super) fn detach_card_for_probe(
+        &mut self,
+        session: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.detach_card(session, window, cx);
     }
 
     pub(super) fn board_view_for_probe(&self) -> Option<BoardView> {
@@ -3334,8 +3519,40 @@ struct DetachedCardView {
     terminal: Entity<TerminalSurface>,
     presentation: DetachedPresentation,
     hud_ready: bool,
+    notification_focus: Option<u64>,
     _owner_updates: Option<Subscription>,
+    _notification_activation: Subscription,
     _keyboard: Subscription,
+}
+
+impl DetachedCardView {
+    fn dismiss_notification_on_press(
+        &mut self,
+        event: &MouseDownEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.terminal.read(cx).scrollbar_hit(event.position) {
+            let _ = self.owner.update(cx, |owner, cx| {
+                owner.dismiss_session_notification(&self.session_id, cx);
+            });
+        }
+    }
+
+    fn finish_notification_focus(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if notification_window_active(window)
+            && self.terminal.read(cx).focus.is_focused(window)
+            && let Some(id) = self.notification_focus.take()
+        {
+            let owner = self.owner.clone();
+            let session = self.session_id.clone();
+            cx.defer(move |cx| {
+                let _ = owner.update(cx, |owner, cx| {
+                    owner.finish_notification_jump(id, &session, cx)
+                });
+            });
+        }
+    }
 }
 
 struct DetachedPresentation {
@@ -3381,6 +3598,14 @@ impl Render for DetachedCardView {
         let target = self.session_id.clone();
         let owner = self.owner.clone();
         let main = self.main;
+        let unread = self.hud_ready
+            && self.owner.upgrade().is_some_and(|owner| {
+                owner
+                    .read(cx)
+                    .notifications
+                    .session_has_unread(&self.session_id)
+            });
+        let animate = unread && !reduced_motion();
         let mut root = div()
             .id("detached-card-window")
             .size_full()
@@ -3388,33 +3613,48 @@ impl Render for DetachedCardView {
             .flex()
             .flex_col()
             .bg(rgba(presentation.bg))
-            .child(detached_window_header(
-                presentation.title.clone(),
-                presentation.locale,
-                presentation.status,
-                presentation.light,
-                #[cfg(target_os = "windows")]
-                window.is_maximized(),
-                move |action, _, cx| {
-                    if action == DetachedWindowAction::ReturnToMain {
-                        let owner = owner.clone();
-                        let target = target.clone();
-                        cx.defer(move |cx| {
-                            let _ = main.update(cx, |_, window, cx| {
-                                let _ = owner.update(cx, |this, cx| {
-                                    this.return_detached_card(&target, window, cx);
+            .child(
+                div()
+                    .flex_none()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(Self::dismiss_notification_on_press),
+                    )
+                    .child(detached_window_header_with_notification(
+                        presentation.title.clone(),
+                        presentation.locale,
+                        presentation.status,
+                        presentation.light,
+                        #[cfg(target_os = "windows")]
+                        Some(window.is_maximized()),
+                        #[cfg(not(target_os = "windows"))]
+                        None,
+                        unread.then(|| notification_card_badge(presentation.locale, animate)),
+                        move |action, _, cx| {
+                            if action == DetachedWindowAction::ReturnToMain {
+                                let owner = owner.clone();
+                                let target = target.clone();
+                                cx.defer(move |cx| {
+                                    let _ = main.update(cx, |_, window, cx| {
+                                        let _ = owner.update(cx, |this, cx| {
+                                            this.return_detached_card(&target, window, cx);
+                                        });
+                                    });
                                 });
-                            });
-                        });
-                    }
-                },
-            ))
+                            }
+                        },
+                    )),
+            )
             .child(
                 div()
                     .id("detached-terminal-body")
                     .flex_1()
                     .min_h_0()
                     .relative()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(Self::dismiss_notification_on_press),
+                    )
                     .child(self.terminal.clone())
                     .children(environment),
             );
@@ -3434,6 +3674,8 @@ impl Render for DetachedCardView {
                     .bg(rgba(presentation.footer.background)),
             );
         }
-        root
+        root.when(unread, |root| {
+            root.child(notification_card_frame(px(0.), animate))
+        })
     }
 }

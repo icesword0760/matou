@@ -20,7 +20,7 @@ use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
 use crate::codex_events;
-use crate::context_guard::interceptor::HookInterceptor;
+use crate::context_guard::interceptor::{HookEvaluation, HookInterceptor};
 
 pub(crate) const IDENTITY_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const HOOK_QUEUE_CAPACITY: usize = 128;
@@ -1040,7 +1040,8 @@ fn evaluate_hook_fail_open(
     profile: LaunchProfile,
     session_id: &str,
     payload: &Value,
-) -> String {
+) -> HookEvaluation {
+    let deadline = Instant::now() + HOOK_DECISION_BUDGET;
     let (tx, rx) = mpsc::sync_channel(1);
     let interceptor = Arc::clone(interceptor);
     let data_root = data_root.to_path_buf();
@@ -1050,18 +1051,21 @@ fn evaluate_hook_fail_open(
         .name("context-guard-eval".into())
         .spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                interceptor
-                    .evaluate_hook(&data_root, profile, &session_id, &payload)
-                    .response_json
+                interceptor.evaluate_hook(&data_root, profile, &session_id, &payload, deadline)
             }))
-            .unwrap_or_else(|_| "{}".to_owned());
+            .unwrap_or_else(|_| HookEvaluation::allow());
             let _ = tx.try_send(result);
         });
     if spawned.is_err() {
-        return "{}".to_owned();
+        return HookEvaluation::allow();
     }
-    rx.recv_timeout(HOOK_DECISION_BUDGET)
-        .unwrap_or_else(|_| "{}".to_owned())
+    let wait = if profile == LaunchProfile::ClaudeCode {
+        deadline.saturating_duration_since(Instant::now())
+    } else {
+        HOOK_DECISION_BUDGET
+    };
+    rx.recv_timeout(wait)
+        .unwrap_or_else(|_| HookEvaluation::allow())
 }
 
 fn handle_request(
@@ -1077,16 +1081,20 @@ fn handle_request(
     }
     let deadline = drain_deadline.unwrap_or_else(|| Instant::now() + REQUEST_TIMEOUT);
     let result = read_request(&mut socket, registry, interceptor, send, deadline);
-    let (status, body) = match result {
-        Ok(decision_json) => ("200 OK", decision_json),
-        Err(status) => (status, String::new()),
+    let (status, body) = match &result {
+        Ok((decision, _)) => ("200 OK", decision.response_json.as_str()),
+        Err(status) => (*status, ""),
     };
     let _ = socket.set_write_timeout(Some(Duration::from_millis(100)));
-    let _ = write!(
+    if write!(
         socket,
         "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
-    );
+    ).is_ok() {
+        if let Ok((decision, Some(session_id))) = result {
+            interceptor.record_claude_replacement(&session_id, &decision);
+        }
+    }
 }
 
 type HttpResult<T> = std::result::Result<T, &'static str>;
@@ -1100,7 +1108,7 @@ fn read_request(
     interceptor: &Arc<HookInterceptor>,
     send: &SyncSender<HookMessage>,
     deadline: Instant,
-) -> HttpResult<String> {
+) -> HttpResult<(HookEvaluation, Option<String>)> {
     let mut reader = BufReader::new(DeadlineRead { socket, deadline });
     let mut header_budget = MAX_HEADERS;
     let first = read_line(&mut reader, &mut header_budget)?;
@@ -1122,9 +1130,13 @@ fn read_request(
     if !matches!(fields.next(), Some("HTTP/1.0" | "HTTP/1.1")) || fields.next().is_some() {
         return Err(BAD_REQUEST);
     }
-    if !registry.lock().unwrap().contains_key(token) {
-        return Err(NOT_FOUND);
-    }
+    let profile = registry
+        .lock()
+        .unwrap()
+        .get(token)
+        .ok_or(NOT_FOUND)?
+        .scope
+        .profile;
 
     let mut length = None;
     let mut chunked = false;
@@ -1171,7 +1183,13 @@ fn read_request(
     } else {
         append_body(&mut reader, &mut body, length.ok_or(BAD_REQUEST)?)?;
     }
-    let payload: Map<String, Value> = serde_json::from_slice(&body).map_err(|_| BAD_REQUEST)?;
+    let payload: Map<String, Value> = match serde_json::from_slice(&body) {
+        Ok(payload) => payload,
+        Err(_) if profile == LaunchProfile::ClaudeCode && !statusline => {
+            return Ok((HookEvaluation::allow(), None));
+        }
+        Err(_) => return Err(BAD_REQUEST),
+    };
     let mut registry = registry.lock().unwrap();
     let record = registry.get_mut(token).ok_or(NOT_FOUND)?;
     if record.retired.is_some() {
@@ -1182,7 +1200,7 @@ fn read_request(
         {
             record.reported_retirement = true;
         }
-        return Ok("{}".to_owned());
+        return Ok((HookEvaluation::allow(), None));
     }
     let received_at = Instant::now();
     if pre_tool_use && record.scope.profile != LaunchProfile::Antigravity {
@@ -1228,17 +1246,20 @@ fn read_request(
     drop(registry);
     match send.try_send(message) {
         Ok(()) => {
-            let decision_json = match eval_scope {
-                Some((data_root, profile, session_id, payload_val)) => evaluate_hook_fail_open(
-                    interceptor,
-                    &data_root,
-                    profile,
-                    &session_id,
-                    &payload_val,
-                ),
-                None => "{}".to_owned(),
+            let Some((data_root, profile, session_id, payload_val)) = eval_scope else {
+                return Ok((HookEvaluation::allow(), None));
             };
-            Ok(decision_json)
+            let decision = evaluate_hook_fail_open(
+                interceptor,
+                &data_root,
+                profile,
+                &session_id,
+                &payload_val,
+            );
+            Ok((
+                decision,
+                (profile == LaunchProfile::ClaudeCode).then_some(session_id),
+            ))
         }
         Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
             Err("503 Service Unavailable")
@@ -1324,6 +1345,100 @@ mod tests {
             .nth(1)
             .context("HTTP status")?
             .parse()?)
+    }
+
+    fn claude_hook_reply(
+        server: &ProviderHookServer,
+        run: &Registration,
+        body: &str,
+    ) -> Result<String> {
+        let mut socket = TcpStream::connect((Ipv4Addr::LOCALHOST, server.port))?;
+        socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+        write!(
+            socket,
+            "POST /hooks/{} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{body}",
+            run.token,
+            body.len()
+        )?;
+        let mut response = String::new();
+        socket.read_to_string(&mut response)?;
+        ensure!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+        Ok(response
+            .split_once("\r\n\r\n")
+            .context("HTTP response headers")?
+            .1
+            .to_owned())
+    }
+
+    #[test]
+    fn claude_http_replacement_counts_the_persisted_preview_once_and_keeps_the_full_log()
+    -> Result<()> {
+        use crate::context_guard::store::ContextGuardStore;
+        use matou_native_core::context_optimizer_config::{
+            AgentOptimizerSettings, ContextOptimizerConfig,
+        };
+
+        let root = tempfile::tempdir()?;
+        let server = ProviderHookServer::start()?;
+        let run = server.register(root.path(), scope("ctx-trim"))?;
+        let session = Uuid::new_v4().to_string();
+        let project = root.path().join("projects/workspace");
+        let transcript = project.join(format!("{session}.jsonl"));
+        let path = project
+            .join(&session)
+            .join("tool-results")
+            .join("b50kb.txt");
+        fs::create_dir_all(path.parent().unwrap())?;
+        let full_log = format!("{}\n", "L".repeat(50_000));
+        fs::write(&path, &full_log)?;
+        let payload = json!({
+            "hook_event_name": "PostToolUse", "session_id": session, "transcript_path": transcript,
+            "tool_use_id": "toolu_50kb", "tool_name": "Bash", "tool_input": {"command": "fixture"},
+            "tool_response": {"stdout": &full_log[..30_000], "stderr": "", "interrupted": false,
+                "isImage": false, "persistedOutputPath": path, "persistedOutputSize": full_log.len()}
+        }).to_string();
+        assert_eq!(claude_hook_reply(&server, &run, &payload)?, "{}");
+        assert_eq!(claude_hook_reply(&server, &run, "{")?, "{}");
+        assert_eq!(server.saved_noise_bytes("session"), 0);
+        assert!(!root.path().join("context_guard.sqlite").exists());
+        ContextOptimizerConfig::for_data_root(root.path()).set_agent_settings(
+            "claude-code",
+            AgentOptimizerSettings {
+                noise_filter: true,
+                ..Default::default()
+            },
+        )?;
+        let response = claude_hook_reply(&server, &run, &payload)?;
+        let reply: Value = serde_json::from_str(&response)?;
+        let replacement = &reply["hookSpecificOutput"]["updatedToolOutput"];
+        let summary = replacement["stdout"].as_str().context("Bash replacement")?;
+        assert!(replacement.get("persistedOutputPath").is_none());
+        assert!(summary.contains("mt ctx log log_0001"));
+        let original_model_body = format!(
+            "<persisted-output>\nOutput too large (48.8KB). Full output saved to: {}\n\nPreview (first 2KB):\n{}\n...\n</persisted-output>",
+            path.display(),
+            "L".repeat(2000),
+        );
+        let saved = (original_model_body.len() - summary.len()) as u64;
+        assert_eq!(server.saved_noise_bytes("session"), saved);
+        assert_eq!(claude_hook_reply(&server, &run, &payload)?, response);
+        assert_eq!(server.saved_noise_bytes("session"), saved);
+        let store = ContextGuardStore::open(root.path())?;
+        assert_eq!(store.list_session_logs("session", 10)?.len(), 1);
+        assert_eq!(store.get_full_log("log_0001")?, Some(full_log));
+
+        fs::remove_file(path)?;
+        let partial = claude_hook_reply(
+            &server,
+            &run,
+            &payload.replace("toolu_50kb", "toolu_missing"),
+        )?;
+        assert!(partial.contains("Available output saved"));
+        assert_eq!(
+            store.get_full_log("log_0002")?.as_deref(),
+            Some("L".repeat(30_000).as_str())
+        );
+        Ok(())
     }
 
     #[test]
@@ -1448,8 +1563,8 @@ mod tests {
     fn bundled_foreman_script_and_composed_instructions_work() -> Result<()> {
         let root = tempfile::tempdir()?;
         let explicit = root.path().join("explicit assets");
-        let explicit_script = explicit
-            .join("providers/claude-plugin/skills/agent-foreman/scripts/foreman.mjs");
+        let explicit_script =
+            explicit.join("providers/claude-plugin/skills/agent-foreman/scripts/foreman.mjs");
         fs::create_dir_all(explicit_script.parent().unwrap())?;
         fs::write(&explicit_script, "// foreman")?;
         assert_eq!(
@@ -1467,8 +1582,9 @@ mod tests {
                 root.path().join("Matou.app/Contents/Resources"),
             ),
         ] {
-            let script = resources
-                .join("control-assets/providers/claude-plugin/skills/agent-foreman/scripts/foreman.mjs");
+            let script = resources.join(
+                "control-assets/providers/claude-plugin/skills/agent-foreman/scripts/foreman.mjs",
+            );
             fs::create_dir_all(script.parent().unwrap())?;
             fs::write(&script, "// bundled")?;
             assert_eq!(
@@ -1606,7 +1722,7 @@ mod tests {
         assert_eq!(request(&server, &run.token, "GET", b"")?, 405);
         assert_eq!(request(&server, "incorrect", "POST", b"")?, 404);
         for body in [b"null".as_slice(), b"[]", b"true", b"\"x\"", b"{"] {
-            assert_eq!(request(&server, &run.token, "POST", body)?, 400);
+            assert_eq!(request(&server, &run.token, "POST", body)?, 200);
         }
         assert!(server.messages().next().is_none());
         let mut exact = br#"{"hook_event_name":"Stop","session_id":"external"}"#.to_vec();

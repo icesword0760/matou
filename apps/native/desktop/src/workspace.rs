@@ -1,6 +1,7 @@
 use std::{
     cell::Cell,
     collections::{HashMap, HashSet},
+    ops::Range,
     path::PathBuf,
     rc::Rc,
     sync::Arc,
@@ -700,7 +701,7 @@ impl LoaderSession {
             } else {
                 Some(LoaderOwner {
                     session_id: loaded_by["sessionId"].as_str()?.into(),
-                    title: loaded_by["title"].as_str()?.into(),
+                    title: loaded_by["title"].as_str().unwrap_or_default().into(),
                 })
             },
         })
@@ -789,6 +790,7 @@ struct LoaderLoad {
     title: String,
     previous_revision: u64,
     request_id: Option<u64>,
+    wait_for_identity: bool,
 }
 
 struct DeferredRecoveryCard {
@@ -819,6 +821,7 @@ struct SessionLoader {
     history: bool,
     provider: &'static str,
     confirm_running: bool,
+    confirmation: Option<LoaderConfirmation>,
     remembered: LoaderRemembered,
     restore_selection: Option<String>,
     list_total: usize,
@@ -836,6 +839,8 @@ struct SessionLoader {
     search_hits: Vec<LoaderSearchHit>,
     has_more_hits: bool,
     search_next: usize,
+    history_matches: Vec<HistoryMatch>,
+    active_history_match: usize,
     detail_model: Option<String>,
     detail_permission: Option<String>,
     scene_id: String,
@@ -863,6 +868,75 @@ impl SessionLoader {
         matches!(self.provider, "codex" | "dsh" | "antigravity")
     }
 
+    fn selected_session(&self) -> Option<&LoaderSession> {
+        let id = self.selected.as_ref()?;
+        self.sessions.iter().find(|session| &session.id == id)
+    }
+
+    fn blocked_owner(&self) -> Option<&LoaderOwner> {
+        self.selected_session()?.loaded_by.as_ref().filter(|owner| {
+            self.provider == "codex"
+                || self.provider != "claude-code" && owner.session_id != self.session_id
+        })
+    }
+
+    fn takeover_from(&self) -> Option<&str> {
+        let owner = self.selected_session()?.loaded_by.as_ref()?;
+        (self.provider == "claude-code" && owner.session_id != self.session_id)
+            .then_some(owner.session_id.as_str())
+    }
+
+    fn list_row_height(&self) -> Pixels {
+        px(if self.provider == "codex" { 72. } else { 88. })
+    }
+
+    fn reveal_list_row(&self, index: usize) {
+        let height = self.list_row_height();
+        let top = -self.list_scroll.offset().y;
+        let viewport = self.list_scroll.bounds().size.height.max(height);
+        let row_top = height * index;
+        let row_bottom = row_top + height;
+        let next_top = top.min(row_top).max(row_bottom - viewport);
+        self.list_scroll.set_offset(point(px(0.), -next_top));
+    }
+
+    fn rebuild_history_matches(&mut self, keep_active: bool) {
+        let previous = self
+            .history_matches
+            .get(self.active_history_match)
+            .map(|hit| hit.event_index)
+            .filter(|_| keep_active);
+        self.history_matches.clear();
+        self.active_history_match = 0;
+        let query = lowercase_history_text(&self.search_query);
+        if query.is_empty() {
+            return;
+        }
+        for (position, event) in self.events.iter().enumerate() {
+            let ranges = history_match_ranges(&event.text, &query);
+            if !ranges.is_empty() {
+                if previous == Some(event.index) {
+                    self.active_history_match = self.history_matches.len();
+                }
+                self.history_matches.push(HistoryMatch {
+                    event_index: event.index,
+                    position,
+                    ranges,
+                });
+            }
+        }
+    }
+
+    fn reveal_history_match(&self) {
+        if let Some(hit) = self.history_matches.get(self.active_history_match) {
+            // The loaded count and earlier-page action precede the messages.
+            let prefix = usize::from(self.first_event.is_some())
+                + usize::from(self.has_earlier || self.loading_earlier);
+            self.preview_scroll
+                .scroll_to_top_of_item(prefix + hit.position);
+        }
+    }
+
     fn visible_sessions<'a>(
         &'a self,
         cx: &App,
@@ -885,6 +959,67 @@ impl SessionLoader {
     }
 }
 
+struct LoaderConfirmation {
+    selected: String,
+    takeover_from: Option<String>,
+    running: bool,
+    return_focus: FocusHandle,
+}
+
+struct HistoryMatch {
+    event_index: usize,
+    position: usize,
+    ranges: Vec<Range<usize>>,
+}
+
+fn lowercase_history_text(text: &str) -> String {
+    text.chars().flat_map(char::to_lowercase).collect()
+}
+
+fn history_match_ranges(text: &str, query: &str) -> Vec<Range<usize>> {
+    let folded = lowercase_history_text(text);
+    if query.is_empty() || !folded.contains(query) {
+        return Vec::new();
+    }
+    if text.is_ascii() {
+        return folded
+            .match_indices(query)
+            .map(|(start, matched)| start..start + matched.len())
+            .collect();
+    }
+    // Delayed GPUI highlights use UTF-8 offsets in the original text.
+    // Case conversion can expand a character and change later byte offsets.
+    let mut boundaries = Vec::new();
+    let mut offset = 0;
+    for (original, character) in text.char_indices() {
+        boundaries.push((offset, original));
+        offset += character.to_lowercase().map(char::len_utf8).sum::<usize>();
+    }
+    boundaries.push((offset, text.len()));
+    let mut ranges: Vec<Range<usize>> = Vec::new();
+    for (start, matched) in folded.match_indices(query) {
+        let lower = boundaries.partition_point(|&(offset, _)| offset <= start) - 1;
+        let upper = boundaries.partition_point(|&(offset, _)| offset < start + matched.len());
+        let range = boundaries[lower].1..boundaries[upper].1;
+        if let Some(last) = ranges.last_mut().filter(|last| last.end > range.start) {
+            last.end = last.end.max(range.end);
+        } else {
+            ranges.push(range);
+        }
+    }
+    ranges
+}
+
+fn loader_row_range(count: usize, top: Pixels, viewport: Pixels, row: Pixels) -> Range<usize> {
+    const BUFFER: usize = 3;
+    if count < 50 {
+        return 0..count;
+    }
+    let first = (top / row).floor() as usize;
+    let end = ((top + viewport) / row).ceil() as usize;
+    first.saturating_sub(BUFFER).min(count)..end.saturating_add(BUFFER).min(count)
+}
+
 const SESSION_LOADER_PAGE_SIZE: i64 = 200;
 
 const LAST_TAB_BODY: &str = "当前已是最后一个事项下的最后一个标签，这里点击关闭不会删除该事项。\n\n如需删除该工作区，请在左侧事项面板的下拉菜单中执行删除。";
@@ -905,6 +1040,48 @@ const SESSION_LOADER_LOADING_PREVIEW: &str = "正在载入预览…";
 const SESSION_LOADER_NO_HISTORY: &str = "当前会话还没有可显示的历史内容";
 const SESSION_LOADER_LOADING_EARLIER: &str = "正在载入更早内容…";
 const SESSION_LOADER_LOADING: &str = "正在载入…";
+const LOADER_EXIT_NOT_SAVED: &str = "The process exited, but its exit record could not be saved";
+const LOADER_EXIT_NOT_SAVED_ZH: &str = "进程已结束，但退出记录写入失败";
+
+fn loader_load_error(error: String, locale: InterfaceLocale) -> String {
+    if locale == InterfaceLocale::Chinese
+        && let Some(detail) = error.strip_prefix(LOADER_EXIT_NOT_SAVED)
+    {
+        return format!("{LOADER_EXIT_NOT_SAVED_ZH}{detail}");
+    }
+    if locale == InterfaceLocale::Chinese {
+        let translated = match error.as_str() {
+            "The confirmed source card no longer owns this session" => {
+                "原先确认的卡片已不再持有该会话"
+            }
+            "This session is already open in another card. Confirm the current source before loading." => {
+                "该会话已在另一张卡中打开，请重新选择并确认来源卡片"
+            }
+            "The confirmed source no longer has an available session" => {
+                "原先确认的卡片已没有可用会话"
+            }
+            "The confirmed source card is no longer in this scene" => {
+                "原先确认的卡片已不在当前画布中"
+            }
+            "More than one card owns this session. The source card is ambiguous." => {
+                "该会话在多张卡片中打开，无法确定要接管哪一张"
+            }
+            "A card is already taking part in a conversation load" => {
+                "有卡片正在载入会话，请稍后再试"
+            }
+            "This session is already loading in another card" => "该会话正在另一张卡中载入",
+            "The source card is already stopping or recovering" => "来源卡片正在停止或恢复",
+            "The source card could not be stopped" => "无法结束来源卡片的进程",
+            "Could not request that the process stop" => "未能发送停止进程的请求",
+            "The source card still has a running process" => "来源卡片仍有进程正在运行",
+            "The completed takeover is no longer available" => "已接管的会话已不可用",
+            "The session owner changed" => "会话的持有卡片已变更",
+            _ => return error,
+        };
+        return translated.into();
+    }
+    error
+}
 
 struct StartFailureCard<'a> {
     title: &'static str,
@@ -1666,7 +1843,7 @@ impl Notifications {
             }
             *cooldown = (now, cooldown.1 + 1);
             if let Some(session_id) = session_id {
-                self.mark_session_read(session_id);
+                self.dismiss_session(session_id);
             }
             self.sequence += 1;
             (self.sequence, Some(key))
@@ -1737,12 +1914,54 @@ impl Notifications {
         });
     }
 
-    fn mark_session_read(&mut self, id: &str) {
+    fn mark_workspace_read(&mut self, id: &str) -> bool {
+        self.mark_read(|entry| entry.workspace_id.as_deref() == Some(id))
+    }
+
+    fn mark_task_read(&mut self, id: &str) -> bool {
+        self.mark_read(|entry| entry.task_id.as_deref() == Some(id))
+    }
+
+    fn dismiss_session(&mut self, id: &str) -> bool {
+        self.mark_read(|entry| entry.session_id.as_deref() == Some(id))
+    }
+
+    fn mark_read(&mut self, matches: impl Fn(&NotificationEntry) -> bool) -> bool {
+        let mut changed = false;
         for entry in &mut self.entries {
-            if entry.session_id.as_deref() == Some(id) {
+            if !entry.read && matches(entry) {
                 entry.read = true;
+                changed = true;
             }
         }
+        changed
+    }
+
+    fn unread_for_workspace(&self, id: &str) -> usize {
+        self.unread()
+            .filter(|entry| entry.workspace_id.as_deref() == Some(id))
+            .count()
+    }
+
+    fn unread_for_task(&self, id: &str) -> usize {
+        self.unread()
+            .filter(|entry| entry.task_id.as_deref() == Some(id))
+            .count()
+    }
+
+    fn unread_for_scene(&self, id: &str) -> usize {
+        self.unread()
+            .filter(|entry| entry.scene_id.as_deref() == Some(id))
+            .count()
+    }
+
+    fn session_has_unread(&self, id: &str) -> bool {
+        self.unread()
+            .any(|entry| entry.session_id.as_deref() == Some(id))
+    }
+
+    fn unread(&self) -> impl Iterator<Item = &NotificationEntry> {
+        self.entries.iter().filter(|entry| !entry.read)
     }
 
     fn set_sound(&mut self, enabled: bool) {
@@ -2133,6 +2352,7 @@ pub struct Workspace {
     reveal_task: Option<String>,
     task_menu: Option<(String, Point<Pixels>, Vec<FocusHandle>)>,
     pub(crate) sidebar_scroll: ScrollHandle,
+    sidebar_glass_pointer: Rc<Cell<Option<Point<Pixels>>>>,
     sidebar_overflow: bool,
     pub(crate) sidebar_scrollbar: SidebarScrollbarState,
     notifications: Notifications,
@@ -2159,6 +2379,7 @@ pub struct Workspace {
     tab_scroll: ScrollHandle,
     tab_hover: Option<String>,
     tab_overflow: bool,
+    tab_overflow_has_unread: bool,
     hidden_tabs: Option<Vec<(String, FocusHandle)>>,
     tab_menu: Option<(String, Point<Pixels>, FocusHandle)>,
     control_focus: HashMap<&'static str, FocusHandle>,
@@ -2195,6 +2416,7 @@ pub struct Workspace {
     edge_phase_start: f64,
     edge_cruising: bool,
     card_geometry: Vec<(String, f64, f64)>,
+    carousel_mounted_terminals: HashSet<String>,
     geometry: HashMap<String, GeometryUpdate>,
     geometry_dirty: HashSet<String>,
     reconnect_geometry: HashSet<String>,
@@ -3237,6 +3459,7 @@ impl Workspace {
             reveal_task: None,
             task_menu: None,
             sidebar_scroll: ScrollHandle::new(),
+            sidebar_glass_pointer: Rc::default(),
             sidebar_overflow: false,
             sidebar_scrollbar: SidebarScrollbarState::default(),
             notifications: Notifications::new(
@@ -3270,6 +3493,7 @@ impl Workspace {
             tab_scroll: ScrollHandle::new(),
             tab_hover: None,
             tab_overflow: false,
+            tab_overflow_has_unread: false,
             hidden_tabs: None,
             tab_menu: None,
             control_focus: CONTROLS
@@ -3309,6 +3533,7 @@ impl Workspace {
             edge_phase_start: 0.,
             edge_cruising: false,
             card_geometry: Vec::new(),
+            carousel_mounted_terminals: HashSet::new(),
             geometry: HashMap::new(),
             geometry_dirty: HashSet::new(),
             reconnect_geometry: HashSet::new(),
@@ -3697,6 +3922,9 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.close_notifications(cx);
+        if self.notifications.mark_task_read(&task_id) {
+            self.notifications_changed(cx);
+        }
         self.workspace_menu = None;
         self.task_menu = None;
         self.tab_menu = None;
@@ -3719,7 +3947,7 @@ impl Workspace {
     fn clear_notifications(&mut self, cx: &mut Context<Self>) {
         self.notifications.entries.clear();
         self.notifications.cooldowns.clear();
-        cx.notify();
+        self.notifications_changed(cx);
     }
 
     fn dismiss_notification(&mut self, id: u64, cx: &mut Context<Self>) {
@@ -3730,8 +3958,38 @@ impl Workspace {
             .position(|entry| entry.id == id)
         {
             self.notifications.remove_at(index);
-            cx.notify();
+            self.notifications_changed(cx);
         }
+    }
+
+    fn dismiss_session_notification(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        if self.notifications.dismiss_session(session_id) {
+            self.notifications_changed(cx);
+        }
+    }
+
+    fn finish_notification_jump(&mut self, id: u64, session: &str, cx: &mut Context<Self>) {
+        if self
+            .notifications
+            .entries
+            .iter()
+            .any(|entry| entry.id == id && entry.session_id.as_deref() == Some(session))
+        {
+            self.dismiss_notification(id, cx);
+            self.close_notifications(cx);
+        }
+    }
+
+    fn notifications_changed(&self, cx: &mut Context<Self>) {
+        if let Some(child) = self.dag_window {
+            let sessions = self
+                .notifications
+                .unread()
+                .filter_map(|entry| entry.session_id.clone())
+                .collect::<Vec<_>>();
+            let _ = child.update(cx, |view, _, cx| view.set_notifications(&sessions, cx));
+        }
+        cx.notify();
     }
 
     fn toggle_notification_sound(&mut self, cx: &mut Context<Self>) {
@@ -3743,7 +4001,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn update_notifications(&mut self, graph: &mut Value) {
+    fn update_notifications(&mut self, graph: &mut Value, window: &Window, cx: &mut Context<Self>) {
         if let Some((scene, task)) = self
             .hierarchy
             .as_ref()
@@ -3758,19 +4016,150 @@ impl Workspace {
             self.notification_scene_sessions
                 .insert(scene.id.clone(), (task.id.clone(), sessions));
         }
-        if let Some(Value::Array(events)) = graph
+        let events = graph
             .as_object_mut()
-            .and_then(|graph| graph.remove("agentNotifications"))
-        {
+            .and_then(|graph| graph.remove("agentNotifications"));
+        if let Some(Value::Array(events)) = events {
+            let focused = self.notification_foreground_session(window, cx);
             let now = notification_now();
             let mut play_sound = false;
             for event in &events {
-                play_sound |= self.notifications.push(event, self.focused.as_deref(), now);
+                play_sound |= self.notifications.push(event, focused.as_deref(), now);
             }
             if play_sound {
                 play_notification_sound();
             }
+            self.reconcile_notification_targets(graph);
+            self.notifications_changed(cx);
+        } else if self.reconcile_notification_targets(graph) {
+            self.notifications_changed(cx);
         }
+    }
+
+    fn reconcile_notification_targets(&mut self, graph: &Value) -> bool {
+        let Some(hierarchy) = &self.hierarchy else {
+            return false;
+        };
+        let active_task = hierarchy.task.as_ref().map(|task| task.id.as_str());
+        let active_scene = hierarchy.scene.as_ref().map(|scene| scene.id.as_str());
+        let live_scene = |scene: &str| self.scenes.iter().any(|item| item.id == scene);
+        let mut changed = false;
+        for entry in self
+            .notifications
+            .entries
+            .iter_mut()
+            .filter(|entry| !entry.read)
+        {
+            if let Some(session) = entry.session_id.as_deref()
+                && entry.scene_id.as_ref().is_none_or(|scene| {
+                    (entry.task_id.as_deref() == active_task && !live_scene(scene))
+                        || self
+                            .notification_scene_sessions
+                            .get(scene)
+                            .is_some_and(|(_, sessions)| !sessions.contains(session))
+                })
+            {
+                // A current mount can fill missing routing IDs or supersede an old mount.
+                let known_mount = self
+                    .notification_scene_sessions
+                    .iter()
+                    .filter(|(scene, (task, sessions))| {
+                        sessions.contains(session)
+                            && (Some(task.as_str()) != active_task || live_scene(scene))
+                    })
+                    .min_by_key(|(scene, _)| {
+                        (
+                            Some(scene.as_str()) != active_scene,
+                            entry.scene_id.as_ref() != Some(*scene),
+                            *scene,
+                        )
+                    });
+                if let Some((scene, (task, _))) = known_mount {
+                    entry.scene_id = Some(scene.clone());
+                    entry.task_id = Some(task.clone());
+                    if let Some(owner) = self.tasks.iter().find(|item| item.id == *task) {
+                        entry.workspace_id = Some(owner.workspace_id.clone());
+                    }
+                } else if entry.scene_id.is_none() {
+                    entry.scene_id = hierarchy
+                        .navigation
+                        .session_by_scene
+                        .iter()
+                        .filter(|(scene, focused)| focused.as_str() == session && live_scene(scene))
+                        .map(|(scene, _)| scene)
+                        .min()
+                        .cloned();
+                }
+            }
+            if entry.task_id.is_none()
+                && let Some(scene) = entry.scene_id.as_ref()
+            {
+                entry.task_id = self
+                    .notification_scene_sessions
+                    .get(scene)
+                    .map(|(task, _)| task.clone())
+                    .or_else(|| {
+                        self.scenes
+                            .iter()
+                            .find(|item| &item.id == scene)
+                            .map(|item| item.task_id.clone())
+                    });
+            }
+            if entry.workspace_id.is_none()
+                && let Some(task) = self
+                    .tasks
+                    .iter()
+                    .find(|task| Some(&task.id) == entry.task_id.as_ref())
+            {
+                entry.workspace_id = Some(task.workspace_id.clone());
+            }
+            let closed_scene = entry
+                .task_id
+                .as_deref()
+                .is_some_and(|task| Some(task) == active_task)
+                && entry
+                    .scene_id
+                    .as_deref()
+                    .is_some_and(|scene| !live_scene(scene));
+            let archived_session = entry.session_id.as_deref().is_some_and(|session| {
+                session_levels::node(session_levels::nodes(graph), session)
+                    .is_some_and(|node| !node["archivedAt"].is_null())
+            });
+            let missing_owner = self.domain_ready
+                && self.read_only.is_none()
+                && (entry.workspace_id.as_ref().is_some_and(|id| {
+                    !self
+                        .workspaces
+                        .iter()
+                        .any(|owner| &owner.id == id && owner.archived_at.is_none())
+                }) || entry.task_id.as_ref().is_some_and(|id| {
+                    !self
+                        .tasks
+                        .iter()
+                        .any(|owner| &owner.id == id && owner.archived_at.is_none())
+                }));
+            if closed_scene || archived_session || missing_owner {
+                entry.read = true;
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    fn notification_foreground_session(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
+        if notification_window_active(window) {
+            return self
+                .focused
+                .as_ref()
+                .filter(|id| !self.wiring.is_detached(id))
+                .filter(|_| self.settings.is_none() && !self.wiring.board_open)
+                .cloned();
+        }
+        self.active_detached_notification_session(cx)
     }
 
     fn notification_target<'a>(
@@ -4630,7 +5019,18 @@ impl Workspace {
             }
             Event::DatabaseRecoveryRequired(_) => {}
             Event::ReadOnlyReady { .. } | Event::ReadOnlyQueryResult { .. } => unreachable!(),
-            Event::Workspaces(workspaces) => self.apply_workspaces(workspaces, cx),
+            Event::Workspaces(workspaces) => {
+                if self.notifications.mark_read(|entry| {
+                    entry.workspace_id.as_ref().is_some_and(|id| {
+                        !workspaces
+                            .iter()
+                            .any(|workspace| &workspace.id == id && workspace.archived_at.is_none())
+                    })
+                }) {
+                    self.notifications_changed(cx);
+                }
+                self.apply_workspaces(workspaces, cx);
+            }
             Event::WorkspacePaths(paths) => {
                 self.workspace_paths = paths;
                 if matches!(&self.dialog, Some(TabDialog::RemoveSession { session_id, .. })
@@ -4686,7 +5086,18 @@ impl Workspace {
                 }
                 _ => {}
             },
-            Event::Tasks(tasks) => self.apply_tasks(tasks, cx),
+            Event::Tasks(tasks) => {
+                if self.notifications.mark_read(|entry| {
+                    entry.task_id.as_ref().is_some_and(|id| {
+                        !tasks
+                            .iter()
+                            .any(|task| &task.id == id && task.archived_at.is_none())
+                    })
+                }) {
+                    self.notifications_changed(cx);
+                }
+                self.apply_tasks(tasks, cx);
+            }
             Event::TaskRenameResult {
                 task_id,
                 title,
@@ -4712,6 +5123,11 @@ impl Workspace {
                 title,
                 error,
             } => {
+                if title.is_none()
+                    && let Some(error) = &error
+                {
+                    self.show_restore_title_error(error, cx);
+                }
                 if let Some(title) = title
                     && let Some(TabDialog::RenameSession {
                         session_id: current,
@@ -4782,10 +5198,10 @@ impl Workspace {
                     _ => None,
                 };
                 if let Some((id, session_id)) = notification_focus.zip(next_focus.as_deref()) {
-                    if let Some(entry) = self.notifications.entries.iter_mut().find(|entry| {
-                        entry.id == id && entry.session_id.as_deref() == Some(session_id)
-                    }) {
-                        entry.read = true;
+                    if self.wiring.is_detached(session_id) {
+                        self.open_detached_notification(id, session_id, cx);
+                    } else {
+                        self.finish_notification_jump(id, session_id, cx);
                     }
                     if let Some(scene_id) = next_scene {
                         let parent =
@@ -4794,7 +5210,6 @@ impl Workspace {
                                 .map(str::to_owned);
                         self.level_parent_by_scene.insert(scene_id.clone(), parent);
                     }
-                    self.close_notifications(cx);
                     window.blur();
                 }
                 if scene_changed {
@@ -4996,6 +5411,12 @@ impl Workspace {
                 // The replacement graph may arrive on a later frame. Drop these
                 // cards from the layout before removing their view state.
                 self.order.retain(|id| !ids.contains(id));
+                if self
+                    .notifications
+                    .mark_read(|entry| entry.session_id.as_ref().is_some_and(|id| ids.contains(id)))
+                {
+                    self.notifications_changed(cx);
+                }
                 for id in &ids {
                     self.forget_board_scene(id);
                 }
@@ -5222,7 +5643,7 @@ impl Workspace {
                             cx,
                         );
                     }
-                    self.update_notifications(&mut graph);
+                    self.update_notifications(&mut graph, window, cx);
                     return;
                 }
                 let loader_results = graph.as_object_mut().map(|graph| {
@@ -5966,6 +6387,7 @@ impl Workspace {
     }
 
     fn activate_session_card(&mut self, session_id: &str, window: &Window, cx: &mut Context<Self>) {
+        self.dismiss_session_notification(session_id, cx);
         if self.level_focus() == Some(session_id) {
             return;
         }
@@ -6188,11 +6610,11 @@ impl Workspace {
         self.cancel_hover_restore();
         let delta = event.delta.pixel_delta(px(16.));
         let horizontal = event.modifiers.shift || delta.x.abs() >= delta.y.abs();
-        let narrow = self.carousel_viewport_width(window) < 720.;
+        let compact = self.carousel_viewport_width(window) < 720. || self.read_only.is_some();
         let over_terminal = self
-            .order
+            .carousel_mounted_terminals
             .iter()
-            .filter(|id| !narrow || self.level_focus() == Some(id.as_str()))
+            .filter(|id| !compact || self.level_focus() == Some(id.as_str()))
             .any(|id| {
                 self.terminals
                     .get(id)
@@ -6337,9 +6759,8 @@ impl Workspace {
         let target = self
             .edge_target
             .take()
-            .filter(|id| self.order.contains(id))
-            .or_else(|| self.nearest_hidden_card(self.edge_direction, viewport_width))
-            .filter(|id| self.order.contains(id));
+            .filter(|id| self.card_geometry.iter().any(|(card, _, _)| card == id))
+            .or_else(|| self.nearest_hidden_card(self.edge_direction, viewport_width));
         if let Some(id) = target {
             // Dwelling at an edge is navigation intent: unlike ordinary
             // preview, this new position remains after pointer exit.
@@ -7355,6 +7776,13 @@ impl Workspace {
                         .flex()
                         .items_center()
                         .gap(px(6. * scale))
+                        .when(self.notifications.unread_for_workspace(&id) > 0, |status| {
+                            status.child(tabs_ui::tab_status_dot().relative().children(
+                                workspace_wiring::wiring_probe_bounds(format!(
+                                    "unread-workspace-{id}"
+                                )),
+                            ))
+                        })
                         .when(workspace.is_pinned, |status| {
                             status.child(icon("pin", 13. * scale, rgba(sidebar_palette.icon_muted)))
                         })
@@ -7375,6 +7803,9 @@ impl Workspace {
                 ),
             &controls[0],
             move |this, window, cx| {
+                if this.notifications.mark_workspace_read(&toggle_id) {
+                    this.notifications_changed(cx);
+                }
                 if active {
                     if !this.workspace_collapsed.remove(&toggle_id) {
                         this.workspace_collapsed.insert(toggle_id.clone());
@@ -7773,7 +8204,12 @@ impl Workspace {
             .flex_col()
             .border_r_1()
             .border_color(rgba(sidebar_palette.divider))
+            .relative()
             .bg(background)
+            .child(sidebar_glass_highlight(
+                sidebar_palette.glass_highlight,
+                self.sidebar_glass_pointer.clone(),
+            ))
             .child(header.child(self.notification_bell(cx)))
             .child(
                 div()
@@ -7885,6 +8321,7 @@ impl Workspace {
         } else {
             sidebar_palette.task_text
         };
+        let unread = self.notifications.unread_for_task(&task.id);
         let row = self
             .focus_control(
                 div().id(SharedString::from(format!("task:{id}"))),
@@ -7990,6 +8427,34 @@ impl Workspace {
             )
             .when(task.is_pinned, |row| {
                 row.child(icon("pin", 13. * scale, rgba(sidebar_palette.icon_muted)))
+            })
+            .when(unread > 0, |row| {
+                row.child(
+                    div()
+                        .flex_none()
+                        .min_w(px(16.))
+                        .h(px(16.))
+                        .px(px(5.))
+                        .rounded_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(rgb(0xf54c46))
+                        .text_color(rgb(0xffffff))
+                        .text_size(px(10.))
+                        .line_height(px(16.))
+                        .font_weight(FontWeight::BOLD)
+                        .relative()
+                        .children(workspace_wiring::wiring_probe_bounds(format!(
+                            "unread-task-{}",
+                            task.id
+                        )))
+                        .child(if unread > 99 {
+                            "99+".into()
+                        } else {
+                            unread.to_string()
+                        }),
+                )
             })
             .child(
                 self.button(
@@ -8151,26 +8616,6 @@ impl Workspace {
     }
 
     fn scene_title(&self, scene: &Scene) -> String {
-        if !scene.title_pinned
-            && scene.name.starts_with("Shell · ")
-            && self
-                .hierarchy
-                .as_ref()
-                .and_then(|h| h.scene.as_ref())
-                .is_some_and(|s| s.id == scene.id)
-        {
-            if let Some(cwd) = self.graph["nodes"]
-                .as_array()
-                .and_then(|nodes| {
-                    nodes
-                        .iter()
-                        .find(|n| n["sessionId"].as_str() == self.focused.as_deref())
-                })
-                .and_then(|n| n["cwd"].as_str())
-            {
-                return format!("Shell · {cwd}");
-            }
-        }
         // `新画布` / `新画布 2` are generated by the runtime for unpinned
         // default canvases. Translate them at display time only; a pinned or
         // manually named scene keeps its exact stored title.
@@ -8297,6 +8742,37 @@ impl Workspace {
             failure: None,
         });
         cx.notify();
+    }
+
+    fn restore_session_title(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        if !self
+            .renameable_card(session_id)
+            .is_some_and(|node| node["titleSource"] == "manual")
+        {
+            return;
+        }
+        if let Err(error) = self.commands.send_at(
+            self.runtime_generation,
+            Command::SetSessionTitle {
+                session_id: session_id.to_owned(),
+                title: None,
+            },
+        ) {
+            self.show_restore_title_error(&error.to_string(), cx);
+        }
+    }
+
+    fn show_restore_title_error(&mut self, error: &str, cx: &mut Context<Self>) {
+        self.show_error_toast(
+            format!(
+                "{}{error}",
+                self.locale.text(
+                    "恢复自动标题失败：",
+                    "Could not restore the automatic title: ",
+                )
+            ),
+            cx,
+        );
     }
 
     fn open_title_input(
@@ -8622,6 +9098,7 @@ impl Workspace {
         match opened {
             Ok(child) => {
                 self.dag_window = Some(child);
+                self.notifications_changed(cx);
                 self.dismiss_dag_open_error(window, cx);
             }
             Err(error) => {
@@ -9211,7 +9688,7 @@ impl Workspace {
 
     fn card_action_blocked_reason(&self, id: &str, node: &Value) -> Option<&'static str> {
         self.card_mutation_blocked_reason(id, node).or_else(|| {
-            self.recovery_blocked(id).then_some(
+            (self.terminals.contains_key(id) && self.recovery_blocked(id)).then_some(
                 self.locale
                     .text("当前终端仍在恢复", "This terminal is still recovering."),
             )
@@ -9586,7 +10063,7 @@ impl Workspace {
         let permission_results = graph
             .as_object_mut()
             .and_then(|object| object.remove("providerPermissionModeResults"));
-        self.update_notifications(&mut graph);
+        self.update_notifications(&mut graph, window, cx);
         self.refresh_egress_for_graph_change(&graph, cx);
         clear_exited_recovery_sessions(
             &mut self.restoring_sessions,
@@ -9658,24 +10135,53 @@ impl Workspace {
     }
 
     fn session_loader_running(&self, id: &str) -> bool {
-        self.graph_node(id)
-            .is_some_and(|node| matches!(node["workStatus"].as_str(), Some("running" | "starting")))
+        self.graph_node(id).is_some_and(|node| {
+            matches!(
+                node["workStatus"].as_str(),
+                Some("running" | "starting" | "needs-input")
+            ) || node["currentMode"] == "claude-code"
+                && node["workStatus"] == "idle"
+                && self.recovery.get(id) == Some(&RecoveryState::Ready)
+        })
     }
 
     fn session_loader_can_submit(&self, state: &SessionLoader) -> bool {
         !state.history
-            && state.selected.as_ref().is_some_and(|id| {
-                state.provider != "codex"
-                    || state
-                        .sessions
-                        .iter()
-                        .any(|row| &row.id == id && row.loaded_by.is_none())
-            })
+            && state.selected_session().is_some()
+            && state.blocked_owner().is_none()
             && !self.pending_loader_loads.contains_key(&state.session_id)
             && self.graph_node(&state.session_id).is_some_and(|node| {
-                self.launch_action_blocked_reason(&state.session_id, node)
-                    .is_none()
+                node["archivedAt"].is_null()
+                    && self
+                        .launch_action_blocked_reason(&state.session_id, node)
+                        .is_none()
             })
+    }
+
+    fn session_loader_owner_notice(&self, state: &SessionLoader) -> Option<String> {
+        let owner = state.blocked_owner()?;
+        Some(if owner.session_id == state.session_id {
+            self.locale
+                .text(
+                    "该会话已在当前卡片中打开",
+                    "This session is already open in this card",
+                )
+                .to_owned()
+        } else if owner.title.trim().is_empty() {
+            self.locale
+                .text(
+                    "该会话已在另一张卡中打开",
+                    "This session is already open in another card",
+                )
+                .to_owned()
+        } else {
+            match self.locale {
+                InterfaceLocale::Chinese => format!("该会话已在“{}”中打开", owner.title),
+                InterfaceLocale::English => {
+                    format!("This session is already open in \"{}\"", owner.title)
+                }
+            }
+        })
     }
 
     fn open_session_loader(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -9743,7 +10249,11 @@ impl Workspace {
             "Filter by title, path, model or session ID",
         );
         let input = cx.new(|cx| loader_search_input(filter_placeholder, self.wiring_dark(), cx));
-        let content_placeholder = self.locale.text("查找右侧内容", "Search content");
+        let content_placeholder = if history {
+            self.locale.text("输入关键词", "Enter a keyword")
+        } else {
+            self.locale.text("查找右侧内容", "Search content")
+        };
         let content_input =
             cx.new(|cx| loader_search_input(content_placeholder, self.wiring_dark(), cx));
         self.dialog_subscription =
@@ -9752,13 +10262,16 @@ impl Workspace {
                     this.loader_filter_changed(cx);
                 }
             }));
-        let content_subscription =
-            cx.subscribe_in(&content_input, window, |this, _, event, _, cx| {
-                if matches!(event, RenameInputEvent::Changed) {
-                    this.loader_search_changed(cx);
-                }
-            });
-        self.dialog_controls = (0..11).map(|_| cx.focus_handle().tab_stop(true)).collect();
+        let content_subscription = cx.subscribe_in(
+            &content_input,
+            window,
+            |this, _, event, _, cx| match event {
+                RenameInputEvent::Changed => this.loader_search_changed(cx),
+                RenameInputEvent::Confirm => this.step_history_match(1, cx),
+                RenameInputEvent::Cancel => {}
+            },
+        );
+        self.dialog_controls = (0..16).map(|_| cx.focus_handle().tab_stop(true)).collect();
         let list_focus = cx.focus_handle().tab_stop(true);
         let focus_subscriptions = [
             (input.read(cx).focus.clone(), LoaderFocus::Filter),
@@ -9797,6 +10310,7 @@ impl Workspace {
             history,
             provider,
             confirm_running: false,
+            confirmation: None,
             restore_selection: remembered.selected(provider),
             remembered,
             list_total: 0,
@@ -9814,6 +10328,8 @@ impl Workspace {
             search_hits: Vec::new(),
             has_more_hits: false,
             search_next: 0,
+            history_matches: Vec::new(),
+            active_history_match: 0,
             detail_model: None,
             detail_permission: None,
             scene_id,
@@ -10036,7 +10552,7 @@ impl Workspace {
                 .visible_sessions(cx)
                 .position(|row| row.id == matching.id)
         {
-            state.list_scroll.scroll_to_item(position);
+            state.reveal_list_row(position);
         }
         let next = matching.or(first).map(|session| session.id.clone());
         drop(visible);
@@ -10071,7 +10587,7 @@ impl Workspace {
         };
         let next = current.saturating_add_signed(delta).min(visible.len() - 1);
         let id = visible[next].id.clone();
-        state.list_scroll.scroll_to_item(next);
+        state.reveal_list_row(next);
         self.select_loader_session(&id, cx);
     }
 
@@ -10195,6 +10711,12 @@ impl Workspace {
             return;
         }
         state.search_query = query;
+        if state.history {
+            state.rebuild_history_matches(false);
+            state.reveal_history_match();
+            cx.notify();
+            return;
+        }
         state.search_hits.clear();
         state.has_more_hits = false;
         state.search_next = 0;
@@ -10202,12 +10724,26 @@ impl Workspace {
         cx.notify();
     }
 
+    fn step_history_match(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if let Some(TabDialog::SessionLoader(state)) = &mut self.dialog
+            && state.history
+            && !state.history_matches.is_empty()
+        {
+            let len = state.history_matches.len() as isize;
+            state.active_history_match =
+                (state.active_history_match as isize + delta).rem_euclid(len) as usize;
+            state.reveal_history_match();
+            cx.notify();
+        }
+    }
+
     fn request_loader_search(&mut self, offset: usize) {
         let Some(TabDialog::SessionLoader(state)) = &mut self.dialog else {
             return;
         };
         let Some(id) = state.selected.as_ref().filter(|_| {
-            state.remote_catalog()
+            !state.history
+                && state.remote_catalog()
                 && !state.search_query.is_empty()
                 && state.pending_search.is_none()
         }) else {
@@ -10321,28 +10857,94 @@ impl Workspace {
         cx.notify();
     }
 
-    fn submit_session_loader(&mut self, cx: &mut Context<Self>) {
+    fn session_loader_needs_running_modal(&self, state: &SessionLoader) -> bool {
+        self.session_loader_running(&state.session_id)
+            && (state.provider == "claude-code"
+                || self
+                    .graph_node(&state.session_id)
+                    .is_some_and(|node| node["currentMode"] == "claude-code"))
+    }
+
+    fn submit_session_loader(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(TabDialog::SessionLoader(state)) = &self.dialog else {
             return;
         };
-        if !self.session_loader_can_submit(state) {
+        if state.confirmation.is_some() || !self.session_loader_can_submit(state) {
             return;
         }
-        if state.remote_catalog()
-            && !state.confirm_running
-            && self.session_loader_running(&state.session_id)
-        {
+        let takeover_from = state.takeover_from().map(str::to_owned);
+        let running = self.session_loader_needs_running_modal(state);
+        if takeover_from.is_some() || running {
+            let selected = state.selected.clone().expect("validated selection");
+            let return_focus = window
+                .focused(cx)
+                .unwrap_or_else(|| self.dialog_controls[2].clone());
+            if let Some(TabDialog::SessionLoader(state)) = &mut self.dialog {
+                state.confirmation = Some(LoaderConfirmation {
+                    selected,
+                    takeover_from,
+                    running,
+                    return_focus,
+                });
+            }
+            window.focus(&self.dialog_controls[14]);
+        } else if !state.confirm_running && self.session_loader_running(&state.session_id) {
             if let Some(TabDialog::SessionLoader(state)) = &mut self.dialog {
                 state.confirm_running = true;
             }
-            cx.notify();
-            return;
+        } else {
+            self.send_session_loader_load(None, false, cx);
         }
-        let Some(session) = state
-            .sessions
-            .iter()
-            .find(|session| Some(&session.id) == state.selected.as_ref())
-        else {
+        cx.notify();
+    }
+
+    fn cancel_loader_confirmation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(TabDialog::SessionLoader(state)) = &mut self.dialog
+            && let Some(confirmation) = state.confirmation.take()
+        {
+            window.focus(&confirmation.return_focus);
+            cx.notify();
+        }
+    }
+
+    fn confirm_loader_load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(confirmation) = (match &mut self.dialog {
+            Some(TabDialog::SessionLoader(state)) => state.confirmation.take(),
+            _ => None,
+        }) else {
+            return;
+        };
+        if let Some(TabDialog::SessionLoader(state)) = &self.dialog
+            && state.selected.as_ref() == Some(&confirmation.selected)
+            && self.session_loader_can_submit(state)
+        {
+            if state.takeover_from() == confirmation.takeover_from.as_deref()
+                && (confirmation.running || !self.session_loader_needs_running_modal(state))
+            {
+                window.focus(&confirmation.return_focus);
+                self.send_session_loader_load(confirmation.takeover_from, confirmation.running, cx);
+                return;
+            }
+            // Reopen the confirmation if the selected conversation acquired a
+            // different owner or the target began running while it was open.
+            window.focus(&confirmation.return_focus);
+            self.submit_session_loader(window, cx);
+        } else {
+            window.focus(&confirmation.return_focus);
+            cx.notify();
+        }
+    }
+
+    fn send_session_loader_load(
+        &mut self,
+        takeover_from: Option<String>,
+        confirmed_running: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(TabDialog::SessionLoader(state)) = &self.dialog else {
+            return;
+        };
+        let Some(session) = state.selected_session() else {
             return;
         };
         let session_id = state.session_id.clone();
@@ -10360,6 +10962,8 @@ impl Workspace {
             title: session.title.clone(),
             previous_revision,
             request_id,
+            wait_for_identity: state.provider == "claude-code"
+                && (takeover_from.is_some() || confirmed_running),
         };
         let command = match (state.provider, request_id) {
             ("dsh", Some(request_id)) => Command::LoadDshSession {
@@ -10379,6 +10983,7 @@ impl Workspace {
             _ => Command::LoadProviderSession {
                 session_id: session_id.clone(),
                 provider_session_id: load.id.clone(),
+                takeover_from,
             },
         };
         let result = self.commands.send_at(self.runtime_generation, command);
@@ -10506,7 +11111,8 @@ impl Workspace {
             if request.start.is_some() && page["hasLater"] == true {
                 let first = previous_first.unwrap_or_default() as usize;
                 let mut previous: Vec<_> = events.filter(|event| event.index < first).collect();
-                let anchor = previous.len() + usize::from(state.has_earlier);
+                let anchor =
+                    previous.len() + usize::from(state.has_earlier) + usize::from(state.history);
                 previous.append(&mut state.events);
                 state.events = previous;
                 state.preview_scroll.scroll_to_top_of_item(anchor);
@@ -10521,8 +11127,17 @@ impl Workspace {
                     state
                         .preview_scroll
                         .scroll_to_top_of_item(position + usize::from(state.has_earlier));
-                } else {
+                } else if !state.history {
                     state.preview_scroll.scroll_to_bottom();
+                }
+            }
+            if state.history {
+                let had_match = !state.history_matches.is_empty();
+                state.rebuild_history_matches(true);
+                if state.history_matches.is_empty() && request.start.is_none() {
+                    state.preview_scroll.scroll_to_bottom();
+                } else if !had_match || request.start.is_none() {
+                    state.reveal_history_match();
                 }
             }
         }
@@ -10646,7 +11261,7 @@ impl Workspace {
                     && node["title"] == load.title
             });
             if error.is_none()
-                && !committed
+                && (load.wait_for_identity || !committed)
                 && !identity.is_some_and(|result| result["result"] == "confirmed")
             {
                 return true;
@@ -10660,7 +11275,7 @@ impl Workspace {
             Some(Ok(())) => self.close_dialog(window, cx),
             Some(Err(error)) => {
                 if let Some(TabDialog::SessionLoader(state)) = &mut self.dialog {
-                    state.error = Some(error);
+                    state.error = Some(loader_load_error(error, self.locale));
                     state.confirm_running = false;
                 }
             }
@@ -11863,37 +12478,60 @@ impl Workspace {
         }
         if let Some(TabDialog::SessionLoader(state)) = &self.dialog {
             if stroke.key == "escape" {
-                self.close_dialog(window, cx);
+                if state.confirmation.is_some() {
+                    self.cancel_loader_confirmation(window, cx);
+                } else {
+                    self.close_dialog(window, cx);
+                }
                 cx.stop_propagation();
             } else if stroke.key == "tab" && !mods.alt && !mods.control && !mods.platform {
-                let input = state.input.read(cx);
-                let mut controls = vec![&self.dialog_controls[0]];
-                if !state.history {
-                    controls.extend([4, 9, 5, 8].map(|index| &self.dialog_controls[index]));
-                }
-                controls.push(&input.focus);
-                if !input.text.is_empty() {
+                let controls = if state.confirmation.is_some() {
+                    [13, 14, 15]
+                        .map(|index| &self.dialog_controls[index])
+                        .to_vec()
+                } else if state.history {
+                    let mut controls = vec![
+                        &self.dialog_controls[0],
+                        &state.content_input.read(cx).focus,
+                    ];
+                    if !state.history_matches.is_empty() && !state.loading_detail {
+                        controls.extend([11, 12].map(|index| &self.dialog_controls[index]));
+                    }
+                    if state.has_earlier && !state.loading_earlier {
+                        controls.push(&self.dialog_controls[1]);
+                    }
+                    if state.error.is_some() && !state.loading_detail {
+                        controls.push(&self.dialog_controls[2]);
+                    }
                     controls.push(&self.dialog_controls[3]);
-                }
-                controls.push(&state.list_focus);
-                if state.remote_catalog() {
-                    if state.has_more_sessions && !state.loading_list {
-                        controls.push(&self.dialog_controls[6]);
+                    controls
+                } else {
+                    let input = state.input.read(cx);
+                    let mut controls = vec![&self.dialog_controls[0]];
+                    controls.extend([4, 9, 5, 8].map(|index| &self.dialog_controls[index]));
+                    controls.push(&input.focus);
+                    if !input.text.is_empty() {
+                        controls.push(&self.dialog_controls[3]);
                     }
-                    if state.has_more_hits && state.pending_search.is_none() {
-                        controls.push(&self.dialog_controls[7]);
+                    controls.push(&state.list_focus);
+                    if state.remote_catalog() {
+                        if state.has_more_sessions && !state.loading_list {
+                            controls.push(&self.dialog_controls[6]);
+                        }
+                        if state.has_more_hits && state.pending_search.is_none() {
+                            controls.push(&self.dialog_controls[7]);
+                        }
                     }
-                }
-                if state.has_earlier && !state.loading_earlier {
-                    controls.push(&self.dialog_controls[1]);
-                }
-                if !state.history {
+                    if state.has_earlier && !state.loading_earlier {
+                        controls.push(&self.dialog_controls[1]);
+                    }
                     controls.push(&state.content_input.read(cx).focus);
                     controls.push(&self.dialog_controls[10]);
-                }
-                if self.session_loader_can_submit(state) {
-                    controls.push(&self.dialog_controls[2]);
-                }
+                    if self.session_loader_can_submit(state) {
+                        controls.push(&self.dialog_controls[2]);
+                    }
+                    controls
+                };
                 let current = controls.iter().position(|focus| focus.is_focused(window));
                 let next = match (current, mods.shift) {
                     (Some(index), true) => (index + controls.len() - 1) % controls.len(),
@@ -12157,6 +12795,15 @@ impl Workspace {
         )
     }
 
+    fn scene_tab_hidden(&self, index: usize) -> bool {
+        let viewport = self.tab_scroll.bounds();
+        let offset = self.tab_scroll.offset();
+        self.tab_scroll.bounds_for_item(index).is_none_or(|bounds| {
+            bounds.left() + offset.x < viewport.left() - px(1.)
+                || bounds.right() + offset.x > viewport.right() + px(1.)
+        })
+    }
+
     fn topbar(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let palette = self.theme_palette();
         let background = rgba(palette.tabs.bar);
@@ -12222,8 +12869,22 @@ impl Workspace {
                 )
                 .child(
                     self.button(
-                        tabs_ui::tab_title(title)
-                            .id(SharedString::from(format!("tab-title-{}", scene.id))),
+                        div()
+                            .id(SharedString::from(format!("tab-title-{}", scene.id)))
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(tabs_ui::tab_title(title))
+                            .when(self.notifications.unread_for_scene(&scene.id) > 0, |tab| {
+                                tab.child(tabs_ui::tab_status_dot().relative().children(
+                                    workspace_wiring::wiring_probe_bounds(format!(
+                                        "unread-tab-{}",
+                                        scene.id
+                                    )),
+                                ))
+                            }),
                         title_focus,
                         move |this, _, cx| {
                             this.send(
@@ -12303,36 +12964,43 @@ impl Workspace {
             tabs = tabs.child(add);
         } else {
             overflow_actions = overflow_actions
-                .child(self.button(
-                    tabs_ui::tab_overflow_btn("tab-overflow", &palette.tabs),
-                    &self.control_focus["tab-overflow"],
-                    |this, _, cx| {
-                        if this.hidden_tabs.is_some() {
-                            this.hidden_tabs = None;
-                        } else {
-                            let viewport = this.tab_scroll.bounds();
-                            let offset = this.tab_scroll.offset();
-                            let hidden = this
-                                .scenes
-                                .iter()
-                                .enumerate()
-                                .filter(|(i, _)| {
-                                    this.tab_scroll.bounds_for_item(*i).is_none_or(|b| {
-                                        b.left() + offset.x < viewport.left() - px(1.)
-                                            || b.right() + offset.x > viewport.right() + px(1.)
-                                    })
-                                })
-                                .map(|(_, s)| (s.id.clone(), cx.focus_handle().tab_stop(true)))
-                                .collect::<Vec<_>>();
-                            this.hidden_tabs = Some(hidden);
-                        }
-                        this.workspace_menu = None;
-                        this.task_menu = None;
-                        this.tab_menu = None;
-                        cx.notify();
-                    },
-                    cx,
-                ))
+                .child(
+                    self.button(
+                        tabs_ui::tab_overflow_btn("tab-overflow", &palette.tabs)
+                            .relative()
+                            .when(self.tab_overflow_has_unread, |button| {
+                                button.child(
+                                    tabs_ui::tab_status_dot()
+                                        .absolute()
+                                        .top(px(1.))
+                                        .right(px(1.))
+                                        .children(workspace_wiring::wiring_probe_bounds(
+                                            "unread-tab-overflow".into(),
+                                        )),
+                                )
+                            }),
+                        &self.control_focus["tab-overflow"],
+                        |this, _, cx| {
+                            if this.hidden_tabs.is_some() {
+                                this.hidden_tabs = None;
+                            } else {
+                                let hidden = this
+                                    .scenes
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(i, _)| this.scene_tab_hidden(*i))
+                                    .map(|(_, s)| (s.id.clone(), cx.focus_handle().tab_stop(true)))
+                                    .collect::<Vec<_>>();
+                                this.hidden_tabs = Some(hidden);
+                            }
+                            this.workspace_menu = None;
+                            this.task_menu = None;
+                            this.tab_menu = None;
+                            cx.notify();
+                        },
+                        cx,
+                    ),
+                )
                 .child(add);
         }
         #[cfg(target_os = "windows")]
@@ -12560,6 +13228,71 @@ impl Workspace {
         )
     }
 
+    fn canvas_empty_message(&self, id: &'static str, label: &'static str) -> Div {
+        let palette = self.theme_palette();
+        div()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .relative()
+            .flex()
+            .items_center()
+            .justify_center()
+            .px(px(12.))
+            .text_size(px(12.))
+            .text_center()
+            .text_color(if palette.terminal == Theme::LIGHT {
+                rgba(0x8a919bff)
+            } else {
+                rgba(palette.workspace.muted)
+            })
+            .children(workspace_wiring::wiring_probe_bounds(id.into()))
+            .child(ui_text(label))
+    }
+
+    fn compact_recovery_status(&self, id: &str, node: Option<&Value>) -> Option<(String, bool)> {
+        let locale = self.locale;
+        let restoring = || (locale.text("正在恢复", "Restoring").to_owned(), false);
+        let failure = |label: &str, reason: &str| {
+            let reason = reason.trim();
+            let text = if reason.is_empty() {
+                label.to_owned()
+            } else {
+                format!("{label}{}{reason}", locale.text("：", ": "))
+            };
+            (text, true)
+        };
+        let failed = |reason| failure(locale.text("恢复失败", "Recovery failed"), reason);
+        match self.recovery.get(id) {
+            Some(RecoveryState::Restoring | RecoveryState::Restarting(_)) => {
+                return Some(restoring());
+            }
+            Some(RecoveryState::Failed(reason)) => return Some(failed(reason)),
+            Some(RecoveryState::StartFailed(reason)) => {
+                return Some(failure(locale.text("启动失败", "Could not start"), reason));
+            }
+            Some(RecoveryState::Deferred) => {
+                return Some((locale.text("等待恢复", "Waiting to recover").into(), false));
+            }
+            _ => {}
+        }
+        if self.pending_provider_restores.contains_key(id) {
+            return Some(restoring());
+        }
+        if let Some(node) = node {
+            match Self::provider_restore_state(node) {
+                Some("restoring") => return Some(restoring()),
+                Some("failed") => {
+                    return Some(failed(
+                        node["providerRestoreError"].as_str().unwrap_or_default(),
+                    ));
+                }
+                _ => {}
+            }
+        }
+        self.restoring_sessions.contains(id).then(restoring)
+    }
+
     /// Backwards-compatible two-argument form used by layout probes; the host
     /// render path uses `compact_session_summary_themed`.
     #[allow(dead_code)]
@@ -12568,6 +13301,9 @@ impl Workspace {
             node,
             title,
             &matou_native_desktop::theme_tokens::LIGHT,
+            InterfaceLocale::Chinese,
+            None,
+            None,
         )
     }
 
@@ -12575,6 +13311,9 @@ impl Workspace {
         node: Option<&Value>,
         title: &str,
         palette: &ThemePalette,
+        locale: InterfaceLocale,
+        recovery: Option<(String, bool)>,
+        notification_badge: Option<AnyElement>,
     ) -> Div {
         let status = node
             .and_then(|node| node["workStatus"].as_str())
@@ -12610,21 +13349,43 @@ impl Workspace {
             .gap(px(9.))
             .child(
                 div()
-                    .text_size(px(12.))
-                    .font_weight(FontWeight::BOLD)
-                    .text_color(rgba(palette.cards.compact_title))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .child(title.to_owned()),
+                    .flex()
+                    .items_center()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgba(palette.cards.compact_title))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(title.to_owned()),
+                    )
+                    .children(notification_badge),
             )
-            .child(Self::compact_session_status(status))
+            .child(if let Some((message, failed)) = recovery {
+                div()
+                    .text_size(px(10.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .line_height(px(14.))
+                    .whitespace_normal()
+                    .when(failed, |label| {
+                        label.text_color(rgba(palette.recovery_page.error_text))
+                    })
+                    .child(ui_text(message))
+            } else {
+                Self::compact_session_status(status, locale)
+            })
             .children((active_child_count > 0).then(|| {
                 div()
                     .text_size(px(9.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(0xe8ae48))
-                    .child(format!("子会话 {active_child_count}"))
+                    .child(format!(
+                        "{} {active_child_count}",
+                        locale.text("子会话", "Child sessions")
+                    ))
             }))
             .child(
                 div()
@@ -12636,7 +13397,7 @@ impl Workspace {
             )
     }
 
-    fn compact_session_status(status: &str) -> Div {
+    fn compact_session_status(status: &str, locale: InterfaceLocale) -> Div {
         div()
             .text_size(px(9.))
             .px(px(6.))
@@ -12651,12 +13412,12 @@ impl Workspace {
                 badge
             })
             .child(match status {
-                "starting" | "running" => "运行中",
-                "needs-input" => "等待输入",
-                "error" => "异常",
-                "interrupted" => "中断",
-                "exited" => "已停止",
-                _ => "空闲",
+                "starting" | "running" => locale.text("运行中", "Running"),
+                "needs-input" => locale.text("等待输入", "Needs input"),
+                "error" => locale.text("异常", "Error"),
+                "interrupted" => locale.text("中断", "Interrupted"),
+                "exited" => locale.text("已停止", "Stopped"),
+                _ => locale.text("空闲", "Idle"),
             })
     }
 
@@ -12668,6 +13429,8 @@ impl Workspace {
             title,
             actions,
             &matou_native_desktop::theme_tokens::LIGHT,
+            None,
+            None,
             None,
         )
     }
@@ -12724,8 +13487,11 @@ impl Workspace {
         actions: Div,
         palette: &ThemePalette,
         loading_badge: Option<Div>,
+        environment_badges: Option<Div>,
+        notification_badge: Option<AnyElement>,
     ) -> Div {
         let background = rgba(palette.cards.header);
+        let has_environment_badges = environment_badges.is_some();
         #[cfg(debug_assertions)]
         crate::settings_shell::probe_workspace_surfaces(|probe| {
             probe.card_header = Some(background)
@@ -12750,6 +13516,7 @@ impl Workspace {
                         div()
                             .min_w_0()
                             .max_w(relative(0.46))
+                            .when(has_environment_badges, |title| title.flex_none())
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .text_ellipsis()
@@ -12757,9 +13524,81 @@ impl Workspace {
                             .font_weight(FontWeight::BOLD)
                             .child(title),
                     )
-                    .children(loading_badge),
+                    .children(loading_badge)
+                    .children(environment_badges)
+                    .children(notification_badge),
             )
             .child(actions)
+    }
+
+    fn card_environment_badges(
+        &self,
+        id: &str,
+        node: &Value,
+        width: f32,
+        palette: &ThemePalette,
+    ) -> Option<Div> {
+        // Match the reference card-width breakpoints before allocating header space.
+        let git = (width > 500.)
+            .then(|| FooterGit::projected(node, None, self.locale))
+            .flatten()
+            .filter(|git| git.available);
+        let shared = width > 420. && node["sharedWorkingDirectory"] == true;
+        if git.is_none() && !shared {
+            return None;
+        }
+        let dark = palette.terminal != Theme::LIGHT;
+        let badge = |kind, label: String, title: String, text, background| {
+            let id = format!("card-{kind}-{id}");
+            div()
+                .id(SharedString::from(id.clone()))
+                .relative()
+                .flex_shrink()
+                .min_w_0()
+                .max_w(px(120.))
+                .px(px(5.))
+                .py(px(2.))
+                .rounded(px(8.))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .text_size(px(8.))
+                .line_height(relative(1.2))
+                .text_color(rgba(text))
+                .bg(rgba(background))
+                .child(ui_text(label))
+                .children(workspace_wiring::wiring_probe_bounds(id))
+                .tooltip(move |_, cx| cx.new(|_| CardTooltip(title.clone().into())).into())
+        };
+        Some(
+            div()
+                .ml(px(8.))
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .children(git.map(|git| {
+                    badge(
+                        "git",
+                        git.label,
+                        git.title,
+                        if dark { 0xd2deefb8 } else { 0x596577ff },
+                        if dark { 0xffffff0e } else { 0xedf0f4ff },
+                    )
+                }))
+                .children(shared.then(|| {
+                    let label = self.locale.text("共享工作目录", "Shared directory");
+                    badge(
+                        "shared",
+                        label.into(),
+                        label.into(),
+                        if dark { 0xe0ad55ff } else { 0x936410ff },
+                        if dark { 0xe0ad551c } else { 0xfff4d9ff },
+                    )
+                })),
+        )
     }
 
     /// The reference header uses `box-shadow: 0 5px 9px -7px`. GPUI clips
@@ -13405,10 +14244,8 @@ impl Workspace {
         let content_empty = content_input.text.is_empty();
         let local_content_query = content_input.text.trim().to_lowercase();
         let content_focused = content_input.focus.is_focused(window);
-        let selected = state
-            .selected
-            .as_ref()
-            .and_then(|id| state.sessions.iter().find(|session| &session.id == id));
+        let selected = state.selected_session();
+        let owner_notice = self.session_loader_owner_notice(state);
         let target_title = self
             .graph_node(&state.session_id)
             .and_then(|node| node["title"].as_str())
@@ -13487,8 +14324,8 @@ impl Workspace {
         let content_search = div().flex_none().flex().items_center().gap(px(7.)).child(
             div()
                 .id("session-loader-content")
-                .w(px(220.))
-                .h(px(34.))
+                .w(px(if state.history { 190. } else { 220. }))
+                .h(px(if state.history { 30. } else { 34. }))
                 .flex()
                 .items_center()
                 .gap(px(7.))
@@ -13501,6 +14338,9 @@ impl Workspace {
                 })
                 .rounded(px(9.))
                 .bg(tone(0x15181c, 0xffffff))
+                .children(workspace_wiring::wiring_probe_bounds(
+                    "session-loader-content".into(),
+                ))
                 .when(content_focused, |content| {
                     content.shadow(vec![BoxShadow {
                         color: focus_ring,
@@ -13520,6 +14360,95 @@ impl Workspace {
                         .child(state.content_input.clone()),
                 ),
         );
+        let preview_search = if state.history {
+            div()
+                .flex_none()
+                .flex()
+                .items_end()
+                .gap(px(10.))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .child(
+                            div()
+                                .text_size(px(9.))
+                                .text_color(tone(0x9aa4b1, 0x5b6675))
+                                .child(
+                                    ui_text(
+                                        self.locale.text("搜索已加载内容", "Search loaded content"),
+                                    )
+                                    .normal_line_height(),
+                                ),
+                        )
+                        .child(content_search),
+                )
+                .when(
+                    !state.search_query.is_empty() && !state.loading_detail,
+                    |search| {
+                        let count = state.history_matches.len();
+                        let label = if count == 0 {
+                            self.locale
+                                .text("没有找到匹配内容", "No matches")
+                                .to_owned()
+                        } else {
+                            format!("{}/{count}", state.active_history_match + 1)
+                        };
+                        let mut nav = div()
+                            .h(px(30.))
+                            .flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .id("session-history-match-nav")
+                            .child(div().text_size(px(10.)).child(label));
+                        if count != 0 {
+                            for (id, label, tooltip, control, delta) in [
+                                (
+                                    "session-history-previous",
+                                    "↑",
+                                    self.locale.text("上一处", "Previous match"),
+                                    11,
+                                    -1,
+                                ),
+                                (
+                                    "session-history-next",
+                                    "↓",
+                                    self.locale.text("下一处", "Next match"),
+                                    12,
+                                    1,
+                                ),
+                            ] {
+                                nav = nav.child(
+                                    self.button(
+                                        div()
+                                            .id(id)
+                                            .size(px(25.))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded(px(5.))
+                                            .cursor_pointer()
+                                            .hover(move |style| {
+                                                style.bg(wash(0xffffff12, 0x30415712))
+                                            })
+                                            .tooltip(move |_, cx| {
+                                                cx.new(|_| CardTooltip(tooltip.into())).into()
+                                            })
+                                            .child(label),
+                                        &self.dialog_controls[control],
+                                        move |this, _, cx| this.step_history_match(delta, cx),
+                                        cx,
+                                    ),
+                                );
+                            }
+                        }
+                        search.child(nav)
+                    },
+                )
+        } else {
+            content_search
+        };
 
         let provider_name = match state.provider {
             "codex" => "Codex",
@@ -13527,8 +14456,24 @@ impl Workspace {
             "antigravity" => "Antigravity",
             _ => "Claude Code",
         };
-        let mut rows = Vec::with_capacity(sessions.len());
-        for session in &sessions {
+        let row_height = state.list_row_height();
+        let all_loaded = !state.loading_list && !state.has_more_sessions && !sessions.is_empty();
+        // Panel borders, header/footer, and the list's filter and count.
+        let list_viewport =
+            px(panel_height - 2. - 2. * 58. - 14. - 34. - 32. - if all_loaded { 24. } else { 0. });
+        let tail_height = px(if state.loading_list || state.has_more_sessions {
+            30.
+        } else {
+            0.
+        });
+        // GPUI clamps wheel overscroll after this render, so use the same
+        // logical extent when deciding which rows to materialize.
+        let max_top =
+            (row_height * sessions.len() + tail_height + px(12.) - list_viewport).max(px(0.));
+        let top = (-state.list_scroll.offset().y).clamp(px(0.), max_top);
+        let range = loader_row_range(sessions.len(), top, list_viewport, row_height);
+        let mut rows = Vec::with_capacity(range.len());
+        for session in &sessions[range.clone()] {
             let is_selected = state.selected.as_deref() == Some(session.id.as_str());
             let row_session_id = session.id.clone();
             let model = session
@@ -13553,6 +14498,10 @@ impl Workspace {
                     self.locale
                         .text("已载入当前卡片", "Loaded in this card")
                         .to_owned()
+                } else if owner.title.trim().is_empty() {
+                    self.locale
+                        .text("已载入另一张卡", "Loaded in another card")
+                        .to_owned()
                 } else {
                     match self.locale {
                         InterfaceLocale::Chinese => format!("已载入“{}”", owner.title),
@@ -13567,6 +14516,7 @@ impl Workspace {
                         session.id
                     )))
                     .w_full()
+                    .h(row_height - px(6.))
                     .flex_none()
                     .mb(px(6.))
                     .border_1()
@@ -13688,13 +14638,22 @@ impl Workspace {
                     _ => {}
                 }
             }))
-            .children(rows);
+            .children((range.start > 0).then(|| div().flex_none().h(row_height * range.start)))
+            .children(rows)
+            .children((range.end < sessions.len()).then(|| {
+                div()
+                    .flex_none()
+                    .h(row_height * (sessions.len() - range.end))
+            }));
         let list_results = if state.loading_list {
             list_results.child(
                 div()
                     .w_full()
-                    .py(px(7.))
-                    .text_center()
+                    .h(px(30.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
                     .text_size(px(9.))
                     .text_color(tone(0x8490a0, 0x748091))
                     .child(
@@ -13818,19 +14777,19 @@ impl Workspace {
                     ),
             )
             .child(list_results)
-            .when(
-                !state.loading_list && !state.has_more_sessions && !sessions.is_empty(),
-                |list| {
-                    list.child(
-                        div()
-                            .py(px(7.))
-                            .text_size(px(9.))
-                            .text_center()
-                            .text_color(tone(0x8490a0, 0x748091))
-                            .child(self.locale.text("已加载全部", "All loaded")),
-                    )
-                },
-            );
+            .when(all_loaded, |list| {
+                list.child(
+                    div()
+                        .h(px(24.))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(9.))
+                        .text_color(tone(0x8490a0, 0x748091))
+                        .child(self.locale.text("已加载全部", "All loaded")),
+                )
+            });
 
         let preview_title = if state.history && is_codex {
             provider_name.to_owned()
@@ -13916,7 +14875,7 @@ impl Workspace {
                             .child(ui_text(meta).normal_line_height())
                     })),
             )
-            .when(!state.history, |header| header.child(content_search));
+            .child(preview_search);
 
         let mut events = div()
             .id("session-loader-events")
@@ -13967,10 +14926,12 @@ impl Workspace {
                 .text_size(px(9.))
                 .text_color(tone(0x8490a0, 0x748091))
                 .child(
-                    ui_text(
+                    ui_text(if state.history && !state.loading_earlier {
+                        self.locale.text("载入更早内容", "Load earlier content")
+                    } else {
                         self.locale
-                            .text(SESSION_LOADER_LOADING_EARLIER, "Loading earlier content…"),
-                    )
+                            .text(SESSION_LOADER_LOADING_EARLIER, "Loading earlier content…")
+                    })
                     .normal_line_height(),
                 );
             let pill = if state.loading_earlier {
@@ -14002,15 +14963,37 @@ impl Workspace {
         } else {
             "Consolas"
         };
-        for event in &state.events {
+        let mut history_matches = state.history_matches.iter().enumerate().peekable();
+        for (position, event) in state.events.iter().enumerate() {
             let (border, background) = match event.kind.as_str() {
                 "tool" => (tone(0x4c3d5a, 0xd8cae4), tone(0x241f2a, 0xf7f2fb)),
                 "user" => (tone(0x343b46, 0xd8dee6), tone(0x252b32, 0xeef2f6)),
                 _ => (tone(0x343b46, 0xd8dee6), tone(0x20242a, 0xf7f9fb)),
             };
-            let matches = !remote_catalog
-                && !local_content_query.is_empty()
-                && event.text.to_lowercase().contains(&local_content_query);
+            let history_hit = history_matches.next_if(|(_, hit)| hit.position == position);
+            let active = history_hit.is_some_and(|(index, _)| index == state.active_history_match);
+            let matches = active
+                || !state.history
+                    && !remote_catalog
+                    && !local_content_query.is_empty()
+                    && event.text.to_lowercase().contains(&local_content_query);
+            let text = if let Some((_, hit)) = history_hit {
+                let highlight = HighlightStyle {
+                    background_color: Some(
+                        wash(
+                            if active { 0xb57821aa } else { 0xb578215c },
+                            if active { 0xffc262db } else { 0xffd888a8 },
+                        )
+                        .into(),
+                    ),
+                    ..Default::default()
+                };
+                StyledText::new(event.text.clone())
+                    .with_highlights(hit.ranges.iter().cloned().map(|range| (range, highlight)))
+                    .into_any_element()
+            } else {
+                ui_text(event.text.clone()).into_any_element()
+            };
             let assistant = if remote_catalog {
                 provider_name
             } else {
@@ -14076,7 +15059,7 @@ impl Workspace {
                                     .line_height(px(16.))
                                     .text_color(tone(0xd9dde3, 0x394250))
                                     .whitespace_normal()
-                                    .child(ui_text(event.text.clone())),
+                                    .child(text),
                             ),
                     ),
             );
@@ -14198,7 +15181,7 @@ impl Workspace {
                     )
                 },
             );
-        let hits_panel = (remote_catalog && !content_empty).then_some(hits_panel);
+        let hits_panel = (!state.history && remote_catalog && !content_empty).then_some(hits_panel);
 
         let preview = div()
             .id("session-loader-preview")
@@ -14225,6 +15208,10 @@ impl Workspace {
             self.locale
                 .text(SESSION_LOADER_LOADING, "Loading…")
                 .to_owned()
+        } else if state.error.as_deref().is_some_and(|error| {
+            error.starts_with(LOADER_EXIT_NOT_SAVED) || error.starts_with(LOADER_EXIT_NOT_SAVED_ZH)
+        }) {
+            self.locale.text("重试载入", "Retry loading").to_owned()
         } else if remote_catalog && state.confirm_running {
             self.locale
                 .text("结束当前进程并载入", "End the current run and load")
@@ -14257,13 +15244,17 @@ impl Workspace {
             self.button(
                 primary.cursor_pointer(),
                 &self.dialog_controls[2],
-                |this, _, cx| this.submit_session_loader(cx),
+                Self::submit_session_loader,
                 cx,
             )
         } else {
             primary
                 .opacity(0.48)
                 .cursor(CursorStyle::OperationNotAllowed)
+                .when_some(owner_notice.clone(), |button, notice| {
+                    button
+                        .tooltip(move |_, cx| cx.new(|_| CardTooltip(notice.clone().into())).into())
+                })
         };
 
         let footer = div()
@@ -14294,8 +15285,24 @@ impl Workspace {
                             .text_size(px(10.))
                             .text_color(tone(0xff8276, 0xa13d39))
                             .child(ui_text(error.clone()).normal_line_height())
+                            .tooltip({
+                                let error = error.clone();
+                                move |_, cx| cx.new(|_| CardTooltip(error.clone().into())).into()
+                            })
                     }))
-                    .when(confirm_warning, |left| {
+                    .when_some(owner_notice, |left, notice| {
+                        left.child(
+                            div()
+                                .id("session-loader-occupied")
+                                .text_size(px(10.))
+                                .text_color(tone(0xe5af52, 0x90601b))
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .child(ui_text(notice).normal_line_height()),
+                        )
+                    })
+                    .when(confirm_warning && state.blocked_owner().is_none(), |left| {
                         left.child(
                             div()
                                 .w_full()
@@ -14565,7 +15572,94 @@ impl Workspace {
             )
             .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
             .child(panel)
+            .children(state.confirmation.as_ref().map(|confirmation| {
+                self.render_loader_confirmation(confirmation, viewport_width, dark, cx)
+            }))
             .into_any_element()
+    }
+
+    fn render_loader_confirmation(
+        &self,
+        confirmation: &LoaderConfirmation,
+        viewport_width: f32,
+        dark: bool,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let close = self.button(
+            tabs_ui::dialog_close("session-loader-confirm-close", dark),
+            &self.dialog_controls[13],
+            Self::cancel_loader_confirmation,
+            cx,
+        );
+        let cancel = self.button(
+            tabs_ui::dialog_button(
+                "session-loader-confirm-cancel",
+                self.locale.text("取消", "Cancel"),
+                false,
+                false,
+                dark,
+            )
+            .children(workspace_wiring::wiring_probe_bounds(
+                "session-loader-confirm-cancel".into(),
+            )),
+            &self.dialog_controls[14],
+            Self::cancel_loader_confirmation,
+            cx,
+        );
+        let confirm = self.button(
+            tabs_ui::dialog_button(
+                "session-loader-confirm-continue",
+                self.locale.text("继续", "Continue"),
+                true,
+                false,
+                dark,
+            )
+            .children(workspace_wiring::wiring_probe_bounds(
+                "session-loader-confirm-continue".into(),
+            )),
+            &self.dialog_controls[15],
+            Self::confirm_loader_load,
+            cx,
+        );
+        let body = tabs_ui::dialog_body(dark)
+            .gap(px(8.))
+            .children(confirmation.takeover_from.as_ref().map(|_| {
+                ui_text(self.locale.text(
+                    "该会话已在另一张卡中打开，继续会接管它",
+                    "This session is already open in another card; continuing will take it over",
+                ))
+                .pre_line()
+            }))
+            .children(confirmation.running.then(|| {
+                ui_text(self.locale.text(
+                    "这个会话正在运行，载入历史会结束当前进程",
+                    "This session is running; loading history will end the current process",
+                ))
+                .pre_line()
+            }));
+        tabs_ui::dialog_overlay("session-loader-confirm-overlay")
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    this.cancel_loader_confirmation(window, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+            .child(
+                tabs_ui::dialog_panel(viewport_width, dark)
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
+                        tabs_ui::dialog_header()
+                            .child(tabs_ui::dialog_title(
+                                self.locale.text("载入会话", "Load session"),
+                                dark,
+                            ))
+                            .child(close),
+                    )
+                    .child(body)
+                    .child(tabs_ui::dialog_footer().child(cancel).child(confirm)),
+            )
     }
 
     fn render_fork_header(
@@ -15359,6 +16453,13 @@ impl Workspace {
                     self.button(
                         tabs_ui::overflow_item(SharedString::from(format!("hidden-{id}")), active)
                             .child(tabs_ui::overflow_title(self.scene_title(scene), active))
+                            .when(self.notifications.unread_for_scene(&id) > 0, |item| {
+                                item.child(tabs_ui::overflow_dot().relative().children(
+                                    workspace_wiring::wiring_probe_bounds(format!(
+                                        "unread-hidden-tab-{id}"
+                                    )),
+                                ))
+                            })
                             .when(active, |item| item.child(tabs_ui::overflow_check())),
                         focus,
                         move |this, _, cx| {
@@ -16551,6 +17652,7 @@ impl Render for Workspace {
             self.carousel_drag = None;
             self.leave_carousel(cx);
         }
+        self.carousel_mounted_terminals.clear();
         let level_focus = self.level_focus().map(str::to_owned);
         self.refresh_project_instructions(window, cx);
         let active_level_focus = self.active_level_focus().map(str::to_owned);
@@ -16639,6 +17741,17 @@ impl Render for Workspace {
         if !was_cruising {
             self.advance_edge_browse(now, viewport_width, cx);
         }
+        let team_cards = if in_split || self.wiring.board_open {
+            Vec::new()
+        } else {
+            self.canvas_team_members()
+        };
+        let display_order: Vec<_> = self
+            .order
+            .iter()
+            .cloned()
+            .chain(team_cards.iter().map(|member| member.id.clone()))
+            .collect();
         let mut widths = HashMap::new();
         let mut positions = HashMap::new();
         let mut left = 10.;
@@ -16647,11 +17760,14 @@ impl Render for Workspace {
         let mut preview_geometry = None;
         let mut moving = false;
         let width_duration = if reduced_motion() { 1. } else { 380. };
-        for id in &self.order {
+        for id in &display_order {
             let selected = level_focus.as_ref() == Some(id);
             let hovered = self.hovered.as_ref() == Some(id);
             let rule = layout.width_rule(selected, hovered);
-            let motion = self.card_motion.get_mut(id).expect("mounted card motion");
+            let motion = self
+                .card_motion
+                .entry(id.clone())
+                .or_insert_with(|| CardMotion::new(selected));
             motion.drawn_lift = motion.lift_for_frame(now, in_split);
             motion.retarget_elevation(CardElevation::for_card(selected, hovered), now);
             let motion_width = motion.width.get_or_insert_with(|| CardWidth::new(rule));
@@ -16824,11 +17940,19 @@ impl Render for Workspace {
         for id in visible_deferred {
             self.request_deferred_preview(&id);
         }
+        let terminal_range =
+            carousel_terminal_range(&self.card_geometry, carousel_left, viewport_width);
         let mut badge_tooltip = None;
         let mut split_cards = HashMap::new();
         let mut stacked_cards = Vec::new();
         let dark = self.wiring_dark();
-        for id in self.order.iter().filter(|_| !self.wiring.board_open) {
+        let animate_notifications =
+            self.notifications.unread().next().is_some() && !reduced_motion();
+        for (index, id) in display_order
+            .iter()
+            .enumerate()
+            .filter(|_| !self.wiring.board_open)
+        {
             let node = session_levels::node(session_levels::nodes(&self.graph), id);
             let selected = level_focus.as_ref() == Some(id);
             let width = match &split_widths {
@@ -16842,12 +17966,23 @@ impl Render for Workspace {
             let weights = motion.shadow_weights(now);
             let elevation = motion.shadow_target;
             let lift = motion.drawn_lift;
+            let unread = self.notifications.session_has_unread(id);
+            let notification_badge =
+                || unread.then(|| notification_card_badge(self.locale, animate_notifications));
             let place_card = |card: Stateful<Div>| {
                 let glass = dark && selected;
                 let card = card.children(
                     (glass || weights[2] > 0.).then(|| card_reflection(dark, glass, weights[2])),
                 );
-                let shadows = card_shadows(dark, weights);
+                let card = card.children(unread.then(|| {
+                    notification_card_frame(CARD_RADIUS, animate_notifications).children(
+                        workspace_wiring::wiring_probe_bounds(format!("unread-card-{id}")),
+                    )
+                }));
+                let mut shadows = card_shadows(dark, weights);
+                if unread {
+                    shadows.push(notification_card_glow());
+                }
                 if in_split {
                     card.shadow(shadows).into_any_element()
                 } else {
@@ -16880,13 +18015,25 @@ impl Render for Workspace {
             let title = node
                 .and_then(|node| node["title"].as_str())
                 .unwrap_or("Shell");
-            if let Some(node) = node.filter(|node| Self::team_member_node(node)) {
-                let card = place_card(card.child(self.render_team_member(id, node)));
+            let live_member = index
+                .checked_sub(self.order.len())
+                .and_then(|index| team_cards.get(index));
+            let member_summary = live_member
+                .map(|member| &member.summary)
+                .or_else(|| node.filter(|node| Self::team_member_node(node)));
+            if let Some(summary) = member_summary {
+                let card = place_card(card.child(self.render_team_member(id, summary)));
                 stacked_cards.push((elevation, card));
                 continue;
             }
             if self.wiring.is_detached(id) {
-                let card = place_card(card.child(self.render_detached_placeholder(id, title, cx)));
+                let card =
+                    place_card(
+                        card.child(self.render_detached_placeholder(id, title, cx))
+                            .children(notification_badge().map(|badge| {
+                                div().absolute().top(px(10.)).left(px(12.)).child(badge)
+                            })),
+                    );
                 if in_split {
                     split_cards.insert(id.clone(), card);
                 } else {
@@ -16900,6 +18047,9 @@ impl Render for Workspace {
                         Some(node),
                         title,
                         &palette,
+                        self.locale,
+                        None,
+                        None,
                     ))
                 } else {
                     card.child(self.stopped_session_card(id, node, cx))
@@ -16907,9 +18057,26 @@ impl Render for Workspace {
                 stacked_cards.push((elevation, place_card(card)));
                 continue;
             }
-            let Some(terminal) = self.terminals.get(id) else {
-                continue;
-            };
+            // Keep the surface entity and its frame subscription alive. Only the
+            // GPUI child leaves the tree, so the next mount has the latest output.
+            let terminal = self.terminals.get(id).cloned();
+            let compact = compact && terminal.is_some();
+            let keep_terminal = selected
+                || self.focused.as_ref() == Some(id)
+                || terminal
+                    .as_ref()
+                    .is_some_and(|surface| surface.read(cx).focus.is_focused(window))
+                || self.restoring_sessions.contains(id)
+                || matches!(
+                    self.recovery.get(id),
+                    Some(RecoveryState::Restoring | RecoveryState::Restarting(_))
+                )
+                || node.is_some_and(|node| {
+                    Self::provider_restore_state(node) == Some("restoring")
+                        || fork_progress_copy(node).is_some()
+                });
+            let mount_terminal = terminal.is_some()
+                && (in_split || keep_terminal || (!compact && terminal_range.contains(&index)));
             // The badge measures its painted bounds so pointer-down can be
             // excluded from the card's capture-phase activation even before
             // the first hover event reaches the freshly rendered badge.
@@ -16961,9 +18128,13 @@ impl Render for Workspace {
                 }
                 Some(self.child_badge_button(id, badge, badge_bounds.clone(), &focus, cx))
             });
-            let focus = terminal.read(cx).focus.clone();
+            let focus = terminal
+                .as_ref()
+                .map(|surface| surface.read(cx).focus.clone());
             let restore_hidden = self.provider_restore_hides_terminal(id);
-            let capture_terminal = terminal.clone();
+            let capture_terminal = terminal
+                .clone()
+                .filter(|_| mount_terminal && !compact && !restore_hidden);
             let capture_session = id.clone();
             let session_id = id.clone();
             // Read the bounds from the frame that registered the handlers, including lift and scroll.
@@ -16973,7 +18144,8 @@ impl Render for Workspace {
             let action_bounds = CardActionBounds::default();
             let capture_actions = action_bounds.clone();
             #[cfg(target_os = "macos")]
-            let water = if recovery_water_available
+            let water = if terminal.is_some()
+                && recovery_water_available
                 && (!narrow || selected)
                 && positions[id] < carousel_left + viewport_width
                 && positions[id] + widths[id] > carousel_left
@@ -17011,6 +18183,7 @@ impl Render for Workspace {
             #[cfg(not(target_os = "macos"))]
             let has_water = false;
             let loading_badge = node
+                .filter(|_| terminal.is_some())
                 .and_then(|node| {
                     let awaiting_first_frame = !waiting
                         && self.can_show_loading_badge()
@@ -17046,16 +18219,16 @@ impl Render for Workspace {
                                 .borrow()
                                 .iter()
                                 .any(|bounds| bounds.contains(&event.position))
-                            || (!compact
-                                && !restore_hidden
-                                && capture_terminal.read(cx).scrollbar_hit(event.position))
+                            || capture_terminal.as_ref().is_some_and(|surface| {
+                                surface.read(cx).scrollbar_hit(event.position)
+                            })
                         {
                             return;
                         }
                         if !in_split
-                            && (compact
-                                || restore_hidden
-                                || !capture_terminal.read(cx).contains_position(event.position))
+                            && !capture_terminal.as_ref().is_some_and(|surface| {
+                                surface.read(cx).contains_position(event.position)
+                            })
                         {
                             this.carousel_drag =
                                 Some((event.position, this.carousel_scroll.offset().x));
@@ -17076,8 +18249,9 @@ impl Render for Workspace {
                         if this.active_path_valid()
                             && !this.recovery_blocked(&session_id)
                             && !this.provider_restore_hides_terminal(&session_id)
+                            && let Some(focus) = &focus
                         {
-                            window.focus(&focus);
+                            window.focus(focus);
                         }
                     }),
                 )
@@ -17091,20 +18265,22 @@ impl Render for Workspace {
                     .size_full(),
                 );
             let fork_failure = node
-                .filter(|_| !compact && self.read_only.is_none())
+                .filter(|_| terminal.is_some() && !compact && self.read_only.is_none())
                 .and_then(|node| self.render_fork_failure(id, node, &action_bounds, cx));
             let fork_progress = node
                 .filter(|_| self.read_only.is_none())
                 .and_then(fork_progress_copy);
             let provider_banner = node
                 .filter(|_| {
-                    self.read_only.is_none()
+                    terminal.is_some()
+                        && self.read_only.is_none()
                         && !compact
                         && fork_failure.is_none()
                         && fork_progress.is_none()
                 })
                 .and_then(|node| self.provider_restore_banner(id, node));
             let card = if !compact
+                && terminal.is_some()
                 && !self.environment_unavailable(id)
                 && fork_failure.is_none()
                 && fork_progress.is_none()
@@ -17205,8 +18381,18 @@ impl Render for Workspace {
                         ),
                 )
                 .children(badge.map(|badge| badge.absolute().top(px(8.)).right(px(8.))))
+                .children(
+                    notification_badge()
+                        .map(|badge| div().absolute().top(px(10.)).left(px(12.)).child(badge)),
+                )
             } else if compact {
                 let target = id.clone();
+                let surface = terminal
+                    .clone()
+                    .filter(|_| mount_terminal && !restore_hidden);
+                if surface.is_some() {
+                    self.carousel_mounted_terminals.insert(id.clone());
+                }
                 card.on_mouse_down(
                     MouseButton::Right,
                     cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -17214,7 +18400,22 @@ impl Render for Workspace {
                         cx.stop_propagation();
                     }),
                 )
-                .child(Self::compact_session_summary_themed(node, title, &palette))
+                .children(surface.map(|terminal| {
+                    let mut surface = div().absolute().inset_0().child(terminal);
+                    surface.style().visibility = Some(Visibility::Hidden);
+                    surface
+                }))
+                .child(
+                    Self::compact_session_summary_themed(
+                        node,
+                        title,
+                        &palette,
+                        self.locale,
+                        self.compact_recovery_status(id, node),
+                        notification_badge(),
+                    )
+                    .relative(),
+                )
             } else {
                 let mut actions = Self::session_card_actions()
                     .on_children_prepainted({
@@ -17224,23 +18425,24 @@ impl Render for Workspace {
                     .children(badge);
                 if let Some(node) = node {
                     actions = actions.children(
-                        card_header_actions(node, self.scene_membership_count() > 1).filter_map(
-                            |action| match action {
-                                CardHeaderAction::History => self.card_history_button(id, cx),
-                                CardHeaderAction::Load => {
-                                    Some(self.session_loader_button(id, node, cx))
-                                }
-                                CardHeaderAction::ForkChild => {
-                                    self.render_fork_header(id, ForkPlacement::Child, cx)
-                                }
-                                CardHeaderAction::ForkSibling => {
-                                    self.render_fork_header(id, ForkPlacement::Sibling, cx)
-                                }
-                                CardHeaderAction::Remove => {
-                                    Some(self.remove_card_button(id, node, cx))
-                                }
-                            },
-                        ),
+                        card_header_actions(
+                            node,
+                            self.scene_membership_count() > 1 || terminal.is_none(),
+                        )
+                        .filter(|action| terminal.is_some() || *action == CardHeaderAction::Remove)
+                        .filter_map(|action| match action {
+                            CardHeaderAction::History => self.card_history_button(id, cx),
+                            CardHeaderAction::Load => {
+                                Some(self.session_loader_button(id, node, cx))
+                            }
+                            CardHeaderAction::ForkChild => {
+                                self.render_fork_header(id, ForkPlacement::Child, cx)
+                            }
+                            CardHeaderAction::ForkSibling => {
+                                self.render_fork_header(id, ForkPlacement::Sibling, cx)
+                            }
+                            CardHeaderAction::Remove => Some(self.remove_card_button(id, node, cx)),
+                        }),
                     );
                 }
                 card.child(
@@ -17249,6 +18451,10 @@ impl Render for Workspace {
                         actions,
                         &palette,
                         header_loading,
+                        node.filter(|_| !in_split).and_then(|node| {
+                            self.card_environment_badges(id, node, width, &palette)
+                        }),
+                        notification_badge(),
                     )
                     .id(SharedString::from(format!("session-header-{id}")))
                     .children(workspace_wiring::wiring_probe_bounds(format!(
@@ -17280,7 +18486,7 @@ impl Render for Workspace {
                     )
                 })
                 .children(self.render_card_egress(id, cx))
-                .children(self.render_live_teammates(id))
+                .children(in_split.then(|| self.render_live_teammates(id)).flatten())
                 .children(provider_banner.map(|banner| {
                     self.render_provider_restore_banner(
                         id,
@@ -17291,23 +18497,21 @@ impl Render for Workspace {
                     )
                 }))
                 .children(
-                    (self.read_only.is_none() && fork_failure.is_none() && fork_progress.is_none())
-                        .then(|| {
-                            node.and_then(|node| self.start_failure_card(id, node))
-                                .map(|card| {
-                                    self.render_start_failure_card(
-                                        id,
-                                        card,
-                                        width,
-                                        &action_bounds,
-                                        cx,
-                                    )
-                                })
-                        })
-                        .flatten(),
+                    (terminal.is_some()
+                        && self.read_only.is_none()
+                        && fork_failure.is_none()
+                        && fork_progress.is_none())
+                    .then(|| {
+                        node.and_then(|node| self.start_failure_card(id, node))
+                            .map(|card| {
+                                self.render_start_failure_card(id, card, width, &action_bounds, cx)
+                            })
+                    })
+                    .flatten(),
                 )
                 .children(
-                    (!restore_hidden
+                    (terminal.is_some()
+                        && !restore_hidden
                         && fork_failure.is_none()
                         && fork_progress.is_none()
                         && !self.is_deferred(id)
@@ -17317,12 +18521,26 @@ impl Render for Workspace {
                     .then(|| self.render_history_gap_notice(id, &action_bounds, window, cx))
                     .flatten(),
                 )
-                .child(if let Some(failure) = fork_failure {
+                .child(if terminal.is_none() {
+                    self.canvas_empty_message(
+                        "terminal-unavailable",
+                        self.locale.text(
+                            "会话终端暂时不可用",
+                            "This session's terminal is unavailable",
+                        ),
+                    )
+                } else if let Some(failure) = fork_failure {
                     failure.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 } else {
                     let environment_overlay = node
                         .filter(|_| fork_progress.is_none())
                         .and_then(|node| self.environment_card_overlay(id, node, window, cx));
+                    let surface = terminal
+                        .clone()
+                        .filter(|_| mount_terminal && !restore_hidden);
+                    if !in_split && surface.is_some() {
+                        self.carousel_mounted_terminals.insert(id.clone());
+                    }
                     let body = div()
                         .flex_1()
                         .min_h_0()
@@ -17330,7 +18548,17 @@ impl Render for Workspace {
                         .children(workspace_wiring::wiring_probe_bounds(format!(
                             "terminal-body-{id}"
                         )))
-                        .children((!restore_hidden).then(|| terminal.clone()))
+                        .children(surface)
+                        .children((!mount_terminal).then(|| {
+                            Self::compact_session_summary_themed(
+                                node,
+                                title,
+                                &palette,
+                                self.locale,
+                                self.compact_recovery_status(id, node),
+                                None,
+                            )
+                        }))
                         .children(
                             self.history_view
                                 .as_ref()
@@ -17383,10 +18611,12 @@ impl Render for Workspace {
             {
                 let clock = self.motion_clock;
                 let session = id.clone();
+                let terminal_mounted = self.carousel_mounted_terminals.contains(id);
                 card.child(canvas(|_,_,_|(), move |bounds,_,_,_| {
                     record_motion(&trace,&serde_json::json!({"kind":"paint","renderAt":now,"paintAt":clock.elapsed().as_secs_f64()*1000.,
                         "session":session,"focused":selected,"x":f32::from(bounds.origin.x),"y":f32::from(bounds.origin.y),
-                        "width":f32::from(bounds.size.width),"height":f32::from(bounds.size.height),"moving":moving}));
+                        "width":f32::from(bounds.size.width),"height":f32::from(bounds.size.height),"moving":moving,
+                        "terminalMounted":terminal_mounted}));
                 }).absolute().top_0().left_0().size_full())
             } else {
                 card
@@ -17410,7 +18640,7 @@ impl Render for Workspace {
             // GPUI tracks the direct children as logical scroll items. The
             // first slot hosts the painted stack without sizing or clipping it.
             let mut stack = Some(stack);
-            carousel = carousel.children(self.order.iter().map(|id| {
+            carousel = carousel.children(display_order.iter().map(|id| {
                 div()
                     .relative()
                     .flex_none()
@@ -17420,21 +18650,29 @@ impl Render for Workspace {
             }));
         }
         if self.order.is_empty() {
-            carousel = carousel.child(
-                div()
-                    .flex_1()
-                    .h_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_size(px(12.))
-                    .text_color(if palette.terminal == Theme::LIGHT {
-                        rgb(0x8a919b)
-                    } else {
-                        rgba(palette.workspace.muted)
+            let workspace_empty = self.hierarchy.as_ref().is_some_and(|hierarchy| {
+                hierarchy.task.is_none()
+                    && hierarchy.workspace.as_ref().is_some_and(|workspace| {
+                        !self
+                            .tasks
+                            .iter()
+                            .any(|task| task.workspace_id == workspace.id)
                     })
-                    .child("当前画布没有活跃会话"),
-            );
+            });
+            let (id, label) = if workspace_empty {
+                (
+                    "workspace-no-tasks",
+                    self.locale
+                        .text("这个工作区还没有事项", "This workspace has no tasks"),
+                )
+            } else {
+                (
+                    "canvas-no-sessions",
+                    self.locale
+                        .text("当前画布没有活跃会话", "No active sessions on this canvas"),
+                )
+            };
+            carousel = carousel.child(self.canvas_empty_message(id, label));
         }
         #[cfg(target_os = "macos")]
         {
@@ -17730,6 +18968,15 @@ impl Render for Workspace {
                         crate::macos::window_diag::workspace_painted(window, cx);
                         let _ = geometry_view.update(cx, |this, cx| {
                             let overflow = this.tab_scroll.max_offset().width > px(4.);
+                            let hidden_unread = overflow
+                                && this.scenes.iter().enumerate().any(|(i, scene)| {
+                                    this.notifications.unread_for_scene(&scene.id) > 0
+                                        && this.scene_tab_hidden(i)
+                                });
+                            if hidden_unread != this.tab_overflow_has_unread {
+                                this.tab_overflow_has_unread = hidden_unread;
+                                cx.notify();
+                            }
                             if overflow != this.tab_overflow {
                                 this.tab_overflow = overflow;
                                 if !overflow {
@@ -18009,12 +19256,7 @@ impl Workspace {
     /// the frozen 6px dot to the numeric badge required by this round.
     fn notification_bell(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = self.theme_palette().sidebar;
-        let unread = self
-            .notifications
-            .entries
-            .iter()
-            .filter(|entry| !entry.read)
-            .count();
+        let unread = self.notifications.unread().count();
         let badge = (unread > 0).then(|| {
             div()
                 .id("notification-bell-badge")
@@ -19748,6 +20990,84 @@ fn card_shadows(dark: bool, weights: [f32; 3]) -> Vec<BoxShadow> {
         .collect()
 }
 
+fn carousel_terminal_range(
+    cards: &[(String, f64, f64)],
+    left: f64,
+    width: f64,
+) -> std::ops::Range<usize> {
+    let first = cards.partition_point(|(_, x, card_width)| x + card_width <= left);
+    let last = cards.partition_point(|(_, x, _)| *x < left + width);
+    first.saturating_sub(1)..last.saturating_add(1).min(cards.len())
+}
+
+fn sidebar_glass_highlight(highlight: u32, pointer: Rc<Cell<Option<Point<Pixels>>>>) -> Div {
+    const WIDTH: f32 = 680.;
+    const HEIGHT: f32 = 520.;
+    static GLOW: std::sync::OnceLock<Arc<RenderImage>> = std::sync::OnceLock::new();
+    let glow = GLOW.get_or_init(|| {
+        let pixels = image::RgbaImage::from_fn(256, 196, |x, y| {
+            let x = (x as f32 / 255. - 0.5) * WIDTH;
+            let y = (y as f32 / 195. - 0.5) * HEIGHT;
+            let falloff = |rx: f32, ry: f32| (1. - (x / rx).hypot(y / ry)).max(0.);
+            let alpha = 255. * (0.43 * falloff(231., 177.) + 0.57 * falloff(130., 95.));
+            image::Rgba([255, 255, 255, alpha.round() as u8])
+        });
+        Arc::new(RenderImage::new(vec![image::Frame::new(pixels)]))
+    });
+    let animate = !reduced_motion();
+    div()
+        .absolute()
+        .inset_0()
+        .opacity(Hsla::from(rgba(highlight)).a + 0.14)
+        .child(
+            canvas(
+                |_, _, _| (),
+                move |bounds, _, window, _| {
+                    let center = pointer
+                        .get()
+                        .filter(|position| {
+                            animate && window.is_window_active() && bounds.contains(position)
+                        })
+                        .unwrap_or_else(|| {
+                            bounds.origin + point(bounds.size.width * 0.44, px(118.))
+                        });
+                    if animate {
+                        let moving_pointer = pointer.clone();
+                        window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, _| {
+                            if phase == DispatchPhase::Capture {
+                                let next =
+                                    bounds.contains(&event.position).then_some(event.position);
+                                if moving_pointer.replace(next) != next {
+                                    window.refresh();
+                                }
+                            }
+                        });
+                        window.on_mouse_event(move |_: &MouseExitEvent, phase, window, _| {
+                            if phase == DispatchPhase::Capture && pointer.take().is_some() {
+                                window.refresh();
+                            }
+                        });
+                    }
+                    let image_bounds = Bounds::new(
+                        center - point(px(WIDTH / 2.), px(HEIGHT / 2.)),
+                        size(px(WIDTH), px(HEIGHT)),
+                    );
+                    // This canvas is a paint-only layer behind the sidebar controls.
+                    window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                        let _ = window.paint_image(
+                            image_bounds,
+                            Corners::default(),
+                            glow.clone(),
+                            0,
+                            false,
+                        );
+                    });
+                },
+            )
+            .size_full(),
+        )
+}
+
 fn carousel_card_shadow(shadows: Vec<BoxShadow>) -> Canvas<()> {
     canvas(
         |_, _, _| (),
@@ -19860,6 +21180,141 @@ fn loading_badge_ring(spread: f32) -> BoxShadow {
         offset: point(px(0.), px(0.)),
         blur_radius: px(0.),
         spread_radius: px(spread),
+    }
+}
+
+fn notification_card_glow() -> BoxShadow {
+    BoxShadow {
+        color: Hsla::from(rgb(0x2588ff)).alpha(0.32),
+        offset: point(px(0.), px(0.)),
+        blur_radius: px(9.),
+        spread_radius: px(0.),
+    }
+}
+
+fn notification_window_active(window: &Window) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use cocoa::{
+            appkit::NSApp,
+            base::{BOOL, YES, id, nil},
+        };
+        use objc::{msg_send, sel, sel_impl};
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let Ok(handle) = HasWindowHandle::window_handle(window) else {
+            return false;
+        };
+        let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+            return false;
+        };
+        // Read the current AppKit key window. GPUI's cached activation can lag
+        // while a runtime event and an OS focus change are being dispatched.
+        unsafe {
+            let view = handle.ns_view.as_ptr() as id;
+            let native_window: id = msg_send![view, window];
+            let app_active: BOOL = msg_send![NSApp(), isActive];
+            native_window != nil && app_active == YES && {
+                let key: BOOL = msg_send![native_window, isKeyWindow];
+                key == YES
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        window.is_window_active()
+    }
+}
+
+fn notification_arrival_ease(progress: f32) -> f32 {
+    let coordinate = |t: f32, a: f32, b: f32| {
+        let inverse = 1. - t;
+        3. * inverse * inverse * t * a + 3. * inverse * t * t * b + t * t * t
+    };
+    let (mut low, mut high) = (0., 1.);
+    for _ in 0..12 {
+        let t = (low + high) * 0.5;
+        if coordinate(t, 0.16, 0.3) < progress {
+            low = t;
+        } else {
+            high = t;
+        }
+    }
+    coordinate((low + high) * 0.5, 1., 1.)
+}
+
+fn notification_card_frame(radius: Pixels, animate: bool) -> Div {
+    let inner = div()
+        .absolute()
+        .top(px(1.))
+        .bottom(px(1.))
+        .left(px(1.))
+        .right(px(1.))
+        .rounded((radius - px(1.)).max(px(0.)))
+        .border_1()
+        .border_color(rgba(0x69b5fff2));
+    let inner = if animate {
+        inner
+            .with_animations(
+                "notification-frame-arrival",
+                vec![Animation::new(Duration::from_millis(720)); 2],
+                |inner, round, progress| {
+                    let opacity = if round == 1 && progress >= 1. {
+                        1.
+                    } else if progress < 0.55 {
+                        0.5 + 0.5 * notification_arrival_ease(progress / 0.55)
+                    } else {
+                        1. - 0.2 * notification_arrival_ease((progress - 0.55) / 0.45)
+                    };
+                    inner.opacity(opacity)
+                },
+            )
+            .into_any_element()
+    } else {
+        inner.into_any_element()
+    };
+    div()
+        .absolute()
+        .inset_0()
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .rounded(radius)
+                .border(px(2.))
+                .border_color(rgb(0x2588ff)),
+        )
+        .child(inner)
+}
+
+fn notification_card_badge(locale: InterfaceLocale, animate: bool) -> AnyElement {
+    let badge = div()
+        .flex_none()
+        .ml(px(8.))
+        .px(px(6.))
+        .h(px(17.))
+        .flex()
+        .items_center()
+        .rounded_full()
+        .bg(rgb(0x1677e8))
+        .text_color(rgb(0xffffff))
+        .font_weight(FontWeight::BOLD)
+        .text_size(px(8.))
+        .line_height(px(11.))
+        .whitespace_nowrap()
+        .child(ui_text(locale.text("新通知", "New notification")));
+    if animate {
+        badge
+            .with_animations(
+                "notification-badge-arrival",
+                vec![Animation::new(Duration::from_millis(720)); 2],
+                |badge, _, progress| {
+                    badge
+                        .opacity(0.55 + 0.45 * notification_arrival_ease((progress / 0.55).min(1.)))
+                },
+            )
+            .into_any_element()
+    } else {
+        badge.into_any_element()
     }
 }
 
