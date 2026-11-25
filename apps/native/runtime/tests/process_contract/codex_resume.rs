@@ -619,17 +619,16 @@ fn codex_title_follows_the_active_index_and_preserves_manual_priority() -> Resul
             && card["providerTitle"].is_null()
     })?;
     send_title(&mut child, None)?;
-    child.send(Command::Refresh)?;
     graph(
         &mut child,
         "restore before any provider title",
         |_, card| {
-            card["title"] == "手动一"
-                && card["titleSource"] == "manual"
-                && card["providerTitle"].is_null()
+            card["title"] == "Codex"
+                && card["titleSource"] == "default"
+                && card.get("providerTitle") == Some(&Value::Null)
         },
     )?;
-    println!("codex-title clear without candidate: manual name survives");
+    println!("codex-title clear without candidate: default title is restored");
 
     let first = row(UUID, "  自动摘要一  ", "2026-11-15T06:14:00Z");
     let store = root.path().join("index staging");
@@ -648,9 +647,9 @@ fn codex_title_follows_the_active_index_and_preserves_manual_priority() -> Resul
         .join("\n"),
     )?;
     fs::rename(&store, &index)?;
-    visible(&mut child, "手动一", "manual", "自动摘要一")?;
+    visible(&mut child, "自动摘要一", "auto", "自动摘要一")?;
     println!(
-        "codex-title delayed index: atomic creation, exact UUID and latest valid time selected under manual lock"
+        "codex-title delayed index: restored card adopts the latest valid title for the exact UUID"
     );
     let count = updates()?;
     let receipt_count = receipts()?;
@@ -663,6 +662,8 @@ fn codex_title_follows_the_active_index_and_preserves_manual_priority() -> Resul
     assert_eq!(updates()?, count);
     assert_eq!(receipts()?, receipt_count);
     println!("codex-title duplicate/bad/empty rows: no event or command receipt added");
+    send_title(&mut child, Some("手动一"))?;
+    visible(&mut child, "手动一", "manual", "自动摘要一")?;
     send_title(&mut child, None)?;
     visible(&mut child, "自动摘要一", "auto", "自动摘要一")?;
 
