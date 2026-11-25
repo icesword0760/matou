@@ -696,11 +696,7 @@ impl ContextOptimizerSettingsPanel {
             .relative()
             .w_full()
             .py(px(12.))
-            .pl(if field == OptimizerToggle::CacheExpiryNotify {
-                px(18.)
-            } else {
-                px(0.)
-            })
+            .pl(px(0.))
             .border_t_1()
             .border_color(rgba(palette.line))
             .child(text)
@@ -1066,6 +1062,37 @@ mod tests {
         format_saved_noise_bytes, unavailable_reason,
     };
     use std::rc::Rc;
+
+    #[test]
+    fn cache_expiry_notification_row_starts_at_the_same_left_edge() {
+        use super::ContextOptimizerSettingsPanel;
+        use crate::theme_tokens::AppTheme;
+        use OptimizerToggle::{CacheExpiryNotify, CacheMonitor};
+        use gpui::{AppContext, ScrollHandle, Styled, TestAppContext, px};
+
+        let root = std::env::temp_dir().join(format!("matou-ctx-opt-row-{}", uuid::Uuid::new_v4()));
+        let config = Rc::new(ContextOptimizerConfig::for_data_root(&root));
+        let mut cx = TestAppContext::single();
+        cx.update(|cx| {
+            cx.new(|cx| {
+                ContextOptimizerSettingsPanel::new(
+                    config,
+                    InterfaceLocale::Chinese,
+                    AppTheme::Light,
+                    ScrollHandle::new(),
+                    cx,
+                )
+                .unwrap()
+            })
+            .update(cx, |panel, cx| {
+                let entry = panel.state.current_entry().unwrap();
+                for field in [CacheMonitor, CacheExpiryNotify] {
+                    let mut row = panel.render_advanced_row(field, entry, None, cx);
+                    assert_eq!(row.style().padding.left, Some(px(0.).into()), "{field:?}");
+                }
+            });
+        });
+    }
 
     #[test]
     fn panel_enforces_matrix_and_preserves_unavailable_preferences_across_reload() {

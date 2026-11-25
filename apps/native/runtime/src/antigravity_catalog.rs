@@ -176,6 +176,15 @@ struct Conversation {
     workspace_uris: Vec<String>,
 }
 
+impl Conversation {
+    fn matches_workspace(&self, cwd: &Path) -> bool {
+        self.workspace_uris
+            .iter()
+            .filter_map(|uri| workspace_path(uri))
+            .any(|path| canonical_path(&path).is_ok_and(|path| path == cwd))
+    }
+}
+
 #[derive(PartialEq, Eq)]
 struct FileVersion {
     size: u64,
@@ -401,15 +410,14 @@ impl Catalog {
             .and_then(|entry| entry.auto_title))
     }
 
-    /// A metadata match permits a targeted launch. The transcript can be
-    /// absent or partial, and only the live run can confirm recovery.
+    /// The card's bound conversation ID can stand in for missing workspace
+    /// metadata. Only the live run can confirm recovery.
     pub fn recovery_candidate(&mut self, cwd: &Path, id: &str) -> Result<RecoveryCandidate> {
         ensure!(valid_conversation_id(id), INVALID_ID);
-        let belongs = self
-            .workspace(cwd)?
-            .1
-            .into_iter()
-            .any(|entry| entry.id == id);
+        let cwd = canonical_path(cwd)?;
+        let belongs = self.metadata()?.iter().any(|entry| {
+            entry.id == id && (entry.workspace_uris.is_empty() || entry.matches_workspace(&cwd))
+        });
         Ok(if belongs {
             RecoveryCandidate::AwaitingIdentity(LaunchMode::Resume(id.to_owned()))
         } else {
@@ -442,13 +450,7 @@ impl Catalog {
         let entries = self
             .metadata()?
             .iter()
-            .filter(|entry| {
-                entry
-                    .workspace_uris
-                    .iter()
-                    .filter_map(|uri| workspace_path(uri))
-                    .any(|path| canonical_path(&path).is_ok_and(|path| path == cwd))
-            })
+            .filter(|entry| entry.matches_workspace(&cwd))
             .cloned()
             .collect();
         Ok((cwd, entries))

@@ -2195,6 +2195,7 @@ impl ShellOwner {
                     || self
                         .antigravity_binding(&id)?
                         .is_some_and(|binding| binding.resumable)
+                    || self.unbound_provider_can_start_fresh(&id, "antigravity")?
                 {
                     candidates.push((id, workspace, true));
                 }
@@ -2220,7 +2221,9 @@ impl ShellOwner {
                     || (binding.is_none()
                         && sessions::unbound_codex_restore(&self.connection, &id)?
                             .is_some_and(|event| event["restoreState"] == "failed"));
-                if !failed && (has_run || binding.is_some()) {
+                if (!failed && (has_run || binding.is_some()))
+                    || self.unbound_provider_can_start_fresh(&id, "codex")?
+                {
                     candidates.push((id, workspace, true));
                 }
                 continue;
@@ -2304,6 +2307,42 @@ impl ShellOwner {
 
     pub(crate) fn codex_binding(&self, id: &str) -> Result<Option<sessions::ProviderBinding>> {
         sessions::codex_binding(&self.connection, id)
+    }
+
+    pub(crate) fn unbound_provider_can_start_fresh(
+        &self,
+        id: &str,
+        provider: &str,
+    ) -> Result<bool> {
+        // A previous run can have stopped before the provider created a conversation.
+        // A title or a recorded identity is evidence of a conversation even if its binding is lost.
+        Ok(self.connection.query_row(
+            "SELECT EXISTS (
+                SELECT 1 FROM sessions WHERE id = ?1 AND kind = ?2
+                  AND kind IN ('codex', 'antigravity') AND archived_at IS NULL
+                  AND status IN ('exited', 'interrupted') AND provider_title IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM provider_bindings WHERE session_id = ?1 AND provider = ?2
+                  ) AND NOT EXISTS (
+                      SELECT 1 FROM domain_events WHERE session_id = ?1
+                        AND event_type IN ('provider-binding.recorded', 'session.mode-changed', 'session.restore-state-changed')
+                        AND json_extract(payload_json, '$.provider') = ?2
+                        AND json_type(payload_json, '$.providerSessionId') = 'text'
+                  )
+            )",
+            params![id, provider],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub(crate) fn prepare_fresh_codex_start(&mut self, id: &str) -> Result<bool> {
+        if self.unbound_provider_can_start_fresh(id, "codex")? {
+            // Clear a legacy no-binding failure and its notification before projecting the card.
+            self.change_codex_restore(id, ClaudeRestore::Fresh)?;
+            Ok(true)
+        } else {
+            self.pending_codex_fresh(id)
+        }
     }
 
     pub(crate) fn pending_codex_fresh(&self, id: &str) -> Result<bool> {

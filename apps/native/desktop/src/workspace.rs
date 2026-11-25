@@ -1372,6 +1372,84 @@ mod recovery_loading_tests {
     use serde_json::json;
     use std::collections::{HashMap, HashSet};
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn restoring_card_mounts_water_before_a_terminal_entity_exists() -> anyhow::Result<()> {
+        use super::Workspace;
+        use crate::runtime_bridge::RuntimeBridge;
+        use gpui::{AppContext, Context, Entity, IntoElement, Render, TestAppContext, Window, div};
+        use matou_native_runtime::host::LaunchOptions;
+        use std::{fs, path::PathBuf};
+
+        // Exercise the workspace's first GPUI render, before rasterizing its
+        // children. The test window does not have an AppKit backing window.
+        struct MountProbe(Entity<Workspace>);
+        impl Render for MountProbe {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                self.0.update(cx, |workspace, cx| {
+                    let _ = workspace.render(window, cx);
+                });
+                div()
+            }
+        }
+
+        let root = std::env::temp_dir().join(format!("water-{}", uuid::Uuid::new_v4().simple()));
+        let result = (|| {
+            fs::create_dir(&root)?;
+            let binary = std::env::current_exe()?
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("matou-native-runtime");
+            let mut bridge = RuntimeBridge::start_with_binary(
+                LaunchOptions {
+                    data_root: root.join("data"),
+                    workspace: root.clone(),
+                    shell_home: root.clone(),
+                    shell: PathBuf::from("/bin/zsh"),
+                },
+                &binary,
+            )?;
+            let (_, events) = async_channel::unbounded();
+            let mut cx = TestAppContext::single();
+            let handle = cx.add_window(|window, cx| {
+                MountProbe(cx.new(|cx| {
+                    let mut workspace = Workspace::with_launch_options(
+                        bridge.commands.clone(), events, window, cx, None,
+                    );
+                    workspace.hierarchy = Some(serde_json::from_value(json!({
+                        "scene": {"id":"scene", "taskId":"task", "name":"Canvas", "mode":"free",
+                            "titlePinned":false, "sortKey":"", "layoutRevision":0, "createdAt":0, "updatedAt":0},
+                        "navigation": {"windowId":"window", "taskByWorkspace":{}, "sceneByTask":{}, "sessionByScene":{}}
+                    })).unwrap());
+                    workspace.graph = json!({"nodes": [{"sessionId":"card", "sceneId":"scene",
+                        "currentMode":"claude-code", "title":"Claude", "workStatus":"exited"}]});
+                    workspace.order.push("card".into());
+                    workspace.recovery.insert("card".into(), RecoveryState::Restoring);
+                    workspace.remove_card_controls.insert("card".into(), cx.focus_handle());
+                    workspace
+                }))
+            });
+            handle.update(&mut cx, |probe, window, cx| {
+                probe.0.update(cx, |workspace, cx| {
+                    assert!(workspace.terminals.is_empty());
+                    assert!(workspace.recovery_water_needed("card", &workspace.graph["nodes"][0]));
+                    assert!(
+                        workspace.recovery_water.contains_key("card"),
+                        "restoring card did not mount a water overlay before its terminal existed"
+                    );
+                    workspace.first_frame_content.insert("card".into());
+                    workspace.prune_recovery_water(window, cx);
+                    assert!(!workspace.recovery_water.contains_key("card"));
+                });
+            })?;
+            bridge.shutdown()
+        })();
+        let _ = fs::remove_dir_all(root);
+        result
+    }
+
     #[test]
     fn historical_work_status_preserves_recovery_until_the_first_visible_frame() {
         for (mode, work_status) in [("claude-code", "exited"), ("shell", "error")] {
@@ -3745,6 +3823,21 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let launch_options = matou_native_desktop::instance_open::DesktopOptions::from_args(
+            std::env::args_os().skip(1),
+        )
+        .ok()
+        .map(|options| options.runtime);
+        Self::with_launch_options(commands, events, window, cx, launch_options)
+    }
+
+    fn with_launch_options(
+        commands: RuntimeCommands,
+        events: async_channel::Receiver<BridgeEvent>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        launch_options: Option<matou_native_runtime::host::LaunchOptions>,
+    ) -> Self {
         cx.spawn_in(window, async move |this, cx| {
             while let Ok(event) = events.recv().await {
                 let applied = cx
@@ -3763,11 +3856,6 @@ impl Workspace {
                 let _ = view.update(cx, |this, cx| this.tab_key(&event.keystroke, window, cx));
             }
         });
-        let launch_options = matou_native_desktop::instance_open::DesktopOptions::from_args(
-            std::env::args_os().skip(1),
-        )
-        .ok()
-        .map(|options| options.runtime);
         let data_root = launch_options
             .as_ref()
             .map(|options| options.data_root.clone());
@@ -8167,14 +8255,13 @@ impl Workspace {
     }
 
     #[cfg(target_os = "macos")]
-    fn recovery_water_available(&self, window: &Window) -> bool {
+    fn recovery_water_available(&self) -> bool {
         self.active_path_valid()
             && self.hierarchy.as_ref().is_some_and(|h| h.scene.is_some())
             && !matches!(
                 self.commands.connection().1,
                 ConnectionPhase::Stopped | ConnectionPhase::Blocked(_)
             )
-            && Self::recovery_water_window_visible(window)
     }
 
     #[cfg(target_os = "macos")]
@@ -8182,7 +8269,7 @@ impl Workspace {
         if self.recovery_water.is_empty() {
             return;
         }
-        let available = self.recovery_water_available(window);
+        let available = self.recovery_water_available();
         self.retain_recovery_water(window, cx, |this, id| {
             available
                 && this.graph["nodes"].as_array().is_some_and(|nodes| {
@@ -18863,9 +18950,8 @@ impl Render for Workspace {
             }));
         let path_valid = self.active_path_valid();
         #[cfg(target_os = "macos")]
-        let recovery_water_available = !self.wiring.board_open
-            && self.read_only.is_none()
-            && self.recovery_water_available(window);
+        let recovery_water_available =
+            !self.wiring.board_open && self.read_only.is_none() && self.recovery_water_available();
         let carousel_left =
             f64::from(-f32::from(self.carousel_scroll.offset().x)).clamp(0., max_scroll);
         #[cfg(target_os = "macos")]
@@ -19089,8 +19175,7 @@ impl Render for Workspace {
             let action_bounds = CardActionBounds::default();
             let capture_actions = action_bounds.clone();
             #[cfg(target_os = "macos")]
-            let water = if terminal.is_some()
-                && recovery_water_available
+            let water = if recovery_water_available
                 && (!narrow || selected)
                 && positions[id] < carousel_left + viewport_width
                 && positions[id] + widths[id] > carousel_left
@@ -19106,6 +19191,7 @@ impl Render for Workspace {
                                 "kind": "recovery-water-mount", "session": id,
                                 "at": self.motion_clock.elapsed().as_secs_f64() * 1000.,
                                 "generation": self.runtime_generation,
+                                "terminal_ready": terminal.is_some(),
                             }),
                         );
                     }
@@ -19128,7 +19214,7 @@ impl Render for Workspace {
             #[cfg(not(target_os = "macos"))]
             let has_water = false;
             let loading_badge = node
-                .filter(|_| terminal.is_some())
+                .filter(|_| has_water || terminal.is_some())
                 .and_then(|node| {
                     let awaiting_first_frame = !waiting
                         && self.can_show_loading_badge()
@@ -19487,7 +19573,9 @@ impl Render for Workspace {
                     .then(|| self.render_history_gap_notice(id, &action_bounds, window, cx))
                     .flatten(),
                 )
-                .child(if terminal.is_none() {
+                .child(if terminal.is_none() && has_water {
+                    div().flex_1().min_h_0()
+                } else if terminal.is_none() {
                     self.canvas_empty_message(
                         "terminal-unavailable",
                         self.locale.text(

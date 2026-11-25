@@ -4607,7 +4607,10 @@ fn run_writable(
     {
         if automatic && startup_order.len() < 16 {
             startup_order.insert(session_id.clone(), startup_order.len());
-            startup_restores.push((session_id, workspace_id));
+            let fresh_codex = owner.prepare_fresh_codex_start(&session_id)?;
+            let recovering = !fresh_codex
+                && !owner.unbound_provider_can_start_fresh(&session_id, "antigravity")?;
+            startup_restores.push((session_id, workspace_id, recovering, fresh_codex));
         } else {
             startup_deferred.insert(session_id);
         }
@@ -4633,15 +4636,14 @@ fn run_writable(
     if let Some(workspace_id) = &active_workspace {
         checks.request(&owner, workspace_id)?;
     }
-    for (session_id, workspace_id) in startup_restores {
+    for (session_id, workspace_id, recovering, fresh_codex) in startup_restores {
         if !pending_launch.contains(&session_id) {
-            let fresh_codex = owner.pending_codex_fresh(&session_id)?;
             checks.request(&owner, &workspace_id)?;
             launch_retries.insert(
                 session_id,
                 LaunchRetry {
                     workspace_id,
-                    recovering: true,
+                    recovering,
                     validated: false,
                     fresh_codex,
                     claude_rebuild: None,
@@ -7120,7 +7122,6 @@ fn run_writable(
                     {
                         continue;
                     }
-                    let fresh_codex = codex && owner.pending_codex_fresh(session_id)?;
                     let state = if rebuilding {
                         if !parked && !matches!(failed, Some(RecoveryState::Failed(_))) {
                             continue;
@@ -7144,6 +7145,10 @@ fn run_writable(
                     let Some(workspace_id) = owner.session_workspace(session_id)? else {
                         continue;
                     };
+                    let fresh_codex = codex && owner.prepare_fresh_codex_start(session_id)?;
+                    let recovering = rebuilding
+                        && !fresh_codex
+                        && !owner.unbound_provider_can_start_fresh(session_id, "antigravity")?;
                     startup_deferred.remove(session_id);
                     send.send_blocking(Event::Recovery {
                         session_id: session_id.clone(),
@@ -7171,7 +7176,7 @@ fn run_writable(
                                 LaunchRetry {
                                     workspace_id,
                                     validated: false,
-                                    recovering: rebuilding,
+                                    recovering,
                                     fresh_codex,
                                     claude_rebuild: None,
                                 },
@@ -7182,7 +7187,7 @@ fn run_writable(
                             let failure = report_launch_failure(
                                 send,
                                 session_id,
-                                rebuilding,
+                                recovering,
                                 format!("{error:#}"),
                             )?;
                             failed_launches.insert(session_id.clone(), failure);

@@ -611,6 +611,62 @@ fn promotion_installs_and_repairs_plugin_and_projects_authenticated_activity() -
 }
 
 #[test]
+fn restart_opens_never_bound_card_then_resumes_its_binding_without_workspace_uris() -> Result<()> {
+    let fixture = Fixture::new()?;
+    fixture.write_history("Bound conversation")?;
+    let mut host = fixture.start()?;
+    let (_, session) = ready(&host)?;
+    fixture.promote(&host, &session)?;
+    let first = fixture.run(1)?;
+    assert_eq!(first.resume_arg(), None);
+    // The first frame can precede the committed Shell-to-provider handoff.
+    // Input reaches the stub only after the host releases the promotion queue.
+    input(&host, &session, b"fixture-ready\r")?;
+    wait(|| Ok(first.input_log().contains("fixture-ready").then_some(())))?;
+    host.shutdown()?;
+
+    let mut host = fixture.start()?;
+    assert_eq!(ready(&host)?.1, session);
+    let fresh = fixture.run(2)?;
+    assert_eq!(fresh.resume_arg(), None);
+    fresh.status(SOURCE, "idle")?;
+    assert_eq!(
+        identity(&host, &session, "confirmed")?["restoreState"],
+        "none"
+    );
+    host.shutdown()?;
+    assert_eq!(fs::read_dir(&fixture.traces)?.count(), 2);
+
+    let mut metadata: Value = serde_json::from_slice(&fs::read(fixture.history_file())?)?;
+    metadata["conversations"][SOURCE]["summary"]["WorkspaceURIs"] = Value::Null;
+    fs::write(fixture.history_file(), serde_json::to_vec(&metadata)?)?;
+    let mut catalog = matou_native_runtime::antigravity_catalog::Catalog::new(
+        fixture.shell_home.join(".gemini/antigravity-cli"),
+    );
+    let listed = catalog.list(&fixture.cwd, Default::default())?;
+    assert_eq!(listed.sessions.len(), 1);
+    assert_eq!(listed.sessions[0].provider_session_id, OTHER);
+    assert!(
+        catalog
+            .detail(&fixture.cwd, SOURCE, Default::default())
+            .is_err()
+    );
+
+    let mut host = fixture.start()?;
+    assert_eq!(ready(&host)?.1, session);
+    let restored = fixture.run(3)?;
+    assert_eq!(restored.resume_arg(), Some(SOURCE));
+    restored.status(SOURCE, "idle")?;
+    assert_eq!(
+        identity(&host, &session, "confirmed")?["providerSessionId"],
+        SOURCE
+    );
+    host.shutdown()?;
+    assert_eq!(fs::read_dir(&fixture.traces)?.count(), 3);
+    Ok(())
+}
+
+#[test]
 fn catalog_recovers_retries_and_obeys_read_only_storage() -> Result<()> {
     let fixture = Fixture::new()?;
     fixture.write_history("Catalog title")?;

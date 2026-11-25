@@ -72,13 +72,12 @@ fn open_data(child: &RuntimeChild) -> Result<Connection> {
     Ok(db)
 }
 
-fn establish(root: &Path) -> Result<(RuntimeChild, PathBuf, PathBuf, Connection)> {
+fn promote_without_identity(root: &Path) -> Result<(RuntimeChild, PathBuf)> {
     let home = root.join("isolated Codex home");
     fs::create_dir(&home)?;
     let fixture = root.join("fixture Codex");
     fs::write(&fixture, include_bytes!("../fixtures/codex-launch.sh"))?;
     fs::set_permissions(&fixture, fs::Permissions::from_mode(0o700))?;
-    let rollout = material(&home, UUID)?;
     let mut child = spawn(root)?;
     child.hello()?;
     child.input("codex --dangerously-bypass-approvals-and-sandbox")?;
@@ -88,6 +87,12 @@ fn establish(root: &Path) -> Result<(RuntimeChild, PathBuf, PathBuf, Connection)
     graph(&mut child, "promoted", |_, card| {
         card["currentMode"] == "codex"
     })?;
+    Ok((child, home))
+}
+
+fn establish(root: &Path) -> Result<(RuntimeChild, PathBuf, PathBuf, Connection)> {
+    let (mut child, home) = promote_without_identity(root)?;
+    let rollout = material(&home, UUID)?;
     let url = current_hook_url(&home)?;
     assert_eq!(post_hook(&url, started(UUID, &rollout))?, 200);
     confirmed(&mut child, UUID)?;
@@ -1207,7 +1212,68 @@ fn codex_resume_wrong_identity_early_exit_and_fresh_start() -> Result<()> {
 }
 
 #[test]
-fn codex_resume_no_binding_stays_retryable_across_restarts() -> Result<()> {
+fn codex_never_bound_card_starts_fresh_once_on_restart() -> Result<()> {
+    use matou_native_core::{
+        sessions::{ClaudeRestore, change_codex_restore},
+        storage::CommandMetadata,
+    };
+
+    for legacy_failure in [false, true] {
+        let root = tempfile::tempdir()?;
+        let (mut child, home) = promote_without_identity(root.path())?;
+        child.input("noise")?;
+        child.frame(|_, screen, _| screen_has_line(screen, "model error: Server timed out"))?;
+        let session = child.session.clone();
+        let mut db = open_data(&child)?;
+        let old = retire_and_check(child, &db, &session)?;
+        assert!(codex_binding(&db, &session)?.is_none());
+        if legacy_failure {
+            assert!(
+                change_codex_restore(
+                    &mut db,
+                    &CommandMetadata {
+                        command_id: "legacy-unbound-failure".into(),
+                        command_type: "session.restore-state-changed".into(),
+                        request_hash: "legacy-unbound-failure".into(),
+                        causation_id: None,
+                        correlation_id: None,
+                    },
+                    &session,
+                    ClaudeRestore::Fail {
+                        binding_id: "",
+                        error: MISSING
+                    },
+                    "Codex recovery failed",
+                    0,
+                )?
+                .is_some()
+            );
+        }
+
+        let mut child = spawn(root.path())?;
+        child.connect()?;
+        first_screen(&mut child, &home, None, false)?;
+        let fresh = replacement(&db, &session, &old)?;
+        child.send(Command::Refresh)?;
+        graph(
+            &mut child,
+            "fresh card has no stale restore failure",
+            |_, card| card["providerRestoreState"] == "none",
+        )?;
+        let rollout = material(&home, UUID)?;
+        assert_eq!(
+            post_hook(&current_hook_url(&home)?, started(UUID, &rollout))?,
+            200
+        );
+        confirmed(&mut child, UUID)?;
+        assert_eq!(replacement(&db, &session, &old)?.id, fresh.id);
+        shutdown(child)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn codex_missing_binding_with_prior_identity_stays_retryable_across_restarts() -> Result<()> {
     let root = tempfile::tempdir()?;
     let (child, home, _, db) = establish(root.path())?;
     let session = child.session.clone();
