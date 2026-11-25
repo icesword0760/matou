@@ -1839,6 +1839,30 @@ impl Editor {
         draft
     }
 
+    fn sync_provider_metadata(&mut self, providers: &[Value]) {
+        if self.subscription.is_some()
+            || self.connection_changed
+            || self.fetch_snapshot.is_some()
+            || self.fetch_error.is_some()
+            || self.draft.fetched_metadata.is_some()
+        {
+            return;
+        }
+        let Some(id) = self.draft.id.as_deref() else {
+            return;
+        };
+        let Some(provider) = providers.iter().find(|provider| provider["id"] == id) else {
+            return;
+        };
+        let latest = ProviderDraft::from_provider(provider);
+        if latest.original_endpoint == self.draft.original_endpoint
+            && latest.subscription_kind == self.draft.subscription_kind
+        {
+            self.draft.model_metadata = latest.model_metadata;
+            self.baseline_metadata = self.draft.model_metadata.clone();
+        }
+    }
+
     fn is_dirty(&self, cx: &App) -> bool {
         let metadata = self
             .draft
@@ -4191,6 +4215,9 @@ impl SettingsShell {
             cx.emit(SettingsShellEvent::ProviderActivated);
         }
         self.apply_update(update, window, cx);
+        if let Some(editor) = &mut self.editor {
+            editor.sync_provider_metadata(self.providers.providers());
+        }
         // A start/reopen reply can move the flow back to waiting without any
         // timer running; restart the single chain here.
         if self.editor.as_ref().is_some_and(|editor| {
@@ -4657,6 +4684,12 @@ impl SettingsShell {
         } else {
             editor.focus.key.clone()
         };
+        if self.assignments.native_catalog_models().is_empty()
+            && official_context_picker_models(&editor.draft, self.providers.providers(), &[])
+                .is_some()
+        {
+            self.load_assignment_catalog(false, cx);
+        }
         self.editor = Some(editor);
         window.focus(&focus);
         cx.notify();
@@ -4855,6 +4888,20 @@ impl SettingsShell {
     #[allow(dead_code)]
     pub(crate) fn probe_settings_nav_focus(&self, page: SettingsPage, window: &mut Window) {
         window.focus(&self.nav_focus[page.index()]);
+    }
+
+    #[cfg(debug_assertions)]
+    #[allow(dead_code)]
+    pub(crate) fn probe_context_optimizer<'a>(
+        &self,
+        cx: &'a App,
+    ) -> &'a ContextOptimizerSettingsPanel {
+        self.context_optimizer_panel
+            .as_ref()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .read(cx)
     }
 
     #[cfg(debug_assertions)]
@@ -8753,7 +8800,7 @@ impl SettingsShell {
         let busy = self.editor_busy();
         let editing = work.id.is_some();
         let subscription = work.subscription_kind.is_some();
-        let models = work.available_models();
+        let models = self.effective_editor_models(work);
         let mut body = div().flex().flex_col().w_full();
         if !subscription {
             body = body.child(self.render_api_fields(editor, work, &models, window, &colors, cx));
@@ -8868,12 +8915,13 @@ impl SettingsShell {
                 }
                 roles = roles.child(column);
             }
+            let effort_models = work.available_models();
             let known_efforts = work
                 .model_mapping
                 .iter()
                 .filter(|id| {
                     !work.ignore_model_efforts
-                        && models
+                        && effort_models
                             .iter()
                             .any(|row| row["id"] == id.trim() && row["supportedEfforts"].is_array())
                 })
@@ -9217,16 +9265,31 @@ impl SettingsShell {
             model_field = model_field.child(self.model_details(row, "model-detail", true, colors));
         }
         let confirmed = editor.fetch_error.is_none() && work.fetched_metadata.is_some();
-        let source = self.model_source(
-            fetching,
-            editor.fetch_error.is_some(),
-            confirmed,
-            editing,
-            models.len(),
-            model_id,
-            metadata,
-            preset,
-        );
+        let source = if !fetching && self.native_editor_models(work).is_some() {
+            if model_id.is_empty() || metadata.is_some() {
+                self.locale.text(
+                    "显示官方模型目录中的名称与上下文窗口。",
+                    "Names and context windows are from the official model catalog.",
+                )
+            } else {
+                self.locale.text(
+                    "此模型 ID 不在官方目录中，名称与上下文窗口未知。",
+                    "This model ID is outside the official catalog. Its name and context window are unknown.",
+                )
+            }
+            .into()
+        } else {
+            self.model_source(
+                fetching,
+                editor.fetch_error.is_some(),
+                confirmed,
+                editing,
+                models.len(),
+                model_id,
+                metadata,
+                preset,
+            )
+        };
         model_field = model_field.child(mark_provider(
             help_text(source.clone(), colors),
             "model-source",
@@ -9846,42 +9909,22 @@ impl SettingsShell {
         }
     }
 
+    fn native_editor_models(&self, work: &ProviderDraft) -> Option<&[Value]> {
+        native_editor_models(
+            work,
+            self.providers.providers(),
+            self.assignments.native_catalog_models(),
+        )
+    }
+
+    fn effective_editor_models<'a>(&'a self, work: &'a ProviderDraft) -> Vec<&'a Value> {
+        self.native_editor_models(work)
+            .map_or_else(|| work.available_models(), |models| models.iter().collect())
+    }
+
     fn mapping_label(&self, work: &ProviderDraft, index: usize) -> (String, bool) {
-        let id = work.model_mapping[index].trim();
-        if id.is_empty() {
-            (
-                self.locale.text("请选择模型", "Select a model").into(),
-                true,
-            )
-        } else if !work.ignore_model_efforts
-            && let Some(row) = work
-                .available_models()
-                .into_iter()
-                .find(|row| row["id"] == id)
-        {
-            (row["displayName"].as_str().unwrap_or(id).into(), true)
-        } else if work.subscription_kind.is_some() {
-            (
-                format!("{id} · {}", self.locale.text("不可用", "Unavailable")),
-                false,
-            )
-        } else if work.ignore_model_efforts || work.available_models().is_empty() {
-            (
-                format!(
-                    "{id} {}",
-                    self.locale.text("（尚未获取列表）", "(list not fetched)")
-                ),
-                true,
-            )
-        } else {
-            (
-                format!(
-                    "{id} {}",
-                    self.locale.text("（未在列表中）", "(not in list)")
-                ),
-                true,
-            )
-        }
+        let models = self.effective_editor_models(work);
+        mapping_label(self.locale, work, index, &models)
     }
 
     fn provider_select_options(
@@ -9890,6 +9933,9 @@ impl SettingsShell {
         select: ProviderSelect,
     ) -> Vec<SelectOption> {
         match select {
+            ProviderSelect::Mapping(index) => {
+                mapping_select_options(self.locale, work, index, self.effective_editor_models(work))
+            }
             ProviderSelect::Effort(index) => {
                 let current = if work.is_codex() {
                     &work.reasoning_effort
@@ -9917,51 +9963,6 @@ impl SettingsShell {
                         }
                     })
                     .collect()
-            }
-            ProviderSelect::Mapping(index) => {
-                let id = work.model_mapping[index].trim();
-                let subscription = work.subscription_kind.is_some();
-                let models = if work.ignore_model_efforts && !subscription {
-                    Vec::new()
-                } else {
-                    work.available_models()
-                };
-                let known = models.iter().any(|row| row["id"] == id);
-                let mut options = Vec::with_capacity(models.len() + 2);
-                options.extend(models.into_iter().map(|row| {
-                    let model_id = row["id"].as_str().unwrap_or_default();
-                    let window = window_text(row, self.locale);
-                    SelectOption {
-                        choice: ProviderChoice::Model(model_id.into()),
-                        label: row["displayName"].as_str().unwrap_or(model_id).into(),
-                        detail: Some(format!("{model_id} · {window}")),
-                        selected: model_id == id,
-                        enabled: true,
-                    }
-                }));
-                if !known && !id.is_empty() {
-                    let (label, enabled) = self.mapping_label(work, index);
-                    options.push(SelectOption {
-                        choice: ProviderChoice::Model(id.into()),
-                        label,
-                        detail: None,
-                        selected: true,
-                        enabled,
-                    });
-                }
-                if !subscription || ROLES[index] == "fable" {
-                    options.push(SelectOption {
-                        choice: ProviderChoice::Manual,
-                        label: self
-                            .locale
-                            .text("手动填写模型 ID…", "Enter model ID manually…")
-                            .into(),
-                        detail: None,
-                        selected: false,
-                        enabled: true,
-                    });
-                }
-                options
             }
         }
     }
@@ -10285,6 +10286,99 @@ impl SettingsShell {
     }
 }
 
+fn mapping_label(
+    locale: InterfaceLocale,
+    work: &ProviderDraft,
+    index: usize,
+    models: &[&Value],
+) -> (String, bool) {
+    let id = work.model_mapping[index].trim();
+    if id.is_empty() {
+        (locale.text("请选择模型", "Select a model").into(), true)
+    } else if !work.ignore_model_efforts
+        && let Some(row) = models.iter().find(|row| row["id"] == id)
+    {
+        (row["displayName"].as_str().unwrap_or(id).into(), true)
+    } else if work.subscription_kind.is_some() {
+        (
+            format!("{id} · {}", locale.text("不可用", "Unavailable")),
+            false,
+        )
+    } else if work.ignore_model_efforts || models.is_empty() {
+        (
+            format!(
+                "{id} {}",
+                locale.text("（尚未获取列表）", "(list not fetched)")
+            ),
+            true,
+        )
+    } else {
+        (
+            format!("{id} {}", locale.text("（未在列表中）", "(not in list)")),
+            true,
+        )
+    }
+}
+
+fn mapping_select_options(
+    locale: InterfaceLocale,
+    work: &ProviderDraft,
+    index: usize,
+    mut models: Vec<&Value>,
+) -> Vec<SelectOption> {
+    let id = work.model_mapping[index].trim();
+    let subscription = work.subscription_kind.is_some();
+    if work.ignore_model_efforts && !subscription {
+        models.clear();
+    }
+    let known = models.iter().any(|row| row["id"] == id);
+    let mut options = Vec::with_capacity(models.len() + 2);
+    options.extend(models.iter().map(|row| {
+        let model_id = row["id"].as_str().unwrap_or_default();
+        let window = window_text(row, locale);
+        SelectOption {
+            choice: ProviderChoice::Model(model_id.into()),
+            label: row["displayName"].as_str().unwrap_or(model_id).into(),
+            detail: Some(format!("{model_id} · {window}")),
+            selected: model_id == id,
+            enabled: true,
+        }
+    }));
+    if !known && !id.is_empty() {
+        let (label, enabled) = mapping_label(locale, work, index, &models);
+        options.push(SelectOption {
+            choice: ProviderChoice::Model(id.into()),
+            label,
+            detail: None,
+            selected: true,
+            enabled,
+        });
+    }
+    if !subscription || ROLES[index] == "fable" {
+        options.push(SelectOption {
+            choice: ProviderChoice::Manual,
+            label: locale
+                .text("手动填写模型 ID…", "Enter model ID manually…")
+                .into(),
+            detail: None,
+            selected: false,
+            enabled: true,
+        });
+    }
+    options
+}
+
+fn native_editor_models<'a>(
+    draft: &ProviderDraft,
+    providers: &[Value],
+    native_catalog: &'a [Value],
+) -> Option<&'a [Value]> {
+    if draft.ignore_model_efforts || native_catalog.is_empty() {
+        return None;
+    }
+    official_context_picker_models(draft, providers, native_catalog)
+}
+
 fn official_context_picker_models<'a>(
     draft: &ProviderDraft,
     providers: &[Value],
@@ -10292,6 +10386,7 @@ fn official_context_picker_models<'a>(
 ) -> Option<&'a [Value]> {
     if !draft.built_in
         || draft.fetched_metadata.is_some()
+        || !draft.api_key.trim().is_empty()
         || !is_official_endpoint(draft.endpoint.trim())
     {
         return None;
@@ -10303,7 +10398,10 @@ fn official_context_picker_models<'a>(
 
 #[cfg(test)]
 mod official_context_picker_tests {
-    use super::{ProviderDraft, official_context_picker_models};
+    use super::{
+        InterfaceLocale, ProviderChoice, ProviderDraft, ROLES, mapping_select_options,
+        native_editor_models, official_context_picker_models,
+    };
     use serde_json::json;
 
     #[test]
@@ -10332,6 +10430,36 @@ mod official_context_picker_tests {
             official_context_picker_models(&draft, &[provider], &native),
             None
         );
+    }
+
+    #[test]
+    fn official_editor_mapping_options_list_native_models_for_all_four_roles() {
+        let provider = json!({
+            "id": "anthropic-official", "builtIn": true,
+            "endpoint": "https://api.anthropic.com/",
+            "modelMapping": {"opus": "opus"},
+        });
+        let draft = ProviderDraft::from_provider(&provider);
+        assert!(draft.available_models().is_empty());
+        let native = [
+            json!({"id": "opus", "displayName": "Claude Opus", "contextWindow": 1_000_000}),
+            json!({"id": "sonnet", "displayName": "Claude Sonnet", "contextWindow": 200_000}),
+        ];
+        let models = native_editor_models(&draft, &[provider], &native).unwrap();
+        for index in 0..ROLES.len() {
+            let options = mapping_select_options(
+                InterfaceLocale::English,
+                &draft,
+                index,
+                models.iter().collect(),
+            );
+            assert_eq!(options[0].label, "Claude Opus");
+            assert!(matches!(&options[0].choice, ProviderChoice::Model(id) if id == "opus"));
+            assert_eq!(options[0].selected, index == 0);
+            assert!(options[0].enabled);
+            assert_eq!(options[1].label, "Claude Sonnet");
+            assert!(matches!(options[2].choice, ProviderChoice::Manual));
+        }
     }
 }
 
