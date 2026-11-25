@@ -332,7 +332,7 @@ function writeAgentStatus(state) {
     const model = state.options.model;
     const agent = agentName(state);
     const tier = agent === 'Codex' ? resolveCodexServiceTier(state.options, process.env) : null;
-    const tierName = new Map([['fast', '快速'], ['ultrafast', '超快'], ['priority', '优先'], ['flex', '弹性']]).get(tier) ?? (tier && tier !== 'default' ? tier : null);
+    const tierName = new Map([['default', '普通'], ['fast', '快速'], ['ultrafast', '超快'], ['priority', '优先'], ['flex', '弹性']]).get(tier) ?? (tier || null);
     const label = `${agent}：${state.task}（${[model && model !== 'best' ? model : '', effort ? `${effortName}推理` : '', tierName].filter(Boolean).join(' · ')}）`;
     const file = path.join(dir, `${id}.json`);
     if (lastAgentStatus?.file === file && lastAgentStatus.status === status &&
