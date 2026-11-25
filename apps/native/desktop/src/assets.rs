@@ -10,6 +10,7 @@ impl AssetSource for NativeAssets {
             "icons/plus.svg" => include_bytes!("../assets/icons/plus.svg"),
             "icons/graph-ring.svg" => include_bytes!("../assets/icons/graph-ring.svg"),
             "icons/history.svg" => include_bytes!("../assets/icons/history.svg"),
+            "icons/keyboard.svg" => include_bytes!("../assets/icons/keyboard.svg"),
             "icons/panel-right-open.svg" => include_bytes!("../assets/icons/panel-right-open.svg"),
             "icons/folder-input.svg" => include_bytes!("../assets/icons/folder-input.svg"),
             "icons/layers.svg" => include_bytes!("../assets/icons/layers.svg"),

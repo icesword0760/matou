@@ -55,6 +55,24 @@ pub fn font_zoom_for_key(stroke: &gpui::Keystroke, is_mac: bool) -> Option<FontZ
     }
 }
 
+fn font_zoom_for_wheel(
+    delta: gpui::ScrollDelta,
+    modifiers: gpui::Modifiers,
+    is_mac: bool,
+) -> Option<FontZoom> {
+    let gpui::ScrollDelta::Lines(delta) = delta else {
+        return None;
+    };
+    if !terminal_mod(modifiers, is_mac) || modifiers.alt || delta.y == 0. {
+        return None;
+    }
+    Some(if delta.y > 0. {
+        FontZoom::In
+    } else {
+        FontZoom::Out
+    })
+}
+
 const DEFAULT_VERTICAL_INSET: Pixels = px(14.);
 const CANVAS_VERTICAL_INSET: Pixels = px(12.);
 const BLINK_INTERVAL: Duration = Duration::from_millis(500);
@@ -1361,21 +1379,10 @@ impl TerminalSurface {
     }
 
     fn on_scroll(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
-        if terminal_mod(event.modifiers, cfg!(target_os = "macos")) && !event.modifiers.alt {
-            let delta = match event.delta {
-                gpui::ScrollDelta::Pixels(delta) => f32::from(delta.y),
-                gpui::ScrollDelta::Lines(delta) => delta.y,
-            };
-            if delta != 0. {
-                self.emit(
-                    SurfaceEventKind::FontZoom(if delta > 0. {
-                        FontZoom::In
-                    } else {
-                        FontZoom::Out
-                    }),
-                    cx,
-                );
-            }
+        if let Some(zoom) =
+            font_zoom_for_wheel(event.delta, event.modifiers, cfg!(target_os = "macos"))
+        {
+            self.emit(SurfaceEventKind::FontZoom(zoom), cx);
             cx.stop_propagation();
             return;
         }
@@ -1423,7 +1430,7 @@ impl TerminalSurface {
     }
 
     fn scrollbar_wheel(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
-        if event.modifiers.control || event.modifiers.platform {
+        if !event.delta.precise() && (event.modifiers.control || event.modifiers.platform) {
             return;
         }
         let delta = wheel_scroll_pixels(event.delta, event.modifiers.alt);
@@ -2409,6 +2416,40 @@ mod file_drop_tests {
 #[cfg(test)]
 mod shortcut_tests {
     use super::*;
+
+    #[test]
+    fn font_zoom_only_uses_line_wheel_with_the_platform_modifier() {
+        use gpui::{Modifiers, ScrollDelta};
+
+        let up = ScrollDelta::Lines(point(0., 1.));
+        let down = ScrollDelta::Lines(point(0., -1.));
+        let horizontal = ScrollDelta::Lines(point(1., 0.));
+        let precise = ScrollDelta::Pixels(point(px(0.), px(12.)));
+        for is_mac in [true, false] {
+            let modifier = Modifiers {
+                platform: is_mac,
+                control: !is_mac,
+                ..Modifiers::default()
+            };
+            let with_alt = Modifiers {
+                alt: true,
+                ..modifier
+            };
+            assert_eq!(
+                font_zoom_for_wheel(up, modifier, is_mac),
+                Some(FontZoom::In)
+            );
+            assert_eq!(
+                font_zoom_for_wheel(down, modifier, is_mac),
+                Some(FontZoom::Out)
+            );
+            assert_eq!(font_zoom_for_wheel(horizontal, modifier, is_mac), None);
+            assert_eq!(font_zoom_for_wheel(precise, modifier, is_mac), None);
+            assert_eq!(font_zoom_for_wheel(up, with_alt, is_mac), None);
+            assert_eq!(font_zoom_for_wheel(up, Modifiers::default(), is_mac), None);
+            assert_eq!(font_zoom_for_wheel(up, modifier, !is_mac), None);
+        }
+    }
 
     #[test]
     fn font_shortcuts_use_command_on_mac_and_control_on_windows() {

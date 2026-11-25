@@ -56,7 +56,6 @@ pub struct ShortcutEntry {
     pub label: &'static str,
     mac_keys: &'static [&'static str],
     win_keys: &'static [&'static str],
-    light_win_keys: Option<&'static [&'static str]>,
 }
 
 impl ShortcutEntry {
@@ -69,17 +68,13 @@ impl ShortcutEntry {
             label,
             mac_keys,
             win_keys,
-            light_win_keys: None,
         }
     }
 
     pub fn keys(self, model: ShortcutPanelModel) -> &'static [&'static str] {
-        match (model.platform, model.theme) {
-            (ShortcutPlatform::Mac, _) => self.mac_keys,
-            (ShortcutPlatform::Windows, ShortcutTheme::Dark) => self.win_keys,
-            (ShortcutPlatform::Windows, ShortcutTheme::Light) => {
-                self.light_win_keys.unwrap_or(self.win_keys)
-            }
+        match model.platform {
+            ShortcutPlatform::Mac => self.mac_keys,
+            ShortcutPlatform::Windows => self.win_keys,
         }
     }
 }
@@ -91,11 +86,7 @@ const SPLITS: &[ShortcutEntry] = &[
         &["⌘", "Shift", "D"],
         &["Ctrl", "Shift", "D"],
     ),
-    ShortcutEntry {
-        // The light Windows artwork shows ⌘ for this row.
-        light_win_keys: Some(&["⌘", "]"]),
-        ..ShortcutEntry::new("切换到下一个 pane", &["⌘", "]"], &["Ctrl", "]"])
-    },
+    ShortcutEntry::new("切换到下一个 pane", &["⌘", "]"], &["Ctrl", "]"]),
     ShortcutEntry::new("切换到上一个pane", &["⌘", "["], &["Ctrl", "["]),
     ShortcutEntry::new(
         "切换到指定方向的 pane",
@@ -127,7 +118,6 @@ const FONT_SIZE: &[ShortcutEntry] = &[
     ShortcutEntry::new("缩小字号", &["⌘", "−"], &["Ctrl", "−"]),
     ShortcutEntry::new("重置字号", &["⌘", "0"], &["Ctrl", "0"]),
     ShortcutEntry::new("滚轮缩放", &["⌘", "滚轮"], &["Ctrl", "滚轮"]),
-    ShortcutEntry::new("触控板缩放", &["双指捏合"], &["双指捏合"]),
 ];
 
 const OTHER: &[ShortcutEntry] = &[
@@ -260,7 +250,6 @@ mod tests {
 缩小字号|⌘ −
 重置字号|⌘ 0
 滚轮缩放|⌘ 滚轮
-触控板缩放|双指捏合
 其他
 换肤|⌘ I
 搜索|⌘ F";
@@ -284,7 +273,6 @@ mod tests {
 缩小字号|Ctrl −
 重置字号|Ctrl 0
 滚轮缩放|Ctrl 滚轮
-触控板缩放|双指捏合
 换肤
 换肤|Ctrl I
 搜索|Ctrl F";
@@ -309,22 +297,22 @@ mod tests {
                 (
                     ShortcutPlatform::Mac,
                     ShortcutTheme::Dark,
-                    0x622f9c3f771efcf2,
+                    0x91cb41da4a415487,
                 ),
                 (
                     ShortcutPlatform::Mac,
                     ShortcutTheme::Light,
-                    0x933306c961927956,
+                    0xf0fe923be57aaa91,
                 ),
                 (
                     ShortcutPlatform::Windows,
                     ShortcutTheme::Dark,
-                    0xbf86448c96ec36e4,
+                    0x327876b01ec3352c,
                 ),
                 (
                     ShortcutPlatform::Windows,
                     ShortcutTheme::Light,
-                    0x6651954908098f89,
+                    0x50d8149aa3c3e275,
                 ),
             ] {
                 let model = ShortcutPanelModel {
@@ -344,12 +332,9 @@ mod tests {
                         }),
                     );
                 }
-                let expected = match (platform, theme) {
-                    (ShortcutPlatform::Mac, _) => MAC_ENTRIES.into(),
-                    (ShortcutPlatform::Windows, ShortcutTheme::Dark) => WIN_ENTRIES.into(),
-                    (ShortcutPlatform::Windows, ShortcutTheme::Light) => {
-                        WIN_ENTRIES.replace("切换到下一个 pane|Ctrl ]", "切换到下一个 pane|⌘ ]")
-                    }
+                let expected = match platform {
+                    ShortcutPlatform::Mac => MAC_ENTRIES,
+                    ShortcutPlatform::Windows => WIN_ENTRIES,
                 };
                 assert_eq!(lines.join("\n"), expected, "{model:?}");
                 let artwork_hash = model
@@ -532,7 +517,7 @@ mod ui {
                         .id("shortcut-panel-artwork")
                         .flex_none()
                         .w(artwork_width)
-                        .h(artwork_width * (1312. / 1520.))
+                        .h(artwork_width * (1216. / 1520.))
                         .with_fallback(move || ui_text(messages.image_alt).into_any_element()),
                 );
 

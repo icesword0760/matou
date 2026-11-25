@@ -1806,6 +1806,7 @@ const CONTROLS: &[&str] = &[
     "dag-open-retry",
     "dag-open-dismiss",
     "split",
+    "shortcuts",
     "project-instructions",
     "project-instructions-close",
     "project-instructions-preview",
@@ -13403,6 +13404,37 @@ impl Workspace {
                     cx,
                 )
                 .into_any_element()
+            }
+        })
+        .child({
+            let shortcuts = div()
+                .id("shortcuts")
+                .size(px(28.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(icon("keyboard", 16., rgba(palette.tabs.action_text)));
+            if !self.wiring_available() {
+                shortcuts
+                    .opacity(0.5)
+                    .cursor(CursorStyle::OperationNotAllowed)
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            } else {
+                self.button(
+                    shortcuts.cursor_pointer().tooltip({
+                        let label = self.locale.text("快捷键", "Keyboard shortcuts");
+                        move |_, cx| cx.new(|_| CardTooltip(label.into())).into()
+                    }),
+                    &self.control_focus["shortcuts"],
+                    |this, window, cx| {
+                        if let Some(focus) = this.active_terminal_focus(cx) {
+                            window.focus(&focus);
+                        }
+                        this.toggle_shortcuts(window, cx);
+                    },
+                    cx,
+                )
             }
         })
         .child(self.update_trigger(cx))

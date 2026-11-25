@@ -857,7 +857,7 @@ impl Workspace {
         self.theme.effective() == matou_native_desktop::theme_tokens::AppTheme::Dark
     }
 
-    fn wiring_available(&self) -> bool {
+    pub(super) fn wiring_available(&self) -> bool {
         self.settings.is_none()
             && self.wiring_unblocked()
             && (self.hierarchy.is_some() || self.read_only.is_some())
@@ -889,7 +889,7 @@ impl Workspace {
         }
     }
 
-    fn active_terminal_focus(&self, cx: &App) -> Option<FocusHandle> {
+    pub(super) fn active_terminal_focus(&self, cx: &App) -> Option<FocusHandle> {
         let id = self.active_level_focus()?;
         if !self.wiring_available()
             || self.wiring.board_open

@@ -14,6 +14,7 @@ export type AppIconName =
   | 'git-commit-horizontal'
   | 'graph-ring'
   | 'history'
+  | 'keyboard'
   | 'layers'
   | 'layers-plus'
   | 'network'
@@ -44,6 +45,7 @@ const paths: Record<AppIconName, ReactNode> = {
   plus: <><path d="M12 5v14"/><path d="M5 12h14"/></>,
   'graph-ring': <><path d="M13.8 5.6a8.2 8.2 0 0 1 4.5 7.8M16.5 17.5a8.2 8.2 0 0 1-9 0M5.7 13.4a8.2 8.2 0 0 1 4.5-7.8"/><circle cx="12" cy="4.5" r="2.15" fill="currentColor" stroke="none"/><circle cx="18.5" cy="16" r="2.15" fill="currentColor" stroke="none"/><circle cx="5.5" cy="16" r="2.15" fill="currentColor" stroke="none"/></>,
   history: <><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/><path d="M12 8v4l3 2"/></>,
+  keyboard: <><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M6 9h.01M10 9h.01M14 9h.01M18 9h.01M6 13h.01M10 13h.01M14 13h.01M18 13h.01M8 16h8"/></>,
   'panel-right-open': <><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M14 4v16M17.5 9v6M20.5 12h-6"/></>,
   'folder-input': <><path d="M3 7.5V6a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/><path d="M12 9v7m-3-3 3 3 3-3"/></>,
   layers: <><path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z"/><path d="M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12"/><path d="M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17"/></>,
