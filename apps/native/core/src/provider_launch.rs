@@ -1400,7 +1400,8 @@ fn prepare_claude(
             None,
         ),
     };
-    let selected_model = match provider_binding["model"].as_str() {
+    let stored_model = provider_binding["model"].as_str();
+    let selected_model = match stored_model {
         Some(bound)
             if !provider.is_subscription()
                 && (bound.starts_with("matou-chatgpt/")
@@ -1438,10 +1439,18 @@ fn prepare_claude(
             (provider, assignment.model.as_str(), effort, Some(*role))
         }
         None => {
+            let restored_role = restored_model_role(
+                target,
+                stored_model.filter(|model| *model == selected_model),
+            );
             let effort = if bound_role.is_some() || remembered {
-                provider_binding["effort"].as_str()
+                // Preserve omitted effort for remembered concrete models.
+                provider_binding["effort"].as_str().or_else(|| {
+                    let role = restored_role?;
+                    reasoning_effort(&provider, model, selected_role.or(Some(role)))
+                })
             } else {
-                reasoning_effort(&provider, model, selected_role)
+                reasoning_effort(&provider, model, selected_role.or(restored_role))
             };
             (&provider, model, effort, bound_role)
         }
@@ -2731,6 +2740,18 @@ fn fallback_role(
     }
 }
 
+fn restored_model_role(
+    target: Option<ClaudeTarget<'_>>,
+    stored_model: Option<&str>,
+) -> Option<&'static str> {
+    match target {
+        Some(ClaudeTarget::Resume(_) | ClaudeTarget::PermissionRestart { .. }) => {
+            stored_model.and_then(startup_role_alias)
+        }
+        _ => None,
+    }
+}
+
 fn reasoning_effort<'a>(
     provider: &'a Provider,
     model: &str,
@@ -3052,4 +3073,113 @@ pub(crate) fn login_shell_path(
     unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL) };
     let _ = child.wait();
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn effort_provider() -> Result<tempfile::TempDir> {
+        let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR"))?;
+        let config = json!({
+            "version": 1,
+            "activeProviderIds": {"claude-code": "fixture"},
+            "providers": {"claude-code": [{
+                "id": "fixture",
+                "endpoint": "https://example.invalid",
+                "apiKey": "fixture-key",
+                "model": "opus",
+                "effortMapping": {"opus": "high", "sonnet": "follow"}
+            }]}
+        });
+        fs::write(root.path().join("provider-config.json"), config.to_string())?;
+        Ok(root)
+    }
+
+    #[test]
+    fn restored_claude_argv_uses_the_stored_model_role_for_effort() -> Result<()> {
+        let root = effort_provider()?;
+        let environment = BTreeMap::from([(
+            "MATOU_CLAUDE_COMMAND".into(),
+            std::env::current_exe()?.into_os_string(),
+        )]);
+        let resume = ClaudeTarget::Resume("original");
+        let restart = ClaudeTarget::PermissionRestart { remembered: true };
+        for (target, model, assigned_role, saved_effort, expected_effort) in [
+            (resume, "matou-role/opus", None, None, Some("high")),
+            (
+                resume,
+                "matou-role/opus-fallback",
+                Some("opus"),
+                None,
+                Some("high"),
+            ),
+            (
+                resume,
+                "matou-role/sonnet",
+                Some("sonnet"),
+                Some("xhigh"),
+                Some("xhigh"),
+            ),
+            (resume, "matou-role/haiku", None, None, None),
+            (resume, "matou-role/sonnet", None, None, None),
+            (resume, "matou-role/opus", Some("opus"), Some(""), None),
+            (restart, "matou-role/opus", None, None, Some("high")),
+            (restart, "matou-role/opus", None, Some("follow"), None),
+        ] {
+            let binding = json!({
+                "providerConfigId": "fixture", "model": model,
+                "assignedRole": assigned_role, "effort": saved_effort,
+            });
+            let launch = prepare_managed_claude_launch(
+                root.path(),
+                root.path(),
+                &binding,
+                Some(target),
+                environment.clone(),
+                80,
+                24,
+            )?;
+            let mut expected = vec!["--model", model];
+            if let Some(effort) = expected_effort {
+                expected.extend(["--effort", effort]);
+            }
+            if let ClaudeTarget::Resume(id) = target {
+                expected.extend(["--resume", id]);
+            }
+            assert_eq!(launch.launch.argv, expected, "{binding}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn new_claude_argv_uses_assigned_effort() -> Result<()> {
+        let root = effort_provider()?;
+        let assignments = BTreeMap::from([(
+            "opus".into(),
+            ClaudeRoleAssignment {
+                provider_id: "fixture".into(),
+                model: "matou-role/opus".into(),
+                effort: Some("xhigh".into()),
+            },
+        )]);
+        let launch = prepare_new_claude_launch(
+            root.path(),
+            root.path(),
+            &json!({"model": "matou-role/sonnet", "effort": "low"}),
+            Some(&assignments),
+            BTreeMap::from([(
+                "MATOU_CLAUDE_COMMAND".into(),
+                std::env::current_exe()?.into_os_string(),
+            )]),
+            80,
+            24,
+        )?;
+
+        assert_eq!(
+            launch.launch.argv,
+            ["--model", "matou-role/opus", "--effort", "xhigh"]
+        );
+        Ok(())
+    }
 }
