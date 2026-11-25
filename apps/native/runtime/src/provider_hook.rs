@@ -1265,11 +1265,16 @@ fn read_request(
     }
     let agy_pre_tool_use = record.scope.profile == LaunchProfile::Antigravity
         && payload.get("hookEventName").and_then(Value::as_str) == Some("PreToolUse");
-    let provider_response = |mut evaluation: HookEvaluation| {
+    let provider_response = |mut evaluation: HookEvaluation, allow_sandbox_bypass: bool| {
         if agy_pre_tool_use && evaluation.response_json == "{}" {
             // The native response requires a decision. Allow leaves approval to
-            // the next hook or Antigravity's default permission policy.
-            evaluation.response_json = r#"{"decision":"allow"}"#.to_owned();
+            // the next hook or Antigravity's default permission policy, except
+            // for whitelisted Matou control commands that live under ~/.matou.
+            evaluation.response_json = if allow_sandbox_bypass {
+                r#"{"decision":"allow","overwrite":{"BypassSandbox":true}}"#.to_owned()
+            } else {
+                r#"{"decision":"allow"}"#.to_owned()
+            };
         }
         evaluation
     };
@@ -1281,8 +1286,10 @@ fn read_request(
         {
             record.reported_retirement = true;
         }
-        return Ok((provider_response(HookEvaluation::allow()), None));
+        return Ok((provider_response(HookEvaluation::allow(), false), None));
     }
+    let agy_sandbox_bypass =
+        agy_pre_tool_use && should_bypass_antigravity_sandbox(&payload, &record.data_root);
     let received_at = Instant::now();
     let eval_scope = (!statusline).then(|| {
         (
@@ -1340,7 +1347,7 @@ fn read_request(
                 HOOK_DECISION_BUDGET,
             );
             Ok((
-                provider_response(decision),
+                provider_response(decision, agy_sandbox_bypass),
                 matches!(
                     profile,
                     LaunchProfile::ClaudeCode | LaunchProfile::Antigravity
@@ -1350,6 +1357,135 @@ fn read_request(
         }
         Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
             Err("503 Service Unavailable")
+        }
+    }
+}
+
+/// Allows Antigravity's terminal sandbox to be bypassed only for direct,
+/// shell-metacharacter-free `mt` / `mt-foreman` control-plane commands
+/// (optionally chained with `&&`). `mt ctx exec` and unknown `mt` subcommands
+/// are explicitly rejected so arbitrary commands remain sandboxed.
+fn should_bypass_antigravity_sandbox(payload: &Map<String, Value>, data_root: &Path) -> bool {
+    let Some(tool_call) = payload.get("toolCall").and_then(Value::as_object) else {
+        return false;
+    };
+    if tool_call.get("name").and_then(Value::as_str) != Some("run_command") {
+        return false;
+    }
+    let Some(raw_command) = tool_call
+        .get("args")
+        .and_then(Value::as_object)
+        .and_then(|args| args.get("CommandLine"))
+        .and_then(Value::as_str)
+    else {
+        return false;
+    };
+    let trimmed = raw_command.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let bin_dir = data_root.join("control").join("bin");
+    trimmed
+        .split("&&")
+        .all(|segment| is_whitelisted_matou_segment(segment.trim(), &bin_dir))
+}
+
+fn is_whitelisted_matou_segment(segment: &str, bin_dir: &Path) -> bool {
+    if segment.is_empty() || segment.chars().any(is_disallowed_shell_char) {
+        return false;
+    }
+    let Some((first_word, rest)) = split_first_shell_word(segment) else {
+        return false;
+    };
+    if matches_control_binary(first_word, bin_dir, "mt-foreman") {
+        return true;
+    }
+    if matches_control_binary(first_word, bin_dir, "mt") {
+        return is_whitelisted_mt_args(rest);
+    }
+    false
+}
+
+fn is_disallowed_shell_char(ch: char) -> bool {
+    matches!(
+        ch,
+        ';' | '|' | '`' | '$' | '(' | ')' | '<' | '>' | '{' | '}' | '&' | '\r' | '\n' | '\0'
+    )
+}
+
+fn matches_control_binary(word: &str, bin_dir: &Path, name: &str) -> bool {
+    if word == name {
+        return true;
+    }
+    let word_path = Path::new(word);
+    if word_path == bin_dir.join(name) || word_path == bin_dir.join(format!("{name}.cmd")) {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        if word.eq_ignore_ascii_case(&bin_dir.join(name).to_string_lossy())
+            || word.eq_ignore_ascii_case(&bin_dir.join(format!("{name}.cmd")).to_string_lossy())
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_whitelisted_mt_args(rest: &str) -> bool {
+    if rest.is_empty() {
+        return true;
+    }
+    let Some((subcommand, after_sub)) = split_first_shell_word(rest) else {
+        return false;
+    };
+    match subcommand {
+        "identify" | "list" | "read" | "history" | "commands" | "send" | "key" | "create"
+        | "fork" | "remove" | "close" | "focus" | "switch" | "help" | "--help" | "-h" => true,
+        "ctx" => {
+            if after_sub.is_empty() {
+                return true;
+            }
+            let Some((ctx_sub, _)) = split_first_shell_word(after_sub) else {
+                return false;
+            };
+            matches!(
+                ctx_sub,
+                "outline"
+                    | "batch-search"
+                    | "index"
+                    | "log"
+                    | "search"
+                    | "resume"
+                    | "help"
+                    | "--help"
+                    | "-h"
+            )
+        }
+        _ => false,
+    }
+}
+
+fn split_first_shell_word(input: &str) -> Option<(&str, &str)> {
+    let trimmed = input.trim_start();
+    let mut chars = trimmed.chars();
+    let first = chars.next()?;
+    if first == '"' || first == '\'' {
+        let end = trimmed[1..].find(first)?;
+        if end == 0 {
+            return None;
+        }
+        let word = &trimmed[1..1 + end];
+        let after = &trimmed[2 + end..];
+        if !after.is_empty() && !after.starts_with(char::is_whitespace) {
+            return None;
+        }
+        Some((word, after.trim_start()))
+    } else {
+        match trimmed.find(char::is_whitespace) {
+            Some(pos) => Some((&trimmed[..pos], trimmed[pos..].trim_start())),
+            None => Some((trimmed, "")),
         }
     }
 }
@@ -1764,6 +1900,245 @@ mod tests {
         assert_eq!(
             post("pre-tool-use", &native_read(&root.path().join(".env.example"), 22))?,
             json!({"decision":"allow"})
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn antigravity_sandbox_bypass_allows_whitelisted_mt_commands_and_rejects_unsafe_ones() {
+        let data_root = Path::new("/Users/tester/.matou");
+        let run_cmd = |command: &str| {
+            json!({
+                "hookEventName": "PreToolUse",
+                "toolCall": {
+                    "name": "run_command",
+                    "args": { "CommandLine": command }
+                }
+            })
+            .as_object()
+            .unwrap()
+            .clone()
+        };
+
+        let allowed = [
+            "mt",
+            "mt identify --json",
+            "mt list --all --json",
+            "mt read session:1 --json",
+            "mt send left \"hello world\" --enter",
+            "mt key left enter",
+            "mt ctx",
+            "mt ctx search foo",
+            "mt ctx log --limit 20",
+            "mt-foreman guide",
+            "mt-foreman status",
+            "mt-foreman start task-01 --cd /tmp/repo --brief /tmp/brief.md",
+            "mt identify --json && mt list --json",
+            "mt identify --json && mt-foreman guide && mt-foreman roles",
+            "\"mt\" \"identify\" --json",
+            "'mt-foreman' guide",
+            "/Users/tester/.matou/control/bin/mt list --json",
+            "\"/Users/tester/.matou/control/bin/mt\" identify --json",
+            "/Users/tester/.matou/control/bin/mt-foreman guide",
+            "/Users/tester/.matou/control/bin/mt.cmd list --json",
+            "/Users/tester/.matou/control/bin/mt-foreman.cmd status",
+        ];
+        for command in allowed {
+            assert!(
+                should_bypass_antigravity_sandbox(&run_cmd(command), data_root),
+                "expected sandbox bypass for: {command}"
+            );
+        }
+
+        let rejected = [
+            "",
+            "   ",
+            "git status",
+            "ls ~/.matou/control/bin",
+            "mtx foo",
+            "sudo mt list",
+            "mt shell",
+            "mt unknown-subcommand",
+            "mt ctx exec -- rm -rf /",
+            "mt ctx exec --session s1 -- ls",
+            "mt 'ctx' \"exec\" -- ls",
+            "mt ctx --session s1 exec -- ls",
+            "mt list --json && mt ctx exec -- rm -rf /",
+            "mt list --json && rm -rf /",
+            "mt identify --json && ",
+            "&& mt identify --json",
+            "mt list | head",
+            "mt list; rm -rf /",
+            "mt list &",
+            "mt identify --json &&& mt list --json",
+            "mt $(whoami)",
+            "mt `whoami`",
+            "mt list > /tmp/out",
+            "mt-foreman start t1 <<'EOF'\nhi\nEOF",
+            "mt list\nrm -rf /",
+            "mt \"\"",
+            "\"mt\"list --json",
+            "/tmp/evil/mt list --json",
+        ];
+        for command in rejected {
+            assert!(
+                !should_bypass_antigravity_sandbox(&run_cmd(command), data_root),
+                "expected sandbox restriction for: {command:?}"
+            );
+        }
+
+        let non_run_command = json!({
+            "hookEventName": "PreToolUse",
+            "toolCall": {
+                "name": "read_file",
+                "args": { "CommandLine": "mt identify --json", "Path": "/tmp/a" }
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        assert!(!should_bypass_antigravity_sandbox(
+            &non_run_command,
+            data_root
+        ));
+
+        let missing_command = json!({
+            "hookEventName": "PreToolUse",
+            "toolCall": { "name": "run_command", "args": {} }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        assert!(!should_bypass_antigravity_sandbox(
+            &missing_command,
+            data_root
+        ));
+    }
+
+    #[test]
+    fn antigravity_pre_tool_use_bypasses_sandbox_for_mt_without_overriding_non_mt_or_retired_or_deny()
+    -> Result<()> {
+        use matou_native_core::context_optimizer_config::{
+            AgentOptimizerSettings, ContextOptimizerConfig,
+        };
+
+        let root = tempfile::tempdir()?;
+        ContextOptimizerConfig::for_data_root(root.path()).set_agent_settings(
+            "antigravity",
+            AgentOptimizerSettings {
+                block_sensitive_reads: true,
+                ..Default::default()
+            },
+        )?;
+        let server = ProviderHookServer::start()?;
+        let agy = server.register(
+            root.path(),
+            Scope {
+                profile: LaunchProfile::Antigravity,
+                ..scope("agy-sandbox")
+            },
+        )?;
+        let claude = server.register(root.path(), scope("claude-control"))?;
+
+        let post_agy = |token: &str, kind: &str, payload: &Value| -> Result<Value> {
+            let body = payload.to_string();
+            let mut socket = TcpStream::connect((Ipv4Addr::LOCALHOST, server.port))?;
+            socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+            write!(
+                socket,
+                "POST /hooks/{token}?kind={kind} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )?;
+            let mut response = String::new();
+            socket.read_to_string(&mut response)?;
+            ensure!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+            Ok(serde_json::from_str(
+                response.split_once("\r\n\r\n").context("response")?.1,
+            )?)
+        };
+        let run_cmd = |command: &str| {
+            json!({
+                "conversationId": "agy-sandbox-conv",
+                "stepIdx": 2,
+                "toolCall": {
+                    "id": "call_1",
+                    "name": "run_command",
+                    "args": { "CommandLine": command }
+                }
+            })
+        };
+
+        let bypass = json!({"decision":"allow","overwrite":{"BypassSandbox":true}});
+        let allow_only = json!({"decision":"allow"});
+        let abs_mt = format!(
+            "{} list --json",
+            root.path().join("control/bin/mt").display()
+        );
+
+        for command in [
+            "mt identify --json",
+            "mt-foreman guide",
+            "mt identify --json && mt list --json",
+            "mt ctx search foo",
+            abs_mt.as_str(),
+        ] {
+            assert_eq!(
+                post_agy(&agy.token, "pre-tool-use", &run_cmd(command))?,
+                bypass,
+                "expected BypassSandbox overwrite for {command}"
+            );
+        }
+
+        for command in [
+            "mt ctx exec -- rm -rf /",
+            "mt list --json && mt ctx exec -- rm -rf /",
+            "git status",
+            "mt list | head",
+        ] {
+            assert_eq!(
+                post_agy(&agy.token, "pre-tool-use", &run_cmd(command))?,
+                allow_only,
+                "expected plain allow without overwrite for {command}"
+            );
+        }
+
+        // PostToolUse never receives a PreToolUse overwrite.
+        assert_eq!(
+            post_agy(&agy.token, "post-tool-use", &run_cmd("mt identify --json"))?,
+            json!({})
+        );
+
+        // Explicit interceptor deny is preserved.
+        let env_read = json!({
+            "conversationId": "agy-sandbox-conv",
+            "stepIdx": 3,
+            "toolCall": {
+                "id": "call_env",
+                "name": "read_file",
+                "args": { "Path": root.path().join(".env") }
+            }
+        });
+        let denied = post_agy(&agy.token, "pre-tool-use", &env_read)?;
+        assert_eq!(denied["decision"], "deny");
+
+        // Claude Code profile is unaffected.
+        let claude_payload = json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "run_command",
+            "toolCall": {
+                "name": "run_command",
+                "args": { "CommandLine": "mt identify --json" }
+            }
+        })
+        .to_string();
+        assert_eq!(claude_hook_reply(&server, &claude, &claude_payload)?, "{}");
+
+        // Retired Antigravity token never receives BypassSandbox overwrite.
+        let retired_token = agy.token.clone();
+        drop(agy);
+        assert_eq!(
+            post_agy(&retired_token, "pre-tool-use", &run_cmd("mt identify --json"))?,
+            allow_only
         );
         Ok(())
     }

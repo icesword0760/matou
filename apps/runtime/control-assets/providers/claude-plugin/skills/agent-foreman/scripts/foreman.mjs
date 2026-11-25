@@ -179,7 +179,7 @@ const usage = `Usage:
   mt-foreman start  商城-购物车-01 --cd <dir> [--brief <file>] [options]
   mt-foreman send   商城-购物车-01 [--message <file>] [options] (resume is an alias)
   mt-foreman watch  商城-购物车-01
-  mt-foreman status 商城-购物车-01
+  mt-foreman status [商城-购物车-01]
   mt-foreman stop   商城-购物车-01
   mt-foreman ask    商城-购物车-01 [--no-wait] [--wait-min N] (执行者; question from stdin)
   mt-foreman inbox  商城-购物车-01 (执行者)
@@ -1713,8 +1713,8 @@ async function main() {
     process.stdout.write(content);
     return 0;
   }
-  if (!['start', 'send', 'resume', 'watch', 'status', 'stop', 'ask', 'answer', 'note', 'inbox', '_supervise', '_detach', '_notify-owner'].includes(cmd) || task == null) throw new Error(usage);
-  if (!task || task.startsWith('.') || /[\s\p{White_Space}'"`/\\\0]/u.test(task) || Array.from(task).length > 40) {
+  if (!['start', 'send', 'resume', 'watch', 'status', 'stop', 'ask', 'answer', 'note', 'inbox', '_supervise', '_detach', '_notify-owner'].includes(cmd) || (task == null && cmd !== 'status')) throw new Error(usage);
+  if (task != null && (!task || task.startsWith('.') || /[\s\p{White_Space}'"`/\\\0]/u.test(task) || Array.from(task).length > 40)) {
     throw new Error('任务名不能包含空格、引号或斜杠，最长 40 个字');
   }
   if (['ask', 'answer', 'note', 'inbox'].includes(cmd)) return mailboxCommand(cmd, task, opts);
@@ -1743,6 +1743,27 @@ async function main() {
   }
 
   if (cmd === 'status') {
+    if (task == null) {
+      let entries;
+      try {
+        entries = fs.readdirSync(RUNS, { withFileTypes: true });
+      } catch (err) {
+        if (err.code !== 'ENOENT') throw err;
+        entries = [];
+      }
+      const rows = [];
+      for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+        if (!entry.isDirectory()) continue;
+        try {
+          const state = loadState(entry.name);
+          rows.push(`${entry.name}\t${state.status}\t${state.agent || 'codex'}`);
+        } catch (err) {
+          if (err.code !== 'ENOENT') throw err;
+        }
+      }
+      console.log(rows.length ? rows.join('\n') : '暂无任务');
+      return 0;
+    }
     const s = loadState(task);
     heal(s);
     const idle = s.lastActivityAt ? Math.round((Date.now() - Date.parse(s.lastActivityAt)) / 1000) : null;
