@@ -1762,8 +1762,16 @@ mod view {
 
         /// Update the blue notification ring without rebuilding the canvas.
         pub fn set_notifications(&mut self, session_ids: &[String], cx: &mut Context<Self>) {
-            self.notifications = session_ids.iter().cloned().collect();
-            cx.notify();
+            let next = session_ids.iter().cloned().collect();
+            if self.notifications != next {
+                self.notifications = next;
+                cx.notify();
+            }
+        }
+
+        #[cfg(debug_assertions)]
+        pub fn has_notification_for_probe(&self, session_id: &str) -> bool {
+            self.notifications.contains(session_id)
         }
 
         pub fn set_locale(&mut self, locale: InterfaceLocale, cx: &mut Context<Self>) {
@@ -2598,7 +2606,8 @@ mod view {
                     continue;
                 }
                 let focused = positioned.node.session_id == self.canvas.preview_session_id;
-                let notified = self.notifications.contains(&positioned.node.session_id);
+                let notified = !positioned.node.archived
+                    && self.notifications.contains(&positioned.node.session_id);
                 cards.push(node_card(
                     positioned,
                     focused,
@@ -2683,10 +2692,10 @@ mod view {
         } else {
             node.work_status.as_str()
         };
-        let border = if focused {
-            p.focus
-        } else if notified {
+        let border = if notified {
             0x2588ff
+        } else if focused {
+            p.focus
         } else if stopped {
             p.stopped_border
         } else {
@@ -2761,10 +2770,10 @@ mod view {
         let session_id = node.session_id.clone();
         let selector = format!("dag-node-{session_id}");
         let mut shadows = Vec::new();
-        if focused {
-            shadows.push(shadow(p.focus, 0.24, 0., 0., 2.));
-        } else if notified {
+        if notified {
             shadows.push(shadow(0x2588ff, 0.32, 0., 0., 2.));
+        } else if focused {
+            shadows.push(shadow(p.focus, 0.24, 0., 0., 2.));
         }
         shadows.push(shadow(
             p.card_shadow,
@@ -2809,7 +2818,9 @@ mod view {
             .overflow_hidden()
             .shadow(shadows)
             .cursor(CursorStyle::PointingHand)
-            .hover(|style| style.border_color(rgb(0x596575)))
+            .when(!notified, |card| {
+                card.hover(|style| style.border_color(rgb(0x596575)))
+            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {

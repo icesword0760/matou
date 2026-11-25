@@ -1635,7 +1635,7 @@ impl Notifications {
             }
             *cooldown = (now, cooldown.1 + 1);
             if let Some(session_id) = session_id {
-                self.mark_session_read(session_id);
+                self.dismiss_session(session_id);
             }
             self.sequence += 1;
             (self.sequence, Some(key))
@@ -1706,12 +1706,54 @@ impl Notifications {
         });
     }
 
-    fn mark_session_read(&mut self, id: &str) {
+    fn mark_workspace_read(&mut self, id: &str) -> bool {
+        self.mark_read(|entry| entry.workspace_id.as_deref() == Some(id))
+    }
+
+    fn mark_task_read(&mut self, id: &str) -> bool {
+        self.mark_read(|entry| entry.task_id.as_deref() == Some(id))
+    }
+
+    fn dismiss_session(&mut self, id: &str) -> bool {
+        self.mark_read(|entry| entry.session_id.as_deref() == Some(id))
+    }
+
+    fn mark_read(&mut self, matches: impl Fn(&NotificationEntry) -> bool) -> bool {
+        let mut changed = false;
         for entry in &mut self.entries {
-            if entry.session_id.as_deref() == Some(id) {
+            if !entry.read && matches(entry) {
                 entry.read = true;
+                changed = true;
             }
         }
+        changed
+    }
+
+    fn unread_for_workspace(&self, id: &str) -> usize {
+        self.unread()
+            .filter(|entry| entry.workspace_id.as_deref() == Some(id))
+            .count()
+    }
+
+    fn unread_for_task(&self, id: &str) -> usize {
+        self.unread()
+            .filter(|entry| entry.task_id.as_deref() == Some(id))
+            .count()
+    }
+
+    fn unread_for_scene(&self, id: &str) -> usize {
+        self.unread()
+            .filter(|entry| entry.scene_id.as_deref() == Some(id))
+            .count()
+    }
+
+    fn session_has_unread(&self, id: &str) -> bool {
+        self.unread()
+            .any(|entry| entry.session_id.as_deref() == Some(id))
+    }
+
+    fn unread(&self) -> impl Iterator<Item = &NotificationEntry> {
+        self.entries.iter().filter(|entry| !entry.read)
     }
 
     fn set_sound(&mut self, enabled: bool) {
@@ -2128,6 +2170,7 @@ pub struct Workspace {
     tab_scroll: ScrollHandle,
     tab_hover: Option<String>,
     tab_overflow: bool,
+    tab_overflow_has_unread: bool,
     hidden_tabs: Option<Vec<(String, FocusHandle)>>,
     tab_menu: Option<(String, Point<Pixels>, FocusHandle)>,
     control_focus: HashMap<&'static str, FocusHandle>,
@@ -3237,6 +3280,7 @@ impl Workspace {
             tab_scroll: ScrollHandle::new(),
             tab_hover: None,
             tab_overflow: false,
+            tab_overflow_has_unread: false,
             hidden_tabs: None,
             tab_menu: None,
             control_focus: CONTROLS
@@ -3662,6 +3706,9 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.close_notifications(cx);
+        if self.notifications.mark_task_read(&task_id) {
+            self.notifications_changed(cx);
+        }
         self.workspace_menu = None;
         self.task_menu = None;
         self.tab_menu = None;
@@ -3684,7 +3731,7 @@ impl Workspace {
     fn clear_notifications(&mut self, cx: &mut Context<Self>) {
         self.notifications.entries.clear();
         self.notifications.cooldowns.clear();
-        cx.notify();
+        self.notifications_changed(cx);
     }
 
     fn dismiss_notification(&mut self, id: u64, cx: &mut Context<Self>) {
@@ -3695,8 +3742,38 @@ impl Workspace {
             .position(|entry| entry.id == id)
         {
             self.notifications.remove_at(index);
-            cx.notify();
+            self.notifications_changed(cx);
         }
+    }
+
+    fn dismiss_session_notification(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        if self.notifications.dismiss_session(session_id) {
+            self.notifications_changed(cx);
+        }
+    }
+
+    fn finish_notification_jump(&mut self, id: u64, session: &str, cx: &mut Context<Self>) {
+        if self
+            .notifications
+            .entries
+            .iter()
+            .any(|entry| entry.id == id && entry.session_id.as_deref() == Some(session))
+        {
+            self.dismiss_notification(id, cx);
+            self.close_notifications(cx);
+        }
+    }
+
+    fn notifications_changed(&self, cx: &mut Context<Self>) {
+        if let Some(child) = self.dag_window {
+            let sessions = self
+                .notifications
+                .unread()
+                .filter_map(|entry| entry.session_id.clone())
+                .collect::<Vec<_>>();
+            let _ = child.update(cx, |view, _, cx| view.set_notifications(&sessions, cx));
+        }
+        cx.notify();
     }
 
     fn toggle_notification_sound(&mut self, cx: &mut Context<Self>) {
@@ -3708,7 +3785,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn update_notifications(&mut self, graph: &mut Value) {
+    fn update_notifications(&mut self, graph: &mut Value, window: &Window, cx: &mut Context<Self>) {
         if let Some((scene, task)) = self
             .hierarchy
             .as_ref()
@@ -3723,19 +3800,150 @@ impl Workspace {
             self.notification_scene_sessions
                 .insert(scene.id.clone(), (task.id.clone(), sessions));
         }
-        if let Some(Value::Array(events)) = graph
+        let events = graph
             .as_object_mut()
-            .and_then(|graph| graph.remove("agentNotifications"))
-        {
+            .and_then(|graph| graph.remove("agentNotifications"));
+        if let Some(Value::Array(events)) = events {
+            let focused = self.notification_foreground_session(window, cx);
             let now = notification_now();
             let mut play_sound = false;
             for event in &events {
-                play_sound |= self.notifications.push(event, self.focused.as_deref(), now);
+                play_sound |= self.notifications.push(event, focused.as_deref(), now);
             }
             if play_sound {
                 play_notification_sound();
             }
+            self.reconcile_notification_targets(graph);
+            self.notifications_changed(cx);
+        } else if self.reconcile_notification_targets(graph) {
+            self.notifications_changed(cx);
         }
+    }
+
+    fn reconcile_notification_targets(&mut self, graph: &Value) -> bool {
+        let Some(hierarchy) = &self.hierarchy else {
+            return false;
+        };
+        let active_task = hierarchy.task.as_ref().map(|task| task.id.as_str());
+        let active_scene = hierarchy.scene.as_ref().map(|scene| scene.id.as_str());
+        let live_scene = |scene: &str| self.scenes.iter().any(|item| item.id == scene);
+        let mut changed = false;
+        for entry in self
+            .notifications
+            .entries
+            .iter_mut()
+            .filter(|entry| !entry.read)
+        {
+            if let Some(session) = entry.session_id.as_deref()
+                && entry.scene_id.as_ref().is_none_or(|scene| {
+                    (entry.task_id.as_deref() == active_task && !live_scene(scene))
+                        || self
+                            .notification_scene_sessions
+                            .get(scene)
+                            .is_some_and(|(_, sessions)| !sessions.contains(session))
+                })
+            {
+                // A current mount can fill missing routing IDs or supersede an old mount.
+                let known_mount = self
+                    .notification_scene_sessions
+                    .iter()
+                    .filter(|(scene, (task, sessions))| {
+                        sessions.contains(session)
+                            && (Some(task.as_str()) != active_task || live_scene(scene))
+                    })
+                    .min_by_key(|(scene, _)| {
+                        (
+                            Some(scene.as_str()) != active_scene,
+                            entry.scene_id.as_ref() != Some(*scene),
+                            *scene,
+                        )
+                    });
+                if let Some((scene, (task, _))) = known_mount {
+                    entry.scene_id = Some(scene.clone());
+                    entry.task_id = Some(task.clone());
+                    if let Some(owner) = self.tasks.iter().find(|item| item.id == *task) {
+                        entry.workspace_id = Some(owner.workspace_id.clone());
+                    }
+                } else if entry.scene_id.is_none() {
+                    entry.scene_id = hierarchy
+                        .navigation
+                        .session_by_scene
+                        .iter()
+                        .filter(|(scene, focused)| focused.as_str() == session && live_scene(scene))
+                        .map(|(scene, _)| scene)
+                        .min()
+                        .cloned();
+                }
+            }
+            if entry.task_id.is_none()
+                && let Some(scene) = entry.scene_id.as_ref()
+            {
+                entry.task_id = self
+                    .notification_scene_sessions
+                    .get(scene)
+                    .map(|(task, _)| task.clone())
+                    .or_else(|| {
+                        self.scenes
+                            .iter()
+                            .find(|item| &item.id == scene)
+                            .map(|item| item.task_id.clone())
+                    });
+            }
+            if entry.workspace_id.is_none()
+                && let Some(task) = self
+                    .tasks
+                    .iter()
+                    .find(|task| Some(&task.id) == entry.task_id.as_ref())
+            {
+                entry.workspace_id = Some(task.workspace_id.clone());
+            }
+            let closed_scene = entry
+                .task_id
+                .as_deref()
+                .is_some_and(|task| Some(task) == active_task)
+                && entry
+                    .scene_id
+                    .as_deref()
+                    .is_some_and(|scene| !live_scene(scene));
+            let archived_session = entry.session_id.as_deref().is_some_and(|session| {
+                session_levels::node(session_levels::nodes(graph), session)
+                    .is_some_and(|node| !node["archivedAt"].is_null())
+            });
+            let missing_owner = self.domain_ready
+                && self.read_only.is_none()
+                && (entry.workspace_id.as_ref().is_some_and(|id| {
+                    !self
+                        .workspaces
+                        .iter()
+                        .any(|owner| &owner.id == id && owner.archived_at.is_none())
+                }) || entry.task_id.as_ref().is_some_and(|id| {
+                    !self
+                        .tasks
+                        .iter()
+                        .any(|owner| &owner.id == id && owner.archived_at.is_none())
+                }));
+            if closed_scene || archived_session || missing_owner {
+                entry.read = true;
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    fn notification_foreground_session(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
+        if notification_window_active(window) {
+            return self
+                .focused
+                .as_ref()
+                .filter(|id| !self.wiring.is_detached(id))
+                .filter(|_| self.settings.is_none() && !self.wiring.board_open)
+                .cloned();
+        }
+        self.active_detached_notification_session(cx)
     }
 
     fn notification_target<'a>(
@@ -4591,7 +4799,18 @@ impl Workspace {
             }
             Event::DatabaseRecoveryRequired(_) => {}
             Event::ReadOnlyReady { .. } | Event::ReadOnlyQueryResult { .. } => unreachable!(),
-            Event::Workspaces(workspaces) => self.apply_workspaces(workspaces, cx),
+            Event::Workspaces(workspaces) => {
+                if self.notifications.mark_read(|entry| {
+                    entry.workspace_id.as_ref().is_some_and(|id| {
+                        !workspaces
+                            .iter()
+                            .any(|workspace| &workspace.id == id && workspace.archived_at.is_none())
+                    })
+                }) {
+                    self.notifications_changed(cx);
+                }
+                self.apply_workspaces(workspaces, cx);
+            }
             Event::WorkspacePaths(paths) => {
                 self.workspace_paths = paths;
                 if matches!(&self.dialog, Some(TabDialog::RemoveSession { session_id, .. })
@@ -4647,7 +4866,18 @@ impl Workspace {
                 }
                 _ => {}
             },
-            Event::Tasks(tasks) => self.apply_tasks(tasks, cx),
+            Event::Tasks(tasks) => {
+                if self.notifications.mark_read(|entry| {
+                    entry.task_id.as_ref().is_some_and(|id| {
+                        !tasks
+                            .iter()
+                            .any(|task| &task.id == id && task.archived_at.is_none())
+                    })
+                }) {
+                    self.notifications_changed(cx);
+                }
+                self.apply_tasks(tasks, cx);
+            }
             Event::TaskRenameResult {
                 task_id,
                 title,
@@ -4743,10 +4973,10 @@ impl Workspace {
                     _ => None,
                 };
                 if let Some((id, session_id)) = notification_focus.zip(next_focus.as_deref()) {
-                    if let Some(entry) = self.notifications.entries.iter_mut().find(|entry| {
-                        entry.id == id && entry.session_id.as_deref() == Some(session_id)
-                    }) {
-                        entry.read = true;
+                    if self.wiring.is_detached(session_id) {
+                        self.open_detached_notification(id, session_id, cx);
+                    } else {
+                        self.finish_notification_jump(id, session_id, cx);
                     }
                     if let Some(scene_id) = next_scene {
                         let parent =
@@ -4755,7 +4985,6 @@ impl Workspace {
                                 .map(str::to_owned);
                         self.level_parent_by_scene.insert(scene_id.clone(), parent);
                     }
-                    self.close_notifications(cx);
                     window.blur();
                 }
                 if scene_changed {
@@ -4957,6 +5186,12 @@ impl Workspace {
                 // The replacement graph may arrive on a later frame. Drop these
                 // cards from the layout before removing their view state.
                 self.order.retain(|id| !ids.contains(id));
+                if self
+                    .notifications
+                    .mark_read(|entry| entry.session_id.as_ref().is_some_and(|id| ids.contains(id)))
+                {
+                    self.notifications_changed(cx);
+                }
                 for id in &ids {
                     self.forget_board_scene(id);
                 }
@@ -5181,7 +5416,7 @@ impl Workspace {
                             cx,
                         );
                     }
-                    self.update_notifications(&mut graph);
+                    self.update_notifications(&mut graph, window, cx);
                     return;
                 }
                 let loader_results = graph.as_object_mut().map(|graph| {
@@ -5870,6 +6105,7 @@ impl Workspace {
     }
 
     fn activate_session_card(&mut self, session_id: &str, window: &Window, cx: &mut Context<Self>) {
+        self.dismiss_session_notification(session_id, cx);
         if self.level_focus() == Some(session_id) {
             return;
         }
@@ -6930,6 +7166,13 @@ impl Workspace {
                         .flex()
                         .items_center()
                         .gap(px(6. * scale))
+                        .when(self.notifications.unread_for_workspace(&id) > 0, |status| {
+                            status.child(tabs_ui::tab_status_dot().relative().children(
+                                workspace_wiring::wiring_probe_bounds(format!(
+                                    "unread-workspace-{id}"
+                                )),
+                            ))
+                        })
                         .when(workspace.is_pinned, |status| {
                             status.child(icon("pin", 13. * scale, rgba(sidebar_palette.icon_muted)))
                         })
@@ -6950,6 +7193,9 @@ impl Workspace {
                 ),
             &controls[0],
             move |this, window, cx| {
+                if this.notifications.mark_workspace_read(&toggle_id) {
+                    this.notifications_changed(cx);
+                }
                 if active {
                     if !this.workspace_collapsed.remove(&toggle_id) {
                         this.workspace_collapsed.insert(toggle_id.clone());
@@ -7460,6 +7706,7 @@ impl Workspace {
         } else {
             sidebar_palette.task_text
         };
+        let unread = self.notifications.unread_for_task(&task.id);
         let row = self
             .focus_control(
                 div().id(SharedString::from(format!("task:{id}"))),
@@ -7565,6 +7812,34 @@ impl Workspace {
             )
             .when(task.is_pinned, |row| {
                 row.child(icon("pin", 13. * scale, rgba(sidebar_palette.icon_muted)))
+            })
+            .when(unread > 0, |row| {
+                row.child(
+                    div()
+                        .flex_none()
+                        .min_w(px(16.))
+                        .h(px(16.))
+                        .px(px(5.))
+                        .rounded_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(rgb(0xf54c46))
+                        .text_color(rgb(0xffffff))
+                        .text_size(px(10.))
+                        .line_height(px(16.))
+                        .font_weight(FontWeight::BOLD)
+                        .relative()
+                        .children(workspace_wiring::wiring_probe_bounds(format!(
+                            "unread-task-{}",
+                            task.id
+                        )))
+                        .child(if unread > 99 {
+                            "99+".into()
+                        } else {
+                            unread.to_string()
+                        }),
+                )
             })
             .child(
                 self.button(
@@ -8170,6 +8445,7 @@ impl Workspace {
         match opened {
             Ok(child) => {
                 self.dag_window = Some(child);
+                self.notifications_changed(cx);
                 self.dismiss_dag_open_error(window, cx);
             }
             Err(error) => {
@@ -9134,7 +9410,7 @@ impl Workspace {
         let permission_results = graph
             .as_object_mut()
             .and_then(|object| object.remove("providerPermissionModeResults"));
-        self.update_notifications(&mut graph);
+        self.update_notifications(&mut graph, window, cx);
         self.refresh_egress_for_graph_change(&graph, cx);
         clear_exited_recovery_sessions(
             &mut self.restoring_sessions,
@@ -11704,6 +11980,15 @@ impl Workspace {
         )
     }
 
+    fn scene_tab_hidden(&self, index: usize) -> bool {
+        let viewport = self.tab_scroll.bounds();
+        let offset = self.tab_scroll.offset();
+        self.tab_scroll.bounds_for_item(index).is_none_or(|bounds| {
+            bounds.left() + offset.x < viewport.left() - px(1.)
+                || bounds.right() + offset.x > viewport.right() + px(1.)
+        })
+    }
+
     fn topbar(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let palette = self.theme_palette();
         let background = rgba(palette.tabs.bar);
@@ -11769,8 +12054,22 @@ impl Workspace {
                 )
                 .child(
                     self.button(
-                        tabs_ui::tab_title(title)
-                            .id(SharedString::from(format!("tab-title-{}", scene.id))),
+                        div()
+                            .id(SharedString::from(format!("tab-title-{}", scene.id)))
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(tabs_ui::tab_title(title))
+                            .when(self.notifications.unread_for_scene(&scene.id) > 0, |tab| {
+                                tab.child(tabs_ui::tab_status_dot().relative().children(
+                                    workspace_wiring::wiring_probe_bounds(format!(
+                                        "unread-tab-{}",
+                                        scene.id
+                                    )),
+                                ))
+                            }),
                         title_focus,
                         move |this, _, cx| {
                             this.send(
@@ -11850,36 +12149,43 @@ impl Workspace {
             tabs = tabs.child(add);
         } else {
             overflow_actions = overflow_actions
-                .child(self.button(
-                    tabs_ui::tab_overflow_btn("tab-overflow", &palette.tabs),
-                    &self.control_focus["tab-overflow"],
-                    |this, _, cx| {
-                        if this.hidden_tabs.is_some() {
-                            this.hidden_tabs = None;
-                        } else {
-                            let viewport = this.tab_scroll.bounds();
-                            let offset = this.tab_scroll.offset();
-                            let hidden = this
-                                .scenes
-                                .iter()
-                                .enumerate()
-                                .filter(|(i, _)| {
-                                    this.tab_scroll.bounds_for_item(*i).is_none_or(|b| {
-                                        b.left() + offset.x < viewport.left() - px(1.)
-                                            || b.right() + offset.x > viewport.right() + px(1.)
-                                    })
-                                })
-                                .map(|(_, s)| (s.id.clone(), cx.focus_handle().tab_stop(true)))
-                                .collect::<Vec<_>>();
-                            this.hidden_tabs = Some(hidden);
-                        }
-                        this.workspace_menu = None;
-                        this.task_menu = None;
-                        this.tab_menu = None;
-                        cx.notify();
-                    },
-                    cx,
-                ))
+                .child(
+                    self.button(
+                        tabs_ui::tab_overflow_btn("tab-overflow", &palette.tabs)
+                            .relative()
+                            .when(self.tab_overflow_has_unread, |button| {
+                                button.child(
+                                    tabs_ui::tab_status_dot()
+                                        .absolute()
+                                        .top(px(1.))
+                                        .right(px(1.))
+                                        .children(workspace_wiring::wiring_probe_bounds(
+                                            "unread-tab-overflow".into(),
+                                        )),
+                                )
+                            }),
+                        &self.control_focus["tab-overflow"],
+                        |this, _, cx| {
+                            if this.hidden_tabs.is_some() {
+                                this.hidden_tabs = None;
+                            } else {
+                                let hidden = this
+                                    .scenes
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(i, _)| this.scene_tab_hidden(*i))
+                                    .map(|(_, s)| (s.id.clone(), cx.focus_handle().tab_stop(true)))
+                                    .collect::<Vec<_>>();
+                                this.hidden_tabs = Some(hidden);
+                            }
+                            this.workspace_menu = None;
+                            this.task_menu = None;
+                            this.tab_menu = None;
+                            cx.notify();
+                        },
+                        cx,
+                    ),
+                )
                 .child(add);
         }
         #[cfg(target_os = "windows")]
@@ -12115,6 +12421,7 @@ impl Workspace {
             node,
             title,
             &matou_native_desktop::theme_tokens::LIGHT,
+            None,
         )
     }
 
@@ -12122,6 +12429,7 @@ impl Workspace {
         node: Option<&Value>,
         title: &str,
         palette: &ThemePalette,
+        notification_badge: Option<AnyElement>,
     ) -> Div {
         let status = node
             .and_then(|node| node["workStatus"].as_str())
@@ -12157,13 +12465,20 @@ impl Workspace {
             .gap(px(9.))
             .child(
                 div()
-                    .text_size(px(12.))
-                    .font_weight(FontWeight::BOLD)
-                    .text_color(rgba(palette.cards.compact_title))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .child(title.to_owned()),
+                    .flex()
+                    .items_center()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgba(palette.cards.compact_title))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(title.to_owned()),
+                    )
+                    .children(notification_badge),
             )
             .child(Self::compact_session_status(status))
             .children((active_child_count > 0).then(|| {
@@ -12215,6 +12530,7 @@ impl Workspace {
             title,
             actions,
             &matou_native_desktop::theme_tokens::LIGHT,
+            None,
             None,
         )
     }
@@ -12272,6 +12588,7 @@ impl Workspace {
         actions: Div,
         palette: &ThemePalette,
         loading_badge: Option<Div>,
+        notification_badge: Option<AnyElement>,
     ) -> Div {
         let background = rgba(palette.cards.header);
         #[cfg(debug_assertions)]
@@ -12305,6 +12622,7 @@ impl Workspace {
                             .font_weight(FontWeight::BOLD)
                             .child(title),
                     )
+                    .children(notification_badge)
                     .children(loading_badge),
             )
             .child(actions)
@@ -14894,6 +15212,13 @@ impl Workspace {
                     self.button(
                         tabs_ui::overflow_item(SharedString::from(format!("hidden-{id}")), active)
                             .child(tabs_ui::overflow_title(self.scene_title(scene), active))
+                            .when(self.notifications.unread_for_scene(&id) > 0, |item| {
+                                item.child(tabs_ui::overflow_dot().relative().children(
+                                    workspace_wiring::wiring_probe_bounds(format!(
+                                        "unread-hidden-tab-{id}"
+                                    )),
+                                ))
+                            })
                             .when(active, |item| item.child(tabs_ui::overflow_check())),
                         focus,
                         move |this, _, cx| {
@@ -16314,6 +16639,8 @@ impl Render for Workspace {
         let mut split_cards = HashMap::new();
         let mut stacked_cards = Vec::new();
         let dark = self.wiring_dark();
+        let animate_notifications =
+            self.notifications.unread().next().is_some() && !reduced_motion();
         for id in self.order.iter().filter(|_| !self.wiring.board_open) {
             let node = session_levels::node(session_levels::nodes(&self.graph), id);
             let selected = level_focus.as_ref() == Some(id);
@@ -16328,12 +16655,23 @@ impl Render for Workspace {
             let weights = motion.shadow_weights(now);
             let elevation = motion.shadow_target;
             let lift = motion.drawn_lift;
+            let unread = self.notifications.session_has_unread(id);
+            let notification_badge =
+                || unread.then(|| notification_card_badge(self.locale, animate_notifications));
             let place_card = |card: Stateful<Div>| {
                 let glass = dark && selected;
                 let card = card.children(
                     (glass || weights[2] > 0.).then(|| card_reflection(dark, glass, weights[2])),
                 );
-                let shadows = card_shadows(dark, weights);
+                let card = card.children(unread.then(|| {
+                    notification_card_frame(CARD_RADIUS, animate_notifications).children(
+                        workspace_wiring::wiring_probe_bounds(format!("unread-card-{id}")),
+                    )
+                }));
+                let mut shadows = card_shadows(dark, weights);
+                if unread {
+                    shadows.push(notification_card_glow());
+                }
                 if in_split {
                     card.shadow(shadows).into_any_element()
                 } else {
@@ -16372,7 +16710,13 @@ impl Render for Workspace {
                 continue;
             }
             if self.wiring.is_detached(id) {
-                let card = place_card(card.child(self.render_detached_placeholder(id, title, cx)));
+                let card =
+                    place_card(
+                        card.child(self.render_detached_placeholder(id, title, cx))
+                            .children(notification_badge().map(|badge| {
+                                div().absolute().top(px(10.)).left(px(12.)).child(badge)
+                            })),
+                    );
                 if in_split {
                     split_cards.insert(id.clone(), card);
                 } else {
@@ -16386,6 +16730,7 @@ impl Render for Workspace {
                         Some(node),
                         title,
                         &palette,
+                        None,
                     ))
                 } else {
                     card.child(self.stopped_session_card(id, node, cx))
@@ -16684,6 +17029,10 @@ impl Render for Workspace {
                         ),
                 )
                 .children(badge.map(|badge| badge.absolute().top(px(8.)).right(px(8.))))
+                .children(
+                    notification_badge()
+                        .map(|badge| div().absolute().top(px(10.)).left(px(12.)).child(badge)),
+                )
             } else if compact {
                 let target = id.clone();
                 card.on_mouse_down(
@@ -16693,7 +17042,12 @@ impl Render for Workspace {
                         cx.stop_propagation();
                     }),
                 )
-                .child(Self::compact_session_summary_themed(node, title, &palette))
+                .child(Self::compact_session_summary_themed(
+                    node,
+                    title,
+                    &palette,
+                    notification_badge(),
+                ))
             } else {
                 let mut actions = Self::session_card_actions()
                     .on_children_prepainted({
@@ -16728,6 +17082,7 @@ impl Render for Workspace {
                         actions,
                         &palette,
                         loading_badge,
+                        notification_badge(),
                     )
                     .id(SharedString::from(format!("session-header-{id}")))
                     .children(workspace_wiring::wiring_probe_bounds(format!(
@@ -17162,6 +17517,15 @@ impl Render for Workspace {
                         crate::macos::window_diag::workspace_painted(window, cx);
                         let _ = geometry_view.update(cx, |this, cx| {
                             let overflow = this.tab_scroll.max_offset().width > px(4.);
+                            let hidden_unread = overflow
+                                && this.scenes.iter().enumerate().any(|(i, scene)| {
+                                    this.notifications.unread_for_scene(&scene.id) > 0
+                                        && this.scene_tab_hidden(i)
+                                });
+                            if hidden_unread != this.tab_overflow_has_unread {
+                                this.tab_overflow_has_unread = hidden_unread;
+                                cx.notify();
+                            }
                             if overflow != this.tab_overflow {
                                 this.tab_overflow = overflow;
                                 if !overflow {
@@ -17441,12 +17805,7 @@ impl Workspace {
     /// the frozen 6px dot to the numeric badge required by this round.
     fn notification_bell(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = self.theme_palette().sidebar;
-        let unread = self
-            .notifications
-            .entries
-            .iter()
-            .filter(|entry| !entry.read)
-            .count();
+        let unread = self.notifications.unread().count();
         let badge = (unread > 0).then(|| {
             div()
                 .id("notification-bell-badge")
@@ -19292,6 +19651,141 @@ fn loading_badge_ring(spread: f32) -> BoxShadow {
         offset: point(px(0.), px(0.)),
         blur_radius: px(0.),
         spread_radius: px(spread),
+    }
+}
+
+fn notification_card_glow() -> BoxShadow {
+    BoxShadow {
+        color: Hsla::from(rgb(0x2588ff)).alpha(0.32),
+        offset: point(px(0.), px(0.)),
+        blur_radius: px(9.),
+        spread_radius: px(0.),
+    }
+}
+
+fn notification_window_active(window: &Window) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use cocoa::{
+            appkit::NSApp,
+            base::{BOOL, YES, id, nil},
+        };
+        use objc::{msg_send, sel, sel_impl};
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let Ok(handle) = HasWindowHandle::window_handle(window) else {
+            return false;
+        };
+        let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+            return false;
+        };
+        // Read the current AppKit key window. GPUI's cached activation can lag
+        // while a runtime event and an OS focus change are being dispatched.
+        unsafe {
+            let view = handle.ns_view.as_ptr() as id;
+            let native_window: id = msg_send![view, window];
+            let app_active: BOOL = msg_send![NSApp(), isActive];
+            native_window != nil && app_active == YES && {
+                let key: BOOL = msg_send![native_window, isKeyWindow];
+                key == YES
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        window.is_window_active()
+    }
+}
+
+fn notification_arrival_ease(progress: f32) -> f32 {
+    let coordinate = |t: f32, a: f32, b: f32| {
+        let inverse = 1. - t;
+        3. * inverse * inverse * t * a + 3. * inverse * t * t * b + t * t * t
+    };
+    let (mut low, mut high) = (0., 1.);
+    for _ in 0..12 {
+        let t = (low + high) * 0.5;
+        if coordinate(t, 0.16, 0.3) < progress {
+            low = t;
+        } else {
+            high = t;
+        }
+    }
+    coordinate((low + high) * 0.5, 1., 1.)
+}
+
+fn notification_card_frame(radius: Pixels, animate: bool) -> Div {
+    let inner = div()
+        .absolute()
+        .top(px(1.))
+        .bottom(px(1.))
+        .left(px(1.))
+        .right(px(1.))
+        .rounded((radius - px(1.)).max(px(0.)))
+        .border_1()
+        .border_color(rgba(0x69b5fff2));
+    let inner = if animate {
+        inner
+            .with_animations(
+                "notification-frame-arrival",
+                vec![Animation::new(Duration::from_millis(720)); 2],
+                |inner, round, progress| {
+                    let opacity = if round == 1 && progress >= 1. {
+                        1.
+                    } else if progress < 0.55 {
+                        0.5 + 0.5 * notification_arrival_ease(progress / 0.55)
+                    } else {
+                        1. - 0.2 * notification_arrival_ease((progress - 0.55) / 0.45)
+                    };
+                    inner.opacity(opacity)
+                },
+            )
+            .into_any_element()
+    } else {
+        inner.into_any_element()
+    };
+    div()
+        .absolute()
+        .inset_0()
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .rounded(radius)
+                .border(px(2.))
+                .border_color(rgb(0x2588ff)),
+        )
+        .child(inner)
+}
+
+fn notification_card_badge(locale: InterfaceLocale, animate: bool) -> AnyElement {
+    let badge = div()
+        .flex_none()
+        .ml(px(8.))
+        .px(px(6.))
+        .h(px(17.))
+        .flex()
+        .items_center()
+        .rounded_full()
+        .bg(rgb(0x1677e8))
+        .text_color(rgb(0xffffff))
+        .font_weight(FontWeight::BOLD)
+        .text_size(px(8.))
+        .line_height(px(11.))
+        .whitespace_nowrap()
+        .child(ui_text(locale.text("新通知", "New notification")));
+    if animate {
+        badge
+            .with_animations(
+                "notification-badge-arrival",
+                vec![Animation::new(Duration::from_millis(720)); 2],
+                |badge, _, progress| {
+                    badge
+                        .opacity(0.55 + 0.45 * notification_arrival_ease((progress / 0.55).min(1.)))
+                },
+            )
+            .into_any_element()
+    } else {
+        badge.into_any_element()
     }
 }
 
