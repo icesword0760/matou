@@ -1174,8 +1174,8 @@ impl SettingsPage {
                 "Read-only account subscription, runtime environment and controlled browser status, with a manual retention cleanup.",
             ),
             Self::ContextOptimizer => locale.text(
-                "按 Agent 独立开关上下文噪音剪裁、防重复读、KV-Cache 倒计时与卡死救援（零 MCP 内置服务）。",
-                "Configure per-agent noise trimming, read dedup, KV-cache monitoring, and stall rescue (zero-MCP built-in service).",
+                "让 AI 少读废话、少花额度，卡住了会提醒你。默认已经按推荐配置好。",
+                "Help AI read less, use less quota, and let you know when it's stuck. The recommended settings are already in place.",
             ),
         }
     }
@@ -2017,6 +2017,7 @@ impl EventEmitter<SettingsShellEvent> for SettingsShell {}
 
 static NEXT_TIME_ZONE_REQUEST: AtomicU64 = AtomicU64::new(1);
 static NEXT_DIAGNOSTIC_REQUEST: AtomicU64 = AtomicU64::new(1);
+const CONTEXT_OPTIMIZER_STATS_RESULT: &str = "contextOptimizerStatsResult";
 
 #[derive(Default)]
 struct RuntimeDiagnostic {
@@ -3668,7 +3669,34 @@ impl SettingsShell {
                     Ok(cx.new(|_| panel))
                 }),
         );
+        if matches!(self.context_optimizer_panel, Some(Ok(_))) {
+            self.request_context_optimizer_stats(cx);
+        }
         cx.notify();
+    }
+
+    fn request_context_optimizer_stats(&mut self, cx: &mut Context<Self>) {
+        self.request_runtime_diagnostic(CONTEXT_OPTIMIZER_STATS_RESULT, |request_id| {
+            Command::GetContextOptimizerStats { request_id }
+        });
+        let Some(pending) = self.runtime_diagnostics[CONTEXT_OPTIMIZER_STATS_RESULT].pending else {
+            return;
+        };
+        let timer = cx.background_executor().timer(Duration::from_secs(10));
+        cx.spawn(async move |shell, cx| {
+            timer.await;
+            let _ = shell.update(cx, |shell, _| {
+                if let Some(request) = shell
+                    .runtime_diagnostics
+                    .get_mut(CONTEXT_OPTIMIZER_STATS_RESULT)
+                    && request.pending == Some(pending)
+                {
+                    // A new panel starts empty, so expiry simply drops the request.
+                    request.pending = None;
+                }
+            });
+        })
+        .detach();
     }
 
     fn context_optimizer_content(&mut self, cx: &mut Context<Self>) -> Div {
@@ -5635,6 +5663,17 @@ impl SettingsShell {
             return;
         }
         diagnostic.pending = None;
+        if key == CONTEXT_OPTIMIZER_STATS_RESULT {
+            if let Some(Ok(panel)) = &self.context_optimizer_panel {
+                let result = if reply["error"].is_null() {
+                    &reply["result"]
+                } else {
+                    &Value::Null
+                };
+                panel.update(cx, |panel, cx| panel.set_savings(result, cx));
+            }
+            return;
+        }
         diagnostic.result = Some(if let Some(error) = reply["error"].as_str() {
             Err(if reply["code"] == "STORAGE_READ_ONLY" {
                 self.locale

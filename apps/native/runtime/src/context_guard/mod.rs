@@ -1049,23 +1049,22 @@ mod tests {
     }
 
     #[test]
-    fn managed_cli_instructions_only_emits_when_opted_in() {
+    fn managed_cli_instructions_respect_recommendations_and_saved_opt_out() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(managed_cli_instructions(dir.path(), "claude-code").is_none());
+        let text = managed_cli_instructions(dir.path(), "claude-code").unwrap();
+        assert!(text.contains("mt ctx outline"));
 
         let cfg = ContextOptimizerConfig::for_data_root(dir.path());
         cfg.set_agent_settings(
             "claude-code",
             AgentOptimizerSettings {
-                enabled: true,
-                cli_tools: true,
+                cli_tools: false,
                 ..Default::default()
             },
         )
         .unwrap();
-        let text = managed_cli_instructions(dir.path(), "claude-code").unwrap();
-        assert!(text.contains("mt ctx outline"));
-        assert!(managed_cli_instructions(dir.path(), "codex").is_none());
+        assert!(managed_cli_instructions(dir.path(), "claude-code").is_none());
+        assert!(managed_cli_instructions(dir.path(), "codex").is_some());
     }
 
     #[test]

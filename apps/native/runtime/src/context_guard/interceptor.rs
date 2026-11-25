@@ -536,15 +536,16 @@ mod tests {
             )
         };
         assert!(!config.path().exists());
-        for profile in [
-            LaunchProfile::ClaudeCode,
-            LaunchProfile::Codex,
-            LaunchProfile::Antigravity,
+        for (profile, blocks_sensitive_reads) in [
+            (LaunchProfile::ClaudeCode, true),
+            (LaunchProfile::Codex, false),
+            (LaunchProfile::Antigravity, false),
         ] {
-            assert!(
+            assert_eq!(
                 read(profile, ".env")
                     .response_json
-                    .contains("\"permissionDecision\":\"deny\"")
+                    .contains("\"permissionDecision\":\"deny\""),
+                blocks_sensitive_reads,
             );
             assert_eq!(read(profile, ".env.example"), HookEvaluation::allow());
         }
@@ -701,6 +702,7 @@ mod tests {
     #[test]
     fn claude_post_tool_use_fails_open_for_unknown_outputs_disabled_switch_lock_and_expiry() {
         let dir = tempfile::tempdir().unwrap();
+        let config = ContextOptimizerConfig::for_data_root(dir.path());
         let interceptor = HookInterceptor::new();
         let mut payload = json!({
             "hook_event_name": "PostToolUse", "session_id": "provider", "tool_use_id": "toolu_1",
@@ -716,8 +718,17 @@ mod tests {
                 deadline,
             )
         };
+        config
+            .set_agent_settings(
+                "claude-code",
+                AgentOptimizerSettings {
+                    noise_filter: false,
+                    ..AgentOptimizerSettings::recommended_for("claude-code")
+                },
+            )
+            .unwrap();
         assert_eq!(evaluate(&payload, deadline()), HookEvaluation::allow());
-        ContextOptimizerConfig::for_data_root(dir.path())
+        config
             .set_agent_settings(
                 "claude-code",
                 AgentOptimizerSettings {

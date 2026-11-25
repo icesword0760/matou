@@ -20,23 +20,64 @@ use crate::{
 
 pub use matou_native_core::context_optimizer_config::OptimizerToggle;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AgentSavings {
+    pub bytes7d: u64,
+    pub events7d: u64,
+}
+
+impl AgentSavings {
+    fn labels(self, locale: InterfaceLocale) -> (String, Option<String>) {
+        if self.bytes7d == 0 {
+            return (
+                locale
+                    .text(
+                        "还没有节省数据，正常使用后会显示",
+                        "Savings will appear here after regular use.",
+                    )
+                    .into(),
+                None,
+            );
+        }
+        let tokens = self.bytes7d / 4;
+        let kilobytes = self.bytes7d as f64 / 1024.;
+        let kilobytes = format!("{kilobytes:.3}");
+        let kilobytes = kilobytes.trim_end_matches('0').trim_end_matches('.');
+        match locale {
+            InterfaceLocale::Chinese => (
+                format!("过去 7 天约少读 {tokens} token"),
+                Some(format!("约 {kilobytes} KB")),
+            ),
+            InterfaceLocale::English => (
+                format!("About {tokens} fewer tokens read in the past 7 days"),
+                Some(format!("About {kilobytes} KB")),
+            ),
+        }
+    }
+}
+
 /// Pure, testable state controller for the per-agent optimizer settings view.
 pub struct ContextOptimizerPanelState {
     config: Rc<ContextOptimizerConfig>,
     snapshot: ContextOptimizerSnapshot,
     selected_agent: String,
+    savings: BTreeMap<&'static str, AgentSavings>,
     locale: InterfaceLocale,
     status_message: Option<String>,
     error_message: Option<String>,
 }
 
 impl ContextOptimizerPanelState {
-    pub fn load(config: Rc<ContextOptimizerConfig>, locale: InterfaceLocale) -> Result<Self, String> {
+    pub fn load(
+        config: Rc<ContextOptimizerConfig>,
+        locale: InterfaceLocale,
+    ) -> Result<Self, String> {
         let snapshot = config.snapshot().map_err(|err| err.to_string())?;
         Ok(Self {
             config,
             snapshot,
             selected_agent: KNOWN_AGENT_IDS[0].to_owned(),
+            savings: BTreeMap::new(),
             locale,
             status_message: None,
             error_message: None,
@@ -52,15 +93,34 @@ impl ContextOptimizerPanelState {
     }
 
     pub fn select_agent(&mut self, agent_id: &str) {
-        if self.snapshot.agents.contains_key(agent_id) {
+        if KNOWN_AGENT_IDS.contains(&agent_id) {
             self.selected_agent = agent_id.to_owned();
             self.status_message = None;
             self.error_message = None;
         }
     }
 
-    pub fn agent_ids(&self) -> Vec<String> {
-        self.snapshot.agents.keys().cloned().collect()
+    fn set_savings(&mut self, result: &Value) {
+        self.savings = KNOWN_AGENT_IDS
+            .into_iter()
+            .map(|id| {
+                let agent = &result["agents"][id];
+                (
+                    id,
+                    AgentSavings {
+                        bytes7d: agent["bytes7d"].as_u64().unwrap_or_default(),
+                        events7d: agent["events7d"].as_u64().unwrap_or_default(),
+                    },
+                )
+            })
+            .collect();
+    }
+
+    pub fn current_savings(&self) -> AgentSavings {
+        self.savings
+            .get(self.selected_agent())
+            .copied()
+            .unwrap_or_default()
     }
 
     pub fn current_entry(&self) -> Option<&AgentOptimizerEntry> {
@@ -86,7 +146,10 @@ impl ContextOptimizerPanelState {
         }
         let mut next = entry.settings.clone();
         match field {
-            OptimizerToggle::MasterEnabled => next.enabled = !next.enabled,
+            OptimizerToggle::MasterEnabled if !next.enabled => {
+                next = entry.restored_recommendations();
+            }
+            OptimizerToggle::MasterEnabled => next.enabled = false,
             OptimizerToggle::NoiseFilter => next.noise_filter = !next.noise_filter,
             OptimizerToggle::ReadDedup => next.read_dedup = !next.read_dedup,
             OptimizerToggle::CacheMonitor => next.cache_monitor = !next.cache_monitor,
@@ -107,25 +170,7 @@ impl ContextOptimizerPanelState {
         let Some(entry) = self.current_entry() else {
             return false;
         };
-        let saved = &entry.settings;
-        let mut defaults = AgentOptimizerSettings::default();
-        if entry.availability(OptimizerToggle::NoiseFilter) != OptimizerAvailability::Available {
-            defaults.noise_filter = saved.noise_filter;
-            defaults.max_log_bytes = saved.max_log_bytes;
-        }
-        if entry.availability(OptimizerToggle::ReadDedup) != OptimizerAvailability::Available {
-            defaults.read_dedup = saved.read_dedup;
-        }
-        if entry.availability(OptimizerToggle::BlockSensitiveReads)
-            != OptimizerAvailability::Available
-        {
-            defaults.block_sensitive_reads = saved.block_sensitive_reads;
-        }
-        if entry.availability(OptimizerToggle::CacheKeepalive) != OptimizerAvailability::Available {
-            defaults.cache_keepalive = saved.cache_keepalive;
-            defaults.cache_keepalive_max_per_turn = saved.cache_keepalive_max_per_turn;
-        }
-        self.save_current(defaults)
+        self.save_current(entry.restored_recommendations())
     }
 
     fn save_current(&mut self, next: AgentOptimizerSettings) -> bool {
@@ -148,6 +193,7 @@ impl ContextOptimizerPanelState {
 fn can_toggle(field: OptimizerToggle, entry: &AgentOptimizerEntry) -> bool {
     entry.availability(field) == OptimizerAvailability::Available
         && (field == OptimizerToggle::MasterEnabled || entry.settings.enabled)
+        && (field != OptimizerToggle::CacheExpiryNotify || entry.settings.cache_monitor)
 }
 
 fn unavailable_reason(
@@ -156,27 +202,48 @@ fn unavailable_reason(
     locale: InterfaceLocale,
 ) -> Option<&'static str> {
     use OptimizerAvailability::{Available, Pending, Unsupported};
-    use OptimizerToggle::{CacheKeepalive, NoiseFilter};
+    use OptimizerToggle::{
+        BlockSensitiveReads, CacheExpiryNotify, CacheKeepalive, CliTools, NoiseFilter,
+    };
     match (entry.availability(field), field, entry.agent_id.as_str()) {
+        (Available, _, _) if field != OptimizerToggle::MasterEnabled && !entry.settings.enabled => {
+            Some(locale.text("自动优化已关闭。", "Automatic optimization is off."))
+        }
+        (Available, CacheExpiryNotify, _) if !entry.settings.cache_monitor => Some(locale.text(
+            "先开启「快满了提前告诉你」，才能收到缓存到期提醒。",
+            "Turn on context alerts above to receive cache expiry reminders.",
+        )),
         (Available, _, _) => None,
         (Pending, CacheKeepalive, _) => Some(locale.text(
-            "暂无可靠的静默续命方式，自动发送会进入对话并消耗额度。有可验证的静默方式后再开放。",
-            "Silent keepalive is unavailable. Automatic messages would appear in the conversation and use quota. This will open once silent delivery can be verified.",
+            "暂无可靠的静默续命方式：自动发送会进入对话并消耗额度。等能确认送达后再开放。",
+            "There is no reliable way to refresh the cache silently yet. An automatic message would appear in the conversation and use quota. This will be available once silent delivery can be verified.",
+        )),
+        (Pending, CliTools, _) => Some(locale.text(
+            "运行时还没接入会话提示注入，开关暂时只保存偏好；接入后开放。",
+            "Session guidance for these tools is still being integrated. Your saved preference will apply once it is available.",
         )),
         (Pending, NoiseFilter, "codex") => Some(locale.text(
-            "待适配。Codex 当前版本不支持在输出交给 AI 前替换结果，自动剪裁暂不可用。",
+            "Codex 当前版本不支持在结果交给 AI 前替换输出，自动省日志暂不可用；已记录，待适配。",
             "Pending integration. This Codex version cannot replace tool output before it reaches the model, so automatic trimming is unavailable.",
         )),
         (Pending, NoiseFilter, "antigravity") => Some(locale.text(
-            "待适配和验证。反重力支持执行前改写命令，Matou 完成适配并登录验证后开放。",
+            "反重力支持执行前改写命令的方式，Matou 正在适配，完成并登录验证后开放。",
             "Pending integration and testing. Antigravity can rewrite commands before execution. Matou will enable trimming after integration and signed-in testing.",
         )),
+        (Pending, BlockSensitiveReads, "codex") => Some(locale.text(
+            "Codex 读文件走 Bash，.env 保护暂未覆盖，待适配。",
+            "Codex reads files through Bash. Protection for .env needs an integration for that route.",
+        )),
         (Pending, _, "codex") => Some(locale.text(
-            "待适配。Codex 通过 Bash 读文件，当前读保护未覆盖该路径。",
-            "Pending integration. Codex reads files through Bash, which the current read protection does not cover.",
+            "Codex 通过 Bash 读文件，当前防重复读没有覆盖这条路径，待适配。",
+            "Codex reads files through Bash. Skipping duplicate reads needs an integration for that route.",
+        )),
+        (Pending, BlockSensitiveReads, "antigravity") => Some(locale.text(
+            "反重力的读文件路径需要先适配并验证，再开放 .env 保护。",
+            "The Antigravity file reader needs to be integrated and tested before .env protection is available.",
         )),
         (Pending, _, "antigravity") => Some(locale.text(
-            "待验证。Matou 需适配反重力的专用读文件工具，并在登录后验证保护生效。",
+            "反重力的专用读文件工具需要先适配并验证，再开放读保护。",
             "Pending validation. Matou needs to integrate Antigravity's dedicated file reader and verify protection in a signed-in session.",
         )),
         (Pending, _, _) => Some(locale.text(
@@ -184,7 +251,7 @@ fn unavailable_reason(
             "Pending integration or validation. This will open once verified.",
         )),
         (Unsupported, OptimizerToggle::NoiseFilter | OptimizerToggle::ReadDedup | OptimizerToggle::BlockSensitiveReads, _) => Some(locale.text(
-            "该 Agent 仅支持观察，不支持自动拦截。",
+            "DSH 仅支持观察，不支持自动拦截。",
             "This agent supports observation only. Automatic interception is unsupported.",
         )),
         (Unsupported, _, _) => Some(locale.text(
@@ -352,13 +419,189 @@ impl ContextGuardHudView {
     }
 }
 
+const ADVANCED_ITEMS: [OptimizerToggle; 8] = {
+    use OptimizerToggle::*;
+    [
+        CacheMonitor,
+        CacheExpiryNotify,
+        StallRescue,
+        NoiseFilter,
+        ReadDedup,
+        BlockSensitiveReads,
+        CliTools,
+        CacheKeepalive,
+    ]
+};
+const AGENT_TABS: [&str; 4] = ["antigravity", "claude-code", "codex", "dsh"];
+
+struct AdvancedCopy {
+    title: &'static str,
+    description: &'static str,
+    recommendation: &'static str,
+    benefit: &'static str,
+    cost: &'static str,
+    when_off: &'static str,
+}
+
+fn advanced_copy(field: OptimizerToggle, locale: InterfaceLocale) -> AdvancedCopy {
+    use OptimizerToggle::*;
+    let t = |zh, en| locale.text(zh, en);
+    match field {
+        CacheMonitor => AdvancedCopy {
+            title: t("快满了提前告诉你", "Warn me when context is nearly full"),
+            description: t(
+                "底栏显示 AI 还记得多少、已读内容还能复用多久，接近上限时提醒你。只读状态，不改变 AI 的行为。",
+                "See context usage and remaining cache time in the bottom bar. Get an alert near the limit. This only reads session status.",
+            ),
+            recommendation: t("推荐开启", "Recommended on"),
+            benefit: t(
+                "知道什么时候该压缩或换会话",
+                "Know when to compact or start a new session",
+            ),
+            cost: t("没有代价", "None"),
+            when_off: t(
+                "不想被打扰可以关",
+                "Turn it off if you prefer fewer alerts.",
+            ),
+        },
+        CacheExpiryNotify => AdvancedCopy {
+            title: t("缓存快过期时提醒", "Remind me before the cache expires"),
+            description: t(
+                "已读内容快不能复用时提醒你，不会向 AI 发送请求。",
+                "Get an alert when the AI is about to lose the ability to reuse what it has read. This sends no request to the AI.",
+            ),
+            recommendation: t("默认关闭", "Off by default"),
+            benefit: t(
+                "想继续时可以赶在缓存过期前回来",
+                "Return in time to reuse the cache",
+            ),
+            cost: t("多一条提醒", "An extra alert"),
+            when_off: t(
+                "不想被缓存提醒打扰时保持关闭",
+                "Leave it off if you prefer fewer alerts.",
+            ),
+        },
+        StallRescue => AdvancedCopy {
+            title: t("卡住了提醒你", "Tell me when a session is stuck"),
+            description: t(
+                "后台会话长时间没有任何动静时提醒，并准备一份脱敏进度摘要，点一下就能带着摘要开新会话。",
+                "Flag long-running sessions that go quiet and prepare a summary with sensitive details removed. Start a new session with that summary in one click.",
+            ),
+            recommendation: t("推荐开启", "Recommended on"),
+            benefit: t(
+                "不用切回去才发现白等半小时",
+                "Spot a stalled session while working elsewhere",
+            ),
+            cost: t("极少数情况会多一条提醒", "An occasional extra alert"),
+            when_off: t(
+                "长构建、慢模型已做过防误报，一般不用关",
+                "Usually safe to leave on. Long builds and slow models are accounted for.",
+            ),
+        },
+        NoiseFilter => AdvancedCopy {
+            title: t("长日志自动压缩", "Summarize long logs automatically"),
+            description: t(
+                "跑测试、构建时，AI 只读报错和摘要，不被几千行日志淹没。完整原文留在本地，随时能查回。",
+                "Give the AI errors and a summary from long test and build logs. The full log stays available locally.",
+            ),
+            recommendation: t("经常跑测试的人推荐开", "Recommended for frequent testing"),
+            benefit: t(
+                "少占上下文，回复更快、更省额度",
+                "Less context to read, faster replies, less quota used",
+            ),
+            cost: t(
+                "AI 看不到全文，需要时你点开原文",
+                "Open the original when you need the full log",
+            ),
+            when_off: t(
+                "需要 AI 逐行看完整原始输出时先关掉",
+                "Turn it off when the AI needs to inspect the entire raw output.",
+            ),
+        },
+        ReadDedup => AdvancedCopy {
+            title: t(
+                "别让 AI 反复读同一个文件",
+                "Skip repeat reads of unchanged files",
+            ),
+            description: t(
+                "同一个文件没改过，第二次读会被提醒复用已有内容；120 秒内再试一次会自动放行。",
+                "When the AI rereads an unchanged file, ask it to reuse what it already has. A retry within 120 seconds goes through.",
+            ),
+            recommendation: t("推荐开启", "Recommended on"),
+            benefit: t(
+                "省额度，也减少重复思考",
+                "Use less quota and avoid repeated work",
+            ),
+            cost: t("偶尔会被拦一下，重试即可", "A repeat read can take a retry"),
+            when_off: t(
+                "正在逐行对照同一文件时可临时关",
+                "Turn it off temporarily for line-by-line comparisons of the same file.",
+            ),
+        },
+        BlockSensitiveReads => AdvancedCopy {
+            title: t("拦住直接读 .env", "Block direct reads of .env"),
+            description: t(
+                "AI 想直接读 .env 里的密钥时会被拦下；.env.example 这类样板文件照常放行。",
+                "Block direct reads of secrets in .env files. Templates such as .env.example are still readable.",
+            ),
+            recommendation: t("推荐开启", "Recommended on"),
+            benefit: t("避免密钥被带进对话", "Keep secrets out of the conversation"),
+            cost: t(
+                "读取真实配置时需要先关闭",
+                "Accessing real configuration requires turning it off",
+            ),
+            when_off: t(
+                "你明确要让 AI 读真实配置时再关",
+                "Turn it off only when you want the AI to read the real configuration.",
+            ),
+        },
+        CliTools => AdvancedCopy {
+            title: t("更省 token 的查找工具", "Search with fewer tokens"),
+            description: t(
+                "查找工具可以看大文件大纲、批量搜索、查被截断的日志。自动引导 AI 使用这些工具的功能正在接入。",
+                "The built-in tools can outline large files, run batch searches, and find trimmed logs. Automatic guidance for the AI is still being integrated.",
+            ),
+            recommendation: t("暂不可用", "Unavailable"),
+            benefit: t("接入后可减少重复读取", "Fewer repeat reads once available"),
+            cost: t("接入后再确认", "To be confirmed"),
+            when_off: t(
+                "只用轻量对话时可以关",
+                "Leave it off for lightweight conversations.",
+            ),
+        },
+        CacheKeepalive => AdvancedCopy {
+            title: t("自动续命", "Keep the cache warm automatically"),
+            description: t(
+                "缓存快过期前自动发一次极短请求，让缓存别冷掉。",
+                "Send a short request before the cache expires to keep it warm.",
+            ),
+            recommendation: t("暂不可用", "Unavailable"),
+            benefit: t(
+                "离开几分钟回来不用重新计算",
+                "Reuse cached work after stepping away",
+            ),
+            cost: t(
+                "自动发送会进入对话并消耗额度",
+                "An automatic message appears in the chat and uses quota",
+            ),
+            when_off: t(
+                "目前没有可靠的静默发送方式，先只做到期提醒",
+                "Use the expiry reminder until silent refresh is available.",
+            ),
+        },
+        MasterEnabled => unreachable!("the master switch is outside advanced settings"),
+    }
+}
+
 /// GPUI settings panel rendered inside `SettingsPage::ContextOptimizer`.
 pub struct ContextOptimizerSettingsPanel {
     state: ContextOptimizerPanelState,
     palette: ThemePalette,
     dark: bool,
-    agent_focus: BTreeMap<String, FocusHandle>,
+    advanced_open: bool,
+    agent_focus: [FocusHandle; AGENT_TABS.len()],
     toggle_focus: [FocusHandle; OptimizerToggle::BlockSensitiveReads as usize + 1],
+    advanced_focus: FocusHandle,
     restore_focus: FocusHandle,
     last_focus: Option<FocusHandle>,
     scroll: ScrollHandle,
@@ -377,8 +620,10 @@ impl ContextOptimizerSettingsPanel {
             state,
             palette: *theme.palette(),
             dark: theme == AppTheme::Dark,
-            agent_focus: BTreeMap::new(),
+            advanced_open: false,
+            agent_focus: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
             toggle_focus: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
+            advanced_focus: cx.focus_handle().tab_stop(true),
             restore_focus: cx.focus_handle().tab_stop(true),
             last_focus: None,
             scroll,
@@ -396,128 +641,307 @@ impl ContextOptimizerSettingsPanel {
         cx.notify();
     }
 
-    fn render_toggle_row(
+    pub fn set_savings(&mut self, result: &Value, cx: &mut Context<Self>) {
+        self.state.set_savings(result);
+        cx.notify();
+    }
+
+    fn switch(
         &self,
-        id: &'static str,
-        title: &'static str,
-        desc: &'static str,
         field: OptimizerToggle,
-        checked: bool,
         entry: &AgentOptimizerEntry,
-        reveal_focus: Option<&FocusHandle>,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let interactive = can_toggle(field, entry);
-        let reason = unavailable_reason(field, entry, self.state.locale);
-        let focus = &self.toggle_focus[field as usize];
-        let accent = rgba(self.palette.workspace.accent);
-        let title_color = rgba(if interactive {
-            self.palette.workspace.text
-        } else {
-            self.palette.workspace.muted
-        });
-
-        let pill_bg = if !interactive {
-            self.palette.workspace.line
-        } else if checked {
+        let checked = interactive && field.checked(&entry.settings);
+        let track_color = if checked {
             self.palette.workspace.accent
         } else if self.dark {
-            0x3a4250ff
+            0x3a4048ff
         } else {
-            0xcbd5e1ff
+            0xcfd4dcff
         };
-
-        let mut pill = div()
-            .id(SharedString::from(format!("ctx-opt-toggle-{id}")))
-            .w(px(36.))
-            .h(px(20.))
+        let switch = div()
+            .id(("ctx-opt-toggle", field as usize))
+            .w(px(44.))
+            .h(px(26.))
+            .mt(px(2.))
             .flex_none()
-            .rounded(px(10.))
-            .p(px(2.))
+            .rounded_full()
+            .p(px(3.))
             .flex()
             .items_center()
-            .justify_start()
-            .bg(rgba(pill_bg))
+            .bg(rgba(track_color))
             .child(
                 div()
-                    .size(px(16.))
-                    .rounded(px(8.))
-                    .ml(if checked { px(16.) } else { px(0.) })
+                    .size(px(20.))
+                    .rounded_full()
+                    .ml(if checked { px(18.) } else { px(0.) })
                     .bg(rgb(0xffffff)),
             );
-
         if interactive {
-            pill = pill
-                .track_focus(focus)
+            let accent = rgba(self.palette.workspace.accent);
+            switch
+                .track_focus(&self.toggle_focus[field as usize])
                 .focus(|style| style.shadow(vec![outline_shadow(accent)]))
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.state.toggle(field);
                     cx.notify();
-                }));
+                }))
         } else {
-            pill = pill.opacity(0.45);
+            switch.opacity(0.55)
         }
+    }
 
-        let mut text_col = div()
-            .flex()
-            .flex_col()
-            .flex_1()
+    fn label(&self, copy: impl Into<SharedString>) -> Div {
+        div()
+            .text_size(px(12.))
+            .line_height(px(17.))
+            .text_color(rgba(self.palette.workspace.muted))
+            .child(copy.into())
+    }
+
+    fn pill(&self, copy: impl Into<SharedString>, color: u32, background: u32) -> Div {
+        div()
+            .max_w_full()
+            .px(px(7.))
+            .py(px(1.))
+            .rounded(px(7.))
+            .text_size(px(10.5))
+            .line_height(px(15.))
+            .bg(rgba(background))
+            .text_color(rgba(color))
+            .child(copy.into())
+    }
+
+    fn render_advanced_row(
+        &self,
+        field: OptimizerToggle,
+        entry: &AgentOptimizerEntry,
+        reveal_focus: Option<&FocusHandle>,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let locale = self.state.locale;
+        let copy = advanced_copy(field, locale);
+        let focus = &self.toggle_focus[field as usize];
+        let reason = unavailable_reason(field, entry, locale);
+        let palette = self.palette.workspace;
+        let (good, good_bg, warning, warning_bg) = if self.dark {
+            (0x4cc596ff, 0x16332aff, 0xe0a34dff, 0x332715ff)
+        } else {
+            (0x187351ff, 0xe7f5eeff, 0x8c4d00ff, 0xfff4e2ff)
+        };
+        let recommendation = if entry.availability(field) == OptimizerAvailability::Available {
+            copy.recommendation
+        } else {
+            locale.text("暂不可用", "Unavailable")
+        };
+        let recommendation_color = if reason.is_some() {
+            (palette.muted, palette.panel_muted)
+        } else if field == OptimizerToggle::CacheExpiryNotify {
+            (palette.text, palette.panel_muted)
+        } else {
+            (good, good_bg)
+        };
+        let mut text = div()
+            .w_full()
             .min_w_0()
-            .gap(px(2.))
+            .pr(px(60.))
             .child(
                 div()
-                    .text_size(px(12.))
-                    .font_weight(FontWeight(600.))
-                    .text_color(title_color)
-                    .child(title),
+                    .text_size(px(14.))
+                    .font_weight(FontWeight(650.))
+                    .text_color(rgba(if reason.is_some() {
+                        palette.muted
+                    } else {
+                        palette.text
+                    }))
+                    .child(copy.title),
+            )
+            .child(self.label(copy.description).mt(px(4.)))
+            .child(
+                div()
+                    .mt(px(6.))
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(6.))
+                    .child(self.pill(
+                        recommendation,
+                        recommendation_color.0,
+                        recommendation_color.1,
+                    ))
+                    .child(self.pill(
+                        format!("{} {}", locale.text("好处", "Benefit"), copy.benefit),
+                        palette.text,
+                        palette.panel_muted,
+                    ))
+                    .child(self.pill(
+                        format!("{} {}", locale.text("代价", "Trade-off"), copy.cost),
+                        if reason.is_some() {
+                            palette.muted
+                        } else {
+                            warning
+                        },
+                        if reason.is_some() {
+                            palette.panel_muted
+                        } else {
+                            warning_bg
+                        },
+                    )),
             )
             .child(
-                div()
-                    .text_size(px(10.5))
-                    .line_height(px(14.5))
-                    .text_color(rgba(self.palette.workspace.muted))
-                    .child(desc),
+                self.label(format!(
+                    "{} {}",
+                    locale.text("什么时候别开", "When to leave it off"),
+                    copy.when_off
+                ))
+                .mt(px(4.)),
             );
         if let Some(reason) = reason {
-            // Keep the explanation reachable by Tab while the switch has
-            // neither a focus target nor an activation handler.
-            text_col = text_col.child(
-                div()
+            let accent = rgba(palette.accent);
+            text = text.child(
+                self.label(reason)
                     .id(("ctx-opt-reason", field as usize))
                     .track_focus(focus)
-                    .rounded(px(3.))
                     .focus(|style| style.shadow(vec![outline_shadow(accent)]))
-                    .text_size(px(10.5))
-                    .line_height(px(14.5))
-                    .text_color(rgba(self.palette.workspace.muted))
-                    .child(reason),
+                    .mt(px(4.))
+                    .px(px(8.))
+                    .py(px(4.))
+                    .rounded(px(6.))
+                    .text_color(rgba(warning))
+                    .bg(rgba(warning_bg)),
             );
         }
-
-        let row = reveal_on_focus(div(), &self.scroll, reveal_focus == Some(focus))
+        let mut row = reveal_on_focus(div(), &self.scroll, reveal_focus == Some(focus))
             .id(("ctx-opt-row", field as usize))
+            .relative()
             .w_full()
-            .py(px(10.))
-            .pr(px(12.))
-            .pl(if field == OptimizerToggle::BlockSensitiveReads {
-                px(24.)
+            .py(px(12.))
+            .pl(if field == OptimizerToggle::CacheExpiryNotify {
+                px(18.)
             } else {
-                px(12.)
+                px(0.)
             })
+            .border_t_1()
+            .border_color(rgba(palette.line))
+            .child(text)
+            .child(
+                div()
+                    .absolute()
+                    .top(px(12.))
+                    .right_0()
+                    .child(self.switch(field, entry, cx)),
+            );
+        if let Some(reason) = reason {
+            row = row.tooltip(move |_, cx| cx.new(|_| CardTooltip(reason.into())).into());
+        }
+        row
+    }
+
+    fn render_summary(&self, entry: &AgentOptimizerEntry) -> Div {
+        let locale = self.state.locale;
+        let palette = self.palette.workspace;
+        let name = agent_display_name(&entry.agent_id);
+        let (label, note) = if entry.settings.enabled {
+            let label = if entry.agent_id == "dsh" {
+                locale.text("观察模式已开启", "Observation mode is on")
+            } else {
+                locale.text("自动优化已开启", "Automatic optimization is on")
+            };
+            let defaults = AgentOptimizerSettings::recommended_for(&entry.agent_id);
+            let count = ADVANCED_ITEMS
+                .into_iter()
+                .filter(|&field| can_toggle(field, entry) && field.checked(&entry.settings))
+                .count();
+            let recommended = ADVANCED_ITEMS.into_iter().all(|field| {
+                entry.availability(field) != OptimizerAvailability::Available
+                    || field.checked(&entry.settings) == field.checked(&defaults)
+            });
+            let note = match (locale, recommended) {
+                (InterfaceLocale::Chinese, true) => {
+                    format!("已按 {name} 当前可用的能力自动配置 {count} 项")
+                }
+                (InterfaceLocale::Chinese, false) => format!("{name} 当前已启用 {count} 项"),
+                (InterfaceLocale::English, true) => {
+                    format!("{count} options configured automatically for {name}")
+                }
+                (InterfaceLocale::English, false) => format!("{count} options enabled for {name}"),
+            };
+            (label, note)
+        } else {
+            (
+                locale.text("已关闭", "Off"),
+                locale
+                    .text("优化和提醒已暂停", "Optimization and alerts are paused")
+                    .to_owned(),
+            )
+        };
+        let status_dot = if entry.settings.enabled {
+            if self.dark { 0x4cc596ff } else { 0x18805bff }
+        } else {
+            palette.muted
+        };
+        let (primary, secondary) = self.state.current_savings().labels(locale);
+        let savings = match secondary {
+            Some(secondary) => div()
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .child(
+                    div()
+                        .text_size(px(15.))
+                        .font_weight(FontWeight(700.))
+                        .child(primary),
+                )
+                .child(self.label(secondary)),
+            None => self.label(primary),
+        };
+        div()
             .flex()
+            .flex_wrap()
             .items_center()
             .justify_between()
             .gap(px(14.))
-            .border_b_1()
-            .border_color(rgba(self.palette.workspace.line))
-            .child(text_col)
-            .child(pill);
-        if let Some(reason) = reason {
-            row.tooltip(move |_, cx| cx.new(|_| CardTooltip(reason.into())).into())
-        } else {
-            row
-        }
+            .w_full()
+            .p(px(16.))
+            .rounded(px(12.))
+            .border_1()
+            .border_color(rgba(palette.line))
+            .bg(rgba(palette.panel_muted))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_grow()
+                    .flex_basis(px(205.))
+                    .min_w_0()
+                    .gap(px(3.))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .text_size(px(14.))
+                            .font_weight(FontWeight(650.))
+                            .child(
+                                div()
+                                    .size(px(8.))
+                                    .flex_none()
+                                    .rounded_full()
+                                    .bg(rgba(status_dot)),
+                            )
+                            .child(label),
+                    )
+                    .child(self.label(note)),
+            )
+            .child(
+                savings
+                    .flex_grow()
+                    .flex_basis(px(180.))
+                    .min_w_0()
+                    .text_right(),
+            )
     }
 }
 
@@ -564,227 +988,189 @@ fn reveal_on_focus(element: Div, scroll: &ScrollHandle, newly_focused: bool) -> 
 impl Render for ContextOptimizerSettingsPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let locale = self.state.locale;
-        let selected = self.state.selected_agent().to_owned();
-        let agent_ids = self.state.agent_ids();
-        let accent = rgba(self.palette.workspace.accent);
+        let palette = self.palette.workspace;
+        let accent = rgba(palette.accent);
         let previous_focus = std::mem::replace(&mut self.last_focus, window.focused(cx));
         let reveal_focus = self
             .last_focus
             .as_ref()
             .filter(|focus| Some(*focus) != previous_focus.as_ref());
 
-        let mut tabs = div().flex().flex_wrap().gap(px(6.)).mb(px(12.));
-        for id in agent_ids {
-            let active = id == selected;
-            let label = agent_display_name(&id).to_owned();
-            let id_click = id.clone();
-            let focus: &FocusHandle = self
-                .agent_focus
-                .entry(id.clone())
-                .or_insert_with(|| cx.focus_handle().tab_stop(true));
+        let mut tabs = div().flex().flex_wrap().gap(px(8.));
+        for (id, focus) in AGENT_TABS.into_iter().zip(&self.agent_focus) {
+            let active = id == self.state.selected_agent();
             tabs = tabs.child(
                 reveal_on_focus(div(), &self.scroll, reveal_focus == Some(focus))
                     .id(SharedString::from(format!("ctx-opt-agent-{id}")))
                     .track_focus(focus)
                     .focus(|style| style.shadow(vec![outline_shadow(accent)]))
-                    .px(px(12.))
-                    .py(px(6.))
-                    .rounded(px(7.))
+                    .px(px(16.))
+                    .py(px(7.))
+                    .rounded(px(10.))
                     .cursor_pointer()
-                    .text_size(px(11.5))
-                    .font_weight(FontWeight(620.))
+                    .text_size(px(13.))
+                    .font_weight(FontWeight(600.))
                     .bg(rgba(if active {
-                        self.palette.workspace.accent_soft
+                        palette.accent_soft
                     } else {
-                        0x00000000
+                        palette.panel
                     }))
                     .border_1()
-                    .border_color(rgba(if active {
-                        self.palette.workspace.accent
-                    } else {
-                        self.palette.workspace.line
-                    }))
-                    .text_color(rgba(if active {
-                        self.palette.workspace.accent
-                    } else {
-                        self.palette.workspace.text
-                    }))
+                    .border_color(rgba(if active { palette.accent } else { palette.line }))
+                    .text_color(rgba(if active { palette.accent } else { palette.text }))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.state.select_agent(&id_click);
+                        this.state.select_agent(id);
                         cx.notify();
                     }))
-                    .child(label),
+                    .child(agent_display_name(id)),
             );
         }
 
-        let Some(entry) = self.state.current_entry().cloned() else {
+        let Some(entry) = self.state.current_entry() else {
             return div()
                 .child(locale.text("未找到 Agent 配置", "Agent configuration unavailable"));
         };
-        let s = &entry.settings;
-        let row = |id, title, desc, field, checked, cx: &mut Context<Self>| {
-            self.render_toggle_row(id, title, desc, field, checked, &entry, reveal_focus, cx)
-        };
-
-        let rows = div()
-            .w_full()
-            .rounded(px(10.))
-            .border_1()
-            .border_color(rgba(self.palette.workspace.line))
+        let master_focus = &self.toggle_focus[OptimizerToggle::MasterEnabled as usize];
+        let master = reveal_on_focus(div(), &self.scroll, reveal_focus == Some(master_focus))
             .flex()
-            .flex_col()
-            .child(row(
-                "master",
-                locale.text("为该 Agent 启用上下文与缓存优化", "Enable context & cache optimizer"),
-                locale.text(
-                    "开启后可调整下方设置。关闭时会保留已保存的偏好。",
-                    "Enable to change the settings below. Turning this off keeps your saved preferences.",
-                ),
-                OptimizerToggle::MasterEnabled,
-                s.enabled,
-                cx,
-            ))
-            .child(row(
-                "cache-monitor",
-                locale.text("KV-Cache 监控与水位预警", "KV-cache countdown & context alerts"),
-                locale.text(
-                    "在卡片与底栏 HUD 显示上下文占用和缓存剩余有效期（零前缀污染）。",
-                    "Shows context usage and cache TTL countdown in the HUD without mutating prompts.",
-                ),
-                OptimizerToggle::CacheMonitor,
-                s.cache_monitor,
-                cx,
-            ))
-            .child(row(
-                "stall-rescue",
-                locale.text("卡死检测与一键交接救援", "Stall watchdog & rescue handoff"),
-                locale.text(
-                    "监控后台会话静默卡死（带合盖休眠防误报），并自动准备脱敏交接摘要。",
-                    "Detects silent background stalls with sleep-drift protection and prepares redacted handoff briefs.",
-                ),
-                OptimizerToggle::StallRescue,
-                s.stall_rescue,
-                cx,
-            ))
-            .child(row(
-                "noise-filter",
-                locale.text("终端噪音剪裁与密钥脱敏", "Terminal noise trimming & secret redaction"),
-                locale.text(
-                    "将超长测试/构建日志压缩为报错与摘要，完整原文存本地；自动遮蔽 API Key。",
-                    "Trims noisy build/test logs to errors and summaries while saving full logs locally.",
-                ),
-                OptimizerToggle::NoiseFilter,
-                s.noise_filter,
-                cx,
-            ))
-            .child(row(
-                "read-dedup",
-                locale.text("防重复读与大文件分级保护", "Duplicate-read guard & tiered read caps"),
-                locale.text(
-                    "保护专用读文件工具。拦下未修改大文件的重复读取，120 秒内再试一次会放行。",
-                    "Protects dedicated file reads. A repeated read of an unchanged large file is blocked, and retrying within 120 seconds is allowed.",
-                ),
-                OptimizerToggle::ReadDedup,
-                s.read_dedup,
-                cx,
-            ))
-            .child(row(
-                "block-sensitive-reads",
-                locale.text(".env 与敏感文件保护", "Protect .env and sensitive files"),
-                locale.text(
-                    "阻止专用读文件工具读取 .env 等敏感文件，放行 .env.example 等样板文件。",
-                    "Blocks dedicated file reads of sensitive files such as .env and lets templates such as .env.example through.",
-                ),
-                OptimizerToggle::BlockSensitiveReads,
-                s.block_sensitive_reads,
-                cx,
-            ))
-            .child(row(
-                "cli-tools",
-                locale.text("内置提速工具（mt ctx）", "Built-in CLI helpers (mt ctx)"),
-                locale.text(
-                    "零 MCP 方式提供文件大纲、批量搜索、本地日志检索与 /compact 恢复。",
-                    "Zero-MCP CLI for file outlines, batch search, local log search, and post-compact resume.",
-                ),
-                OptimizerToggle::CliTools,
-                s.cli_tools,
-                cx,
-            ))
-            .child(row(
-                "cache-keepalive",
-                locale.text("自动续命", "Automatic cache keepalive"),
-                locale.text(
-                    "在主会话缓存快过期时尝试延长有效期。",
-                    "Attempts to extend the cache lifetime shortly before it expires.",
-                ),
-                OptimizerToggle::CacheKeepalive,
-                s.cache_keepalive,
-                cx,
-            ))
-            .child(row(
-                "cache-expiry-notify",
-                locale.text("临过期提醒", "Cache expiry reminder"),
-                locale.text(
-                    "KV-Cache 监控开启时，缓存快过期会提醒，不会向 Agent 发送请求。",
-                    "With KV-cache monitoring on, shows a reminder shortly before expiry without sending a request to the agent.",
-                ),
-                OptimizerToggle::CacheExpiryNotify,
-                s.cache_expiry_notify,
-                cx,
-            ));
-
-        let mut footer = div()
-            .mt(px(12.))
-            .flex()
-            .items_center()
-            .justify_between()
+            .items_start()
+            .gap(px(16.))
+            .pt(px(12.))
+            .border_t_1()
+            .border_color(rgba(palette.line))
             .child(
-                reveal_on_focus(
-                    div(),
-                    &self.scroll,
-                    reveal_focus == Some(&self.restore_focus),
-                )
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(3.))
+                    .child(
+                        div().text_size(px(15.)).font_weight(FontWeight(700.)).child(
+                            locale.text("自动优化（推荐）", "Automatic optimization (recommended)"),
+                        ),
+                    )
+                    .child(self.label(locale.text(
+                        "按当前 Agent 实际能用的能力自动配置。关闭后完全恢复原样，不拦截、不提醒、不显示额外状态。",
+                        "Uses the features supported by this agent. Turn it off to stop filtering, alerts, and additional status indicators.",
+                    ))),
+            )
+            .child(self.switch(OptimizerToggle::MasterEnabled, entry, cx));
+
+        let advanced = reveal_on_focus(
+            div(),
+            &self.scroll,
+            reveal_focus == Some(&self.advanced_focus),
+        )
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .justify_between()
+        .gap(px(8.))
+        .pt(px(8.))
+        .border_t_1()
+        .border_color(rgba(palette.line))
+        .child(
+            div()
+                .id("ctx-opt-advanced")
+                .track_focus(&self.advanced_focus)
+                .focus(|style| style.shadow(vec![outline_shadow(accent)]))
+                .flex()
+                .items_center()
+                .gap(px(7.))
+                .px(px(4.))
+                .py(px(5.))
+                .rounded(px(5.))
+                .text_size(px(13.))
+                .font_weight(FontWeight(650.))
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.advanced_open = !this.advanced_open;
+                    cx.notify();
+                }))
+                .child(if self.advanced_open { "▾" } else { "▸" })
+                .child(locale.text("高级设置", "Advanced settings")),
+        )
+        .child(self.label(locale.text(
+            "不确定就保持默认，下面这些不用管",
+            "The defaults are fine for most people.",
+        )));
+
+        let footer = reveal_on_focus(
+            div(),
+            &self.scroll,
+            reveal_focus == Some(&self.restore_focus),
+        )
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .justify_between()
+        .gap(px(10.))
+        .px(px(12.))
+        .py(px(10.))
+        .rounded(px(8.))
+        .bg(rgba(palette.panel_muted))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .child(self.label(locale.text(
+                    "改动立即生效，不用重启会话",
+                    "Changes take effect immediately, without restarting the session.",
+                )))
+                .when_some(self.state.error_message(), |text, error| {
+                    text.child(self.label(error.to_owned()).text_color(rgb(if self.dark {
+                        0xff9b94
+                    } else {
+                        0xb34d47
+                    })))
+                })
+                .when_some(self.state.status_message(), |text, status| {
+                    text.child(self.label(status.to_owned()))
+                }),
+        )
+        .child(
+            div()
                 .id("ctx-opt-restore-defaults")
                 .track_focus(&self.restore_focus)
                 .focus(|style| style.shadow(vec![outline_shadow(accent)]))
-                .px(px(10.))
-                .py(px(5.))
-                .rounded(px(6.))
+                .px(px(11.))
+                .py(px(6.))
+                .rounded(px(7.))
                 .border_1()
-                .border_color(rgba(self.palette.workspace.line))
+                .border_color(rgba(palette.line))
+                .bg(rgba(palette.panel))
                 .cursor_pointer()
-                .text_size(px(11.))
-                .text_color(rgba(self.palette.workspace.text))
+                .text_size(px(12.))
+                .font_weight(FontWeight(600.))
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.state.restore_defaults();
                     cx.notify();
                 }))
-                .child(locale.text("恢复可用项默认值", "Restore available defaults")),
-            );
-
-        if let Some(err) = self.state.error_message() {
-            footer = footer.child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(rgb(0xb34d47))
-                    .child(err.to_owned()),
-            );
-        } else if let Some(msg) = self.state.status_message() {
-            footer = footer.child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(rgb(0x16794b))
-                    .child(msg.to_owned()),
-            );
-        }
+                .child(locale.text("恢复推荐配置", "Restore recommended settings")),
+        );
 
         div()
             .flex()
             .flex_col()
             .w_full()
-            .mt(px(14.))
+            .gap(px(14.))
+            .mt(px(16.))
+            .text_color(rgba(palette.text))
             .child(tabs)
-            .child(rows)
+            .child(self.render_summary(entry))
+            .child(master)
+            .child(advanced)
+            .when(self.advanced_open, |element| {
+                element.child(
+                    div().children(
+                        ADVANCED_ITEMS
+                            .into_iter()
+                            .map(|field| self.render_advanced_row(field, entry, reveal_focus, cx)),
+                    ),
+                )
+            })
             .child(footer)
     }
 }
@@ -792,10 +1178,10 @@ impl Render for ContextOptimizerSettingsPanel {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentOptimizerSettings, ContextGuardHudView, ContextOptimizerConfig,
-        ContextOptimizerPanelState, HudPillTone, InterfaceLocale, OptimizerAvailability,
-        OptimizerToggle, can_toggle, format_cache_countdown, format_saved_noise_bytes,
-        unavailable_reason,
+        ADVANCED_ITEMS, AgentOptimizerSettings, AgentSavings, ContextGuardHudView,
+        ContextOptimizerConfig, ContextOptimizerPanelState, HudPillTone, InterfaceLocale,
+        OptimizerAvailability, OptimizerToggle, can_toggle, format_cache_countdown,
+        format_saved_noise_bytes, unavailable_reason,
     };
     use std::rc::Rc;
 
@@ -815,6 +1201,7 @@ mod tests {
                         noise_filter: true,
                         read_dedup: true,
                         cache_keepalive: true,
+                        cli_tools: id == "claude-code",
                         cache_keepalive_max_per_turn: 3,
                         max_log_bytes: 32_768,
                         ..Default::default()
@@ -843,7 +1230,7 @@ mod tests {
                 (CacheExpiryNotify, Available),
                 (CacheMonitor, Available),
                 (StallRescue, Available),
-                (CliTools, Available),
+                (CliTools, Pending),
             ] {
                 assert_eq!(entry.availability(field), availability, "{id} {field:?}");
                 let available = availability == Available;
@@ -861,7 +1248,7 @@ mod tests {
             );
             assert!(!settings.cache_monitor, "{id}");
             assert!(!settings.stall_rescue, "{id}");
-            assert!(settings.cli_tools, "{id}");
+            assert_eq!(settings.cli_tools, id == "claude-code");
             assert_eq!(settings.noise_filter, interception != Available, "{id}");
             assert_eq!(settings.read_dedup, interception != Available, "{id}");
             assert_eq!(
@@ -896,10 +1283,99 @@ mod tests {
         let saved = &config.snapshot().unwrap().agents["codex"].settings;
         assert!(saved.noise_filter && saved.read_dedup && saved.block_sensitive_reads);
         assert!(saved.cache_keepalive && !saved.cache_expiry_notify);
+        assert!(!saved.cli_tools);
         assert_eq!(saved.cache_keepalive_max_per_turn, 3);
         assert_eq!(saved.max_log_bytes, 32_768);
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn master_switch_preserves_preferences_when_off_and_recommends_when_enabled() {
+        use OptimizerToggle::{CacheExpiryNotify, CacheMonitor, MasterEnabled, NoiseFilter};
+
+        let dir = std::env::temp_dir().join(format!("matou-ctx-master-{}", uuid::Uuid::new_v4()));
+        let config = Rc::new(ContextOptimizerConfig::for_data_root(&dir));
+        let mut panel =
+            ContextOptimizerPanelState::load(config.clone(), InterfaceLocale::Chinese).unwrap();
+        assert!(panel.toggle(NoiseFilter));
+        assert!(panel.toggle(CacheExpiryNotify));
+        assert!(panel.toggle(CacheMonitor));
+        assert!(!panel.toggle(CacheExpiryNotify));
+        let customized = panel.current_entry().unwrap().settings.clone();
+        assert!(!customized.noise_filter && !customized.cache_monitor);
+        assert!(customized.cache_expiry_notify);
+
+        assert!(panel.toggle(MasterEnabled));
+        let disabled = AgentOptimizerSettings {
+            enabled: false,
+            ..customized
+        };
+        assert_eq!(
+            config.snapshot().unwrap().agents["claude-code"].settings,
+            disabled
+        );
+        for field in ADVANCED_ITEMS {
+            assert!(!panel.toggle(field));
+        }
+
+        let mut reopened =
+            ContextOptimizerPanelState::load(config.clone(), InterfaceLocale::Chinese).unwrap();
+        assert_eq!(reopened.current_entry().unwrap().settings, disabled);
+        assert!(reopened.toggle(MasterEnabled));
+        assert_eq!(
+            config.snapshot().unwrap().agents["claude-code"].settings,
+            AgentOptimizerSettings::recommended_for("claude-code")
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn savings_are_per_agent_and_only_display_reported_bytes() {
+        let config = Rc::new(ContextOptimizerConfig::for_data_root(
+            std::env::temp_dir().join(format!("matou-ctx-stats-{}", uuid::Uuid::new_v4())),
+        ));
+        let mut panel = ContextOptimizerPanelState::load(config, InterfaceLocale::Chinese).unwrap();
+        panel.set_savings(&serde_json::json!({
+            "agents": {
+                "claude-code": {"bytes7d": 5123, "events7d": 2},
+                "antigravity": {"bytes7d": 0, "events7d": 0},
+                "codex": {"bytes7d": 1024, "events7d": 1},
+                "dsh": {"bytes7d": "invalid"}
+            }
+        }));
+        assert_eq!(
+            panel.current_savings(),
+            AgentSavings {
+                bytes7d: 5123,
+                events7d: 2
+            }
+        );
+        assert_eq!(
+            panel.current_savings().labels(InterfaceLocale::Chinese),
+            (
+                "过去 7 天约少读 1280 token".into(),
+                Some("约 5.003 KB".into())
+            )
+        );
+        panel.select_agent("codex");
+        assert_eq!(
+            panel.current_savings().labels(InterfaceLocale::English),
+            (
+                "About 256 fewer tokens read in the past 7 days".into(),
+                Some("About 1 KB".into())
+            )
+        );
+        for id in ["antigravity", "dsh"] {
+            panel.select_agent(id);
+            assert_eq!(
+                panel.current_savings().labels(InterfaceLocale::Chinese),
+                ("还没有节省数据，正常使用后会显示".into(), None)
+            );
+        }
+        panel.select_agent("claude-code");
+        panel.set_savings(&serde_json::Value::Null);
+        assert_eq!(panel.current_savings(), AgentSavings::default());
     }
 
     #[test]
@@ -951,6 +1427,9 @@ mod tests {
         assert!(view.handoff_urgent);
 
         // Missing contextGuard returns None cleanly.
-        assert!(ContextGuardHudView::from_live_hud(&serde_json::json!({}), InterfaceLocale::Chinese).is_none());
+        assert!(
+            ContextGuardHudView::from_live_hud(&serde_json::json!({}), InterfaceLocale::Chinese)
+                .is_none()
+        );
     }
 }
