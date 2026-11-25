@@ -1,0 +1,235 @@
+--- a/src/elements/div.rs	2026-11-25 17:16:26
++++ b/src/elements/div.rs	2026-11-25 17:17:24
+@@ -19,11 +19,11 @@
+     AbsoluteLength, Action, AnyDrag, AnyElement, AnyTooltip, AnyView, App, Bounds, ClickEvent,
+     DispatchPhase, Display, Element, ElementId, Entity, FocusHandle, Global, GlobalElementId,
+     Hitbox, HitboxBehavior, HitboxId, InspectorElementId, IntoElement, IsZero, KeyContext,
+-    KeyDownEvent, KeyUpEvent, KeyboardButton, KeyboardClickEvent, LayoutId, ModifiersChangedEvent,
+-    MouseButton, MouseClickEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Overflow,
+-    ParentElement, Pixels, Point, Render, ScrollWheelEvent, SharedString, Size, Style,
+-    StyleRefinement, Styled, Task, TooltipId, Visibility, Window, WindowControlArea, point, px,
+-    size,
++    KeyDownEvent, KeyUpEvent, KeyboardButton, KeyboardClickEvent, LayoutId, MagnifyEvent,
++    ModifiersChangedEvent, MouseButton, MouseClickEvent, MouseDownEvent, MouseMoveEvent,
++    MouseUpEvent, Overflow, ParentElement, Pixels, Point, Render, ScrollWheelEvent, SharedString,
++    Size, Style, StyleRefinement, Styled, Task, TooltipId, Visibility, Window, WindowControlArea,
++    point, px, size,
+ };
+ use collections::HashMap;
+ use refineable::Refineable;
+@@ -321,6 +321,22 @@
+             }));
+     }
+ 
++    /// Bind the given callback to magnify (trackpad pinch) gestures during the bubble phase
++    /// The imperative API equivalent to [`InteractiveElement::on_magnify`]
++    ///
++    /// See [`Context::listener`](crate::Context::listener) to get access to a view's state from this callback.
++    pub fn on_magnify(
++        &mut self,
++        listener: impl Fn(&MagnifyEvent, &mut Window, &mut App) + 'static,
++    ) {
++        self.magnify_listeners
++            .push(Box::new(move |event, phase, hitbox, window, cx| {
++                if phase == DispatchPhase::Bubble && hitbox.should_handle_scroll(window) {
++                    (listener)(event, window, cx);
++                }
++            }));
++    }
++
+     /// Bind the given callback to an action dispatch during the capture phase
+     /// The imperative API equivalent to [`InteractiveElement::capture_action`]
+     ///
+@@ -835,6 +851,18 @@
+         self
+     }
+ 
++    /// Bind the given callback to magnify (trackpad pinch) gestures during the bubble phase
++    /// The fluent API equivalent to [`Interactivity::on_magnify`]
++    ///
++    /// See [`Context::listener`](crate::Context::listener) to get access to a view's state from this callback.
++    fn on_magnify(
++        mut self,
++        listener: impl Fn(&MagnifyEvent, &mut Window, &mut App) + 'static,
++    ) -> Self {
++        self.interactivity().on_magnify(listener);
++        self
++    }
++
+     /// Capture the given action, before normal action dispatch can fire
+     /// The fluent API equivalent to [`Interactivity::on_scroll_wheel`]
+     ///
+@@ -1192,6 +1220,9 @@
+ pub(crate) type ScrollWheelListener =
+     Box<dyn Fn(&ScrollWheelEvent, DispatchPhase, &Hitbox, &mut Window, &mut App) + 'static>;
+ 
++pub(crate) type MagnifyListener =
++    Box<dyn Fn(&MagnifyEvent, DispatchPhase, &Hitbox, &mut Window, &mut App) + 'static>;
++
+ pub(crate) type ClickListener = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
+ 
+ pub(crate) type DragListener =
+@@ -1510,6 +1541,7 @@
+     pub(crate) mouse_up_listeners: Vec<MouseUpListener>,
+     pub(crate) mouse_move_listeners: Vec<MouseMoveListener>,
+     pub(crate) scroll_wheel_listeners: Vec<ScrollWheelListener>,
++    pub(crate) magnify_listeners: Vec<MagnifyListener>,
+     pub(crate) key_down_listeners: Vec<KeyDownListener>,
+     pub(crate) key_up_listeners: Vec<KeyUpListener>,
+     pub(crate) modifiers_changed_listeners: Vec<ModifiersChangedListener>,
+@@ -1705,6 +1737,7 @@
+             || !self.mouse_move_listeners.is_empty()
+             || !self.click_listeners.is_empty()
+             || !self.scroll_wheel_listeners.is_empty()
++            || !self.magnify_listeners.is_empty()
+             || self.drag_listener.is_some()
+             || !self.drop_listeners.is_empty()
+             || self.tooltip_builder.is_some()
+@@ -2061,6 +2094,13 @@
+         for listener in self.scroll_wheel_listeners.drain(..) {
+             let hitbox = hitbox.clone();
+             window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
++                listener(event, phase, &hitbox, window, cx);
++            })
++        }
++
++        for listener in self.magnify_listeners.drain(..) {
++            let hitbox = hitbox.clone();
++            window.on_mouse_event(move |event: &MagnifyEvent, phase, window, cx| {
+                 listener(event, phase, &hitbox, window, cx);
+             })
+         }
+--- a/src/interactive.rs	2026-11-25 17:16:27
++++ b/src/interactive.rs	2026-11-25 17:16:27
+@@ -390,6 +390,39 @@
+     }
+ }
+ 
++/// A magnify (trackpad pinch) gesture event from the platform.
++#[derive(Clone, Debug, Default)]
++pub struct MagnifyEvent {
++    /// The position of the mouse on the window.
++    pub position: Point<Pixels>,
++
++    /// The relative change in magnification for this event. A value of `0.1`
++    /// means the content should grow by 10% of its current scale.
++    pub magnification: f32,
++
++    /// The modifiers that were held down during the gesture.
++    pub modifiers: Modifiers,
++
++    /// The phase of the gesture.
++    pub touch_phase: TouchPhase,
++}
++
++impl Sealed for MagnifyEvent {}
++impl InputEvent for MagnifyEvent {
++    fn to_platform_input(self) -> PlatformInput {
++        PlatformInput::Magnify(self)
++    }
++}
++impl MouseEvent for MagnifyEvent {}
++
++impl Deref for MagnifyEvent {
++    type Target = Modifiers;
++
++    fn deref(&self) -> &Self::Target {
++        &self.modifiers
++    }
++}
++
+ /// The scroll delta for a scroll wheel event.
+ #[derive(Clone, Copy, Debug)]
+ pub enum ScrollDelta {
+@@ -561,6 +594,8 @@
+     MouseExited(MouseExitEvent),
+     /// The scroll wheel was used.
+     ScrollWheel(ScrollWheelEvent),
++    /// A magnify (trackpad pinch) gesture was performed.
++    Magnify(MagnifyEvent),
+     /// Files were dragged and dropped onto the window.
+     FileDrop(FileDropEvent),
+ }
+@@ -576,6 +611,7 @@
+             PlatformInput::MouseMove(event) => Some(event),
+             PlatformInput::MouseExited(event) => Some(event),
+             PlatformInput::ScrollWheel(event) => Some(event),
++            PlatformInput::Magnify(event) => Some(event),
+             PlatformInput::FileDrop(event) => Some(event),
+         }
+     }
+@@ -590,6 +626,7 @@
+             PlatformInput::MouseMove(_) => None,
+             PlatformInput::MouseExited(_) => None,
+             PlatformInput::ScrollWheel(_) => None,
++            PlatformInput::Magnify(_) => None,
+             PlatformInput::FileDrop(_) => None,
+         }
+     }
+--- a/src/platform/mac/events.rs	2026-11-25 17:16:27
++++ b/src/platform/mac/events.rs	2026-11-25 17:16:27
+@@ -1,7 +1,7 @@
+ use crate::{
+-    Capslock, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, ModifiersChangedEvent, MouseButton,
+-    MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection, Pixels,
+-    PlatformInput, ScrollDelta, ScrollWheelEvent, TouchPhase,
++    Capslock, KeyDownEvent, KeyUpEvent, Keystroke, MagnifyEvent, Modifiers, ModifiersChangedEvent,
++    MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection,
++    Pixels, PlatformInput, ScrollDelta, ScrollWheelEvent, TouchPhase,
+     platform::mac::{
+         LMGetKbdType, NSStringExt, TISCopyCurrentKeyboardLayoutInputSource,
+         TISGetInputSourceProperty, UCKeyTranslate, kTISPropertyUnicodeKeyLayoutData,
+@@ -241,6 +241,26 @@
+                         delta,
+                         touch_phase: phase,
+                         modifiers: read_modifiers(native_event),
++                    })
++                }),
++                NSEventType::NSEventTypeMagnify => window_height.map(|window_height| {
++                    let phase = match native_event.phase() {
++                        NSEventPhase::NSEventPhaseMayBegin | NSEventPhase::NSEventPhaseBegan => {
++                            TouchPhase::Started
++                        }
++                        NSEventPhase::NSEventPhaseEnded => TouchPhase::Ended,
++                        NSEventPhase::NSEventPhaseCancelled => TouchPhase::Ended,
++                        _ => TouchPhase::Moved,
++                    };
++
++                    Self::Magnify(MagnifyEvent {
++                        position: point(
++                            px(native_event.locationInWindow().x as f32),
++                            window_height - px(native_event.locationInWindow().y as f32),
++                        ),
++                        magnification: native_event.magnification() as f32,
++                        modifiers: read_modifiers(native_event),
++                        touch_phase: phase,
+                     })
+                 }),
+                 NSEventType::NSLeftMouseDragged
+--- a/src/platform/mac/window.rs	2026-11-25 17:16:27
++++ b/src/platform/mac/window.rs	2026-11-25 17:16:27
+@@ -166,6 +166,10 @@
+                     handle_view_event as extern "C" fn(&Object, Sel, id),
+                 );
+                 decl.add_method(
++                    sel!(magnifyWithEvent:),
++                    handle_view_event as extern "C" fn(&Object, Sel, id),
++                );
++                decl.add_method(
+                     sel!(swipeWithEvent:),
+                     handle_view_event as extern "C" fn(&Object, Sel, id),
+                 );
+--- a/src/window.rs	2026-11-25 17:16:27
++++ b/src/window.rs	2026-11-25 17:16:27
+@@ -3649,6 +3649,11 @@
+                 self.modifiers = scroll_wheel.modifiers;
+                 PlatformInput::ScrollWheel(scroll_wheel)
+             }
++            PlatformInput::Magnify(magnify) => {
++                self.mouse_position = magnify.position;
++                self.modifiers = magnify.modifiers;
++                PlatformInput::Magnify(magnify)
++            }
+             // Translate dragging and dropping of external files from the operating system
+             // to internal drag and drop events.
+             PlatformInput::FileDrop(file_drop) => match file_drop {
