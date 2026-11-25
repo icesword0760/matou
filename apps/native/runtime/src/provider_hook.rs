@@ -900,13 +900,13 @@ pub(crate) fn claude_config_counts(cwd: &Path, config: &Path) -> Value {
     let mut user_mcp = BTreeSet::new();
     let mut project_mcp = BTreeSet::new();
     let mut add_config =
-        |mcp: &mut BTreeSet<String>, settings: Value, disabled: &str, include_hooks: bool| {
+        |mcp: &mut BTreeSet<String>, settings: &Value, disabled: &[&str], include_hooks: bool| {
             if let Some(servers) = settings["mcpServers"].as_object() {
                 mcp.extend(servers.keys().cloned());
             }
-            for name in settings[disabled]
-                .as_array()
-                .into_iter()
+            for name in disabled
+                .iter()
+                .filter_map(|key| settings[*key].as_array())
                 .flatten()
                 .filter_map(Value::as_str)
             {
@@ -917,24 +917,35 @@ pub(crate) fn claude_config_counts(cwd: &Path, config: &Path) -> Value {
             }
         };
     for name in ["settings.json", "settings.local.json"] {
-        add_config(&mut user_mcp, read(config.join(name)), "", true);
+        add_config(&mut user_mcp, &read(config.join(name)), &[], true);
     }
-    if let Some(parent) = config.parent() {
-        add_config(
-            &mut user_mcp,
-            read(parent.join(".claude.json")),
-            "disabledMcpServers",
-            false,
-        );
-    }
-    add_config(&mut project_mcp, read(cwd.join(".mcp.json")), "", false);
+    let claude_json = config
+        .parent()
+        .map(|parent| read(parent.join(".claude.json")))
+        .unwrap_or_default();
+    add_config(&mut user_mcp, &claude_json, &["disabledMcpServers"], false);
+    add_config(&mut project_mcp, &read(cwd.join(".mcp.json")), &[], false);
     for name in ["settings.json", "settings.local.json"] {
         add_config(
             &mut project_mcp,
-            read(project.join(name)),
-            "disabledMcpjsonServers",
+            &read(project.join(name)),
+            &["disabledMcpjsonServers"],
             true,
         );
+    }
+    if let Some(projects) = claude_json["projects"].as_object() {
+        let project_at =
+            |path: &Path| projects.get(path.to_str()?).filter(|entry| entry.is_object());
+        let local = project_at(cwd)
+            .or_else(|| fs::canonicalize(cwd).ok().and_then(|path| project_at(&path)));
+        if let Some(local) = local {
+            add_config(
+                &mut project_mcp,
+                local,
+                &["disabledMcpServers", "disabledMcpjsonServers"],
+                false,
+            );
+        }
     }
     json!({
         "instructionFiles": instruction_files,
@@ -1388,6 +1399,50 @@ fn append_body(reader: &mut impl Read, body: &mut Vec<u8>, length: usize) -> Htt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_config_counts_include_local_project_mcps_and_filter_disabled_servers() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let home = root.path().join("home");
+        let config = home.join(".claude");
+        let workspace = root.path().join("workspace");
+        fs::create_dir_all(&config)?;
+        fs::create_dir(&workspace)?;
+        let cwd = workspace.canonicalize()?;
+        let original = workspace.join(".");
+        let alias = workspace.join(".").join(".");
+        fs::write(
+            cwd.join(".mcp.json"),
+            r#"{"mcpServers":{"shared":{},"disabled-shared":{}}}"#,
+        )?;
+        fs::write(
+            home.join(".claude.json"),
+            json!({
+                "mcpServers": {"global": {}},
+                "projects": {
+                    (original.to_str().context("original path")?): {"mcpServers": {"exact": {}}},
+                    (cwd.to_str().context("canonical path")?): {
+                        "mcpServers": {"local": {}, "disabled-local": {}},
+                        "disabledMcpServers": ["disabled-local"],
+                        "disabledMcpjsonServers": ["disabled-shared"],
+                    },
+                },
+            })
+            .to_string(),
+        )?;
+
+        let counts = claude_config_counts(&alias, &config);
+        assert_eq!(counts["mcps"], 3);
+        assert_eq!(counts["mcpServers"], 3);
+        assert_eq!(counts["mcpServerNames"], json!(["global", "local", "shared"]));
+
+        let exact = claude_config_counts(&original, &config);
+        assert_eq!(
+            exact["mcpServerNames"],
+            json!(["global", "disabled-shared", "exact", "shared"])
+        );
+        Ok(())
+    }
 
     fn scope(run: &str) -> Scope {
         Scope {
