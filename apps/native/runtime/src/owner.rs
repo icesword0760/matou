@@ -3560,6 +3560,10 @@ impl ShellOwner {
         let mut permission_starting = false;
         let mut gateway = None;
         let mut agent_status_directory = None;
+        let roles_path = options
+            .launch
+            .data_root
+            .join(matou_native_core::dispatch_roles::ROLES_FILENAME);
         let hook = if let Some((
             launch_metadata,
             mut secrets,
@@ -3716,9 +3720,6 @@ impl ShellOwner {
                     roles_markdown.as_deref(),
                 )
                 .context(HookSetup)?;
-            if let Some(argv) = fork_argv {
-                options.launch.argv.extend(argv);
-            }
             let mut dsh = None;
             let mut antigravity = None;
             let mut antigravity_config = Vec::new();
@@ -3895,12 +3896,6 @@ impl ShellOwner {
                 std::fs::write(path, serde_json::to_vec(&settings)?)
                     .context("Write Claude launch settings")?;
             }
-            if let Some(resume) = &codex_resume {
-                options
-                    .launch
-                    .argv
-                    .extend(["resume".into(), resume.identity.to_string()]);
-            }
             let deadline = (profile == LaunchProfile::ClaudeCode
                 || codex_resume.is_some()
                 || matches!(dsh, Some(DshObservation::Resume(..)))
@@ -3935,6 +3930,19 @@ impl ShellOwner {
                 {
                     agent_status_directory = Some(directory);
                 }
+            }
+            if profile == LaunchProfile::Codex {
+                let subcommand = fork_argv.or_else(|| {
+                    codex_resume
+                        .as_ref()
+                        .map(|resume| vec!["resume".into(), resume.identity.to_string()])
+                });
+                crate::codex_launch::finish_argv(
+                    &mut options.launch.argv,
+                    agent_status_directory.as_deref(),
+                    &roles_path,
+                    subcommand,
+                );
             }
             Some(RunHook {
                 _registration: registration,
@@ -4003,10 +4011,6 @@ impl ShellOwner {
                 session_id.clone().into(),
             );
         }
-        let roles_path = options
-            .launch
-            .data_root
-            .join(matou_native_core::dispatch_roles::ROLES_FILENAME);
         options.launch.env.insert(
             "MATOU_FOREMAN_ROLES_FILE".into(),
             roles_path.into_os_string(),

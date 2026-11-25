@@ -63,7 +63,7 @@ if [ "${CODEX_FIXTURE_EVENTS:-}" = 1 ]; then
         case "$line" in
             hook\ *)
                 name=${line#hook }
-                /bin/sh -c "$hook_command" < "$CODEX_HOME/$name.json"
+                /bin/sh -c "$hook_command" < "$CODEX_HOME/$name.json" > /dev/null
                 printf 'HOOK SENT <%s>\n' "$name"
                 ;;
             noise)

@@ -32,6 +32,37 @@ pub(crate) fn first_screen_ready(elapsed: Duration, emitted_output: bool) -> boo
     elapsed >= STARTUP_GRACE && emitted_output
 }
 
+pub(crate) fn finish_argv(
+    argv: &mut Vec<String>,
+    status_directory: Option<&Path>,
+    roles_file: &Path,
+    subcommand: Option<Vec<String>>,
+) {
+    fn path_value(path: &Path) -> Option<String> {
+        let path = std::path::absolute(path).ok()?;
+        let path = path.to_str()?;
+        #[cfg(windows)]
+        let path = path.replace('\\', "/");
+        Some(json!(path).to_string())
+    }
+
+    if let Some(status_directory) = status_directory.and_then(path_value) {
+        argv.extend([
+            "-c".into(),
+            format!("shell_environment_policy.set.MATOU_AGENT_STATUS_DIR={status_directory}"),
+        ]);
+        if roles_file.is_file()
+            && let Some(roles_file) = path_value(roles_file)
+        {
+            argv.extend([
+                "-c".into(),
+                format!("shell_environment_policy.set.MATOU_FOREMAN_ROLES_FILE={roles_file}"),
+            ]);
+        }
+    }
+    argv.extend(subcommand.into_iter().flatten());
+}
+
 #[derive(Debug)]
 struct MissingCommand(String);
 
@@ -201,4 +232,65 @@ fn executable_at(path: PathBuf) -> Option<PathBuf> {
         }
     }
     Some(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codex_foreman_argv_keeps_environment_overrides_before_resume_and_fork() -> Result<()> {
+        let temp = tempfile::Builder::new().prefix("派活 argv ").tempdir()?;
+        let status = temp.path().join("agent-status/session");
+        let roles = temp.path().join("dispatch-roles.json");
+        fs::create_dir_all(&status)?;
+        fs::write(&roles, "{}")?;
+        let config = |name: &str, path: &Path| {
+            let path = path.to_str().unwrap();
+            #[cfg(windows)]
+            let path = path.replace('\\', "/");
+            format!("shell_environment_policy.set.{name}={}", json!(path))
+        };
+        let status_arg = config("MATOU_AGENT_STATUS_DIR", &status);
+        let roles_arg = config("MATOU_FOREMAN_ROLES_FILE", &roles);
+        let base = vec!["--model".to_owned(), "fixture-model".to_owned()];
+        for subcommand in [None, Some("resume"), Some("fork")] {
+            let tail = subcommand.map(|name| vec![name.to_owned(), "session-id".into()]);
+            let mut argv = base.clone();
+            finish_argv(&mut argv, Some(&status), &roles, tail.clone());
+            let mut expected = base.clone();
+            expected.extend([
+                "-c".into(),
+                status_arg.clone(),
+                "-c".into(),
+                roles_arg.clone(),
+            ]);
+            expected.extend(tail.clone().into_iter().flatten());
+            assert_eq!(argv, expected);
+            println!("{} argv = {argv:?}", subcommand.unwrap_or("fresh"));
+
+            let mut argv = base.clone();
+            finish_argv(&mut argv, None, &roles, tail.clone());
+            assert_eq!(
+                argv,
+                base.iter()
+                    .cloned()
+                    .chain(tail.clone().into_iter().flatten())
+                    .collect::<Vec<_>>()
+            );
+
+            let mut argv = base.clone();
+            finish_argv(
+                &mut argv,
+                Some(&status),
+                &temp.path().join("missing.json"),
+                tail.clone(),
+            );
+            let mut expected = base.clone();
+            expected.extend(["-c".into(), status_arg.clone()]);
+            expected.extend(tail.into_iter().flatten());
+            assert_eq!(argv, expected);
+        }
+        Ok(())
+    }
 }

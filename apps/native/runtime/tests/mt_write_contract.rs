@@ -33,9 +33,7 @@ impl Fixture {
                 .ancestors()
                 .find(|path| path.join(".git").exists())
                 .context("locate short worktree socket path")?;
-            tempfile::Builder::new()
-                .prefix(".tmp-mtw-")
-                .tempdir_in(repo)?
+            tempfile::Builder::new().prefix(".mtw-").tempdir_in(repo)?
         };
         #[cfg(windows)]
         let root = tempfile::tempdir()?;

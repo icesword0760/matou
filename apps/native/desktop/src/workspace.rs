@@ -4487,15 +4487,22 @@ impl Workspace {
             self.level_focus_request = None;
             self.pending_focus = Some((scene_id.clone(), session_id.clone()));
         }
-        if self
-            .commands
-            .send_at(self.runtime_generation, command)
-            .is_err()
-        {
-            self.pending_focus = None;
-            self.level_focus_request = None;
-            // Offline/reconnecting rejection is expected; do not stack a fault per key.
-            cx.notify();
+        let resized_terminal = match &command {
+            Command::Resize { session_id, .. } => self.terminals.get(session_id).cloned(),
+            _ => None,
+        };
+        match self.commands.send_at(self.runtime_generation, command) {
+            Ok(()) => {
+                if let Some(terminal) = resized_terminal {
+                    terminal.update(cx, TerminalSurface::begin_resize);
+                }
+            }
+            Err(_) => {
+                self.pending_focus = None;
+                self.level_focus_request = None;
+                // Offline/reconnecting rejection is expected; do not stack a fault per key.
+                cx.notify();
+            }
         }
     }
 
@@ -6452,7 +6459,7 @@ impl Workspace {
                 let revision = *revision;
                 let id = session_id.clone();
                 let geometry = (*cols, *rows, *cell_width_px, *cell_height_px);
-                let timer = cx.background_executor().timer(Duration::from_millis(80));
+                let timer = cx.background_executor().timer(Duration::from_millis(220));
                 cx.spawn(async move |this, cx| {
                     timer.await;
                     let _ = this.update(cx, |this, cx| {

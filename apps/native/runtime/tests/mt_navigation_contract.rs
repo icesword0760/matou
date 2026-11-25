@@ -161,9 +161,7 @@ fn cli_navigates_on_live_owner_and_publishes_each_complete_path() -> Result<()> 
         .ancestors()
         .find(|path| path.join(".git").exists())
         .context("locate short worktree socket path")?;
-    let isolated = tempfile::Builder::new()
-        .prefix(".tmp-nav-")
-        .tempdir_in(repo)?;
+    let isolated = tempfile::Builder::new().prefix(".mtn-").tempdir_in(repo)?;
     let root = isolated.path();
     let data = root.join("data");
     let home = root.join("home");

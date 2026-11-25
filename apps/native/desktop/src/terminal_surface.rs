@@ -76,6 +76,8 @@ fn font_zoom_for_wheel(
 const DEFAULT_VERTICAL_INSET: Pixels = px(14.);
 const CANVAS_VERTICAL_INSET: Pixels = px(12.);
 const BLINK_INTERVAL: Duration = Duration::from_millis(500);
+const RESIZE_FRAME_QUIET: Duration = Duration::from_millis(100);
+const RESIZE_FRAME_LIMIT: Duration = Duration::from_millis(500);
 const FAMILIES: &[&str] = &["SF Mono", "Monaco", "Menlo", "Consolas", "Courier New"];
 
 fn quote_dropped_path(path: &str, windows: bool) -> String {
@@ -376,6 +378,19 @@ impl ScrollbarFade {
     }
 }
 
+struct ResizeFrame {
+    screen: Screen,
+    selection: Option<GridSelection>,
+    scroll_request_id: u64,
+}
+
+struct ResizeFrames {
+    limit: Instant,
+    present_at: Instant,
+    latest: Option<ResizeFrame>,
+    timer: Option<Task<()>>,
+}
+
 pub struct TerminalSurface {
     transport_generation: u64,
     transport_suspended: bool,
@@ -387,6 +402,7 @@ pub struct TerminalSurface {
     vertical_inset: Pixels,
     last_dimensions: Option<Dimensions>,
     screen: Option<Screen>,
+    resize_frames: Option<ResizeFrames>,
     open_link: Option<std::rc::Rc<LinkHandler>>,
     modes: InputModes,
     theme: Theme,
@@ -438,6 +454,7 @@ impl TerminalSurface {
         }
         self.transport_generation = generation;
         self.transport_suspended = true;
+        self.resize_frames = None;
         self.set_input_disabled(true, cx);
         self.search = None;
         self.composition.clear();
@@ -543,6 +560,7 @@ impl TerminalSurface {
             vertical_inset: DEFAULT_VERTICAL_INSET,
             last_dimensions: None,
             screen: None,
+            resize_frames: None,
             open_link: None,
             modes: InputModes {
                 application_cursor_keys: false,
@@ -608,6 +626,51 @@ impl TerminalSurface {
         cx.notify();
     }
 
+    pub(crate) fn begin_resize(&mut self, cx: &mut Context<Self>) {
+        if self.screen.is_none() || self.transport_suspended {
+            return;
+        }
+        let limit = cx.background_executor().now() + RESIZE_FRAME_LIMIT;
+        self.resize_frames = Some(ResizeFrames {
+            limit,
+            present_at: limit,
+            latest: None,
+            timer: None,
+        });
+    }
+
+    fn schedule_resize_frame(&mut self, cx: &mut Context<Self>) {
+        let Some(frames) = &mut self.resize_frames else {
+            return;
+        };
+        if frames.timer.is_some() {
+            return;
+        }
+        let now = cx.background_executor().now();
+        if now >= frames.present_at {
+            if let Some(frame) = self.resize_frames.take().and_then(|frames| frames.latest) {
+                self.apply_screen(
+                    frame.screen,
+                    frame.selection,
+                    frame.scroll_request_id,
+                    false,
+                    cx,
+                );
+            }
+            return;
+        }
+        let timer = cx.background_executor().timer(frames.present_at - now);
+        frames.timer = Some(cx.spawn(async move |this, cx| {
+            timer.await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(frames) = &mut this.resize_frames {
+                    frames.timer = None;
+                    this.schedule_resize_frame(cx);
+                }
+            });
+        }));
+    }
+
     pub fn set_screen(
         &mut self,
         screen: Screen,
@@ -634,6 +697,36 @@ impl TerminalSurface {
             }
         }
         self.modes = modes;
+        if let Some(frames) = &mut self.resize_frames {
+            let now = cx.background_executor().now();
+            if now < frames.present_at {
+                frames.latest = Some(ResizeFrame {
+                    screen,
+                    selection,
+                    scroll_request_id,
+                });
+                frames.present_at = (now + RESIZE_FRAME_QUIET).min(frames.limit);
+                // One timer can recheck the quiet period when it wakes, even if
+                // many redraw frames have arrived since it was scheduled.
+                self.schedule_resize_frame(cx);
+                if modes_changed {
+                    cx.notify();
+                }
+                return;
+            }
+            self.resize_frames = None;
+        }
+        self.apply_screen(screen, selection, scroll_request_id, modes_changed, cx);
+    }
+
+    fn apply_screen(
+        &mut self,
+        screen: Screen,
+        selection: Option<GridSelection>,
+        scroll_request_id: u64,
+        modes_changed: bool,
+        cx: &mut Context<Self>,
+    ) {
         let extent_changed = self.screen.as_ref().is_some_and(|old| {
             old.rows != screen.rows || old.scrollbar.total != screen.scrollbar.total
         });
@@ -2410,6 +2503,129 @@ mod file_drop_tests {
                 format!("{plain} \"{spaced}\"")
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod resize_frame_tests {
+    use super::*;
+    use gpui::{AppContext as _, TestAppContext};
+    use matou_native_terminal::{Terminal, TerminalOptions};
+
+    fn publish(view: &Entity<TerminalSurface>, cx: &mut TestAppContext, contents: &str) -> Screen {
+        let mut terminal = Terminal::new(TerminalOptions::new(24, 4, 8, 16)).unwrap();
+        terminal.feed(contents.as_bytes());
+        let screen = terminal.screen().unwrap();
+        let modes = terminal.input_modes().unwrap();
+        view.update(cx, |view, cx| {
+            view.set_screen(screen.clone(), modes, None, 0, cx)
+        });
+        screen
+    }
+
+    fn advance(cx: &mut TestAppContext, ms: u64) {
+        cx.background_executor
+            .advance_clock(Duration::from_millis(ms));
+        cx.run_until_parked();
+    }
+
+    fn displayed(view: &Entity<TerminalSurface>, cx: &TestAppContext, screen: &Screen) {
+        cx.read_entity(view, |view, _| {
+            assert_eq!(view.screen.as_ref(), Some(screen))
+        });
+    }
+
+    #[test]
+    fn resize_shows_only_the_last_redraw_frame() {
+        let mut cx = TestAppContext::single();
+        let view = cx.new(TerminalSurface::new);
+        let old = publish(&view, &mut cx, "status\r\nold body");
+        view.update(&mut cx, TerminalSurface::begin_resize);
+        publish(&view, &mut cx, "status");
+        displayed(&view, &cx, &old);
+        advance(&mut cx, 80);
+        publish(&view, &mut cx, "status\r\npartial");
+        advance(&mut cx, 80);
+        let latest = publish(&view, &mut cx, "status\r\ncomplete body");
+        advance(&mut cx, 99);
+        displayed(&view, &cx, &old);
+        advance(&mut cx, 1);
+        displayed(&view, &cx, &latest);
+    }
+
+    #[test]
+    fn resize_presents_a_frame_after_100ms_of_quiet() {
+        let mut cx = TestAppContext::single();
+        let view = cx.new(TerminalSurface::new);
+        let old = publish(&view, &mut cx, "old body");
+        view.update(&mut cx, TerminalSurface::begin_resize);
+        advance(&mut cx, 140);
+        let blank = publish(&view, &mut cx, "");
+        advance(&mut cx, 99);
+        displayed(&view, &cx, &old);
+        advance(&mut cx, 1);
+        displayed(&view, &cx, &blank);
+    }
+
+    #[test]
+    fn resize_presents_the_latest_frame_at_the_500ms_limit() {
+        let mut cx = TestAppContext::single();
+        let view = cx.new(TerminalSurface::new);
+        let old = publish(&view, &mut cx, "old body");
+        view.update(&mut cx, TerminalSurface::begin_resize);
+        let mut latest = publish(&view, &mut cx, "frame 0");
+        for index in 1..=6 {
+            advance(&mut cx, 80);
+            latest = publish(&view, &mut cx, &format!("frame {index}"));
+            displayed(&view, &cx, &old);
+        }
+        advance(&mut cx, 19);
+        displayed(&view, &cx, &old);
+        advance(&mut cx, 1);
+        displayed(&view, &cx, &latest);
+    }
+
+    #[test]
+    fn ordinary_frames_present_immediately_including_clear() {
+        let mut cx = TestAppContext::single();
+        let view = cx.new(TerminalSurface::new);
+        let initial = publish(&view, &mut cx, "visible body");
+        displayed(&view, &cx, &initial);
+        let blank = publish(&view, &mut cx, "");
+        displayed(&view, &cx, &blank);
+    }
+
+    #[test]
+    fn first_frame_is_immediate_after_initial_resize() {
+        let mut cx = TestAppContext::single();
+        let view = cx.new(TerminalSurface::new);
+        view.update(&mut cx, TerminalSurface::begin_resize);
+        let blank = publish(&view, &mut cx, "");
+        displayed(&view, &cx, &blank);
+    }
+
+    #[test]
+    fn consecutive_resize_restarts_the_window_from_the_latest_command() {
+        let mut cx = TestAppContext::single();
+        let view = cx.new(TerminalSurface::new);
+        let old = publish(&view, &mut cx, "old body");
+        view.update(&mut cx, TerminalSurface::begin_resize);
+        publish(&view, &mut cx, "first resize");
+        advance(&mut cx, 80);
+        view.update(&mut cx, TerminalSurface::begin_resize);
+        advance(&mut cx, 80);
+        displayed(&view, &cx, &old);
+
+        let mut latest = publish(&view, &mut cx, "second resize 1");
+        for index in 2..=6 {
+            advance(&mut cx, 80);
+            latest = publish(&view, &mut cx, &format!("second resize {index}"));
+            displayed(&view, &cx, &old);
+        }
+        advance(&mut cx, 19);
+        displayed(&view, &cx, &old);
+        advance(&mut cx, 1);
+        displayed(&view, &cx, &latest);
     }
 }
 

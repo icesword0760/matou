@@ -314,13 +314,29 @@ fn codex_launch_promotes_exact_commands_on_the_same_card() -> Result<()> {
             "https://api.openai.com/v1"
         };
         expected.extend_from_slice(permission_flags);
-        assert_hook_argv(&actual, &expected);
+        let (hook_argv, foreman_argv) = actual.split_at(actual.len() - 4);
+        assert_hook_argv(hook_argv, &expected);
+        assert_eq!(
+            foreman_argv,
+            [
+                "-c".into(),
+                format!(
+                    "shell_environment_policy.set.MATOU_AGENT_STATUS_DIR={}",
+                    json!(child.data.join("agent-status").join(&child.session))
+                ),
+                "-c".into(),
+                format!(
+                    "shell_environment_policy.set.MATOU_FOREMAN_ROLES_FILE={}",
+                    json!(roles.path())
+                ),
+            ]
+        );
         let injected: String = serde_json::from_str(
-            actual[actual.len() - 4]
+            hook_argv[hook_argv.len() - 4]
                 .strip_prefix("developer_instructions=")
                 .unwrap(),
         )?;
-        assert!(injected.ends_with(&format_roles_markdown(&saved.config)));
+        assert!(injected.contains(&format_roles_markdown(&saved.config)));
         let dispatch_env = fs::read_to_string(codex_home.join("dispatch-environment"))?;
         let mut dispatch_env = dispatch_env.lines();
         assert_eq!(
@@ -515,8 +531,10 @@ fn codex_launch_rolls_back_missing_and_immediately_exiting_commands() -> Result<
                 ("codex", "exited", Some(i64::from(code)))
             );
             assert_shell_gone(u32::try_from(runs[1].pid.context("early Codex PID")?)?)?;
+            let actual = argv(&codex_home.join("argv"))?;
+            let (hook_argv, foreman_argv) = actual.split_at(actual.len() - 2);
             assert_hook_argv(
-                &argv(&codex_home.join("argv"))?,
+                hook_argv,
                 &[
                     "-c",
                     "check_for_update_on_startup=false",
@@ -525,6 +543,16 @@ fn codex_launch_rolls_back_missing_and_immediately_exiting_commands() -> Result<
                     "--sandbox",
                     "workspace-write",
                 ],
+            );
+            assert_eq!(
+                foreman_argv,
+                [
+                    "-c".into(),
+                    format!(
+                        "shell_environment_policy.set.MATOU_AGENT_STATUS_DIR={}",
+                        json!(child.data.join("agent-status").join(&session))
+                    ),
+                ]
             );
         }
         let current = runs.last().unwrap();

@@ -356,10 +356,13 @@ fn antigravity_plugin_install_update_and_repair() -> Result<()> {
             "./hooks/matou-hook.sh"
         );
     }
-    for event in ["PreToolUse", "PostToolUse"] {
+    for (event, hint) in [
+        ("PreToolUse", "pre-tool-use"),
+        ("PostToolUse", "post-tool-use"),
+    ] {
         assert_eq!(
             hooks_json["matou"][event][0]["hooks"][0]["command"],
-            "./hooks/matou-hook.sh"
+            format!("./hooks/matou-hook.sh {hint}")
         );
     }
     assert_eq!(
@@ -373,11 +376,11 @@ fn antigravity_plugin_install_update_and_repair() -> Result<()> {
     let expected_stamp = fs::read_to_string(&stamp)?;
     assert_eq!(
         expected_stamp,
-        "1.0.0:ffadb274f2e822a844ef7f70cc133ae02a9b7ab7eeb62107c3df7d6e1d40e79a\n"
+        "1.0.0:5ece83e5428063a43b3c3d52c4afed7a0bb6a55d263b9afa4e73386f86399dd6\n"
     );
     let modified = fs::metadata(&stamp)?.modified()?;
     let original = fs::read_to_string(&hook)?;
-    assert!(original.contains("kind=pre-tool-use"));
+    assert!(original.contains("kind=$event"));
     assert!(original.contains("--max-time 1"));
     assert!(!original.contains("node"));
     assert!(fs::read_to_string(&start)?.contains("MATOU_ANTIGRAVITY_SYSTEM_MESSAGE_FILE"));

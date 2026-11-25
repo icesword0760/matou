@@ -67,7 +67,7 @@ fn temporary_root() -> Result<TempDir> {
         .find(|parent| parent.join(".git").exists())
         .context("locate the repository for the short socket test root")?;
     Ok(tempfile::Builder::new()
-        .prefix(".tmp-mtc-")
+        .prefix(".mtc-")
         .tempdir_in(repository)?)
 }
 

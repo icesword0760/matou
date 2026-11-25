@@ -797,7 +797,7 @@ fn codex_resume_cold_start_preserves_card_binding_and_legacy_material() -> Resul
             .find_map(|arg| arg.strip_prefix("developer_instructions="))
             .context("resumed Codex instructions")?,
     )?;
-    assert!(instructions.ends_with(&expected_roles));
+    assert!(instructions.contains(&expected_roles));
     let environment = fs::read_to_string(home.join("dispatch-environment"))?;
     assert_eq!(
         Path::new(environment.lines().next().unwrap()).canonicalize()?,
@@ -805,6 +805,15 @@ fn codex_resume_cold_start_preserves_card_binding_and_legacy_material() -> Resul
     );
     let raw = fs::read_to_string(home.join("argv"))?;
     let argv: Vec<_> = raw.split_terminator('\0').collect();
+    let status_dir = format!(
+        "shell_environment_policy.set.MATOU_AGENT_STATUS_DIR={}",
+        json!(child.data.join("agent-status").join(&child.session))
+    );
+    let roles_file = format!(
+        "shell_environment_policy.set.MATOU_FOREMAN_ROLES_FILE={}",
+        json!(roles.path())
+    );
+    assert!(argv.ends_with(&["-c", &status_dir, "-c", &roles_file, "resume", UUID]));
     assert!(
         argv.windows(2)
             .any(|args| args == ["--model", "recorded-model"])
@@ -1287,9 +1296,16 @@ fn assert_permission_argv(home: &Path, expected: &[&str]) -> Result<()> {
     assert_eq!(argv[hook - 1], "-c");
     assert_eq!(&argv[2..hook - 3], expected);
     assert_eq!(
-        &argv[hook + 1..],
-        ["--dangerously-bypass-hook-trust", "resume", UUID]
+        &argv[hook + 1..hook + 3],
+        ["--dangerously-bypass-hook-trust", "-c"]
     );
+    let status_dir: PathBuf = serde_json::from_str(
+        argv[hook + 3]
+            .strip_prefix("shell_environment_policy.set.MATOU_AGENT_STATUS_DIR=")
+            .context("Codex agent status override")?,
+    )?;
+    assert!(status_dir.is_absolute() && status_dir.is_dir());
+    assert_eq!(&argv[hook + 4..], ["resume", UUID]);
     assert_eq!(
         fs::read_to_string(home.join("environment"))?.lines().nth(2),
         Some("https://api.openai.com/v1")

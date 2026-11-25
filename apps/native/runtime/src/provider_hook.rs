@@ -475,14 +475,16 @@ impl Registration {
                 .parent()
                 .context("Antigravity hook directory")?,
         )?;
-        let path = assets.path().join("antigravity-system-message.md");
+        let path = assets.path().join("antigravity-system-message.json");
         let system_message = compose_managed_instructions(
             include_str!("../../../runtime/control-assets/providers/antigravity-system-message.md"),
             foreman_available,
             roles_markdown,
             managed_cli_instructions(&self.data_root, "antigravity"),
         );
-        write_private(&path, system_message.as_bytes(), 0o600)?;
+        let payload =
+            json!({"injectSteps": [{"systemMessage": {"systemMessage": system_message}}]});
+        write_private(&path, &serde_json::to_vec(&payload)?, 0o600)?;
         self.provider_assets = Some(assets);
         Ok(path)
     }
@@ -2233,13 +2235,27 @@ mod tests {
             Some(&expected),
         )?;
         let directory = dsh_patch.parent().unwrap();
-        for path in [agy_file, directory.join("dsh-system-message.md")] {
-            let message = fs::read_to_string(path)?;
+        for message in [
+            read_antigravity_instructions(&agy_file)?,
+            fs::read_to_string(directory.join("dsh-system-message.md"))?,
+        ] {
             assert!(message.contains(FOREMAN_CAPABILITY_INDEX));
             assert!(message.contains(&expected));
             assert!(message.ends_with(managed_cli_instructions(root.path(), "dsh").unwrap()));
         }
         Ok(())
+    }
+
+    fn read_antigravity_instructions(path: &Path) -> Result<String> {
+        let payload: Value = serde_json::from_reader(File::open(path)?)?;
+        let steps = payload["injectSteps"]
+            .as_array()
+            .context("injected steps")?;
+        assert_eq!(steps.len(), 1);
+        steps[0]["systemMessage"]["systemMessage"]
+            .as_str()
+            .map(str::to_owned)
+            .context("injected system message")
     }
 
     #[test]
@@ -2282,7 +2298,7 @@ mod tests {
             let mut dsh = register(LaunchProfile::Dsh)?;
             let codex = register(LaunchProfile::Codex)?;
             let agy_message =
-                fs::read_to_string(agy.attach_antigravity_instructions(false, None)?)?;
+                read_antigravity_instructions(&agy.attach_antigravity_instructions(false, None)?)?;
             let dsh_patch = dsh.attach_dsh(
                 "- id: dsh-tui\n  config:\n    model: offline\n",
                 "dsh",

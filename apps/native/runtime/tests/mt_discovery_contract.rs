@@ -35,7 +35,7 @@ fn root() -> Result<TempDir> {
         .find(|path| path.join(".git").exists())
         .context("find the repository for short Unix socket paths")?;
     Ok(tempfile::Builder::new()
-        .prefix(".tmp-mtd-")
+        .prefix(".mtd-")
         .tempdir_in(repository)?)
 }
 
