@@ -13,6 +13,35 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const source = join(root, 'apps/runtime/control-assets')
 const execFileAsync = promisify(execFile)
 
+test('Claude SessionStart appends the managed mt ctx guidance according to the current settings', async (t) => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), 'matou-context-tools-'))
+  t.after(() => rm(temporaryRoot, { recursive: true, force: true }))
+  const config = join(temporaryRoot, 'context-optimizer.json')
+  const hookPath = join(source, 'providers/claude-plugin/hooks/session-start.mjs')
+  const env = { ...process.env, MATOU_FOREMAN_DEPTH: '1', MATOU_DATA_ROOT: temporaryRoot }
+  const runHook = async (hookEnv = env) => {
+    const { stdout } = await execFileAsync(process.execPath, [hookPath], { env: hookEnv })
+    return JSON.parse(stdout).hookSpecificOutput.additionalContext
+  }
+  const rust = await readFile(join(root, 'apps/native/runtime/src/context_guard/mod.rs'), 'utf8')
+  const note = rust.match(/const MT_CTX_MANAGED_INSTRUCTIONS: &str = "\\\n([^"]+)";/)?.[1]
+  assert.match(note, /mt ctx outline/)
+  const baseline = await runHook({ ...env, MATOU_DATA_ROOT: '' })
+  for (const settings of [undefined, '{}', '{"agents":{"claude-code":{"enabled":true,"cliTools":true}}}']) {
+    if (settings !== undefined) await writeFile(config, settings)
+    assert.equal(await runHook(), `${baseline}\n\n${note}`)
+  }
+  for (const settings of [
+    '{"version":1,"agents":{"claude-code":{"enabled":false,"cliTools":true}}}',
+    '{"version":1,"agents":{"claude-code":{"cliTools":false}}}',
+    '{"version":1,"agents":[]}',
+    '{incomplete'
+  ]) {
+    await writeFile(config, settings)
+    assert.equal(await runHook(), baseline)
+  }
+})
+
 test('copies executable mt wrappers and complete provider guidance', async (t) => {
   const temporaryRoot = await mkdtemp(join(tmpdir(), 'matou-control-assets-'))
   t.after(() => rm(temporaryRoot, { recursive: true, force: true }))
@@ -204,7 +233,7 @@ test('Claude SessionStart injects the same dispatch roles as Foreman across life
   const foremanPath = join(plugin, 'skills/agent-foreman/scripts/foreman.mjs')
   const rolesPath = join(temporaryRoot, 'dispatch-roles.json')
   const env = {
-    ...process.env, MATOU_FOREMAN_DEPTH: '', FOREMAN_RUN_DIR: join(temporaryRoot, 'runs'),
+    ...process.env, MATOU_DATA_ROOT: '', MATOU_FOREMAN_DEPTH: '', FOREMAN_RUN_DIR: join(temporaryRoot, 'runs'),
     MATOU_FOREMAN_ROLES_FILE: rolesPath
   }
   const readHook = (source, hookEnv = env) => {

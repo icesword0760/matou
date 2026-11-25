@@ -2,12 +2,13 @@
 //! workspace batch search. All outputs obey the 8.8 KB hard ceiling.
 
 use std::{
+    collections::HashSet,
     fs,
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result};
-use regex::Regex;
+use regex::RegexSetBuilder;
 
 use crate::context_guard::filter::HARD_CAP_BYTES;
 
@@ -75,33 +76,36 @@ pub fn extract_file_outline(path: &Path) -> Result<String> {
     Ok(out)
 }
 
-/// Searches multiple literal or regex queries across `root` in a single pass
+/// Searches multiple case-insensitive literal queries across `root` in a single pass
 /// and returns a compact, deduplicated report capped at 8.8 KB.
 pub fn batch_search(root: &Path, queries: &[String]) -> Result<String> {
+    let mut seen = HashSet::new();
     let clean_queries: Vec<&str> = queries
         .iter()
         .map(String::as_str)
         .map(str::trim)
         .filter(|q| !q.is_empty())
+        .filter(|q| seen.insert(q.to_lowercase()))
         .take(12)
         .collect();
     if clean_queries.is_empty() {
         anyhow::bail!("At least one non-empty query is required");
     }
 
-    let compiled: Vec<(&str, Option<Regex>)> = clean_queries
-        .iter()
-        .map(|&q| (q, Regex::new(&format!("(?i){}", regex::escape(q))).ok()))
-        .collect();
+    let patterns = RegexSetBuilder::new(clean_queries.iter().map(|query| regex::escape(query)))
+        .case_insensitive(true)
+        .build()
+        .context("compile batch search queries")?;
 
-    let mut results: Vec<Vec<String>> = vec![Vec::new(); compiled.len()];
+    let mut hits = vec![0; clean_queries.len()];
+    let mut rows = String::new();
     let mut files_scanned = 0usize;
     let mut stack = vec![root.to_path_buf()];
+    let mut capped = false;
+    let root_label = root.display().to_string();
+    let root_label = truncate_line(&root_label, 512);
 
-    while let Some(dir) = stack.pop() {
-        if files_scanned >= MAX_BATCH_FILES_SCANNED {
-            break;
-        }
+    'scan: while let Some(dir) = stack.pop() {
         let Ok(read_dir) = fs::read_dir(&dir) else {
             continue;
         };
@@ -112,17 +116,20 @@ pub fn batch_search(root: &Path, queries: &[String]) -> Result<String> {
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or_default();
-            if entry.is_dir() {
+            let Ok(meta) = fs::symlink_metadata(&entry) else {
+                continue;
+            };
+            if meta.is_dir() {
                 if !is_ignored_dir(name) {
                     stack.push(entry);
                 }
                 continue;
             }
-            let Ok(meta) = fs::metadata(&entry) else {
-                continue;
-            };
             if !meta.is_file() || meta.len() as usize > MAX_BATCH_FILE_BYTES {
                 continue;
+            }
+            if files_scanned >= MAX_BATCH_FILES_SCANNED {
+                break 'scan;
             }
             files_scanned += 1;
             let Ok(text) = fs::read_to_string(&entry) else {
@@ -130,47 +137,51 @@ pub fn batch_search(root: &Path, queries: &[String]) -> Result<String> {
             };
             let rel = entry.strip_prefix(root).unwrap_or(&entry);
             for (idx, line) in text.lines().enumerate() {
-                for (q_idx, (_, re_opt)) in compiled.iter().enumerate() {
-                    if results[q_idx].len() >= MAX_MATCHES_PER_QUERY {
-                        continue;
-                    }
-                    if re_opt.as_ref().is_some_and(|re| re.is_match(line)) {
-                        results[q_idx].push(format!(
-                            "  {}:{}: {}",
-                            rel.display(),
-                            idx + 1,
-                            truncate_line(line.trim(), 100)
-                        ));
-                    }
+                let matched = patterns.matches(line);
+                if !matched
+                    .iter()
+                    .any(|index| hits[index] < MAX_MATCHES_PER_QUERY)
+                {
+                    continue;
+                }
+                let labels = matched
+                    .iter()
+                    .map(|index| {
+                        hits[index] += 1;
+                        truncate_line(clean_queries[index], 96)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let path = rel.display().to_string();
+                let row = format!(
+                    "  {}:{}: {} [matches: {labels}]\n",
+                    truncate_line(&path, 512),
+                    idx + 1,
+                    truncate_line(line.trim(), 100),
+                );
+                // Reserve room for the final header and cap notice.
+                if rows.len() + row.len() + root_label.len() + 160 > HARD_CAP_BYTES {
+                    capped = true;
+                    break 'scan;
+                }
+                rows.push_str(&row);
+                if hits.iter().all(|&count| count >= MAX_MATCHES_PER_QUERY) {
+                    break 'scan;
                 }
             }
         }
     }
 
     let mut out = format!(
-        "Batch search in {} ({files_scanned} files scanned, {} queries):\n",
-        root.display(),
-        compiled.len()
+        "Batch search in {root_label} ({files_scanned} files scanned, {} queries):\n",
+        clean_queries.len()
     );
-    for (q_idx, (query, _)) in compiled.iter().enumerate() {
-        let section = format!("\n## Query `{query}` ({} hits)\n", results[q_idx].len());
-        if out.len() + section.len() + 64 > HARD_CAP_BYTES {
-            out.push_str("\n... (output capped at 8.8 KB)\n");
-            break;
-        }
-        out.push_str(&section);
-        if results[q_idx].is_empty() {
-            out.push_str("  (no matches)\n");
-            continue;
-        }
-        for hit in &results[q_idx] {
-            if out.len() + hit.len() + 48 > HARD_CAP_BYTES {
-                out.push_str("  ... (truncated)\n");
-                break;
-            }
-            out.push_str(hit);
-            out.push('\n');
-        }
+    if rows.is_empty() {
+        out.push_str("  (no matches)\n");
+    }
+    out.push_str(&rows);
+    if capped {
+        out.push_str("... (output capped at 8.8 KB)\n");
     }
     Ok(out)
 }
@@ -290,7 +301,7 @@ mod tests {
         fs::create_dir_all(dir.path().join("node_modules/pkg")).unwrap();
         fs::write(
             dir.path().join("src/a.rs"),
-            "fn alpha_token() {}\nfn beta_token() {}\n",
+            "fn alpha_token() {} // beta_token\nfn beta_token() {}\n",
         )
         .unwrap();
         fs::write(
@@ -304,9 +315,31 @@ mod tests {
             &["alpha_token".to_owned(), "beta_token".to_owned()],
         )
         .unwrap();
-        assert!(out.contains("src/a.rs:1"));
+        assert_eq!(out.matches("src/a.rs:1").count(), 1);
+        assert!(out.contains("[matches: alpha_token, beta_token]"));
         assert!(out.contains("src/a.rs:2"));
         assert!(!out.contains("node_modules"));
         assert!(out.len() <= HARD_CAP_BYTES);
+    }
+
+    #[test]
+    fn batch_search_caps_many_matches_without_splitting_a_utf8_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let queries: Vec<_> = (0..12)
+            .map(|index| format!("{index}{}", "检".repeat(30)))
+            .collect();
+        fs::write(
+            dir.path().join("many.txt"),
+            format!("{}\n", queries.join(" ")).repeat(20),
+        )
+        .unwrap();
+        let out = batch_search(dir.path(), &queries).unwrap();
+        assert!(out.len() <= HARD_CAP_BYTES);
+        assert!(out.contains("output capped"));
+        assert!(
+            out.lines()
+                .filter(|line| line.contains("many.txt"))
+                .all(|line| line.ends_with(']'))
+        );
     }
 }

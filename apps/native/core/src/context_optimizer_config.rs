@@ -88,7 +88,7 @@ pub struct AgentOptimizerSettings {
     pub cache_keepalive_max_per_turn: u8,
     #[serde(default = "default_true")]
     pub stall_rescue: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub cli_tools: bool,
     #[serde(default = "default_true")]
     pub block_sensitive_reads: bool,
@@ -270,7 +270,8 @@ impl AgentOptimizerEntry {
                     _ => Unsupported,
                 };
             }
-            CacheKeepalive | CliTools => return Pending,
+            CacheKeepalive => return Pending,
+            CliTools => self.capabilities.cli_tools,
             CacheMonitor | CacheExpiryNotify => self.capabilities.cache_monitor,
             StallRescue => self.capabilities.stall_rescue,
         };
@@ -560,6 +561,7 @@ mod tests {
         assert!(claude.cache_keepalive);
         assert!(!claude.cache_expiry_notify);
         assert!(claude.block_sensitive_reads);
+        assert!(claude.cli_tools);
         let codex = &snapshot.agents["codex"].settings;
         assert!(codex.read_dedup);
         assert!(!codex.block_sensitive_reads);
