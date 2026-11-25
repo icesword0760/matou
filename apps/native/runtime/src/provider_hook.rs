@@ -73,7 +73,7 @@ pub(crate) struct Observation {
     pub model: Option<String>,
     pub permission_mode: Option<String>,
     pub cwd: Option<String>,
-    pub notification: Option<(Notification, Instant)>,
+    pub notification: Option<Notification>,
     pub codex: Option<codex_events::Hook>,
     pub hud_payload: Option<Value>,
     pub statusline: bool,
@@ -128,8 +128,7 @@ impl Observation {
                 .map(str::to_owned),
             permission_mode: text(&["permission_mode", "permissionMode"]).map(str::to_owned),
             cwd: text(&["cwd"]).map(str::to_owned),
-            notification: Notification::parse(event, payload, title)
-                .map(|event| (event, Instant::now())),
+            notification: Notification::parse(event, payload, title),
             codex: (profile == LaunchProfile::Codex)
                 .then(|| codex_events::Hook::parse(payload, event)),
             hud_payload: None,
@@ -149,6 +148,7 @@ pub(crate) enum NotificationKind {
 #[derive(PartialEq, Eq)]
 pub(crate) struct Notification {
     pub kind: NotificationKind,
+    pub received_at: SystemTime,
     title: &'static str,
     subtitle: String,
     body: String,
@@ -236,6 +236,7 @@ impl Notification {
         };
         Some(Self {
             kind,
+            received_at: SystemTime::now(),
             title,
             subtitle,
             body: compact(&body, limit),
@@ -1318,8 +1319,10 @@ fn read_request(
         observation.hud_payload = Some(Value::Object(payload));
         HookMessage::Observed(record.scope.clone(), observation, received_at)
     };
+    // Keep admission timestamps and queue order aligned for concurrent hooks.
+    let queued = send.try_send(message);
     drop(registry);
-    match send.try_send(message) {
+    match queued {
         Ok(()) => {
             let Some((data_root, profile, session_id, payload_val)) = eval_scope else {
                 let mut response = HookEvaluation::allow();
@@ -2420,7 +2423,7 @@ mod tests {
         assert_eq!(scope.run_id, "current");
         assert_eq!(observation.identity.as_deref(), Some("external"));
         assert_eq!(
-            observation.notification.unwrap().0.kind,
+            observation.notification.unwrap().kind,
             NotificationKind::Completed
         );
         assert!(server.messages().next().is_none());
@@ -2468,7 +2471,7 @@ mod tests {
             assert_eq!(
                 Observation::parse(payload.as_object().unwrap())
                     .notification
-                    .map(|(event, _)| event.kind),
+                    .map(|event| event.kind),
                 expected
             );
         }
@@ -2513,7 +2516,7 @@ mod tests {
         ] {
             payload["hookEventName"] = json!("Notification");
             let parsed = Observation::parse(payload.as_object().unwrap());
-            let event = parsed.notification.unwrap().0;
+            let event = parsed.notification.unwrap();
             assert_eq!(event.kind, expected, "{payload}");
             assert_eq!(event.payload()["subtitle"], expected.labels().1);
             assert_eq!(event.payload()["cooldownKey"], "Notification");
@@ -2524,7 +2527,6 @@ mod tests {
         Observation::parse(payload.as_object().unwrap())
             .notification
             .unwrap()
-            .0
             .payload()
     }
 
