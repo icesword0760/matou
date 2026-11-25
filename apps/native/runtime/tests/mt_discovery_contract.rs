@@ -49,6 +49,16 @@ fn fixture(id: &str) -> Value {
         .clone()
 }
 
+fn expected_help() -> String {
+    fixture("cli-help-no-identity")["expected_response"]["stdout"][0]
+        .as_str()
+        .unwrap()
+        .replace(
+            "mt send TARGET TEXT [--enter] [--json]",
+            "mt send TARGET TEXT [--enter] [--replace | --append] [--json]",
+        )
+}
+
 fn invoke(args: &[&str], endpoint: Option<&Path>, token: Option<&str>) -> Result<Output> {
     let mut command = Process::new(RUNTIME);
     command
@@ -106,8 +116,7 @@ fn help_missing_identity_and_usage_never_connect() -> Result<()> {
     let root = root()?;
     let socket = root.path().join("s");
     let listener = UnixListener::bind(&socket)?;
-    let help = fixture("cli-help-no-identity");
-    let expected = help["expected_response"]["stdout"][0].as_str().unwrap();
+    let expected = expected_help();
     compare(
         invoke(&["--help"], None, None)?,
         0,
@@ -671,8 +680,7 @@ fn shim_is_first_on_managed_path_and_refreshes_after_runtime_move() -> Result<()
         0o700
     );
     assert!(!original.contains("MATOU_CONTROL_TOKEN"));
-    let options = fixture("cli-help-no-identity");
-    let help = options["expected_response"]["stdout"][0].as_str().unwrap();
+    let help = expected_help();
     compare(
         Process::new(&path).arg("--help").env_clear().output()?,
         0,

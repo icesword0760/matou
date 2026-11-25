@@ -75,11 +75,12 @@ use crate::{
     provider_resume::{
         self, FORK_REBUILD_FAILED, IDENTITY_MISMATCH, ResumeMonitor, SESSION_NOT_FOUND,
     },
+    session::InputOrigin,
     shell_input::ShellInput,
     subscription_service::{
         LaunchIssue, PreparedClaudeLaunch, SessionSubscriptions, SubscriptionService,
     },
-    worker::{SessionWorker, WorkerCommand, WorkerEvent},
+    worker::{CurrentScreen, SessionWorker, WorkerCommand, WorkerEvent},
 };
 
 // Allow time for a Claude prompt hook to arrive after terminal input.
@@ -2911,7 +2912,11 @@ impl ShellOwner {
         }
         let shell = self.shells.get_mut(session_id).expect("CLI consent run");
         let (reply, _) = mpsc::channel();
-        shell.worker.send(WorkerCommand::Write { bytes, reply })?;
+        shell.worker.send(WorkerCommand::Write {
+            bytes,
+            origin: InputOrigin::User,
+            reply,
+        })?;
         if submitted {
             let hook = shell.hook.as_mut().unwrap();
             hook.resume.as_mut().unwrap().submit_bypass_consent();
@@ -4207,7 +4212,7 @@ impl ShellOwner {
     pub(crate) fn read_current_screen(
         &self,
         session_id: &str,
-    ) -> Result<Option<mpsc::Receiver<Result<matou_native_terminal::Screen>>>> {
+    ) -> Result<Option<mpsc::Receiver<Result<CurrentScreen>>>> {
         let Some(shell) = self
             .shells
             .get(session_id)
@@ -4866,6 +4871,7 @@ impl ShellOwner {
                     .worker
                     .send(WorkerCommand::Write {
                         bytes: antigravity_events::FORK_COMMAND.as_bytes().to_vec(),
+                        origin: InputOrigin::System,
                         reply,
                     })
                     .is_err()
@@ -7464,6 +7470,7 @@ fn write_resume_input(
     let (reply, _) = mpsc::channel();
     if let Err(error) = shell.worker.send(WorkerCommand::Write {
         bytes: bytes.to_vec(),
+        origin: InputOrigin::System,
         reply,
     }) {
         diagnostic(
@@ -7957,6 +7964,7 @@ mod provider_tests {
             session,
             WorkerCommand::Write {
                 bytes: vec![b'\n'],
+                origin: InputOrigin::User,
                 reply,
             },
         )?;
@@ -8274,6 +8282,7 @@ mod provider_tests {
             "early-exit",
             WorkerCommand::Write {
                 bytes: vec![b'\n'],
+                origin: InputOrigin::User,
                 reply,
             },
         )?;
@@ -8510,6 +8519,7 @@ mod provider_tests {
             session,
             WorkerCommand::Write {
                 bytes: b"\r".to_vec(),
+                origin: InputOrigin::User,
                 reply,
             },
         )?;

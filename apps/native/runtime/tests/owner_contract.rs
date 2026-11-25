@@ -12,6 +12,7 @@ use matou_native_core::{
 use matou_native_runtime::{
     SessionEvent, SessionOptions,
     owner::{OwnerEvent, ShellOwner},
+    session::InputOrigin,
     worker::{WorkerCommand, WorkerEvent},
 };
 use matou_native_terminal::TerminalOptions;
@@ -157,6 +158,7 @@ fn write(owner: &ShellOwner, command: &str) -> Result<()> {
         ID,
         WorkerCommand::Write {
             bytes: format!("{command}\r").into_bytes(),
+            origin: InputOrigin::User,
             reply,
         },
     )?;

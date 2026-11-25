@@ -309,9 +309,23 @@ fn request(
                 json!({"target": target, "key": normalize_key(raw)?}),
             );
         }
+        let mode = match (
+            args[1..].iter().any(|arg| arg == "--replace"),
+            args[1..].iter().any(|arg| arg == "--append"),
+        ) {
+            (true, true) => return Err(usage("--replace 和 --append 不能同时使用")),
+            (true, false) => Some("replace"),
+            (false, true) => Some("append"),
+            (false, false) => None,
+        };
         let text = args[1..]
             .iter()
-            .filter(|arg| !matches!(arg.as_str(), "--enter" | "--json"))
+            .filter(|arg| {
+                !matches!(
+                    arg.as_str(),
+                    "--enter" | "--json" | "--replace" | "--append"
+                )
+            })
             .map(String::as_str)
             .collect::<Vec<_>>()
             .join(" ");
@@ -319,12 +333,13 @@ fn request(
         if text.is_empty() {
             return Err(usage("send 需要发送文本"));
         }
-        return client.request(
-            "terminal.send-text",
-            json!({
-                "target": target, "text": text, "submit": args.iter().any(|arg| arg == "--enter"),
-            }),
-        );
+        let mut params = json!({
+            "target": target, "text": text, "submit": args.iter().any(|arg| arg == "--enter"),
+        });
+        if let Some(mode) = mode {
+            params["mode"] = json!(mode);
+        }
+        return client.request("terminal.send-text", params);
     }
     if matches!(command, "create" | "fork" | "remove" | "close") {
         let client = Client::new(Path::new(&endpoint), &token)?;
@@ -1552,7 +1567,7 @@ Usage:
   mt read TARGET [--lines N] [--bytes N] [--json]
   mt history TARGET [--lines N] [--bytes N] [--json]
   mt commands TARGET [--limit N] [--json]
-  mt send TARGET TEXT [--enter] [--json]
+  mt send TARGET TEXT [--enter] [--replace | --append] [--json]
   mt key TARGET KEY [--json]
 
   mt create workspace --path PATH [--title TITLE] [--submission-key KEY] [--enter] [--json]

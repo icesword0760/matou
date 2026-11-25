@@ -49,6 +49,12 @@ description: Use when the user asks Claude Code running inside Matou to inspect 
 - 聚焦或切换目标唯一时直接执行；多个候选时按 CLI 返回的标题、工作空间、事项、画布、profile、cwd 和序号展示，让用户选择。
 - 输入前确认目标和内容，除非用户已经明确给出两者。成功后用一句自然语言说明最终标题或路径。
 - 给另一个 AI 会话传话或布置任务（包括“做完后通知我”）时一律加 `--enter`，否则消息只停在对方输入框；需要对方回报时，先用 `mt identify --json` 取得自己的标题，在消息里写明回报命令 `mt send "<我的标题>" "<回报内容>" --enter`。
+- 判断输入框里有没有“别人还没提交的内容”，以 `mt read --json` 的 `pendingInput` 为准，不要凭截图文字猜：
+  - 没有 `pendingInput`：输入框里的字是模型建议（例如 Claude Code 的灰色占位建议），不是用户或 agent 打的；直接发送会替换它，不会拼接，不需要清空，也不需要问用户。
+  - `origin = "user"`：用户真打的草稿。`mt send --enter` 会拒绝（`PENDING_USER_INPUT`）；只有 `--replace` 会清掉重发，`--append` 会保留再追加。
+  - `origin = "agent"`：别的 agent 预填但还没提交；`--enter` 会自动清除后发送。
+  - `reliable = false`：输入经过方向键、Tab 等无法可靠重建的编辑；不要自动清除，返回 `PENDING_INPUT_UNRELIABLE`，请先手动清空或用 `--append`。
+- 收到 `PENDING_USER_INPUT` / `PENDING_INPUT_UNRELIABLE` / `PENDING_INPUT_CHANGED` 时按错误里的提示处理；不要反复重试或改成盲发。`mt key Enter` 不参与这套检查，它就是按回车。
 
 ## 渐进式参考
 

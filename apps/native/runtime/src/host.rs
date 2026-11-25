@@ -46,6 +46,7 @@ use crate::{
     provider_hook::HookSetup,
     retention_policy::{self, IndexedCheckpoint, IndexedSession, RetentionQuota, SessionRetention},
     search::{SearchRequest, SearchResult},
+    session::InputOrigin,
     shell_input::{InteractiveLaunch, ShellInput},
     subscription_launch::{self, SubscriptionProvider},
     subscription_service::{LaunchIssue, PreparedClaudeLaunch, SubscriptionService},
@@ -9645,11 +9646,16 @@ fn send_input(
         };
         WorkerCommand::WriteShellInput {
             bytes,
+            origin: InputOrigin::User,
             submission,
             reply,
         }
     } else {
-        WorkerCommand::Write { bytes, reply }
+        WorkerCommand::Write {
+            bytes,
+            origin: InputOrigin::User,
+            reply,
+        }
     };
     if let Err(error) = owner.send(&session_id, request) {
         send.send_blocking(Event::Diagnostic(format!("{error:#}")))?;
@@ -11903,6 +11909,7 @@ mod tests {
             &session_id,
             WorkerCommand::Write {
                 bytes: format!("{}\n", "x".repeat(2048)).into_bytes(),
+                origin: InputOrigin::User,
                 reply,
             },
         )?;
@@ -11974,6 +11981,7 @@ mod tests {
             &session_id,
             WorkerCommand::Write {
                 bytes: format!("{}\n", "y".repeat(2048)).into_bytes(),
+                origin: InputOrigin::User,
                 reply,
             },
         )?;

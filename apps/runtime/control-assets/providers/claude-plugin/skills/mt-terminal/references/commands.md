@@ -8,7 +8,7 @@ mt list [--all] [--json]
 mt read TARGET [--lines N] [--bytes N] [--json]
 mt history TARGET [--lines N] [--bytes N] [--json]
 mt commands TARGET [--limit N] [--json]
-mt send TARGET TEXT [--enter] [--json]
+mt send TARGET TEXT [--enter] [--replace | --append] [--json]
 mt key TARGET KEY [--json]
 
 mt create workspace --path PATH [--title TITLE] [--submission-key KEY] [--enter] [--json]
@@ -100,8 +100,27 @@ mt close canvas-commit CONFIRMATION_REF --json
 - “执行过哪些 Shell 命令” → `mt commands`
 - 只填入文本 → `mt send TARGET "text"`
 - 填入并提交 → `mt send TARGET "command" --enter`
+- 强制清掉已有草稿再提交 → `mt send TARGET "text" --enter --replace`
+- 保留已有草稿并在后面追加提交 → `mt send TARGET "text" --enter --append`
 - 给另一个 AI 会话传话、布置任务或请它做完后回报 → 一律 `--enter`
 - 单键 → `mt key TARGET Enter`
+
+### 输入框里的未发送内容
+
+`mt read --json` 在存在未提交输入时返回：
+
+```json
+"pendingInput": {"text": "已写入的预览", "origin": "user", "reliable": true}
+```
+
+- 没有 `pendingInput`：输入框里的字是模型建议（例如 Claude Code 的灰色占位建议），不是用户或 agent 写的。`mt send --enter` 会直接键入并提交，建议会被替换，不会拼接；不需要清空，也不需要向用户确认。
+- `origin = "user"`：用户真打的草稿。`--enter`（默认 `auto`）返回 `PENDING_USER_INPUT`，零字节写入；只有 `--replace` 会清掉重发，`--append` 会保留并追加。
+- `origin = "agent"`：别的 agent 预填、尚未提交的内容。`auto` 会按完整字符数退格清除，再键入并提交新内容。
+- `reliable = false`：输入经过方向键、Tab、无效 UTF-8 等无法可靠重建的编辑。`auto` 和 `--replace` 都返回 `PENDING_INPUT_UNRELIABLE`，不会冒险清除；请先手动清空，或用 `--append` 明确保留。
+- 发送正文和回车之间如果目标输入发生变化，返回 `PENDING_INPUT_CHANGED`，自动发送停止。
+- `truncated: true` 只表示预览被截断（超过 4 KB），清除仍按完整字符数执行。
+
+判断输入归属只看 `pendingInput`，不要根据截屏文字猜测。`mt key Enter` 不参与这套检查，它就是按回车。
 
 允许键：Enter、Tab、Escape、Backspace、Delete、ArrowUp、ArrowDown、ArrowLeft、ArrowRight、Home、End、PageUp、PageDown、CtrlC、CtrlD、CtrlL、CtrlU、CtrlZ。
 
@@ -118,5 +137,8 @@ mt close canvas-commit CONFIRMATION_REF --json
 - 分支或 Worktree 冲突：集中询问受影响节点的新环境选择。
 - 批量部分成功：保留成功项，只重试失败项并复用原 key。
 - 导航超时：汇报目标标题和路径，说明本次导航未完成且可重试。
+- `PENDING_USER_INPUT`：目标输入框里有用户草稿；不要重复重试。确认要覆盖时用 `--replace`，要保留时用 `--append`，否则等用户自己处理。
+- `PENDING_INPUT_UNRELIABLE`：输入无法可靠重建；请用户手动清空，或用 `--append` 明确追加。
+- `PENDING_INPUT_CHANGED`：等待回车期间输入发生变化；先用 `mt read --json` 查看当前 `pendingInput`，再决定。
 - 权限问题：说明当前会话没有该动作的权限。
 - 连接超时：重新 identify 检查当前会话的控制连接。

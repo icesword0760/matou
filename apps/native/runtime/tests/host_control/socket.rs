@@ -2219,6 +2219,267 @@ fn frozen_write_validation_and_outlet_freeze_reject_before_input() -> Result<()>
 
 #[cfg(unix)]
 #[test]
+fn pending_input_cli_protects_and_replaces_drafts_in_shell_and_claude() -> Result<()> {
+    use crate::worker::WorkerCommand;
+    use matou_native_terminal::TerminalOptions;
+
+    for profile in [LaunchProfile::Shell, LaunchProfile::ClaudeCode] {
+        let mut harness = Harness::new(false, false, GENERATION, fixed_now, IDLE_TIMEOUT)?;
+        let root = harness.root.path();
+        let session = fixture_id(8);
+        let capture = root.join("input");
+        let ready = root.join("ready");
+        let program = "stty raw -echo && printf '整套删掉' && : > ready && exec /bin/cat > input";
+        let mut launch = ShellLaunch {
+            profile,
+            executable: "/bin/sh".into(),
+            argv: vec!["-c".into(), program.into()],
+            cwd: root.into(),
+            data_root: root.into(),
+            inherited_env: BTreeMap::from([("HOME".into(), root.as_os_str().into())]),
+            env: BTreeMap::new(),
+            cols: 80,
+            rows: 24,
+        };
+        let terminal = TerminalOptions::new(80, 24, 8, 16);
+        harness
+            .owner
+            .set_shell_launch_directory(&session, root.to_str().unwrap())?;
+        if profile == LaunchProfile::ClaudeCode {
+            harness
+                .owner
+                .promote_shell_to_agent(&session, LaunchProfile::ClaudeCode)?;
+            // The fixture displays a suggestion but never feeds it into the PTY.
+            let executable = root.join("fixture-provider");
+            fs::write(&executable, format!("#!/bin/sh\n{program}\n"))?;
+            fs::set_permissions(&executable, Permissions::from_mode(0o700))?;
+            launch.executable = executable;
+            launch.argv = vec!["--fixture".into(), "--fixture".into()];
+            harness.owner.launch_claude(
+                session.clone(),
+                terminal,
+                matou_native_core::provider_launch::ClaudeLaunch {
+                    launch,
+                    provider_config_id: "fixture-config".into(),
+                    model: "fixture-model".into(),
+                    permission_mode: "default".into(),
+                    assigned_role: None,
+                    effort: None,
+                    clear_assignment_environment: false,
+                    gateway: None,
+                    gateway_refresh: None,
+                    subscription_settings: None,
+                    subscription_role: None,
+                },
+                None,
+            )?;
+        } else {
+            harness.owner.launch(
+                crate::SessionOptions {
+                    session_id: session.clone(),
+                    terminal,
+                    launch,
+                    journal: Default::default(),
+                    restored_history: Vec::new(),
+                    screen_recovery: None,
+                    collect_history: false,
+                },
+                false,
+                "",
+            )?;
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !ready.exists() {
+            ensure!(Instant::now() < deadline, "fixture did not enter raw mode");
+            thread::sleep(Duration::from_millis(2));
+        }
+        let path = harness.server.endpoint.path.clone();
+        let (run, _) = harness.owner.control_terminal(&session).unwrap();
+        let token = harness.token(run, MANAGED_SCOPES, NOW)?;
+        let cli = |harness: &mut Harness, args: &[&str]| {
+            harness.drive(|| {
+                let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
+                let mut stdout = Vec::new();
+                let mut stderr = Vec::new();
+                let code = crate::mt_cli::run_with(
+                    &args,
+                    || (Some(path.as_os_str().into()), Some(token.clone())),
+                    &mut stdout,
+                    &mut stderr,
+                );
+                Ok((code, String::from_utf8(stdout)?, String::from_utf8(stderr)?))
+            })
+        };
+        let read = |harness: &mut Harness| -> Result<Value> {
+            let (code, output, error) = cli(harness, &["read", "self", "--json"])?;
+            assert_eq!(code, 0, "{error}");
+            Ok(serde_json::from_str(&output)?)
+        };
+        let assert_absent = |harness: &mut Harness| -> Result<()> {
+            assert!(read(harness)?.get("pendingInput").is_none());
+            Ok(())
+        };
+        let write_user = |harness: &Harness, bytes: &[u8]| -> Result<()> {
+            let bytes = bytes.to_vec();
+            let origin = InputOrigin::User;
+            let (reply, written) = mpsc::channel();
+            let command = if profile == LaunchProfile::Shell {
+                WorkerCommand::WriteShellInput {
+                    bytes,
+                    origin,
+                    submission: None,
+                    reply,
+                }
+            } else {
+                WorkerCommand::Write {
+                    bytes,
+                    origin,
+                    reply,
+                }
+            };
+            harness.owner.send(&session, command)?;
+            written.recv_timeout(Duration::from_secs(2))??;
+            Ok(())
+        };
+        let mut expected = Vec::new();
+        let mut expect_bytes = |new_bytes: &[u8]| -> Result<()> {
+            expected.extend_from_slice(new_bytes);
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                let actual = fs::read(&capture).unwrap_or_default();
+                if actual.len() >= expected.len() {
+                    assert_eq!(actual, expected, "{profile:?}");
+                    return Ok(());
+                }
+                ensure!(Instant::now() < deadline, "PTY recorded {actual:?}");
+                thread::sleep(Duration::from_millis(2));
+            }
+        };
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let screen = read(&mut harness)?;
+            assert!(screen.get("pendingInput").is_none());
+            if screen["text"].as_str().unwrap().contains("整套删掉") {
+                break;
+            }
+            ensure!(
+                Instant::now() < deadline,
+                "fixture suggestion did not render"
+            );
+        }
+        assert_eq!(cli(&mut harness, &["send", "self", "def", "--enter"])?.0, 0);
+        expect_bytes(b"def\r")?;
+        assert_absent(&mut harness)?;
+
+        write_user(&harness, b"abc")?;
+        assert_eq!(
+            read(&mut harness)?["pendingInput"],
+            json!({"text":"abc","origin":"user","reliable":true}),
+        );
+        let (code, _, error) = cli(&mut harness, &["send", "self", "ignored", "--enter"])?;
+        assert_ne!(code, 0);
+        for part in ["abc", "user", "3 字符", "--replace", "--append"] {
+            assert!(error.contains(part), "{error}");
+        }
+        let (code, _, error) = cli(
+            &mut harness,
+            &["send", "self", "ignored", "--enter", "--json"],
+        )?;
+        assert_ne!(code, 0);
+        assert_eq!(
+            serde_json::from_str::<Value>(&error)?["code"],
+            "PENDING_USER_INPUT"
+        );
+        assert_eq!(
+            cli(
+                &mut harness,
+                &["send", "self", "def", "--enter", "--replace"]
+            )?
+            .0,
+            0,
+        );
+        // Comparing the whole stream also proves rejected requests wrote zero bytes.
+        expect_bytes(b"abc\x7f\x7f\x7fdef\r")?;
+        assert_absent(&mut harness)?;
+
+        assert_eq!(cli(&mut harness, &["send", "self", "abc"])?.0, 0);
+        assert_eq!(
+            read(&mut harness)?["pendingInput"],
+            json!({"text":"abc","origin":"agent","reliable":true}),
+        );
+        assert_eq!(cli(&mut harness, &["send", "self", "def", "--enter"])?.0, 0);
+        expect_bytes(b"abc\x7f\x7f\x7fdef\r")?;
+        assert_absent(&mut harness)?;
+
+        write_user(&harness, b"abc\x1b[D")?;
+        assert_eq!(
+            read(&mut harness)?["pendingInput"],
+            json!({"text":"abc","origin":"user","reliable":false}),
+        );
+        for mode in ["--enter", "--replace"] {
+            let (code, _, error) = cli(
+                &mut harness,
+                &["send", "self", "ignored", "--enter", mode, "--json"],
+            )?;
+            assert_ne!(code, 0);
+            assert_eq!(
+                serde_json::from_str::<Value>(&error)?["code"],
+                "PENDING_INPUT_UNRELIABLE"
+            );
+        }
+        assert_eq!(
+            cli(
+                &mut harness,
+                &["send", "self", "def", "--enter", "--append"]
+            )?
+            .0,
+            0,
+        );
+        expect_bytes(b"abc\x1b[Ddef\r")?;
+        assert_absent(&mut harness)?;
+
+        write_user(&harness, b"abc")?;
+        assert_eq!(cli(&mut harness, &["key", "self", "Enter"])?.0, 0);
+        expect_bytes(b"abc\r")?;
+        assert_absent(&mut harness)?;
+
+        let (reply, written) = mpsc::channel();
+        harness.owner.send(
+            &session,
+            WorkerCommand::WriteControlInput {
+                bytes: b"def".to_vec(),
+                origin: InputOrigin::Agent,
+                check: ControlInputCheck::Prepare(InputMode::Auto),
+                reply,
+            },
+        )?;
+        let revision = written.recv_timeout(Duration::from_secs(2))??;
+        write_user(&harness, b"abc")?;
+        let (reply, written) = mpsc::channel();
+        harness.owner.send(
+            &session,
+            WorkerCommand::WriteControlInput {
+                bytes: b"\r".to_vec(),
+                origin: InputOrigin::Agent,
+                check: ControlInputCheck::Submit(revision),
+                reply,
+            },
+        )?;
+        let fault =
+            terminal_write_error(written.recv_timeout(Duration::from_secs(2))?.unwrap_err());
+        assert_eq!(fault.code, "PENDING_USER_INPUT");
+        assert_eq!(fault.details.unwrap()["pendingInput"]["text"], "defabc");
+        write_user(&harness, b"\x15")?;
+        expect_bytes(b"defabc\x15")?;
+        assert_absent(&mut harness)?;
+        harness.owner.shutdown()?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn fork_batch_replays_successes_and_retries_only_selected_failures() -> Result<()> {
     let mut harness = Harness::new(false, false, GENERATION, fixed_now, IDLE_TIMEOUT)?;
     let source = fixture_id(8);

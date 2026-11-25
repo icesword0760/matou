@@ -1,5 +1,6 @@
 use std::{
     cell::{Cell, RefCell},
+    collections::VecDeque,
     io::{self, Read},
     path::PathBuf,
     sync::{Arc, Condvar, Mutex, mpsc},
@@ -22,6 +23,7 @@ use matou_native_core::{
 use matou_native_terminal::{
     GridSelection, InputModes, Screen, SelectionAction, Terminal, TerminalOptions, Theme,
 };
+use serde::Serialize;
 
 use crate::{
     SessionEvent, SessionOptions, StorageFaultCode,
@@ -36,6 +38,159 @@ use crate::{
 const READ_BYTES: usize = 8 * 1024;
 const READ_QUEUE: usize = 128;
 const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InputOrigin {
+    User,
+    Agent,
+    System,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PendingInput {
+    pub(crate) text: String,
+    pub(crate) origin: InputOrigin,
+    pub(crate) reliable: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    truncated: bool,
+    #[serde(skip)]
+    pub(crate) char_count: usize,
+}
+
+#[derive(Clone, Copy)]
+pub enum InputMode {
+    Auto,
+    Append,
+    Replace,
+}
+
+pub enum ControlInputCheck {
+    None,
+    Prepare(InputMode),
+    Submit(u64),
+}
+
+#[derive(Debug)]
+pub(crate) enum InputConflict {
+    User(PendingInput),
+    Unreliable(PendingInput),
+    Changed,
+}
+
+impl std::fmt::Display for InputConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::User(_) => "user has pending terminal input",
+            Self::Unreliable(_) => "pending terminal input cannot be cleared reliably",
+            Self::Changed => "terminal input changed before submission",
+        })
+    }
+}
+
+impl std::error::Error for InputConflict {}
+
+const MAX_PENDING_INPUT_BYTES: usize = 4096;
+
+#[derive(Default)]
+struct InputLine {
+    preview: VecDeque<char>,
+    preview_bytes: usize,
+    char_count: usize,
+    user: bool,
+    uncertain: bool,
+    decoder: Utf8Decoder,
+    revision: u64,
+}
+
+impl InputLine {
+    fn observe(&mut self, bytes: &[u8], origin: InputOrigin) {
+        if bytes.is_empty() {
+            return;
+        }
+        self.revision += 1;
+        for chunk in self.decoder.complete_bytes(bytes).utf8_chunks() {
+            for ch in chunk.valid().chars() {
+                self.observe_char(ch, origin);
+            }
+            if !chunk.invalid().is_empty() {
+                self.mark_uncertain(origin);
+            }
+        }
+        self.user |= self.decoder.has_pending() && origin == InputOrigin::User;
+    }
+
+    fn observe_char(&mut self, ch: char, origin: InputOrigin) {
+        if matches!(ch, '\r' | '\n' | '\x03' | '\x15') {
+            self.preview.clear();
+            self.preview_bytes = 0;
+            self.char_count = 0;
+            self.user = false;
+            self.uncertain = false;
+            return;
+        }
+        self.user |= origin == InputOrigin::User;
+        if self.uncertain {
+            return;
+        }
+        match ch {
+            '\x08' | '\x7f' => {
+                self.char_count = self.char_count.saturating_sub(1);
+                if let Some(ch) = self.preview.pop_back() {
+                    self.preview_bytes -= ch.len_utf8();
+                }
+                if self.char_count == 0 {
+                    self.user = false;
+                }
+            }
+            ch if !ch.is_control() => {
+                self.char_count += 1;
+                self.preview.push_back(ch);
+                self.preview_bytes += ch.len_utf8();
+                while self.preview_bytes > MAX_PENDING_INPUT_BYTES {
+                    self.preview_bytes -= self.preview.pop_front().unwrap().len_utf8();
+                }
+            }
+            _ => self.mark_uncertain(origin),
+        }
+    }
+
+    fn mark_uncertain(&mut self, origin: InputOrigin) {
+        self.uncertain = true;
+        self.user |= origin == InputOrigin::User;
+    }
+
+    fn snapshot(&self) -> Option<PendingInput> {
+        let reliable = !self.uncertain && !self.decoder.has_pending();
+        (self.char_count != 0 || !reliable).then(|| PendingInput {
+            text: self.preview.iter().collect(),
+            origin: if self.user {
+                InputOrigin::User
+            } else {
+                InputOrigin::Agent
+            },
+            reliable,
+            truncated: self.char_count > self.preview.len(),
+            char_count: self.char_count,
+        })
+    }
+
+    fn erase_count(&self, mode: InputMode) -> Result<usize> {
+        if matches!(mode, InputMode::Append) {
+            return Ok(0);
+        }
+        let Some(pending) = self.snapshot() else {
+            return Ok(0);
+        };
+        if !pending.reliable {
+            return Err(InputConflict::Unreliable(pending).into());
+        }
+        if matches!(mode, InputMode::Auto) && pending.origin == InputOrigin::User {
+            return Err(InputConflict::User(pending).into());
+        }
+        Ok(pending.char_count)
+    }
+}
 
 #[cfg(unix)]
 #[derive(Debug)]
@@ -256,6 +411,7 @@ pub struct Session {
     child_exit_observed_at: Option<Instant>,
     reader_finished: bool,
     decoder: Utf8Decoder,
+    input_line: InputLine,
     batcher: OutputBatcher,
     collector: Option<Collector>,
     delivery: Delivery,
@@ -412,6 +568,7 @@ impl Session {
             child_exit_observed_at: None,
             reader_finished: false,
             decoder: Utf8Decoder::new(),
+            input_line: InputLine::default(),
             batcher,
             collector: options.collect_history.then(Collector::new),
             delivery: Delivery {
@@ -464,6 +621,10 @@ impl Session {
     }
 
     pub fn write(&mut self, bytes: &[u8]) -> Result<()> {
+        self.write_with_origin(bytes, InputOrigin::System)
+    }
+
+    pub fn write_with_origin(&mut self, bytes: &[u8], origin: InputOrigin) -> Result<()> {
         self.ensure_writable()?;
         let process = self
             .process
@@ -477,10 +638,53 @@ impl Session {
         }
         let result = process.write(bytes);
         if let Err(error) = &result {
+            // write_all can fail after some bytes have reached the terminal.
+            self.input_line.revision += 1;
+            self.input_line.mark_uncertain(origin);
             self.events
                 .push(diagnostic(format!("write to Shell PTY: {error:#}")));
+        } else {
+            self.input_line.observe(bytes, origin);
         }
         result
+    }
+
+    pub(crate) fn pending_input(&self) -> Option<PendingInput> {
+        self.input_line.snapshot()
+    }
+
+    pub(crate) fn write_control_input(
+        &mut self,
+        bytes: &[u8],
+        origin: InputOrigin,
+        check: ControlInputCheck,
+    ) -> Result<u64> {
+        self.ensure_writable()?;
+        match check {
+            ControlInputCheck::None => {}
+            ControlInputCheck::Prepare(mode) => {
+                let mut count = self.input_line.erase_count(mode)?;
+                let backspaces = [0x7f; MAX_PENDING_INPUT_BYTES];
+                while count != 0 {
+                    let size = count.min(backspaces.len());
+                    self.write_with_origin(&backspaces[..size], origin)?;
+                    count -= size;
+                }
+            }
+            ControlInputCheck::Submit(revision) if self.input_line.revision != revision => {
+                let conflict = match self.pending_input() {
+                    Some(pending) if !pending.reliable => InputConflict::Unreliable(pending),
+                    Some(pending) if pending.origin == InputOrigin::User => {
+                        InputConflict::User(pending)
+                    }
+                    _ => InputConflict::Changed,
+                };
+                return Err(conflict.into());
+            }
+            ControlInputCheck::Submit(_) => {}
+        }
+        self.write_with_origin(bytes, origin)?;
+        Ok(self.input_line.revision)
     }
 
     pub fn resize(
@@ -1566,6 +1770,78 @@ mod tests {
     use super::*;
     use crate::history::HistoryGapCode;
     use matou_native_core::{journal::JournalOptions, pty::ShellLaunch};
+
+    #[test]
+    fn pending_input_tracks_utf8_origin_and_line_edits() {
+        let mut line = InputLine::default();
+        line.observe(b"a", InputOrigin::System);
+        assert_eq!(line.snapshot().unwrap().origin, InputOrigin::Agent);
+        line.observe(&"中".as_bytes()[..1], InputOrigin::User);
+        assert!(!line.snapshot().unwrap().reliable);
+        line.observe(&"中".as_bytes()[1..], InputOrigin::Agent);
+        line.observe("文".as_bytes(), InputOrigin::Agent);
+        let pending = line.snapshot().unwrap();
+        assert_eq!(pending.text, "a中文");
+        assert_eq!(pending.char_count, 3);
+        assert_eq!(pending.origin, InputOrigin::User);
+        assert!(pending.reliable);
+        line.observe(b"\x7f\x08", InputOrigin::Agent);
+        let pending = line.snapshot().unwrap();
+        assert_eq!(pending.text, "a");
+        assert_eq!(pending.origin, InputOrigin::User);
+        line.observe(b"\x7f", InputOrigin::User);
+        assert!(line.snapshot().is_none());
+
+        for clear in [b'\r', b'\n', 0x03, 0x15] {
+            line.observe(b"abc", InputOrigin::User);
+            line.observe(&[clear], InputOrigin::System);
+            assert!(line.snapshot().is_none(), "clear byte {clear:#x}");
+        }
+        line.observe(b"abc\rdef", InputOrigin::Agent);
+        assert_eq!(line.snapshot().unwrap().text, "def");
+    }
+
+    #[test]
+    fn pending_input_truncates_preview_without_losing_erase_count() {
+        let mut line = InputLine::default();
+        let suffix = "中".repeat(1365);
+        line.observe(format!("aa{suffix}").as_bytes(), InputOrigin::Agent);
+        let pending = line.snapshot().unwrap();
+        assert_eq!(pending.text, format!("a{suffix}"));
+        assert_eq!(pending.text.len(), MAX_PENDING_INPUT_BYTES);
+        assert_eq!(pending.char_count, 1367);
+        assert!(pending.truncated && pending.reliable);
+        assert_eq!(line.erase_count(InputMode::Auto).unwrap(), 1367);
+        line.observe(&[0x7f; 1366], InputOrigin::Agent);
+        assert_eq!(line.erase_count(InputMode::Replace).unwrap(), 1);
+        line.observe(b"\x7f", InputOrigin::Agent);
+        assert!(line.snapshot().is_none());
+    }
+
+    #[test]
+    fn pending_input_stays_unreliable_after_controls_and_invalid_utf8() {
+        let mut line = InputLine::default();
+        line.observe("�".as_bytes(), InputOrigin::Agent);
+        assert!(line.snapshot().unwrap().reliable);
+        line.observe(b"\r", InputOrigin::Agent);
+        for input in [&b"\x1b[D"[..], b"\t", b"\xff"] {
+            line.observe(b"abc", InputOrigin::User);
+            line.observe(input, InputOrigin::User);
+            line.observe(b"def\x7f", InputOrigin::Agent);
+            let pending = line.snapshot().unwrap();
+            assert_eq!(pending.text, "abc");
+            assert!(!pending.reliable);
+            for mode in [InputMode::Auto, InputMode::Replace] {
+                assert!(matches!(
+                    line.erase_count(mode).unwrap_err().downcast_ref(),
+                    Some(InputConflict::Unreliable(_))
+                ));
+            }
+            assert_eq!(line.erase_count(InputMode::Append).unwrap(), 0);
+            line.observe(b"\x15", InputOrigin::System);
+            assert!(line.snapshot().is_none());
+        }
+    }
 
     #[test]
     fn screen_recovery_preserves_readable_output_and_reports_gaps() -> Result<()> {

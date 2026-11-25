@@ -14,7 +14,7 @@ use matou_native_terminal::{GridSelection, InputModes, Screen, SelectionAction, 
 use crate::{
     SessionEvent, SessionOptions,
     search::{SearchRequest, SearchResult},
-    session::{Session, SessionWaker},
+    session::{ControlInputCheck, InputOrigin, PendingInput, Session, SessionWaker},
     shell_input::{InteractiveLaunch, ShellInput},
 };
 
@@ -38,16 +38,26 @@ pub struct ShellSubmission {
     pub(crate) cleared: Receiver<Result<bool>>,
 }
 
+pub type CurrentScreen = (Screen, Option<PendingInput>);
+
 /// Requests can be forwarded without blocking the central owner on a busy session.
 pub enum WorkerCommand {
     Write {
         bytes: Vec<u8>,
+        origin: InputOrigin,
         reply: Sender<Result<()>>,
     },
     WriteShellInput {
         bytes: Vec<u8>,
+        origin: InputOrigin,
         submission: Option<Sender<Option<ShellSubmission>>>,
         reply: Sender<Result<()>>,
+    },
+    WriteControlInput {
+        bytes: Vec<u8>,
+        origin: InputOrigin,
+        check: ControlInputCheck,
+        reply: Sender<Result<u64>>,
     },
     CheckProcess {
         result: Arc<OnceLock<Result<()>>>,
@@ -82,7 +92,7 @@ pub enum WorkerCommand {
         reply: Sender<Result<Screen>>,
     },
     ReadCurrentScreen {
-        reply: Sender<Result<Screen>>,
+        reply: Sender<Result<CurrentScreen>>,
     },
     View {
         reply: Sender<Result<(Screen, InputModes)>>,
@@ -227,6 +237,7 @@ impl SessionWorker {
     pub fn write(&self, bytes: &[u8]) -> Result<()> {
         self.request(move |reply| WorkerCommand::Write {
             bytes: bytes.to_vec(),
+            origin: InputOrigin::System,
             reply,
         })
     }
@@ -331,6 +342,7 @@ fn write_shell_input(
     session: &mut Session,
     shared: &Mutex<ShellInput>,
     bytes: &[u8],
+    origin: InputOrigin,
     submission: Option<Sender<Option<ShellSubmission>>>,
     write_promotion: impl FnOnce(&mut Session, &[u8]) -> Result<bool>,
 ) -> Result<()> {
@@ -354,10 +366,10 @@ fn write_shell_input(
             return Ok(());
         }
         let _ = submission.send(None);
-        session.write(bytes)?;
+        session.write_with_origin(bytes, origin)?;
         *shared.lock().unwrap() = next;
     } else {
-        session.write(bytes)?;
+        session.write_with_origin(bytes, origin)?;
         shared.lock().unwrap().observe(bytes);
     }
     Ok(())
@@ -391,11 +403,16 @@ fn run(
                 Err(TryRecvError::Disconnected) => return finish(session, id, run_id, events),
             };
             match command {
-                WorkerCommand::Write { bytes, reply } => {
-                    let _ = reply.send(session.write(&bytes));
+                WorkerCommand::Write {
+                    bytes,
+                    origin,
+                    reply,
+                } => {
+                    let _ = reply.send(session.write_with_origin(&bytes, origin));
                 }
                 WorkerCommand::WriteShellInput {
                     bytes,
+                    origin,
                     submission,
                     reply,
                 } => {
@@ -403,6 +420,7 @@ fn run(
                         session,
                         shell_input,
                         &bytes,
+                        origin,
                         submission,
                         |session, bytes| {
                             clear_for_promotion(bytes, |bytes| {
@@ -410,11 +428,24 @@ fn run(
                                 if bytes == [0x15] && std::mem::take(&mut fail_promotion_clear) {
                                     anyhow::bail!("injected Ctrl+U failure");
                                 }
-                                session.write(bytes)
+                                let source = if bytes == [0x15] {
+                                    InputOrigin::System
+                                } else {
+                                    origin
+                                };
+                                session.write_with_origin(bytes, source)
                             })
                         },
                     );
                     let _ = reply.send(result);
+                }
+                WorkerCommand::WriteControlInput {
+                    bytes,
+                    origin,
+                    check,
+                    reply,
+                } => {
+                    let _ = reply.send(session.write_control_input(&bytes, origin, check));
                 }
                 WorkerCommand::CheckProcess { result } => {
                     let _ = result.set(session.check_process());
@@ -451,7 +482,10 @@ fn run(
                     let _ = reply.send(session.screen());
                 }
                 WorkerCommand::ReadCurrentScreen { reply } => {
-                    let _ = reply.send(session.read_current_screen());
+                    let result = session
+                        .read_current_screen()
+                        .map(|screen| (screen, session.pending_input()));
+                    let _ = reply.send(result);
                 }
                 WorkerCommand::View { reply } => {
                     let _ = reply.send(session.view());

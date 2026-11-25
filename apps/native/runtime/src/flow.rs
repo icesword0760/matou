@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::VecDeque,
     time::{Duration, Instant},
 };
@@ -22,23 +23,33 @@ impl Utf8Decoder {
         Self::default()
     }
 
+    pub(crate) fn has_pending(&self) -> bool {
+        self.tail_len != 0
+    }
+
     pub fn feed(&mut self, bytes: &[u8]) -> String {
+        String::from_utf8_lossy(&self.complete_bytes(bytes)).into_owned()
+    }
+
+    pub(crate) fn complete_bytes<'a>(&mut self, bytes: &'a [u8]) -> Cow<'a, [u8]> {
         if bytes.is_empty() {
-            return String::new();
+            return Cow::Borrowed(bytes);
         }
 
-        let combined;
-        let bytes = if self.tail_len == 0 {
-            bytes
+        let mut bytes = if self.tail_len == 0 {
+            Cow::Borrowed(bytes)
         } else {
-            combined = [&self.tail[..self.tail_len], bytes].concat();
-            &combined
+            Cow::Owned([&self.tail[..self.tail_len], bytes].concat())
         };
-        let unfinished = unfinished_bytes(bytes);
+        let unfinished = unfinished_bytes(&bytes);
         let complete = bytes.len() - unfinished;
         self.tail[..unfinished].copy_from_slice(&bytes[complete..]);
         self.tail_len = unfinished;
-        String::from_utf8_lossy(&bytes[..complete]).into_owned()
+        match &mut bytes {
+            Cow::Borrowed(bytes) => *bytes = &bytes[..complete],
+            Cow::Owned(bytes) => bytes.truncate(complete),
+        }
+        bytes
     }
 
     pub fn finish(&mut self) -> String {

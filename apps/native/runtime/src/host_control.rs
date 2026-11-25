@@ -43,7 +43,10 @@ use matou_native_core::pty::ShellLaunch;
 
 #[path = "host_control/terminal.rs"]
 mod terminal;
-use crate::owner::ShellOwner;
+use crate::{
+    owner::ShellOwner,
+    session::{ControlInputCheck, InputConflict, InputMode, InputOrigin, PendingInput},
+};
 use matou_native_core::{
     hierarchy::{self, canvas, cards, tabs, tasks, workspaces},
     storage::{CommandMetadata, CommandReplayConflictError},
@@ -442,6 +445,15 @@ fn optional_bool(params: &Value, field: &str) -> WireResult<bool> {
     })
 }
 
+fn send_mode(params: &Value) -> WireResult<InputMode> {
+    match params.get("mode").map(Value::as_str) {
+        None | Some(Some("auto")) => Ok(InputMode::Auto),
+        Some(Some("append")) => Ok(InputMode::Append),
+        Some(Some("replace")) => Ok(InputMode::Replace),
+        _ => Err(Fault::new(INVALID, "mode must be auto, append, or replace")),
+    }
+}
+
 fn terminal_input_selector(target: &Value) -> WireResult<Selector> {
     let target = object(target)?;
     if let Some(session) = target.get("sessionId").filter(|value| value.is_string()) {
@@ -496,13 +508,15 @@ pub(crate) enum ControlUpdate {
 
 enum InputStep {
     Body(Vec<u8>),
-    Acknowledge(Receiver<Result<()>>, bool),
-    Echo(Instant),
+    Acknowledge(Receiver<Result<u64>>, bool),
+    Echo(Instant, Option<u64>),
 }
 
 struct TerminalWrite {
     run: String,
     submit: bool,
+    mode: Option<InputMode>,
+    origin: InputOrigin,
     step: InputStep,
 }
 
@@ -515,6 +529,24 @@ fn input_not_ready() -> Fault {
 }
 
 fn terminal_write_error(error: anyhow::Error) -> Fault {
+    if let Some(conflict) = error.downcast_ref::<InputConflict>() {
+        return match conflict {
+            InputConflict::User(pending) => pending_input_fault(
+                "PENDING_USER_INPUT",
+                pending,
+                "可用 --replace 替换，或用 --append 追加后发送。",
+            ),
+            InputConflict::Unreliable(pending) => pending_input_fault(
+                "PENDING_INPUT_UNRELIABLE",
+                pending,
+                "无法可靠清除当前输入。请先在终端清空，或用 --append 保留现有输入。",
+            ),
+            InputConflict::Changed => Fault::new(
+                "PENDING_INPUT_CHANGED",
+                "等待回车期间目标终端的输入已变化，自动发送已停止。可用 mt read --json 查看当前输入。",
+            ),
+        };
+    }
     match error.to_string().as_str() {
         "session storage is paused" => read_only_fault(),
         "session output is frozen" => Fault::new(
@@ -523,6 +555,28 @@ fn terminal_write_error(error: anyhow::Error) -> Fault {
         ),
         _ => input_not_ready(),
     }
+}
+
+fn pending_input_fault(code: &'static str, pending: &PendingInput, hint: &str) -> Fault {
+    let count = pending.char_count;
+    let origin = match pending.origin {
+        InputOrigin::User => "用户（user）",
+        _ => "Agent（agent）",
+    };
+    let length = if pending.reliable {
+        "长度"
+    } else {
+        "已记录长度"
+    };
+    let mut fault = Fault::new(
+        code,
+        format!(
+            "目标终端有未发送输入（来源 {origin}，{length} {count} 字符）{:?}。{hint}",
+            pending.text
+        ),
+    );
+    fault.details = Some(json!({"pendingInput": pending, "charCount": count}));
+    fault
 }
 
 impl TerminalWrite {
@@ -566,7 +620,7 @@ impl TerminalWrite {
     ) -> WireResult<bool> {
         if let InputStep::Acknowledge(result, false) = &self.step {
             return match result.try_recv() {
-                Ok(Ok(())) => Ok(true),
+                Ok(Ok(_)) => Ok(true),
                 Ok(Err(error)) => Err(terminal_write_error(error)),
                 Err(mpsc::TryRecvError::Disconnected) => Err(input_not_ready()),
                 Err(mpsc::TryRecvError::Empty) => Ok(false),
@@ -580,26 +634,40 @@ impl TerminalWrite {
             .control_terminal(session)
             .filter(|(run, _)| *run == self.run)
             .ok_or_else(input_not_ready)?;
-        let write = |bytes, submit_afterward| {
+        let write = |bytes, submit_afterward, check| {
             let (reply, result) = mpsc::channel();
             owner
                 .send(
                     session,
-                    crate::worker::WorkerCommand::Write { bytes, reply },
+                    crate::worker::WorkerCommand::WriteControlInput {
+                        bytes,
+                        origin: self.origin,
+                        check,
+                        reply,
+                    },
                 )
                 .map_err(|_| input_not_ready())?;
             Ok(InputStep::Acknowledge(result, submit_afterward))
         };
         self.step = match &mut self.step {
-            InputStep::Body(bytes) => write(std::mem::take(bytes), self.submit)?,
+            InputStep::Body(bytes) => write(
+                std::mem::take(bytes),
+                self.submit,
+                self.mode
+                    .map_or(ControlInputCheck::None, ControlInputCheck::Prepare),
+            )?,
             InputStep::Acknowledge(result, submit) => match result.try_recv() {
-                Ok(Ok(())) if *submit => InputStep::Echo(Instant::now()),
-                Ok(Ok(())) => return Ok(true),
+                Ok(Ok(revision)) if *submit => InputStep::Echo(
+                    Instant::now(),
+                    matches!(self.mode, Some(InputMode::Auto | InputMode::Replace))
+                        .then_some(revision),
+                ),
+                Ok(Ok(_)) => return Ok(true),
                 Ok(Err(error)) => return Err(terminal_write_error(error)),
                 Err(mpsc::TryRecvError::Disconnected) => return Err(input_not_ready()),
                 Err(mpsc::TryRecvError::Empty) => return Ok(false),
             },
-            InputStep::Echo(started) => {
+            InputStep::Echo(started, revision) => {
                 let elapsed = started.elapsed();
                 let quiet =
                     last_output.is_none_or(|output| output.elapsed() >= Duration::from_millis(250));
@@ -608,7 +676,11 @@ impl TerminalWrite {
                 {
                     return Ok(false);
                 }
-                write(vec![b'\r'], false)?
+                write(
+                    vec![b'\r'],
+                    false,
+                    revision.map_or(ControlInputCheck::None, ControlInputCheck::Submit),
+                )?
             }
         };
         Ok(false)
@@ -741,6 +813,8 @@ impl RescuePrompt {
                     self.state = RescuePromptState::Writing(TerminalWrite {
                         run: run.clone(),
                         submit: true,
+                        mode: None,
+                        origin: InputOrigin::System,
                         step: InputStep::Body(rescue_prompt_bytes(
                             &self.markdown,
                             modes.bracketed_paste,
@@ -1054,15 +1128,14 @@ impl ControlServer {
             };
             let targets = self.targets()?;
             let target = selector.resolve(&targets, &caller)?;
-            let (bytes, submit) = if request.method == "terminal.send-key" {
+            let (bytes, submit, mode) = if request.method == "terminal.send-key" {
                 let bytes = control_key(params["key"].as_str().unwrap_or_default())
                     .ok_or_else(|| Fault::new(UNSUPPORTED, "control key is not allowlisted"))?;
-                (bytes.to_vec(), false)
+                (bytes.to_vec(), false, None)
             } else {
-                (
-                    wire_text(params, "text", 64 * 1024)?.as_bytes().to_vec(),
-                    optional_bool(params, "submit")?,
-                )
+                let bytes = wire_text(params, "text", 64 * 1024)?.as_bytes().to_vec();
+                let submit = optional_bool(params, "submit")?;
+                (bytes, submit, submit.then_some(send_mode(params)?))
             };
             // The pending write only needs its authority and small byte payload.
             *params = Value::Null;
@@ -1072,10 +1145,16 @@ impl ControlServer {
             if self.inputs.values().map(VecDeque::len).sum::<usize>() >= MAX_CONNECTIONS {
                 return Err(Fault::new(TIMEOUT, "host control input queue is full"));
             }
-            Ok((target.session_id.clone(), run.to_owned(), bytes, submit))
+            Ok((
+                target.session_id.clone(),
+                run.to_owned(),
+                bytes,
+                submit,
+                mode,
+            ))
         })();
         match prepared {
-            Ok((session, run, bytes, submit)) => {
+            Ok((session, run, bytes, submit, mode)) => {
                 self.inputs
                     .entry(session)
                     .or_default()
@@ -1084,6 +1163,8 @@ impl ControlServer {
                         write: TerminalWrite {
                             run,
                             submit,
+                            mode,
+                            origin: InputOrigin::Agent,
                             step: InputStep::Body(bytes),
                         },
                     });
@@ -4181,6 +4262,8 @@ impl ForkWaitItem {
         self.write = Some(TerminalWrite {
             run,
             submit,
+            mode: None,
+            origin: InputOrigin::System,
             step: if !submit {
                 InputStep::Body(vec![b'\r'])
             } else {

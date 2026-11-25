@@ -20,7 +20,7 @@ use matou_native_core::{
 use matou_native_runtime::{
     SessionEvent, SessionOptions, StorageFaultCode,
     flow::{CREDIT_HIGH_WATERMARK_BYTES, MAX_CODE_UNITS},
-    session::Session,
+    session::{InputOrigin, Session},
     worker::{SessionWorker, WorkerCommand, WorkerEvent},
 };
 use matou_native_terminal::{GridPoint, SelectionAction, SelectionMode, TerminalOptions, Theme};
@@ -141,6 +141,7 @@ fn worker_copy_interrupt_clears_the_line_and_preserves_the_decoder_tail() -> Res
     let (reply, written) = mpsc::channel();
     worker.send(WorkerCommand::WriteShellInput {
         bytes: b"old-line\xef".to_vec(),
+        origin: InputOrigin::User,
         submission: None,
         reply,
     })?;
@@ -158,6 +159,7 @@ fn worker_copy_interrupt_clears_the_line_and_preserves_the_decoder_tail() -> Res
     let (reply, written) = mpsc::channel();
     worker.send(WorkerCommand::WriteShellInput {
         bytes: b"\xbb\xbfclaude\r".to_vec(),
+        origin: InputOrigin::User,
         submission: Some(submission),
         reply,
     })?;
@@ -182,6 +184,7 @@ fn worker_promotion_clear_resets_the_decoder_tail() -> Result<()> {
         let (reply, written) = mpsc::channel();
         worker.send(WorkerCommand::WriteShellInput {
             bytes: bytes.to_vec(),
+            origin: InputOrigin::User,
             submission: Some(submission),
             reply,
         })?;

@@ -3,6 +3,7 @@ use super::*;
 use crate::{
     history::{decode_output, read_first_valid, segment_groups},
     owner::ShellOwner,
+    worker::CurrentScreen,
 };
 use encoding_rs::UTF_8;
 use matou_native_core::journal::{Frame, MAX_SAFE_INTEGER, Record};
@@ -115,7 +116,7 @@ fn sequence(value: &Value, field: &str) -> WireResult<u64> {
 
 pub(super) enum Reply {
     Ready(Vec<u8>),
-    Screen(Receiver<Result<Screen>>, PathBuf, String, TextLimits),
+    Screen(Receiver<Result<CurrentScreen>>, PathBuf, String, TextLimits),
     Replay(PathBuf, String, TextLimits),
     History(PathBuf, String, TextLimits, u64, Option<u64>),
 }
@@ -177,19 +178,19 @@ impl Reply {
         let result = match self {
             Self::Ready(body) => return Ok(body),
             Self::Screen(result, root, session, limits) => {
-                let screen = loop {
+                let (screen, pending_input) = loop {
                     match result.recv_timeout(IO_POLL) {
                         Ok(result) => break result.map_err(|_| screen_fault())?,
                         Err(mpsc::RecvTimeoutError::Timeout) => check()?,
                         Err(mpsc::RecvTimeoutError::Disconnected) => {
-                            break replay(&root, &session, check)?;
+                            break (replay(&root, &session, check)?, None);
                         }
                     }
                 };
-                current(request.id, screen, limits)
+                current(request.id, screen, pending_input, limits)
             }
             Self::Replay(root, session, limits) => {
-                current(request.id, replay(&root, &session, check)?, limits)
+                current(request.id, replay(&root, &session, check)?, None, limits)
             }
             Self::History(root, session, limits, from, through) => {
                 history(request.id, &root, &session, limits, from, through, check)
@@ -309,7 +310,12 @@ fn tail_start(text: &str, limits: TextLimits) -> usize {
         .map_or(start, |(position, _)| start + position + 1)
 }
 
-fn current(id: &str, screen: Screen, limits: TextLimits) -> WireResult<Vec<u8>> {
+fn current(
+    id: &str,
+    screen: Screen,
+    pending_input: Option<PendingInput>,
+    limits: TextLimits,
+) -> WireResult<Vec<u8>> {
     #[derive(Serialize)]
     struct Current<'a> {
         text: &'a str,
@@ -317,6 +323,8 @@ fn current(id: &str, screen: Screen, limits: TextLimits) -> WireResult<Vec<u8>> 
         rows: usize,
         truncated: bool,
         source: &'static str,
+        #[serde(rename = "pendingInput", skip_serializing_if = "Option::is_none")]
+        pending_input: Option<PendingInput>,
     }
     let mut text = String::new();
     for row in screen.cells.chunks(screen.cols) {
@@ -341,6 +349,7 @@ fn current(id: &str, screen: Screen, limits: TextLimits) -> WireResult<Vec<u8>> 
             rows: screen.rows,
             truncated: start != 0,
             source: "screen",
+            pending_input,
         },
     )
 }

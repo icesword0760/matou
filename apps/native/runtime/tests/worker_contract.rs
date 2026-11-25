@@ -16,6 +16,7 @@ use matou_native_core::{
 };
 use matou_native_runtime::{
     SessionEvent, SessionOptions,
+    session::InputOrigin,
     worker::{SessionWorker, WorkerCommand, WorkerEvent},
 };
 use matou_native_terminal::{GridPoint, SelectionAction, SelectionMode, TerminalOptions};
@@ -128,6 +129,7 @@ fn real_workers_keep_shell_output_independent_and_return_owned_screens() -> Resu
     let (reply, written) = mpsc::channel();
     b.send(WorkerCommand::Write {
         bytes: b"printf 'WORKER_%s\\n' 'B_ONLY'\r".to_vec(),
+        origin: InputOrigin::User,
         reply,
     })?;
     seen.wait(&incoming, |seen| {

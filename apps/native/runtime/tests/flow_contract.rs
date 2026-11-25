@@ -113,13 +113,17 @@ fn matches_reference_credit_transitions_and_cumulative_acknowledgements() -> Res
 }
 
 #[cfg(target_os = "macos")]
-use matou_native_runtime::{flow, history};
+use matou_native_runtime::history;
 #[cfg(target_os = "macos")]
 use probe_model::{SessionEvent, SessionOptions, StorageFaultCode};
 #[cfg(target_os = "macos")]
 #[path = "../src/checkpoint_sync.rs"]
 #[allow(dead_code)]
 mod checkpoint_sync;
+#[cfg(target_os = "macos")]
+#[path = "../src/flow.rs"]
+#[allow(dead_code)]
+mod flow;
 #[cfg(target_os = "macos")]
 #[path = "../src/model.rs"]
 #[allow(dead_code)]
