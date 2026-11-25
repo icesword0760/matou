@@ -18,7 +18,7 @@ use crate::{
     },
     provider_config::custom_context_window,
     pty::{CALLER_SESSION_MARKERS, LaunchProfile, ShellLaunch, get_var, remove_var, set_var},
-    sessions::ClaudeRoleLaunchPreferences,
+    sessions::{ClaudeRoleLaunchPreferences, current_interface_locale, read_locale_preference},
 };
 
 mod official_oauth;
@@ -721,6 +721,17 @@ impl ClaudeGatewayProjection {
             return None;
         }
         let model = without_context_suffix(model);
+        if let Some(source) = self
+            .source
+            .as_ref()
+            .and_then(|source| source.subscription.as_ref())
+            && source.model.is_none()
+            && model
+                .strip_prefix(source.prefix())
+                .is_some_and(|rest| rest.starts_with('/'))
+        {
+            return None;
+        }
         if let Some(alias) = startup_role_alias(model) {
             return ROLES.iter().position(|role| *role == alias);
         }
@@ -944,7 +955,18 @@ impl ClaudeLaunch {
         // The legacy compaction gateway only adds a route to that launch.
         let independent = has_independent_target(preferences);
         let role_snapshot = has_role_snapshot(preferences);
-        let source_binding = if !role_snapshot {
+        let bound_subscription = self
+            .gateway
+            .as_ref()
+            .and_then(|gateway| gateway.source.as_ref())
+            .filter(|source| {
+                source
+                    .subscription
+                    .as_ref()
+                    .is_some_and(|target| target.provider_id == self.provider_config_id)
+            })
+            .cloned();
+        let source_binding = if !role_snapshot || bound_subscription.is_some() {
             json!({"providerConfigId": self.provider_config_id})
         } else {
             Value::Null
@@ -957,7 +979,7 @@ impl ClaudeLaunch {
             OfficialCapture::new(&config, OfficialClaudeEnvironment::new(launch_environment));
         self.gateway =
             if independent || requires_role_snapshot(&config, &source, preferences, &official) {
-                let (projection, context_window) = independent_gateway_projection(
+                let (mut projection, context_window) = independent_gateway_projection(
                     &config,
                     &source,
                     preferences,
@@ -968,6 +990,12 @@ impl ClaudeLaunch {
                 )?;
                 if role_snapshot {
                     project_context_window(&mut self.launch.env, context_window);
+                }
+                if let Some(source) = bound_subscription {
+                    // An exact role or search route can coexist with the restored
+                    // conversation's original subscription and model.
+                    projection.source = Some(source);
+                    projection.startup_role = None;
                 }
                 Some(projection)
             } else {
@@ -1279,10 +1307,18 @@ fn prepare_claude(
         Some(ClaudeTarget::PermissionRestart { remembered: true })
     );
     let mut provider = read_provider(data_root, &config, provider_binding)?;
+    let locale = || current_interface_locale(read_locale_preference(data_root));
+    let service_unavailable = || {
+        locale().text(
+            "订阅服务未启动，请重新打开设置或重启码头",
+            "The subscription service hasn't started. Reopen Settings or restart Matou.",
+        )
+    };
     if subscriptions && provider.is_subscription() {
         ensure!(
             gateway_connection(&provider).is_some(),
-            "Subscription provider is unavailable"
+            "{}",
+            subscription_account_unavailable(data_root)
         );
     }
     let bound_role = if matches!(
@@ -1315,9 +1351,13 @@ fn prepare_claude(
                     .is_some_and(|models| {
                         models.iter().any(|model| model["id"].as_str() == opus)
                     }),
-            "Subscription Opus model metadata is missing"
+            "{}",
+            locale().text(
+                "订阅账号的模型信息缺失，请刷新账号或重新登录",
+                "Model information is missing for this subscription account. Refresh the account or sign in again.",
+            )
         );
-        bail!("Subscription launch service is unavailable");
+        bail!("{}", service_unavailable());
     }
 
     let assigned = match assignments {
@@ -1412,13 +1452,14 @@ fn prepare_claude(
                 plan.connections()
                     .all(|connection| connection.subscription.is_none())
             }) && !provider.is_subscription(),
-        "Subscription launch service is unavailable"
+        "{}",
+        service_unavailable()
     );
-    let subscription_role = provider.is_subscription().then(|| {
-        selected_role
-            .or_else(|| model_role(provider, model))
-            .unwrap_or("opus")
-    });
+    let subscription_role = if provider.is_subscription() {
+        selected_role.or_else(|| model_role(provider, model))
+    } else {
+        None
+    };
     let clear_assignment_environment = gateway
         .as_ref()
         .is_some_and(|projection| projection.web_search.is_some())
@@ -2240,13 +2281,28 @@ fn official_provider() -> Provider {
     }
 }
 
+fn subscription_account_unavailable(data_root: &Path) -> &'static str {
+    current_interface_locale(read_locale_preference(data_root)).text(
+        "还没有可用的订阅账号，请先在设置里添加并启用",
+        "No subscription account is available. Add and enable one in Settings.",
+    )
+}
+
 fn read_provider(data_root: &Path, config: &Value, binding: &Value) -> Result<Provider> {
     let bound_id = binding["providerConfigId"]
         .as_str()
         .filter(|id| !id.trim().is_empty());
-    let missing = "会话绑定的供应商配置不存在";
+    let missing = || {
+        if binding["model"].as_str().is_some_and(|model| {
+            model.starts_with("matou-chatgpt/") || model.starts_with("matou-antigravity/")
+        }) {
+            subscription_account_unavailable(data_root)
+        } else {
+            "会话绑定的供应商配置不存在"
+        }
+    };
     let Some(providers) = provider_entries(config) else {
-        ensure!(bound_id.is_none_or(|id| id == OFFICIAL_ID), "{missing}");
+        ensure!(bound_id.is_none_or(|id| id == OFFICIAL_ID), "{}", missing());
         return Ok(official_provider());
     };
     let active_id = config["activeProviderIds"]["claude-code"].as_str();
@@ -2256,7 +2312,7 @@ fn read_provider(data_root: &Path, config: &Value, binding: &Value) -> Result<Pr
             .find(|provider| provider["id"].as_str() == Some(id))
     };
     let selected = match bound_id {
-        Some(id) => find(id).context(missing)?,
+        Some(id) => find(id).with_context(missing)?,
         None => active_id.and_then(find).unwrap_or(&providers[0]),
     };
     // serde's error can include the offending value, including a credential.

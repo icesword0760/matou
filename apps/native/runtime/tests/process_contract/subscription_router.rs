@@ -1,8 +1,11 @@
 use super::*;
-use matou_native_core::sessions::{claude_binding, save_claude_time_zone};
+use matou_native_core::{
+    hierarchy::session_environment::Target,
+    sessions::{claude_binding, save_claude_time_zone},
+};
 use matou_native_runtime::{
     egress_probe::Family,
-    host::{ForkPlacement, ForkWorktreeMode, RecoveryState},
+    host::{EnvironmentChangeResult, ForkPlacement, ForkWorktreeMode, RecoveryState},
     protocol::{ProviderSettingsReply, ProviderSettingsResult},
 };
 use serde_json::{Value, json};
@@ -56,6 +59,20 @@ if [ ! -e "$0.skip-messages" ]; then
     done
 fi
 printf 'subscription %s ready\n' "$phase"
+if [ "${PWD##*/}" = "subscription-worktree" ]; then
+    printf 'subscription worktree ready\n'
+fi
+if [ -e "$0.reply-to-input" ]; then
+    IFS= read -r prompt
+    [ "$prompt" = "fixture prompt" ]
+    model="$ANTHROPIC_DEFAULT_OPUS_MODEL"
+    if [ "${1-}" = "--settings" ]; then shift 2; fi
+    if [ "${1-}" = "--model" ]; then model="$2"; fi
+    reply=$(/usr/bin/curl --silent --fail --max-time 8 --noproxy '*' \
+        -H 'Content-Type: application/json' --data "{\"model\":\"$model\",\"fixture\":\"pty-first-turn\"}" \
+        "$ANTHROPIC_BASE_URL/v1/messages")
+    printf 'subscription reply %s\n' "$reply"
+fi
 exec /bin/sleep 60
 "#,
         )?;
@@ -535,6 +552,206 @@ fn stop(host: &mut RuntimeChild) -> Result<()> {
     assert!(router_events(host, "wrong-management-bearer")?.is_empty());
     assert!(router_events(host, "wrong-inference-bearer")?.is_empty());
     Ok(())
+}
+
+#[test]
+fn subscription_start_failures_are_actionable_and_restore_the_shell() -> Result<()> {
+    for (case, locale, expected) in [
+        (
+            "service",
+            "zh-CN",
+            "订阅服务未启动，请重新打开设置或重启码头",
+        ),
+        (
+            "account",
+            "zh-CN",
+            "还没有可用的订阅账号，请先在设置里添加并启用",
+        ),
+        ("sign-in", "zh-CN", "该订阅账号需要重新登录"),
+        (
+            "model",
+            "zh-CN",
+            "订阅账号的模型信息缺失，请刷新账号或重新登录",
+        ),
+        (
+            "connect",
+            "en",
+            "Couldn't connect to the subscription service: The local service version doesn't match. Update Matou.",
+        ),
+    ] {
+        let mut fixture = Fixture::new()?;
+        if case == "service" {
+            fixture.router = fixture.router.with_extension("missing");
+        }
+        let mut host = fixture.spawn(None)?;
+        host.hello()?;
+        fs::write(
+            host.data.join("locale.json"),
+            json!({"preference": locale}).to_string(),
+        )?;
+        let mut row = codex(false);
+        match case {
+            "account" => row["subscription"]["provider"] = Value::Null,
+            "sign-in" => row["subscription"]["account"]["status"] = json!("needs-sign-in"),
+            "model" => row["subscription"]["modelMetadata"] = json!([]),
+            _ => {}
+        }
+        write_config(&host, CODEX_ID, &[api(), row.clone()])?;
+        credential(&host, &row, &["codex-opus", "codex-sonnet", "codex-haiku"])?;
+        if case == "connect" {
+            fs::write(host.data.join("model-router/fixture-mode"), "wrong-version")?;
+        }
+        host.input("claude")?;
+        host.expect_diagnostic(expected)?;
+        host.input("printf 'shell-back\\n'")?;
+        host.frame(|rows, _, _| rows.iter().any(|row| row == "shell-back"))?;
+        assert!(!fixture.cli.with_extension("initial").exists());
+        let db = Connection::open(host.data.join("matou.sqlite"))?;
+        assert!(claude_binding(&db, &host.session)?.is_none());
+        stop(&mut host)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn subscription_start_resume_and_handoff_reply_on_the_bound_account_after_switch() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let mut seed = fixture.spawn_with_shell(None, &fixture.root.path().join("missing-shell"))?;
+    seed.ready()?;
+    stop(&mut seed)?;
+    let codex = codex(false);
+    let agy = antigravity();
+    write_config(&seed, CODEX_ID, &[api(), codex.clone(), agy.clone()])?;
+    credential(
+        &seed,
+        &codex,
+        &["codex-opus", "codex-sonnet", "codex-haiku"],
+    )?;
+    credential(
+        &seed,
+        &agy,
+        &["agy-opus", "agy-sonnet", "agy-haiku", "agy-search"],
+    )?;
+    let db = Connection::open(seed.data.join("matou.sqlite"))?;
+    db.execute(
+        "UPDATE sessions SET kind='claude-code' WHERE id=?",
+        [&seed.session],
+    )?;
+    let worktree = fixture.root.path().join("subscription-worktree");
+    let git = |args: &[&str]| -> Result<()> {
+        let result = ProcessCommand::new("git")
+            .args(args)
+            .current_dir(&seed.workspace)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()?;
+        ensure!(result.status.success(), "fixture git failed: {:?}", args);
+        Ok(())
+    };
+    git(&["init", "-b", "main"])?;
+    git(&[
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "fixture",
+    ])?;
+    git(&[
+        "worktree",
+        "add",
+        "-b",
+        "subscription",
+        worktree.to_str().unwrap(),
+    ])?;
+    db.execute(
+        "INSERT INTO execution_contexts (id, workspace_id, kind, cwd, created_at)
+         SELECT 'subscription-worktree', tasks.workspace_id, 'git-worktree', ?1, 1
+         FROM sessions JOIN tasks ON sessions.task_id=tasks.id WHERE sessions.id=?2",
+        rusqlite::params![worktree.to_str(), seed.session],
+    )?;
+    db.execute(
+        "INSERT INTO worktrees
+         (id, execution_context_id, repository_root, worktree_path, branch_name, state, created_at, updated_at)
+         VALUES ('subscription-worktree', 'subscription-worktree', ?1, ?2, 'subscription', 'ready', 1, 1)",
+        rusqlite::params![seed.workspace.to_str(), worktree.to_str()],
+    )?;
+    db.execute(
+        "UPDATE session_environment_bindings SET managed_worktree_id='subscription-worktree' WHERE session_id=?",
+        [&seed.session],
+    )?;
+    fs::write(fixture.cli.with_extension("reply-to-input"), "")?;
+    let model = "matou-chatgpt/matou-opus";
+    let first_turn = |host: &mut RuntimeChild| -> Result<()> {
+        host.input("fixture prompt")?;
+        host.frame(|rows, _, _| {
+            rows.iter()
+                .any(|row| row.contains(&format!("subscription reply {{\"model\": \"{model}\"")))
+        })?;
+        Ok(())
+    };
+    let mut host = fixture.spawn(None)?;
+    host.connect()?;
+    let initial = fixture.launch(&mut host, "initial")?;
+    confirm(&mut host, &initial, PARENT, "default", model)?;
+    first_turn(&mut host)?;
+    preferences(
+        &mut host,
+        json!({}),
+        Some(target(ANTIGRAVITY_ID, "agy-search")),
+        None,
+    )?;
+    write_config(&host, ANTIGRAVITY_ID, &[api(), codex, agy])?;
+    stop(&mut host)?;
+
+    let mut resumed = fixture.spawn(None)?;
+    resumed.connect()?;
+    let launch = fixture.launch(&mut resumed, "resume")?;
+    assert_eq!(launch.session, initial.session);
+    assert_eq!(launch.args.get(1).map(String::as_str), Some(model));
+    confirm(&mut resumed, &launch, PARENT, "default", model)?;
+    first_turn(&mut resumed)?;
+    let binding = claude_binding(&db, &launch.session)?.context("restored binding")?;
+    assert_eq!(binding.metadata["providerConfigId"], CODEX_ID);
+    assert_eq!(binding.metadata["model"], model);
+    resumed.send(Command::HandoffSessionEnvironment {
+        request_id: 92,
+        session_id: launch.session.clone(),
+        target: Target::Worktree,
+    })?;
+    resumed.frame(|rows, _, _| rows.iter().any(|row| row == "subscription worktree ready"))?;
+    let capture = fs::read_to_string(fixture.cli.with_extension("resume"))?;
+    assert!(capture.lines().any(|arg| arg == model));
+    let settings = capture.lines().nth(7).context("handoff settings path")?;
+    post_claude_identity(Path::new(settings), PARENT, "default", model)?;
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        if let Event::HandoffSessionEnvironmentResult(reply) = resumed.event(deadline, true)? {
+            assert!(
+                matches!(reply.result, EnvironmentChangeResult::Ok { active_target: Target::Worktree, cwd }
+                if Path::new(&cwd) == worktree)
+            );
+            break;
+        }
+    }
+    first_turn(&mut resumed)?;
+    assert_eq!(
+        claude_binding(&db, &launch.session)?
+            .context("handoff binding")?
+            .id,
+        binding.id
+    );
+    assert_eq!(
+        router_events(&resumed, "message")?
+            .iter()
+            .filter(|event| event["operation"] == "pty-first-turn")
+            .map(|event| event["model"].clone())
+            .collect::<Vec<_>>(),
+        [json!(model), json!(model), json!(model)]
+    );
+    stop(&mut resumed)
 }
 
 #[test]
