@@ -333,6 +333,12 @@ impl EgressStatus {
             .or_else(|| membership.first().copied())
     }
 
+    pub fn footer_region(&self, session_id: &str, locale: InterfaceLocale) -> Option<String> {
+        let entry = self.family(self.session_family(session_id)?)?;
+        let country = entry.exit.as_ref().map_or("", |exit| &exit.country);
+        Some(country_flag(country).unwrap_or_else(|| country_name(country, locale).into_owned()))
+    }
+
     fn checks(&self, family: Option<EgressFamily>) -> impl Iterator<Item = &EgressCheck> {
         self.checks
             .iter()
@@ -995,17 +1001,17 @@ fn push_redacted_token(out: &mut String, token: &str) {
 
 fn country_label(code: &str, locale: InterfaceLocale) -> String {
     let name = country_name(code, locale);
-    if code.len() == 2 && code.bytes().all(|byte| byte.is_ascii_alphabetic()) {
-        let flag: String = code
-            .bytes()
+    country_flag(code).map_or_else(|| name.to_string(), |flag| format!("{flag} {name}"))
+}
+
+fn country_flag(code: &str) -> Option<String> {
+    (code.len() == 2 && code.bytes().all(|byte| byte.is_ascii_alphabetic())).then(|| {
+        code.bytes()
             .map(|byte| {
                 char::from_u32(0x1f1e6 + u32::from(byte.to_ascii_uppercase() - b'A')).unwrap()
             })
-            .collect();
-        format!("{flag} {name}")
-    } else {
-        name.into_owned()
-    }
+            .collect()
+    })
 }
 
 fn country_name(code: &str, locale: InterfaceLocale) -> Cow<'_, str> {
@@ -1449,7 +1455,13 @@ mod egress_ui {
             return Empty.into_any_element();
         };
         let (text, background, border, ok_dot) = egress_chip_colors(view.tone, dark);
-        let dot = if ok_dot { rgb(0x22c55e) } else { text };
+        let dot = || {
+            div().size(px(5.)).flex_none().rounded_full().bg(if ok_dot {
+                rgb(0x22c55e)
+            } else {
+                text
+            })
+        };
         let on_action = on_action.clone();
 
         div()
@@ -1458,7 +1470,7 @@ mod egress_ui {
             .flex()
             .items_center()
             .gap(px(5.))
-            .px(px(7.))
+            .px(px(if ok_dot { 4. } else { 7. }))
             .py(px(2.))
             .rounded(px(5.))
             .border_1()
@@ -1470,8 +1482,9 @@ mod egress_ui {
             .whitespace_nowrap()
             .max_w(px(220.))
             .cursor_pointer()
-            .child(div().size(px(5.)).flex_none().rounded_full().bg(dot))
-            .child(div().flex_1().min_w(px(0.)).truncate().children(label))
+            .children((!ok_dot).then(dot))
+            .children(label.map(|label| div().flex_1().min_w_0().truncate().child(label)))
+            .children(ok_dot.then(dot))
             .on_click(move |_, window, cx| {
                 on_action(EgressAction::TogglePanel, window, cx);
             })

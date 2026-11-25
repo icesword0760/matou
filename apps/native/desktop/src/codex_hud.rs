@@ -2,7 +2,7 @@
 //
 // Render-only: the runtime already projects `node["codexHud"]`. This module
 // parses that optional payload, composes the frozen model label, and draws the
-// context ring and tool-detail cell with the existing light footer primitives.
+// context ring and session statistics with the existing footer primitives.
 //
 // Frozen sources:
 // - apps/desktop/src/renderer/src/hud/TerminalHud.tsx:182-191,505-517,540-591
@@ -10,10 +10,14 @@
 // - apps/desktop/src/renderer/src/hierarchy/hierarchy.css:354-419,469-476
 
 use gpui::{prelude::*, *};
+use matou_native_desktop::theme_tokens::FooterPalette;
 use serde_json::Value;
 
 use super::InterfaceLocale;
-use super::{CardTooltip, card_tooltip_box, footer_bounds_probe, footer_text, popover_colors};
+use super::{
+    CardTooltip, card_tooltip_box, footer_bounds_probe, footer_text, footer_token_count,
+    popover_colors,
+};
 use crate::ui_text::ui_text;
 
 /// `.status-priority-8` hides the model at a status content box of 210pt or less.
@@ -154,13 +158,15 @@ impl CodexHud {
         }
     }
 
-    /// Frozen `modelLabel`: `model (effort) (200K context)`. The context
-    /// suffix only exists when the model label is non-empty and the window is
-    /// a positive number.
-    pub(super) fn model_label(&self) -> Option<SharedString> {
-        self.format_model(self.model.as_ref()?)
+    pub(super) fn model_label(&self, mode: &str) -> Option<SharedString> {
+        if supports_details(mode) {
+            self.model.clone()
+        } else {
+            self.format_model(self.model.as_ref()?)
+        }
     }
 
+    /// Keep the full model label, effort and context window in the tooltip.
     pub(super) fn full_model_label(&self) -> Option<SharedString> {
         self.format_model(self.full_model.as_ref()?)
     }
@@ -223,18 +229,15 @@ impl CodexHud {
             .collect()
     }
 
-    pub(super) fn tools_slot(&self, locale: InterfaceLocale, dark: bool) -> Option<Stateful<Div>> {
+    pub(super) fn tools_detail(&self, locale: InterfaceLocale) -> Option<Detail> {
         let total = self.tool_total();
-        (total > 0).then(|| {
-            Detail {
-                id: "tools",
-                label: format!("{total} Tools"),
-                progress: None,
-                title: locale.text("工具调用", "Tool calls"),
-                rows: DetailRows::Plain(self.tool_details(locale)),
-                color: rgb(TOOL_DETAIL_COLOR),
-            }
-            .slot(locale, dark)
+        (total > 0).then(|| Detail {
+            id: "tools",
+            label: format!("{total} Tools"),
+            progress: None,
+            title: locale.text("工具调用", "Tool calls"),
+            rows: DetailRows::Plain(self.tool_details(locale)),
+            color: rgb(TOOL_DETAIL_COLOR),
         })
     }
 }
@@ -274,9 +277,17 @@ pub(super) fn model_slot(
 }
 
 /// Frozen `ContextRing`: 14pt ring, a 4pt gap, and an 11pt percentage label.
-pub(super) fn context_ring(percent: f64) -> Stateful<Div> {
+pub(super) fn context_ring(percent: f64, tokens: Option<(u64, u64)>) -> Stateful<Div> {
     let label = format_context_percent(percent);
-    let tooltip = SharedString::from(format!("Context: {label}"));
+    let mut tooltip = format!("Context: {label}");
+    if let Some((used, window)) = tokens {
+        tooltip.push_str(&format!(
+            " · {} / {}",
+            footer_token_count(used),
+            footer_token_count(window)
+        ));
+    }
+    let tooltip = SharedString::from(tooltip);
     let color = context_color(percent);
     div()
         .id("footer-context")
@@ -987,6 +998,90 @@ fn strings(value: &Value) -> Vec<SharedString> {
     array(value).iter().filter_map(clean_text).collect()
 }
 
+pub(super) fn stats_title(locale: InterfaceLocale) -> &'static str {
+    locale.text("会话统计", "Session stats")
+}
+
+pub(super) fn stats_panel(stats: &[Detail], locale: InterfaceLocale, dark: bool) -> Div {
+    const MAX_ROWS: usize = 6;
+    card_tooltip_box(dark)
+        .w(px(335.))
+        .max_w_full()
+        .flex()
+        .flex_col()
+        .max_h(px(360.))
+        .child(
+            div()
+                .flex_none()
+                .pb(px(6.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(ui_text(stats_title(locale))),
+        )
+        .child(
+            div()
+                .id("footer-stats-rows")
+                .min_h_0()
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .children(stats.iter().filter_map(|stat| {
+                    let DetailRows::Plain(rows) = &stat.rows else {
+                        return None;
+                    };
+                    let count = match stat.id {
+                        "mcp-errors" => Some(("mcp-error-count", rows.len().to_string())),
+                        _ => stat.progress.clone().map(|count| ("todo-count", count)),
+                    };
+                    Some(
+                        div()
+                            .flex_none()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(3.))
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap(px(8.))
+                                    .items_center()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child(ui_text(stat.title)),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .min_w_0()
+                                            .gap(px(4.))
+                                            .text_color(stat.color)
+                                            .child(
+                                                div().min_w_0().truncate().child(footer_text(
+                                                    stat.id,
+                                                    stat.label.clone(),
+                                                )),
+                                            )
+                                            .children(count.map(|(key, count)| {
+                                                div().flex_none().child(footer_text(key, count))
+                                            })),
+                                    ),
+                            )
+                            .children(
+                                rows.iter()
+                                    .take(MAX_ROWS)
+                                    .map(|row| div().truncate().child(ui_text(row.clone()))),
+                            )
+                            .children((rows.len() > MAX_ROWS).then(|| {
+                                footer_text("stats-overflow", format!("+{}", rows.len() - MAX_ROWS))
+                            })),
+                    )
+                })),
+        )
+}
+
 pub(super) fn statistics(
     hud: &Value,
     node: &Value,
@@ -1057,7 +1152,10 @@ pub(super) fn statistics(
         };
         slots.push(Detail {
             id: "agents",
-            label: format!("{warning}{agent_count} Agents"),
+            label: format!(
+                "{warning}{agent_count} {}",
+                if agent_count == 1 { "Agent" } else { "Agents" }
+            ),
             progress: None,
             title: locale.text("子代理", "Agents"),
             rows: DetailRows::Agents(rows),
@@ -1186,16 +1284,55 @@ pub(super) fn usage_windows(hud: &Value, key: &str) -> Vec<UsageWindow> {
         .collect()
 }
 
+pub(super) fn footer_usage_windows(usages: &[&UsageWindow]) -> Vec<usize> {
+    let preferred = ["5h", "Weekly"].into_iter().filter_map(|label| {
+        usages
+            .iter()
+            .position(|usage| usage.label.eq_ignore_ascii_case(label))
+    });
+    let mut selected = preferred.collect::<Vec<_>>();
+    for index in 0..usages.len() {
+        if selected.len() == 2 {
+            break;
+        }
+        if !selected.contains(&index) {
+            selected.push(index);
+        }
+    }
+    selected
+}
+
+pub(super) fn footer_quota_row(
+    usage: &UsageWindow,
+    palette: FooterPalette,
+    key: &'static str,
+    percent_key: &'static str,
+) -> Div {
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(3.))
+        .whitespace_nowrap()
+        .children(footer_bounds_probe(key))
+        .child(footer_text(key, usage.label.clone()))
+        .child(
+            div()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgba(palette.usage_accent))
+                .child(footer_text(
+                    percent_key,
+                    format_context_percent(usage.percent),
+                )),
+        )
+}
+
 pub(super) fn quota_row(usage: &UsageWindow, dark: bool) -> Div {
     quota_row_with_colors(
         usage,
         usage.color(dark),
         rgb(if dark { 0x8b949e } else { 0x57606a }),
     )
-}
-
-pub(super) fn claude_quota_row(usage: &UsageWindow) -> Div {
-    quota_row_with_colors(usage, rgb(0x58a6ff), rgb(0x6e7681))
 }
 
 fn quota_row_with_colors(usage: &UsageWindow, percent: Rgba, reset: Rgba) -> Div {
@@ -1368,6 +1505,35 @@ mod tests {
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].summary(), "Other models 77%");
         assert_eq!(groups[0].color(true), rgb(0xd29922));
+    }
+
+    #[::core::prelude::v1::test]
+    fn footer_prefers_the_subscription_windows_and_keeps_real_partial_usage() {
+        for (labels, expected) in [
+            (vec!["Extra", "wEeKlY", "5H", "Other"], vec!["5H", "wEeKlY"]),
+            (vec!["First", "Weekly", "Other"], vec!["Weekly", "First"]),
+            (vec!["First", "Second", "Third"], vec!["First", "Second"]),
+            (vec!["5h"], vec!["5h"]),
+            (vec![], vec![]),
+        ] {
+            let usages: Vec<_> = labels
+                .into_iter()
+                .map(|label| UsageWindow {
+                    label: label.into(),
+                    percent: 0.,
+                    reset: None,
+                })
+                .collect();
+            let refs: Vec<_> = usages.iter().collect();
+            let selected = footer_usage_windows(&refs);
+            assert_eq!(
+                selected
+                    .into_iter()
+                    .map(|index| usages[index].label.as_ref())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
     }
 
     #[::core::prelude::v1::test]

@@ -1814,6 +1814,7 @@ const CONTROLS: &[&str] = &[
     "footer-git",
     "footer-environment",
     "footer-quota",
+    "footer-stats",
     "permission-mode",
     "detached-permission-close",
     "detached-permission-cancel",
@@ -12274,12 +12275,13 @@ impl Workspace {
             self.footer_shell.clone()
         } else {
             hud.as_ref()
-                .and_then(|hud| hud.model_label())
-                .or_else(|| codex.as_ref().and_then(|hud| hud.model_label()))
+                .and_then(|hud| hud.model_label(mode))
+                .or_else(|| codex.as_ref().and_then(|hud| hud.model_label(mode)))
                 .or_else(|| {
                     (mode != "codex")
                         .then(|| {
-                            codex_hud::CodexHud::from_live(node, &Value::Null, mode).model_label()
+                            codex_hud::CodexHud::from_live(node, &Value::Null, mode)
+                                .model_label(mode)
                         })
                         .flatten()
                 })
@@ -16885,7 +16887,14 @@ impl Workspace {
         )
     }
 
-    fn footer(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+    fn footer(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        if self
+            .footer_popovers
+            .get(&window.window_handle())
+            .is_some_and(|popup| self.level_focus() != Some(popup.session.as_str()))
+        {
+            self.dismiss_footer_popover(window, cx);
+        }
         self.terminal_hud(self.level_focus(), false, window, cx)
     }
 
@@ -16910,28 +16919,101 @@ impl Workspace {
         let count = SharedString::from(count);
         let viewport_width = window.viewport_size().width;
         let child_level = !detached && self.level_parent().is_some();
+        let label_width = footer_text_estimate(&label);
+        let count_width = footer_text_estimate(&count);
+        let fields = session.and_then(|id| self.footer_fields_for(id));
+        let locale = self.locale;
+        let dark = self.theme.effective() == AppTheme::Dark;
+        let mut footer_menu = self
+            .footer_popovers
+            .get(&window.window_handle())
+            .filter(|popup| Some(popup.session.as_str()) == session);
+        let live = fields.as_ref().map_or(&Value::Null, |fields| {
+            fields.live.unwrap_or(&fields.node["codexHud"])
+        });
+        let (agents, quota, more) = fields
+            .as_ref()
+            .filter(|fields| codex_hud::supports_details(fields.mode))
+            .map_or((None, None, None), |fields| {
+                let mut stats = codex_hud::statistics(live, fields.node, locale, dark);
+                let agents = stats
+                    .iter()
+                    .position(|stat| stat.id() == "agents")
+                    .map(|index| stats.remove(index).slot(locale, dark));
+                let tools = if live["runningTools"].is_array() || live["toolCounts"].is_array() {
+                    fields.live_hud.as_ref().or(fields.codex.as_ref())
+                } else {
+                    fields.codex.as_ref()
+                };
+                if let Some(tools) = tools.and_then(|hud| hud.tools_detail(locale)) {
+                    let index = usize::from(stats.first().is_some_and(|stat| stat.id() == "mcps"));
+                    stats.insert(index, tools);
+                }
+                (
+                    agents,
+                    self.footer_quota(fields.mode, live, footer_menu, window, cx),
+                    self.footer_stats(&stats, footer_menu, window, cx),
+                )
+            });
+        footer_menu = footer_menu.filter(|popup| match popup.menu {
+            FooterMenu::Quota => quota.is_some(),
+            FooterMenu::Stats => more.is_some(),
+            _ => true,
+        });
+        let sizing = footer_widths(
+            f32::from(viewport_width),
+            detached,
+            child_level,
+            label_width,
+            count_width,
+            false,
+        );
+        // Reserve the count when deciding to show it so removing the count
+        // cannot immediately push the status back past the same threshold.
+        let show_count = fields
+            .as_ref()
+            .is_none_or(|fields| !codex_hud::supports_details(fields.mode))
+            || sizing.status_estimate - FOOTER_STATUS_PADDING_LEFT - 1. >= FOOTER_COUNT_HIDE_BELOW;
+        let footer_padding = if show_count {
+            PERMISSION_FOOTER_PADDING_X
+        } else {
+            FOOTER_COMPACT_PADDING_X
+        };
+        let breadcrumb_padding = if show_count { 8. } else { 3. };
+        let status_padding = if show_count { FOOTER_STATUS_PADDING_LEFT } else { 4. };
+        let mut sizing = if show_count {
+            sizing
+        } else {
+            footer_widths(
+                f32::from(viewport_width),
+                detached,
+                child_level,
+                label_width,
+                0.,
+                true,
+            )
+        };
+        if child_level && !show_count && (agents.is_some() || quota.is_some()) {
+            // Long parent titles can already ellipsize. Give up some of that
+            // room before the fixed session indicators hit the viewport edge.
+            let available = (sizing.breadcrumb_width - FOOTER_CHILD_BREADCRUMB_MIN_WIDTH).max(0.);
+            let required = (sizing.status_estimate + available)
+                .min(FOOTER_CHILD_STATUS_RESERVE_WIDTH);
+            let reduction = (required - sizing.status_estimate)
+                .max(0.);
+            sizing.breadcrumb_width -= reduction;
+            sizing.status_estimate += reduction;
+            sizing.status_max = sizing.status_max.max(required);
+        }
         let FooterWidths {
             breadcrumb_max,
             breadcrumb_width,
             status_estimate,
             status_max,
-        } = footer_widths(
-            f32::from(viewport_width),
-            detached,
-            child_level,
-            footer_text_estimate(&label),
-            footer_text_estimate(&count),
-        );
-        let locale = self.locale;
-        let fields = session.and_then(|id| self.footer_fields_for(id));
+        } = sizing;
         let chip = session.and_then(|id| self.permission_chip_for(id));
         let menu_open =
             self.permission_menu_open(window) && chip.as_ref().is_some_and(|chip| !chip.disabled);
-        let dark = self.theme.effective() == AppTheme::Dark;
-        let footer_menu = self
-            .footer_popovers
-            .get(&window.window_handle())
-            .filter(|popup| Some(popup.session.as_str()) == session);
         // The optional cwd/Git slot only gets space the model did not claim. A
         // cwd needs room for both a recognizable prefix and any Git label that
         // shares the slot; below that the field is omitted rather than
@@ -16940,13 +17022,13 @@ impl Workspace {
         let status_measure = window.use_keyed_state("footer-status-measure", cx, |_, _| {
             None::<FooterStatusMeasure>
         });
-        let measure_key = (viewport_width, label.clone(), count.clone());
+        let measure_key = (viewport_width, label.clone(), count.clone(), px(breadcrumb_width));
         let (status_content_width, show_cwd) = {
             let measured = status_measure.read(cx);
             let measured = measured
                 .as_ref()
                 .filter(|measure| measure.key == measure_key);
-            let fallback_content = (status_estimate - FOOTER_STATUS_PADDING_LEFT - 1.).max(0.);
+            let fallback_content = (status_estimate - status_padding - if detached { 0. } else { 1. }).max(0.);
             let fallback_show_cwd = fallback_content > FOOTER_CWD_HIDE_BELOW;
             let fallback_optional = if fallback_show_cwd {
                 FOOTER_CWD_MAX_WIDTH
@@ -16974,7 +17056,14 @@ impl Workspace {
         };
         let show_model = codex_hud::shows_model(mode, status_content_width);
         let show_context = status_content_width > codex_hud::CONTEXT_HIDE_BELOW;
-        let status_gap = if status_content_width < FOOTER_COMPACT_STATUS_WIDTH {
+        let compact = !show_count || status_content_width < FOOTER_COMPACT_STATUS_WIDTH;
+        let cache_usage = session.and_then(|_| footer_cache_usage(live, locale, compact));
+        // Give the quota and cache reminder the room normally used by model details.
+        let compact_cache_with_quota = compact && cache_usage.is_some() && quota.is_some();
+        let show_session_health = agents.is_some() && quota.is_some();
+        let status_gap = if !show_count {
+            3.
+        } else if compact || show_session_health {
             FOOTER_GAP / 2.
         } else {
             FOOTER_GAP
@@ -16996,7 +17085,7 @@ impl Workspace {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(footer_text("label", label.clone())),
             )
-            .child(
+            .children(show_count.then(|| {
                 div()
                     .children(footer_bounds_probe("count"))
                     .id("footer-breadcrumb-count")
@@ -17004,8 +17093,8 @@ impl Workspace {
                     .ml(px(4.))
                     .whitespace_nowrap()
                     .text_color(rgba(palette.breadcrumb_count))
-                    .child(footer_text("count", count.clone())),
-            );
+                    .child(footer_text("count", count.clone()))
+            }));
         let breadcrumb = div()
             .h_full()
             .flex_none()
@@ -17031,7 +17120,7 @@ impl Workspace {
                         .min_w_0()
                         .flex()
                         .items_center()
-                        .px(px(8.))
+                        .px(px(breadcrumb_padding))
                         .rounded(px(6.))
                         .cursor_pointer()
                         .hover(move |style| {
@@ -17069,7 +17158,7 @@ impl Workspace {
                     .min_w_0()
                     .flex()
                     .items_center()
-                    .px(px(8.))
+                    .px(px(breadcrumb_padding))
                     .child(content),
             )
         };
@@ -17078,8 +17167,8 @@ impl Workspace {
             .flex_none()
             .flex()
             .items_center()
-            .px(px(PERMISSION_FOOTER_PADDING_X))
-            .gap(px(FOOTER_GAP))
+            .px(px(footer_padding))
+            .gap(px(if show_count { FOOTER_GAP } else { FOOTER_GAP / 2. }))
             .border_t_1()
             .border_color(rgba(palette.top_line))
             .bg(background)
@@ -17092,25 +17181,10 @@ impl Workspace {
             return footer.child(
                 div()
                     .ml_auto()
-                    .child(self.egress_trigger_for(session, window, cx)),
+                    .child(self.egress_trigger_for(session, false, window, cx)),
             );
         }
-        // The dismiss layer is mounted before the status area so the chip and
-        // the deferred menu keep their own input handling above it.
-        if menu_open {
-            footer = footer.child(self.permission_menu_overlay(window, cx));
-        }
-        if footer_menu.is_some() {
-            footer = footer.child(self.footer_popover_overlay(window, cx));
-        }
-        if let Some(panel) = self.render_context_details(window, cx) {
-            footer = footer.child(panel);
-        }
-
-        // Flatten the old primary wrapper into the status row so the model is
-        // a real flex sibling. AGENTS, permission, context and tools keep their
-        // fixed space; the model takes its intrinsic width and gives up only
-        // the remainder the fixed fields leave behind.
+        // The cwd takes only the space left after primary and fixed controls.
         let mut optional = div()
             .children(footer_bounds_probe("secondary"))
             .flex_basis(px(0.))
@@ -17251,10 +17325,11 @@ impl Workspace {
                     cx,
                 ));
             }
-            fixed = fixed.child(self.egress_trigger_for(session, window, cx));
+            fixed = fixed.child(self.egress_trigger_for(session, !show_count, window, cx));
             if footer_shows_account(fields.mode) {
-                fixed = fixed.child(self.footer_account_trigger(window, cx));
+                fixed = fixed.child(self.footer_account_trigger(!show_count, window, cx));
             }
+            fixed = fixed.children(more);
         }
 
         let measure = status_measure.clone();
@@ -17267,7 +17342,7 @@ impl Workspace {
             })
             .min_w_0()
             .h_full()
-            .pl(px(FOOTER_STATUS_PADDING_LEFT))
+            .pl(px(status_padding))
             .when(!detached, |status| {
                 status.border_l_1().border_color(rgba(palette.divider))
             })
@@ -17287,6 +17362,7 @@ impl Workspace {
             .gap(px(status_gap))
             .flex_shrink()
             .overflow_x_scroll()
+            .children(footer_bounds_probe("primary"))
             .when_some(
                 self.project_instructions
                     .get(&window.window_handle())
@@ -17310,7 +17386,6 @@ impl Workspace {
             primary = primary.child(self.permission_primary(chip, menu_open, window, cx));
         }
         if let Some(fields) = fields.as_ref() {
-            let live = fields.live.unwrap_or(&Value::Null);
             if chip.is_none() && !fields.is_shell {
                 let permission = if fields.mode == "dsh" {
                     trimmed_graph_text(&live["providerPermissionLabel"])
@@ -17345,7 +17420,9 @@ impl Workspace {
                     );
                 }
             }
-            if show_model && let Some(name) = fields.name.as_deref().filter(|name| !name.is_empty())
+            if show_model
+                && !compact_cache_with_quota
+                && let Some(name) = fields.name.as_deref().filter(|name| !name.is_empty())
             {
                 let full_label = fields
                     .live_hud
@@ -17371,26 +17448,17 @@ impl Workspace {
                     }),
                 ));
             }
-            if show_context {
+            if show_context && !compact_cache_with_quota {
                 let context = fields
                     .live_hud
                     .as_ref()
                     .filter(|hud| hud.context_percent().is_some() || hud.has_context_window())
                     .or(fields.codex.as_ref());
                 if let Some(percent) = context.and_then(|hud| hud.context_percent()) {
-                    primary = primary.child(codex_hud::context_ring(percent));
-                    if let Some((used, window)) = live["contextUsedTokens"]
+                    let tokens = live["contextUsedTokens"]
                         .as_u64()
-                        .zip(live["contextWindowSize"].as_u64())
-                    {
-                        let used = footer_token_count(used);
-                        let window = footer_token_count(window);
-                        primary = primary.child(
-                            div()
-                                .flex_none()
-                                .child(footer_text("context-usage", format!("{used}/{window}"))),
-                        );
-                    }
+                        .zip(live["contextWindowSize"].as_u64());
+                    primary = primary.child(codex_hud::context_ring(percent, tokens));
                 } else if codex_hud::supports_details(fields.mode)
                     && context.is_some_and(|hud| hud.has_context_window())
                 {
@@ -17405,44 +17473,7 @@ impl Workspace {
                     );
                 }
             }
-            if codex_hud::supports_details(fields.mode) {
-                let mut stats = codex_hud::statistics(live, fields.node, locale, dark)
-                    .into_iter()
-                    .peekable();
-                primary = primary.children(
-                    stats
-                        .next_if(|slot| slot.id() == "mcps")
-                        .map(|slot| slot.slot(locale, dark)),
-                );
-                let tools = if live["runningTools"].is_array() || live["toolCounts"].is_array() {
-                    fields.live_hud.as_ref()
-                } else {
-                    fields.codex.as_ref()
-                };
-                primary = primary.children(tools.and_then(|hud| hud.tools_slot(locale, dark)));
-                while let Some(slot) = stats.next_if(|slot| matches!(slot.id(), "agents" | "hooks"))
-                {
-                    primary = primary.child(slot.slot(locale, dark));
-                }
-                if status_content_width > 290. {
-                    primary = primary.children(self.footer_quota(
-                        fields.mode,
-                        live,
-                        footer_menu,
-                        window,
-                        cx,
-                    ));
-                }
-                primary = primary.children(
-                    stats
-                        .filter(|slot| match slot.id() {
-                            "todos" => status_content_width > 380.,
-                            "mcp-errors" => status_content_width > 330.,
-                            _ => true,
-                        })
-                        .map(|slot| slot.slot(locale, dark)),
-                );
-            }
+            primary = primary.children(agents).children(quota);
             if let Some(guard_view) =
                 matou_native_desktop::context_optimizer_settings::ContextGuardHudView::from_live_hud(
                     live, locale,
@@ -17475,17 +17506,20 @@ impl Workspace {
                             cx,
                         ));
                     }
-                    if let Some((label, detail, tone)) = footer_cache_usage(live, locale) {
+                    if let Some((label, detail, tone)) = cache_usage {
                         let (fg, bg) = pill_colors(tone);
-                        primary = primary.child(self.context_details_trigger(
-                            "footer-cache-countdown",
-                            session,
-                            label,
-                            Some(detail),
-                            fg,
-                            bg,
-                            cx,
-                        ));
+                        primary = primary.child(
+                            self.context_details_trigger(
+                                "footer-cache-countdown",
+                                session,
+                                label,
+                                Some(detail),
+                                fg,
+                                bg,
+                                cx,
+                            )
+                            .children(footer_bounds_probe("cache")),
+                        );
                     }
                     if guard_view.show_handoff_button && self.read_only.is_none() {
                         primary = primary.child(self.context_handoff_actions(
@@ -17502,8 +17536,21 @@ impl Workspace {
             status = status.child(
                 div()
                     .ml_auto()
-                    .child(self.egress_trigger_for(session, window, cx)),
+                    .child(self.egress_trigger_for(session, false, window, cx)),
             );
+        }
+        // Mount the dismiss layers before the status area so the controls and
+        // the deferred menus remain hittable.
+        if menu_open {
+            footer = footer.child(self.permission_menu_overlay(window, cx));
+        }
+        if footer_menu.is_some() {
+            footer = footer.child(self.footer_popover_overlay(window, cx));
+        } else if self.footer_popovers.contains_key(&window.window_handle()) {
+            cx.defer_in(window, Self::dismiss_footer_popover);
+        }
+        if let Some(panel) = self.render_context_details(window, cx) {
+            footer = footer.child(panel);
         }
         status = status.child(
             // Measure the real status and optional boxes after layout. The next
@@ -17516,7 +17563,7 @@ impl Workspace {
                     record_footer_bounds("status", bounds);
                     let actual_width = f32::from(bounds.size.width);
                     let actual_content_width =
-                        actual_width - FOOTER_STATUS_PADDING_LEFT - if detached { 0. } else { 1. };
+                        actual_width - status_padding - if detached { 0. } else { 1. };
                     measure.update(cx, |state, cx| {
                         let optional_width = state
                             .as_ref()
@@ -17533,10 +17580,6 @@ impl Workspace {
                             || actual_show_cwd != show_cwd
                             || actual_show_model != show_model
                             || actual_show_context != show_context
-                            || [290., 330., 380.].into_iter().any(|threshold| {
-                                (actual_content_width > threshold)
-                                    != (status_content_width > threshold)
-                            })
                             || (actual_content_width < FOOTER_COMPACT_STATUS_WIDTH)
                                 != (status_content_width < FOOTER_COMPACT_STATUS_WIDTH);
                         *state = Some(FooterStatusMeasure {
@@ -20267,9 +20310,13 @@ fn write_terminal_font_size(root: &std::path::Path, size: u8) -> std::io::Result
 
 const PERMISSION_FOOTER_HEIGHT: f32 = 38.;
 const PERMISSION_FOOTER_PADDING_X: f32 = 20.;
+const FOOTER_COMPACT_PADDING_X: f32 = 10.;
 const FOOTER_GAP: f32 = 8.;
 const FOOTER_STATUS_PADDING_LEFT: f32 = 12.;
 const FOOTER_COMPACT_STATUS_WIDTH: f32 = 310.;
+const FOOTER_COUNT_HIDE_BELOW: f32 = 340.;
+const FOOTER_CHILD_BREADCRUMB_MIN_WIDTH: f32 = 42.;
+const FOOTER_CHILD_STATUS_RESERVE_WIDTH: f32 = 400.;
 const FOOTER_CWD_MAX_WIDTH: f32 = 130.;
 const FOOTER_GIT_MAX_WIDTH: f32 = 150.;
 const FOOTER_NAME_MAX_WIDTH: f32 = 180.;
@@ -20289,7 +20336,7 @@ const FOOTER_ACCOUNT_LABEL: &str = "Claude 账户";
 /// `optional_width` is the real cwd/Git slot after the model has taken its
 /// intrinsic width, so the cwd can be hidden before it loses its path prefix.
 struct FooterStatusMeasure {
-    key: (Pixels, SharedString, SharedString),
+    key: (Pixels, SharedString, SharedString, Pixels),
     show_cwd: bool,
     status_content_width: f32,
     /// Real width of the cwd/Git overflow slot. The cwd field only renders when
@@ -20324,6 +20371,7 @@ fn footer_token_count(count: u64) -> String {
 fn footer_cache_usage(
     live: &Value,
     locale: InterfaceLocale,
+    compact: bool,
 ) -> Option<(
     String,
     &'static str,
@@ -20332,10 +20380,10 @@ fn footer_cache_usage(
     use matou_native_desktop::context_optimizer_settings::{HudPillTone, format_cache_countdown};
 
     let cache = live.get("contextGuard")?.get("cache")?.as_object()?;
-    let remaining = cache
-        .get("remainingSec")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
+    let remaining = cache.get("remainingSec")?.as_u64()?;
+    if remaining > 600 {
+        return None;
+    }
     let (mut label, detail) = match cache.get("timing").and_then(Value::as_str) {
         Some("precise") => (
             format_cache_countdown(remaining, remaining > 0, locale),
@@ -20361,18 +20409,17 @@ fn footer_cache_usage(
                 locale.text("按最近一次缓存活动时间和该路由的默认时长估算，实际到期时间可能不同。", "Estimated from the last cache activity and the route’s default lifetime. Actual expiry may differ."),
             )
         }
-        _ => (
-            locale
-                .text("缓存时间未知", "Cache timing unknown")
-                .to_owned(),
-            locale.text(
-                "该会话缺少到期时间或可用于估算的缓存活动记录。",
-                "This session has no reported expiry or cache activity timestamp to estimate from.",
-            ),
-        ),
+        _ => return None,
     };
     if let Some(hit) = cache.get("hitRatioPercent").and_then(Value::as_f64) {
         label.push_str(&format!(" · {} {hit:.0}%", locale.text("命中", "hit")));
+    }
+    if compact {
+        label = if remaining == 0 {
+            locale.text("◷ 已过期", "◷ expired").to_owned()
+        } else {
+            format!("{}m", remaining.div_ceil(60))
+        };
     }
     let tone = if remaining == 0 {
         HudPillTone::Neutral
@@ -20612,14 +20659,20 @@ fn footer_widths(
     child_level: bool,
     label_width: f32,
     count_width: f32,
+    compact: bool,
 ) -> FooterWidths {
     let child_level = !detached && child_level;
     let sidebar = if detached { 0. } else { FOOTER_SIDEBAR_WIDTH };
     let available = (window_width - sidebar).max(0.);
-    let footer_room = (available - 2. * PERMISSION_FOOTER_PADDING_X - FOOTER_GAP).max(0.);
+    let (padding, gap, breadcrumb_inset) = if compact {
+        (FOOTER_COMPACT_PADDING_X, FOOTER_GAP / 2., 10.)
+    } else {
+        (PERMISSION_FOOTER_PADDING_X, FOOTER_GAP, 0.)
+    };
+    let footer_room = (available - 2. * padding - gap).max(0.);
     let breadcrumb_max = (available * 0.44).min(520.);
     let chrome = if child_level { 39. } else { 20. };
-    let count_and_chrome = count_width + chrome;
+    let count_and_chrome = count_width + chrome - breadcrumb_inset;
     // The back arrow and count can claim more than 44% when the title's space runs out.
     let breadcrumb_limit = if child_level {
         breadcrumb_max.max(count_and_chrome)
@@ -20648,6 +20701,54 @@ fn footer_widths(
 #[cfg(test)]
 mod hud_theme_and_footer_tests {
     use super::*;
+
+    #[::core::prelude::v1::test]
+    fn footer_cache_requires_known_timing_and_at_most_ten_minutes() {
+        let locale = InterfaceLocale::English;
+        for timing in ["precise", "estimate"] {
+            for remaining in [0, 1, 599, 600, 601, 1018] {
+                let hud = serde_json::json!({
+                    "contextGuard": {"cache": {"timing": timing, "remainingSec": remaining}}
+                });
+                assert_eq!(
+                    footer_cache_usage(&hud, locale, false).is_some(),
+                    remaining <= 600
+                );
+                if (1..=600).contains(&remaining) {
+                    let (label, _, _) = footer_cache_usage(&hud, locale, true).unwrap();
+                    assert_eq!(label, format!("{}m", (remaining as u64).div_ceil(60)));
+                }
+            }
+        }
+        for cache in [
+            serde_json::json!({"remainingSec": 0}),
+            serde_json::json!({"timing": "unknown", "remainingSec": 0}),
+            serde_json::json!({"timing": "precise"}),
+        ] {
+            let hud = serde_json::json!({"contextGuard": {"cache": cache}});
+            assert!(footer_cache_usage(&hud, locale, false).is_none());
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn compact_footer_cache_names_expiry_in_both_locales() {
+        for timing in ["precise", "estimate"] {
+            let hud = serde_json::json!({
+                "contextGuard": {"cache": {"timing": timing, "remainingSec": 0}}
+            });
+            for (locale, expected) in [
+                (InterfaceLocale::Chinese, "◷ 已过期"),
+                (InterfaceLocale::English, "◷ expired"),
+            ] {
+                let (label, _, tone) = footer_cache_usage(&hud, locale, true).unwrap();
+                assert_eq!(label, expected);
+                assert_eq!(
+                    tone,
+                    matou_native_desktop::context_optimizer_settings::HudPillTone::Neutral
+                );
+            }
+        }
+    }
 
     #[::core::prelude::v1::test]
     fn terminal_search_bar_uses_light_and_dark_chrome_and_states() {
@@ -20709,25 +20810,25 @@ mod hud_theme_and_footer_tests {
     #[::core::prelude::v1::test]
     fn child_footer_uses_stage_width_and_reserves_the_return_controls() {
         let count_width = footer_text_estimate("· 12 会话");
-        let wide = footer_widths(1440., false, true, 1000., count_width);
+        let wide = footer_widths(1440., false, true, 1000., count_width, false);
         assert_eq!(wide.breadcrumb_max, (1440. - FOOTER_SIDEBAR_WIDTH) * 0.44);
         assert_eq!(wide.breadcrumb_width, wide.breadcrumb_max);
         assert!(wide.status_max > 0.);
 
-        let narrow = footer_widths(780., false, true, 1000., count_width);
+        let narrow = footer_widths(780., false, true, 1000., count_width, false);
         assert!(narrow.breadcrumb_width >= count_width + 39.);
         assert!(narrow.breadcrumb_width <= (780. - FOOTER_SIDEBAR_WIDTH) * 0.44);
         assert!(narrow.status_max >= 0.);
         assert!(narrow.status_estimate < wide.status_estimate);
 
-        let tight = footer_widths(398., false, true, 1000., count_width);
+        let tight = footer_widths(398., false, true, 1000., count_width, false);
         assert_eq!(tight.breadcrumb_width, count_width + 39.);
         assert!(tight.status_estimate >= 0.);
     }
 
     #[::core::prelude::v1::test]
     fn detached_footer_keeps_the_full_window_width_for_status() {
-        let detached = footer_widths(780., true, false, 1000., 40.);
+        let detached = footer_widths(780., true, false, 1000., 40., false);
         assert_eq!(detached.breadcrumb_width, 0.);
         assert_eq!(detached.breadcrumb_max, 780. * 0.44);
         assert_eq!(
