@@ -1478,12 +1478,14 @@ fn subscription_snapshot_reuses_its_prebound_default_connection_for_models() -> 
 }
 
 #[test]
-fn complete_api_assignments_do_not_start_the_unused_subscription() -> Result<()> {
+fn complete_api_assignments_start_the_subscription_only_after_a_live_role_switch() -> Result<()> {
     let fixture = Fixture::new()?;
     fs::write(fixture.cli.with_extension("skip-messages"), "")?;
     let mut host = fixture.spawn(None)?;
     host.hello()?;
-    write_config(&host, CODEX_ID, &[api(), codex(false)])?;
+    let agy = antigravity();
+    write_config(&host, CODEX_ID, &[api(), codex(false), agy.clone()])?;
+    credential(&host, &agy, &["agy-opus"])?;
     preferences(
         &mut host,
         json!({
@@ -1501,6 +1503,26 @@ fn complete_api_assignments_do_not_start_the_unused_subscription() -> Result<()>
     assert!(body.contains("Original supplier source connection was not bound at startup"));
     assert!(!host.data.join("model-router/keys.json").exists());
     assert!(router_events(&host, "engine-start")?.is_empty());
+
+    let captured = fs::read(fixture.cli.with_extension("initial"))?;
+    preferences(
+        &mut host,
+        json!({
+            "opus": {"providerId": ANTIGRAVITY_ID, "model": "agy-opus", "effort": "high"},
+            "sonnet": target("api", "api-primary"),
+            "haiku": target("api", "api-primary")
+        }),
+        None,
+        None,
+    )?;
+    let (status, body) = request(&launch, "matou-role/opus", "live-role-switch")?;
+    assert_eq!(status, 200, "{body}");
+    let events = router_events(&host, "message")?;
+    let forwarded = events.last().context("router did not receive request")?;
+    assert_eq!(forwarded["model"], "matou-antigravity/agy-opus");
+    assert_eq!(forwarded["effort"]["effort"], "high");
+    assert_eq!(fs::read(fixture.cli.with_extension("initial"))?, captured);
+    assert_eq!(source_models(&launch)?.0, 502);
     stop(&mut host)
 }
 

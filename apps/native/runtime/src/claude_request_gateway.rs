@@ -1,13 +1,14 @@
 //! Per-run Claude request transport. The URL's unguessable path is the local credential.
 use std::{
     borrow::Cow,
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     convert::Infallible,
     error::Error as _,
     fmt::Write as _,
     future::{Future, poll_fn},
     io,
     net::Ipv4Addr,
+    path::{Path, PathBuf},
     pin::Pin,
     sync::{
         Arc, Mutex, OnceLock,
@@ -33,7 +34,8 @@ use matou_native_core::{
     claude_role_budget::CLAUDE_ROLES,
     provider_launch::{
         ClaudeGatewayCompaction, ClaudeGatewayConnection, ClaudeGatewayProjection,
-        ClaudeGatewayRole, EFFORTS, decode_claude_gateway_error, startup_role_alias,
+        ClaudeGatewayRefresh, ClaudeGatewayRole, EFFORTS, decode_claude_gateway_error,
+        startup_role_alias,
     },
     sessions::InterfaceLocale,
 };
@@ -48,6 +50,7 @@ use uuid::Uuid;
 use crate::{
     agent_hud_projection::ContextUsageSample,
     egress_probe::Family,
+    host::{load_role_preferences, native_role_catalog, role_assignments_revision},
     http_proxy::{AbortOnDrop, connect_http1, direct_https, http_connector},
     model_router::RouterConnection,
     subscription_launch::RouterRequest,
@@ -107,6 +110,7 @@ impl Gateway {
 
     pub(crate) fn start_with_context(
         projection: Arc<ClaudeGatewayProjection>,
+        refresh: Option<(ClaudeGatewayRefresh, PathBuf)>,
         read_context_usage: Option<ReadContextUsage>,
         subscriptions: Option<SessionSubscriptions>,
         blocked_families: Arc<AtomicU8>,
@@ -114,10 +118,9 @@ impl Gateway {
         proxy_env: ProxyEnvironment,
     ) -> Result<Self> {
         Self::start_gateway(
-            projection,
+            ProjectionSlot::new(projection, subscriptions, refresh),
             gemini_sse_keepalive::INTERVAL,
             read_context_usage,
-            subscriptions,
             blocked_families,
             locale,
             proxy_env,
@@ -133,9 +136,8 @@ impl Gateway {
         loopback: Option<std::net::SocketAddr>,
     ) -> Result<Self> {
         Self::start_gateway(
-            projection,
+            ProjectionSlot::new(projection, None, None),
             keep_alive_interval,
-            None,
             None,
             Arc::default(),
             InterfaceLocale::default(),
@@ -149,10 +151,9 @@ impl Gateway {
     }
 
     fn start_gateway(
-        projection: Arc<ClaudeGatewayProjection>,
+        projection: ProjectionSlot,
         keep_alive_interval: Duration,
         read_context_usage: Option<ReadContextUsage>,
-        subscriptions: Option<SessionSubscriptions>,
         blocked_families: Arc<AtomicU8>,
         locale: InterfaceLocale,
         proxy_env: ProxyEnvironment,
@@ -175,7 +176,6 @@ impl Gateway {
             stopped: Arc::clone(&stopped),
             token_usage: Arc::clone(&token_usage),
             read_context_usage,
-            subscriptions,
             locale,
             blocked_families,
             keep_alive_interval,
@@ -255,12 +255,109 @@ impl Drop for Gateway {
     }
 }
 
+struct GatewayRoutes {
+    projection: Arc<ClaudeGatewayProjection>,
+    subscriptions: Option<SessionSubscriptions>,
+}
+
+impl GatewayRoutes {
+    fn refresh(&self, context: &ClaudeGatewayRefresh, data_root: &Path) -> Result<Option<Self>> {
+        let preferences = load_role_preferences(data_root);
+        anyhow::ensure!(!preferences.assignments.is_empty());
+        if self.projection.role_assignments() == &preferences.assignments {
+            return Ok(None);
+        }
+        let projection = context
+            .refresh_roles(&self.projection, &preferences, &native_role_catalog)
+            .context("Claude role projection could not be rebuilt")?;
+        let subscriptions = if let Some(previous) = &self.subscriptions {
+            let mut targets = HashMap::new();
+            for target in projection
+                .connections()
+                .filter_map(|connection| connection.subscription.as_ref())
+            {
+                if !targets.contains_key(target) {
+                    let binding = match previous.targets.get(target) {
+                        Some(binding) => Arc::clone(binding),
+                        None => previous.service.prepare_model_target(target)?,
+                    };
+                    targets.insert(target.clone(), binding);
+                }
+            }
+            Some(SessionSubscriptions {
+                service: Arc::clone(&previous.service),
+                targets,
+            })
+        } else {
+            anyhow::ensure!(projection.subscription_providers().next().is_none());
+            None
+        };
+        Ok(Some(Self {
+            projection: Arc::new(projection),
+            subscriptions,
+        }))
+    }
+}
+
+struct ProjectionSlot {
+    cache: AsyncMutex<ProjectionCache>,
+    refresh: Option<(Arc<ClaudeGatewayRefresh>, PathBuf)>,
+}
+
+struct ProjectionCache {
+    revision: u64,
+    routes: Arc<GatewayRoutes>,
+}
+
+impl ProjectionSlot {
+    fn new(
+        projection: Arc<ClaudeGatewayProjection>,
+        subscriptions: Option<SessionSubscriptions>,
+        refresh: Option<(ClaudeGatewayRefresh, PathBuf)>,
+    ) -> Self {
+        Self {
+            // A save can finish between launch planning and listener bind.
+            // Compare the database with the launch assignments on the first request.
+            cache: AsyncMutex::new(ProjectionCache {
+                revision: 0,
+                routes: Arc::new(GatewayRoutes {
+                    projection,
+                    subscriptions,
+                }),
+            }),
+            refresh: refresh.map(|(context, data_root)| (Arc::new(context), data_root)),
+        }
+    }
+
+    async fn current(&self) -> Arc<GatewayRoutes> {
+        let mut cached = self.cache.lock().await;
+        let Some((context, data_root)) = &self.refresh else {
+            return Arc::clone(&cached.routes);
+        };
+        let revision = role_assignments_revision();
+        if cached.revision != revision {
+            let current = Arc::clone(&cached.routes);
+            let context = Arc::clone(context);
+            let data_root = data_root.clone();
+            let next = tokio::task::spawn_blocking(move || current.refresh(&context, &data_root));
+            match next.await {
+                Ok(Ok(Some(routes))) => cached.routes = Arc::new(routes),
+                Ok(Ok(None)) => {}
+                _ => eprintln!(
+                    "[claude-request-gateway] Kept previous role assignments after refresh failed (revision {revision})"
+                ),
+            }
+            cached.revision = revision;
+        }
+        Arc::clone(&cached.routes)
+    }
+}
+
 struct State {
     prefix: String,
-    projection: Arc<ClaudeGatewayProjection>,
+    projection: ProjectionSlot,
     lazy_compaction: OnceCell<ClaudeGatewayRole>,
     lazy_subscription: AsyncMutex<Option<Arc<TargetBinding>>>,
-    subscriptions: Option<SessionSubscriptions>,
     locale: InterfaceLocale,
     blocked_families: Arc<AtomicU8>,
     stopped: Arc<AtomicBool>,
@@ -371,6 +468,8 @@ impl State {
         }
         let is_message = parts.method == Method::POST && path == "/v1/messages";
         let is_count = parts.method == Method::POST && path == "/v1/messages/count_tokens";
+        let routes = self.projection.current().await;
+        let projection = &routes.projection;
         let limited = Limited::new(incoming, MAX_REQUEST_BYTES);
         let (body, buffered, length, connection, destination, rewritten, message_response) =
             if is_message || is_count {
@@ -380,7 +479,7 @@ impl State {
                     .map_err(|error| Fault::request_body(error.as_ref()))?
                     .to_bytes();
                 let (bytes, connection, destination, rewritten, message_response) = self
-                    .rewrite_json(bytes, path, query, &parts.headers)
+                    .rewrite_json(projection, bytes, path, query, &parts.headers)
                     .await?;
                 let length = bytes.len() as u64;
                 let body = full_body(bytes.clone());
@@ -394,8 +493,7 @@ impl State {
                     message_response,
                 )
             } else {
-                let connection = self
-                    .projection
+                let connection = projection
                     .source
                     .as_ref()
                     .ok_or(Fault::bad_gateway(SOURCE_ERROR))?;
@@ -513,7 +611,7 @@ impl State {
         }
         let label = message_response.authentication_label.unwrap_or("main");
         let (mut response, mut body) = if connection.subscription.is_some() {
-            let subscriptions = self.subscriptions.as_ref().ok_or_else(|| {
+            let subscriptions = routes.subscriptions.as_ref().ok_or_else(|| {
                 Fault::bad_gateway(LaunchIssue::ServiceNotStarted.message(self.locale))
             })?;
             let (response, body, binding) = self
@@ -801,13 +899,14 @@ impl State {
         Ok(())
     }
 
-    async fn rewrite_json(
-        &self,
+    async fn rewrite_json<'a>(
+        &'a self,
+        projection: &'a ClaudeGatewayProjection,
         mut body: Bytes,
         path: &str,
         query: Option<&str>,
         headers: &HeaderMap,
-    ) -> Result<(Bytes, &ClaudeGatewayConnection, Uri, bool, MessageResponse), Fault> {
+    ) -> Result<(Bytes, &'a ClaudeGatewayConnection, Uri, bool, MessageResponse), Fault> {
         let is_message = path == "/v1/messages";
         let mut message = serde_json::from_slice::<Map<String, Value>>(&body).ok();
         let request_identity = is_message
@@ -817,11 +916,11 @@ impl State {
             .as_ref()
             .and_then(|object| object.get("model"))
             .and_then(Value::as_str);
-        let role = model.and_then(|model| self.projection.request_role(model));
+        let role = model.and_then(|model| projection.request_role(model));
         if role.is_none()
             && model.is_some_and(|model| {
                 model.starts_with("matou-role/")
-                    && self.projection.literal_model_override(model).is_none()
+                    && projection.literal_model_override(model).is_none()
             })
         {
             return Err(Fault::bad_gateway("Unknown Claude model role."));
@@ -830,13 +929,12 @@ impl State {
         if is_message && marked && model.is_some() {
             self.token_usage.lock().unwrap().note_compaction();
         }
-        let role_target = role.and_then(|index| self.projection.role_target(index));
-        let compaction = self
-            .projection
+        let role_target = role.and_then(|index| projection.role_target(index));
+        let compaction = projection
             .compaction
             .as_ref()
             .filter(|_| is_message && marked && model.is_some());
-        let search = self.projection.web_search.as_ref().filter(|_| {
+        let search = projection.web_search.as_ref().filter(|_| {
             model.is_some() && message.as_ref().is_some_and(pure_web_search) && !marked
         });
         let custom = match compaction {
@@ -879,9 +977,9 @@ impl State {
         }
         let connection = target
             .map(|role| &role.connection)
-            .or(self.projection.source.as_ref())
+            .or(projection.source.as_ref())
             .ok_or(Fault::bad_gateway(SOURCE_ERROR))?;
-        let literal_effort = model.and_then(|model| self.projection.literal_effort(model));
+        let literal_effort = model.and_then(|model| projection.literal_effort(model));
         let fallback_alias = connection
             .subscription
             .as_ref()
@@ -889,14 +987,14 @@ impl State {
             .map(|target| format!("{}/matou-opus-fallback", target.prefix()));
         let literal_model = fallback_alias
             .as_deref()
-            .or_else(|| model.and_then(|model| self.projection.literal_model_override(model)));
+            .or_else(|| model.and_then(|model| projection.literal_model_override(model)));
         let keep_alive = target.is_some_and(|target| target.stream_keep_alive)
             || target.is_none()
-                && model.is_some_and(|model| self.projection.literal_stream_keep_alive(model));
+                && model.is_some_and(|model| projection.literal_stream_keep_alive(model));
         let target_window = target.and_then(|target| target.context_window).or_else(|| {
             target
                 .is_none()
-                .then(|| model.and_then(|model| self.projection.literal_context_window(model)))
+                .then(|| model.and_then(|model| projection.literal_context_window(model)))
                 .flatten()
         });
         let mut rewritten = false;
@@ -977,7 +1075,7 @@ impl State {
                     rewritten |= self.token_usage.lock().unwrap().attach(
                         message,
                         deepseek_token_usage::ContextUsage {
-                            session_window: self.projection.context_window,
+                            session_window: projection.context_window,
                             hud_tokens,
                             hud_window,
                             target_window,
@@ -1010,7 +1108,7 @@ impl State {
                         .duration_since(UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_millis() as f64,
-                    window: target_window.or(self.projection.context_window),
+                    window: target_window.or(projection.context_window),
                     estimated_ttl_sec: estimated_cache_ttl(connection, &destination),
                 }),
             lazy_compaction: matches!(compaction, Some(ClaudeGatewayCompaction::OnFirstRequest(_))),

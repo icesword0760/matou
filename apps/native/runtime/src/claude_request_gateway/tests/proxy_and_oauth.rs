@@ -25,9 +25,8 @@ fn gateway_with(
         .map(|(key, value)| ((*key).into(), (*value).into()))
         .collect();
     Gateway::start_gateway(
-        Arc::new(plan),
+        ProjectionSlot::new(Arc::new(plan), None, None),
         gemini_sse_keepalive::INTERVAL,
-        None,
         None,
         blocked,
         locale,

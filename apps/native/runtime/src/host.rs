@@ -12,6 +12,7 @@ use std::{
     path::{Component, Path, PathBuf},
     sync::{
         Arc, LazyLock, OnceLock,
+        atomic::{AtomicU64, Ordering},
         mpsc::{self, Receiver, Sender},
     },
     thread::{self, JoinHandle},
@@ -9804,7 +9805,13 @@ enum LaunchIntent<'a> {
     },
 }
 
-fn load_role_preferences(data_root: &Path) -> ClaudeRoleLaunchPreferences {
+static ROLE_ASSIGNMENTS_REVISION: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn role_assignments_revision() -> u64 {
+    ROLE_ASSIGNMENTS_REVISION.load(Ordering::Acquire)
+}
+
+pub(crate) fn load_role_preferences(data_root: &Path) -> ClaudeRoleLaunchPreferences {
     startup::open_read_only(&data_root.join("matou.sqlite"))
         .map(|db| read_claude_role_launch_preferences(&db))
         .unwrap_or_default()
@@ -9876,7 +9883,7 @@ pub(crate) fn native_role_catalog() -> Vec<Value> {
         .collect()
 }
 
-fn save_role_assignments(
+pub(crate) fn save_role_assignments(
     data_root: &Path,
     request_id: u64,
     value: &Value,
@@ -9918,6 +9925,7 @@ fn save_role_assignments(
         )
     })()
     .context("保存未确认，请重试。原选择已保留。")?;
+    ROLE_ASSIGNMENTS_REVISION.fetch_add(1, Ordering::Release);
     Ok(ClaudeModelPreferencesReply {
         roles: ClaudeRoleAssignmentsReply {
             request_id,

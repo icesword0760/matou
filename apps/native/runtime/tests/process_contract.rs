@@ -5603,14 +5603,18 @@ fn assigned_claude_gateway_changes_target_without_restarting_the_cli() -> Result
         });
         Ok((address, handle))
     };
-    let (a, a_task) = fake("a", A_KEY, &[("/v1/messages", "from-opus")])?;
+    let (a, a_task) = fake(
+        "a",
+        A_KEY,
+        &[
+            ("/v1/messages", "from-opus"),
+            ("/v1/messages", "paused-stream"),
+        ],
+    )?;
     let (b, b_task) = fake(
         "b",
         B_KEY,
-        &[
-            ("/v1/messages/count_tokens", "from-sonnet-count"),
-            ("/v1/messages", "paused-stream"),
-        ],
+        &[("/v1/messages/count_tokens", "from-sonnet-count")],
     )?;
 
     let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR"))?;
@@ -5752,15 +5756,18 @@ done
             break;
         }
     }
-    // Saving an assignment for the next launch does not reroute a live card.
+    // Sonnet still uses the same CLI alias, but now shares Opus's upstream.
     child.input("stream")?;
     assert_eq!(
         requests
             .recv_timeout(TIMEOUT)
-            .context("upstream B open stream observation")?,
-        ("b", "/v1/messages", "shared-model")
+            .context("upstream A open stream observation")?,
+        ("a", "/v1/messages", "shared-model")
     );
     child.frame(|_, screen, _| screen_has_line(screen, "data: paused-stream"))?;
+    let after_save = list_runs(&db, &child.session)?;
+    assert_eq!(after_save.len(), 1);
+    assert_eq!((&after_save[0].id, after_save[0].pid), (&run.id, Some(pid)));
     child.send(Command::RenameTask {
         task_id: child.task.clone(),
         title: "Gateway host responds mid-stream".into(),
@@ -5806,8 +5813,8 @@ done
     assert_eq!(
         requests
             .recv_timeout(TIMEOUT)
-            .context("upstream B cancellation observation")?,
-        ("b", "cancelled", "shared-model")
+            .context("upstream A cancellation observation")?,
+        ("a", "cancelled", "shared-model")
     );
     let deadline = Instant::now() + TIMEOUT;
     loop {
