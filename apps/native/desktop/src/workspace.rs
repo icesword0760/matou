@@ -1,6 +1,7 @@
 use std::{
     cell::Cell,
     collections::{HashMap, HashSet},
+    ops::Range,
     path::PathBuf,
     rc::Rc,
     sync::Arc,
@@ -694,7 +695,7 @@ impl LoaderSession {
             } else {
                 Some(LoaderOwner {
                     session_id: loaded_by["sessionId"].as_str()?.into(),
-                    title: loaded_by["title"].as_str()?.into(),
+                    title: loaded_by["title"].as_str().unwrap_or_default().into(),
                 })
             },
         })
@@ -783,6 +784,7 @@ struct LoaderLoad {
     title: String,
     previous_revision: u64,
     request_id: Option<u64>,
+    wait_for_identity: bool,
 }
 
 struct DeferredRecoveryCard {
@@ -813,6 +815,7 @@ struct SessionLoader {
     history: bool,
     provider: &'static str,
     confirm_running: bool,
+    confirmation: Option<LoaderConfirmation>,
     remembered: LoaderRemembered,
     restore_selection: Option<String>,
     list_total: usize,
@@ -830,6 +833,8 @@ struct SessionLoader {
     search_hits: Vec<LoaderSearchHit>,
     has_more_hits: bool,
     search_next: usize,
+    history_matches: Vec<HistoryMatch>,
+    active_history_match: usize,
     detail_model: Option<String>,
     detail_permission: Option<String>,
     scene_id: String,
@@ -857,6 +862,75 @@ impl SessionLoader {
         matches!(self.provider, "codex" | "dsh" | "antigravity")
     }
 
+    fn selected_session(&self) -> Option<&LoaderSession> {
+        let id = self.selected.as_ref()?;
+        self.sessions.iter().find(|session| &session.id == id)
+    }
+
+    fn blocked_owner(&self) -> Option<&LoaderOwner> {
+        self.selected_session()?.loaded_by.as_ref().filter(|owner| {
+            self.provider == "codex"
+                || self.provider != "claude-code" && owner.session_id != self.session_id
+        })
+    }
+
+    fn takeover_from(&self) -> Option<&str> {
+        let owner = self.selected_session()?.loaded_by.as_ref()?;
+        (self.provider == "claude-code" && owner.session_id != self.session_id)
+            .then_some(owner.session_id.as_str())
+    }
+
+    fn list_row_height(&self) -> Pixels {
+        px(if self.provider == "codex" { 72. } else { 88. })
+    }
+
+    fn reveal_list_row(&self, index: usize) {
+        let height = self.list_row_height();
+        let top = -self.list_scroll.offset().y;
+        let viewport = self.list_scroll.bounds().size.height.max(height);
+        let row_top = height * index;
+        let row_bottom = row_top + height;
+        let next_top = top.min(row_top).max(row_bottom - viewport);
+        self.list_scroll.set_offset(point(px(0.), -next_top));
+    }
+
+    fn rebuild_history_matches(&mut self, keep_active: bool) {
+        let previous = self
+            .history_matches
+            .get(self.active_history_match)
+            .map(|hit| hit.event_index)
+            .filter(|_| keep_active);
+        self.history_matches.clear();
+        self.active_history_match = 0;
+        let query = lowercase_history_text(&self.search_query);
+        if query.is_empty() {
+            return;
+        }
+        for (position, event) in self.events.iter().enumerate() {
+            let ranges = history_match_ranges(&event.text, &query);
+            if !ranges.is_empty() {
+                if previous == Some(event.index) {
+                    self.active_history_match = self.history_matches.len();
+                }
+                self.history_matches.push(HistoryMatch {
+                    event_index: event.index,
+                    position,
+                    ranges,
+                });
+            }
+        }
+    }
+
+    fn reveal_history_match(&self) {
+        if let Some(hit) = self.history_matches.get(self.active_history_match) {
+            // The loaded count and earlier-page action precede the messages.
+            let prefix = usize::from(self.first_event.is_some())
+                + usize::from(self.has_earlier || self.loading_earlier);
+            self.preview_scroll
+                .scroll_to_top_of_item(prefix + hit.position);
+        }
+    }
+
     fn visible_sessions<'a>(
         &'a self,
         cx: &App,
@@ -879,6 +953,67 @@ impl SessionLoader {
     }
 }
 
+struct LoaderConfirmation {
+    selected: String,
+    takeover_from: Option<String>,
+    running: bool,
+    return_focus: FocusHandle,
+}
+
+struct HistoryMatch {
+    event_index: usize,
+    position: usize,
+    ranges: Vec<Range<usize>>,
+}
+
+fn lowercase_history_text(text: &str) -> String {
+    text.chars().flat_map(char::to_lowercase).collect()
+}
+
+fn history_match_ranges(text: &str, query: &str) -> Vec<Range<usize>> {
+    let folded = lowercase_history_text(text);
+    if query.is_empty() || !folded.contains(query) {
+        return Vec::new();
+    }
+    if text.is_ascii() {
+        return folded
+            .match_indices(query)
+            .map(|(start, matched)| start..start + matched.len())
+            .collect();
+    }
+    // Delayed GPUI highlights use UTF-8 offsets in the original text.
+    // Case conversion can expand a character and change later byte offsets.
+    let mut boundaries = Vec::new();
+    let mut offset = 0;
+    for (original, character) in text.char_indices() {
+        boundaries.push((offset, original));
+        offset += character.to_lowercase().map(char::len_utf8).sum::<usize>();
+    }
+    boundaries.push((offset, text.len()));
+    let mut ranges: Vec<Range<usize>> = Vec::new();
+    for (start, matched) in folded.match_indices(query) {
+        let lower = boundaries.partition_point(|&(offset, _)| offset <= start) - 1;
+        let upper = boundaries.partition_point(|&(offset, _)| offset < start + matched.len());
+        let range = boundaries[lower].1..boundaries[upper].1;
+        if let Some(last) = ranges.last_mut().filter(|last| last.end > range.start) {
+            last.end = last.end.max(range.end);
+        } else {
+            ranges.push(range);
+        }
+    }
+    ranges
+}
+
+fn loader_row_range(count: usize, top: Pixels, viewport: Pixels, row: Pixels) -> Range<usize> {
+    const BUFFER: usize = 3;
+    if count < 50 {
+        return 0..count;
+    }
+    let first = (top / row).floor() as usize;
+    let end = ((top + viewport) / row).ceil() as usize;
+    first.saturating_sub(BUFFER).min(count)..end.saturating_add(BUFFER).min(count)
+}
+
 const SESSION_LOADER_PAGE_SIZE: i64 = 200;
 
 const LAST_TAB_BODY: &str = "当前已是最后一个事项下的最后一个标签，这里点击关闭不会删除该事项。\n\n如需删除该工作区，请在左侧事项面板的下拉菜单中执行删除。";
@@ -899,6 +1034,48 @@ const SESSION_LOADER_LOADING_PREVIEW: &str = "正在载入预览…";
 const SESSION_LOADER_NO_HISTORY: &str = "当前会话还没有可显示的历史内容";
 const SESSION_LOADER_LOADING_EARLIER: &str = "正在载入更早内容…";
 const SESSION_LOADER_LOADING: &str = "正在载入…";
+const LOADER_EXIT_NOT_SAVED: &str = "The process exited, but its exit record could not be saved";
+const LOADER_EXIT_NOT_SAVED_ZH: &str = "进程已结束，但退出记录写入失败";
+
+fn loader_load_error(error: String, locale: InterfaceLocale) -> String {
+    if locale == InterfaceLocale::Chinese
+        && let Some(detail) = error.strip_prefix(LOADER_EXIT_NOT_SAVED)
+    {
+        return format!("{LOADER_EXIT_NOT_SAVED_ZH}{detail}");
+    }
+    if locale == InterfaceLocale::Chinese {
+        let translated = match error.as_str() {
+            "The confirmed source card no longer owns this session" => {
+                "原先确认的卡片已不再持有该会话"
+            }
+            "This session is already open in another card. Confirm the current source before loading." => {
+                "该会话已在另一张卡中打开，请重新选择并确认来源卡片"
+            }
+            "The confirmed source no longer has an available session" => {
+                "原先确认的卡片已没有可用会话"
+            }
+            "The confirmed source card is no longer in this scene" => {
+                "原先确认的卡片已不在当前画布中"
+            }
+            "More than one card owns this session. The source card is ambiguous." => {
+                "该会话在多张卡片中打开，无法确定要接管哪一张"
+            }
+            "A card is already taking part in a conversation load" => {
+                "有卡片正在载入会话，请稍后再试"
+            }
+            "This session is already loading in another card" => "该会话正在另一张卡中载入",
+            "The source card is already stopping or recovering" => "来源卡片正在停止或恢复",
+            "The source card could not be stopped" => "无法结束来源卡片的进程",
+            "Could not request that the process stop" => "未能发送停止进程的请求",
+            "The source card still has a running process" => "来源卡片仍有进程正在运行",
+            "The completed takeover is no longer available" => "已接管的会话已不可用",
+            "The session owner changed" => "会话的持有卡片已变更",
+            _ => return error,
+        };
+        return translated.into();
+    }
+    error
+}
 
 struct StartFailureCard<'a> {
     title: &'static str,
@@ -9206,24 +9383,53 @@ impl Workspace {
     }
 
     fn session_loader_running(&self, id: &str) -> bool {
-        self.graph_node(id)
-            .is_some_and(|node| matches!(node["workStatus"].as_str(), Some("running" | "starting")))
+        self.graph_node(id).is_some_and(|node| {
+            matches!(
+                node["workStatus"].as_str(),
+                Some("running" | "starting" | "needs-input")
+            ) || node["currentMode"] == "claude-code"
+                && node["workStatus"] == "idle"
+                && self.recovery.get(id) == Some(&RecoveryState::Ready)
+        })
     }
 
     fn session_loader_can_submit(&self, state: &SessionLoader) -> bool {
         !state.history
-            && state.selected.as_ref().is_some_and(|id| {
-                state.provider != "codex"
-                    || state
-                        .sessions
-                        .iter()
-                        .any(|row| &row.id == id && row.loaded_by.is_none())
-            })
+            && state.selected_session().is_some()
+            && state.blocked_owner().is_none()
             && !self.pending_loader_loads.contains_key(&state.session_id)
             && self.graph_node(&state.session_id).is_some_and(|node| {
-                self.launch_action_blocked_reason(&state.session_id, node)
-                    .is_none()
+                node["archivedAt"].is_null()
+                    && self
+                        .launch_action_blocked_reason(&state.session_id, node)
+                        .is_none()
             })
+    }
+
+    fn session_loader_owner_notice(&self, state: &SessionLoader) -> Option<String> {
+        let owner = state.blocked_owner()?;
+        Some(if owner.session_id == state.session_id {
+            self.locale
+                .text(
+                    "该会话已在当前卡片中打开",
+                    "This session is already open in this card",
+                )
+                .to_owned()
+        } else if owner.title.trim().is_empty() {
+            self.locale
+                .text(
+                    "该会话已在另一张卡中打开",
+                    "This session is already open in another card",
+                )
+                .to_owned()
+        } else {
+            match self.locale {
+                InterfaceLocale::Chinese => format!("该会话已在“{}”中打开", owner.title),
+                InterfaceLocale::English => {
+                    format!("This session is already open in \"{}\"", owner.title)
+                }
+            }
+        })
     }
 
     fn open_session_loader(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -9291,7 +9497,11 @@ impl Workspace {
             "Filter by title, path, model or session ID",
         );
         let input = cx.new(|cx| loader_search_input(filter_placeholder, self.wiring_dark(), cx));
-        let content_placeholder = self.locale.text("查找右侧内容", "Search content");
+        let content_placeholder = if history {
+            self.locale.text("输入关键词", "Enter a keyword")
+        } else {
+            self.locale.text("查找右侧内容", "Search content")
+        };
         let content_input =
             cx.new(|cx| loader_search_input(content_placeholder, self.wiring_dark(), cx));
         self.dialog_subscription =
@@ -9300,13 +9510,16 @@ impl Workspace {
                     this.loader_filter_changed(cx);
                 }
             }));
-        let content_subscription =
-            cx.subscribe_in(&content_input, window, |this, _, event, _, cx| {
-                if matches!(event, RenameInputEvent::Changed) {
-                    this.loader_search_changed(cx);
-                }
-            });
-        self.dialog_controls = (0..11).map(|_| cx.focus_handle().tab_stop(true)).collect();
+        let content_subscription = cx.subscribe_in(
+            &content_input,
+            window,
+            |this, _, event, _, cx| match event {
+                RenameInputEvent::Changed => this.loader_search_changed(cx),
+                RenameInputEvent::Confirm => this.step_history_match(1, cx),
+                RenameInputEvent::Cancel => {}
+            },
+        );
+        self.dialog_controls = (0..16).map(|_| cx.focus_handle().tab_stop(true)).collect();
         let list_focus = cx.focus_handle().tab_stop(true);
         let focus_subscriptions = [
             (input.read(cx).focus.clone(), LoaderFocus::Filter),
@@ -9345,6 +9558,7 @@ impl Workspace {
             history,
             provider,
             confirm_running: false,
+            confirmation: None,
             restore_selection: remembered.selected(provider),
             remembered,
             list_total: 0,
@@ -9362,6 +9576,8 @@ impl Workspace {
             search_hits: Vec::new(),
             has_more_hits: false,
             search_next: 0,
+            history_matches: Vec::new(),
+            active_history_match: 0,
             detail_model: None,
             detail_permission: None,
             scene_id,
@@ -9584,7 +9800,7 @@ impl Workspace {
                 .visible_sessions(cx)
                 .position(|row| row.id == matching.id)
         {
-            state.list_scroll.scroll_to_item(position);
+            state.reveal_list_row(position);
         }
         let next = matching.or(first).map(|session| session.id.clone());
         drop(visible);
@@ -9619,7 +9835,7 @@ impl Workspace {
         };
         let next = current.saturating_add_signed(delta).min(visible.len() - 1);
         let id = visible[next].id.clone();
-        state.list_scroll.scroll_to_item(next);
+        state.reveal_list_row(next);
         self.select_loader_session(&id, cx);
     }
 
@@ -9743,6 +9959,12 @@ impl Workspace {
             return;
         }
         state.search_query = query;
+        if state.history {
+            state.rebuild_history_matches(false);
+            state.reveal_history_match();
+            cx.notify();
+            return;
+        }
         state.search_hits.clear();
         state.has_more_hits = false;
         state.search_next = 0;
@@ -9750,12 +9972,26 @@ impl Workspace {
         cx.notify();
     }
 
+    fn step_history_match(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if let Some(TabDialog::SessionLoader(state)) = &mut self.dialog
+            && state.history
+            && !state.history_matches.is_empty()
+        {
+            let len = state.history_matches.len() as isize;
+            state.active_history_match =
+                (state.active_history_match as isize + delta).rem_euclid(len) as usize;
+            state.reveal_history_match();
+            cx.notify();
+        }
+    }
+
     fn request_loader_search(&mut self, offset: usize) {
         let Some(TabDialog::SessionLoader(state)) = &mut self.dialog else {
             return;
         };
         let Some(id) = state.selected.as_ref().filter(|_| {
-            state.remote_catalog()
+            !state.history
+                && state.remote_catalog()
                 && !state.search_query.is_empty()
                 && state.pending_search.is_none()
         }) else {
@@ -9869,28 +10105,94 @@ impl Workspace {
         cx.notify();
     }
 
-    fn submit_session_loader(&mut self, cx: &mut Context<Self>) {
+    fn session_loader_needs_running_modal(&self, state: &SessionLoader) -> bool {
+        self.session_loader_running(&state.session_id)
+            && (state.provider == "claude-code"
+                || self
+                    .graph_node(&state.session_id)
+                    .is_some_and(|node| node["currentMode"] == "claude-code"))
+    }
+
+    fn submit_session_loader(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(TabDialog::SessionLoader(state)) = &self.dialog else {
             return;
         };
-        if !self.session_loader_can_submit(state) {
+        if state.confirmation.is_some() || !self.session_loader_can_submit(state) {
             return;
         }
-        if state.remote_catalog()
-            && !state.confirm_running
-            && self.session_loader_running(&state.session_id)
-        {
+        let takeover_from = state.takeover_from().map(str::to_owned);
+        let running = self.session_loader_needs_running_modal(state);
+        if takeover_from.is_some() || running {
+            let selected = state.selected.clone().expect("validated selection");
+            let return_focus = window
+                .focused(cx)
+                .unwrap_or_else(|| self.dialog_controls[2].clone());
+            if let Some(TabDialog::SessionLoader(state)) = &mut self.dialog {
+                state.confirmation = Some(LoaderConfirmation {
+                    selected,
+                    takeover_from,
+                    running,
+                    return_focus,
+                });
+            }
+            window.focus(&self.dialog_controls[14]);
+        } else if !state.confirm_running && self.session_loader_running(&state.session_id) {
             if let Some(TabDialog::SessionLoader(state)) = &mut self.dialog {
                 state.confirm_running = true;
             }
-            cx.notify();
-            return;
+        } else {
+            self.send_session_loader_load(None, false, cx);
         }
-        let Some(session) = state
-            .sessions
-            .iter()
-            .find(|session| Some(&session.id) == state.selected.as_ref())
-        else {
+        cx.notify();
+    }
+
+    fn cancel_loader_confirmation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(TabDialog::SessionLoader(state)) = &mut self.dialog
+            && let Some(confirmation) = state.confirmation.take()
+        {
+            window.focus(&confirmation.return_focus);
+            cx.notify();
+        }
+    }
+
+    fn confirm_loader_load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(confirmation) = (match &mut self.dialog {
+            Some(TabDialog::SessionLoader(state)) => state.confirmation.take(),
+            _ => None,
+        }) else {
+            return;
+        };
+        if let Some(TabDialog::SessionLoader(state)) = &self.dialog
+            && state.selected.as_ref() == Some(&confirmation.selected)
+            && self.session_loader_can_submit(state)
+        {
+            if state.takeover_from() == confirmation.takeover_from.as_deref()
+                && (confirmation.running || !self.session_loader_needs_running_modal(state))
+            {
+                window.focus(&confirmation.return_focus);
+                self.send_session_loader_load(confirmation.takeover_from, confirmation.running, cx);
+                return;
+            }
+            // Reopen the confirmation if the selected conversation acquired a
+            // different owner or the target began running while it was open.
+            window.focus(&confirmation.return_focus);
+            self.submit_session_loader(window, cx);
+        } else {
+            window.focus(&confirmation.return_focus);
+            cx.notify();
+        }
+    }
+
+    fn send_session_loader_load(
+        &mut self,
+        takeover_from: Option<String>,
+        confirmed_running: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(TabDialog::SessionLoader(state)) = &self.dialog else {
+            return;
+        };
+        let Some(session) = state.selected_session() else {
             return;
         };
         let session_id = state.session_id.clone();
@@ -9908,6 +10210,8 @@ impl Workspace {
             title: session.title.clone(),
             previous_revision,
             request_id,
+            wait_for_identity: state.provider == "claude-code"
+                && (takeover_from.is_some() || confirmed_running),
         };
         let command = match (state.provider, request_id) {
             ("dsh", Some(request_id)) => Command::LoadDshSession {
@@ -9927,6 +10231,7 @@ impl Workspace {
             _ => Command::LoadProviderSession {
                 session_id: session_id.clone(),
                 provider_session_id: load.id.clone(),
+                takeover_from,
             },
         };
         let result = self.commands.send_at(self.runtime_generation, command);
@@ -10054,7 +10359,8 @@ impl Workspace {
             if request.start.is_some() && page["hasLater"] == true {
                 let first = previous_first.unwrap_or_default() as usize;
                 let mut previous: Vec<_> = events.filter(|event| event.index < first).collect();
-                let anchor = previous.len() + usize::from(state.has_earlier);
+                let anchor =
+                    previous.len() + usize::from(state.has_earlier) + usize::from(state.history);
                 previous.append(&mut state.events);
                 state.events = previous;
                 state.preview_scroll.scroll_to_top_of_item(anchor);
@@ -10069,8 +10375,17 @@ impl Workspace {
                     state
                         .preview_scroll
                         .scroll_to_top_of_item(position + usize::from(state.has_earlier));
-                } else {
+                } else if !state.history {
                     state.preview_scroll.scroll_to_bottom();
+                }
+            }
+            if state.history {
+                let had_match = !state.history_matches.is_empty();
+                state.rebuild_history_matches(true);
+                if state.history_matches.is_empty() && request.start.is_none() {
+                    state.preview_scroll.scroll_to_bottom();
+                } else if !had_match || request.start.is_none() {
+                    state.reveal_history_match();
                 }
             }
         }
@@ -10194,7 +10509,7 @@ impl Workspace {
                     && node["title"] == load.title
             });
             if error.is_none()
-                && !committed
+                && (load.wait_for_identity || !committed)
                 && !identity.is_some_and(|result| result["result"] == "confirmed")
             {
                 return true;
@@ -10208,7 +10523,7 @@ impl Workspace {
             Some(Ok(())) => self.close_dialog(window, cx),
             Some(Err(error)) => {
                 if let Some(TabDialog::SessionLoader(state)) = &mut self.dialog {
-                    state.error = Some(error);
+                    state.error = Some(loader_load_error(error, self.locale));
                     state.confirm_running = false;
                 }
             }
@@ -11411,37 +11726,60 @@ impl Workspace {
         }
         if let Some(TabDialog::SessionLoader(state)) = &self.dialog {
             if stroke.key == "escape" {
-                self.close_dialog(window, cx);
+                if state.confirmation.is_some() {
+                    self.cancel_loader_confirmation(window, cx);
+                } else {
+                    self.close_dialog(window, cx);
+                }
                 cx.stop_propagation();
             } else if stroke.key == "tab" && !mods.alt && !mods.control && !mods.platform {
-                let input = state.input.read(cx);
-                let mut controls = vec![&self.dialog_controls[0]];
-                if !state.history {
-                    controls.extend([4, 9, 5, 8].map(|index| &self.dialog_controls[index]));
-                }
-                controls.push(&input.focus);
-                if !input.text.is_empty() {
+                let controls = if state.confirmation.is_some() {
+                    [13, 14, 15]
+                        .map(|index| &self.dialog_controls[index])
+                        .to_vec()
+                } else if state.history {
+                    let mut controls = vec![
+                        &self.dialog_controls[0],
+                        &state.content_input.read(cx).focus,
+                    ];
+                    if !state.history_matches.is_empty() && !state.loading_detail {
+                        controls.extend([11, 12].map(|index| &self.dialog_controls[index]));
+                    }
+                    if state.has_earlier && !state.loading_earlier {
+                        controls.push(&self.dialog_controls[1]);
+                    }
+                    if state.error.is_some() && !state.loading_detail {
+                        controls.push(&self.dialog_controls[2]);
+                    }
                     controls.push(&self.dialog_controls[3]);
-                }
-                controls.push(&state.list_focus);
-                if state.remote_catalog() {
-                    if state.has_more_sessions && !state.loading_list {
-                        controls.push(&self.dialog_controls[6]);
+                    controls
+                } else {
+                    let input = state.input.read(cx);
+                    let mut controls = vec![&self.dialog_controls[0]];
+                    controls.extend([4, 9, 5, 8].map(|index| &self.dialog_controls[index]));
+                    controls.push(&input.focus);
+                    if !input.text.is_empty() {
+                        controls.push(&self.dialog_controls[3]);
                     }
-                    if state.has_more_hits && state.pending_search.is_none() {
-                        controls.push(&self.dialog_controls[7]);
+                    controls.push(&state.list_focus);
+                    if state.remote_catalog() {
+                        if state.has_more_sessions && !state.loading_list {
+                            controls.push(&self.dialog_controls[6]);
+                        }
+                        if state.has_more_hits && state.pending_search.is_none() {
+                            controls.push(&self.dialog_controls[7]);
+                        }
                     }
-                }
-                if state.has_earlier && !state.loading_earlier {
-                    controls.push(&self.dialog_controls[1]);
-                }
-                if !state.history {
+                    if state.has_earlier && !state.loading_earlier {
+                        controls.push(&self.dialog_controls[1]);
+                    }
                     controls.push(&state.content_input.read(cx).focus);
                     controls.push(&self.dialog_controls[10]);
-                }
-                if self.session_loader_can_submit(state) {
-                    controls.push(&self.dialog_controls[2]);
-                }
+                    if self.session_loader_can_submit(state) {
+                        controls.push(&self.dialog_controls[2]);
+                    }
+                    controls
+                };
                 let current = controls.iter().position(|focus| focus.is_focused(window));
                 let next = match (current, mods.shift) {
                     (Some(index), true) => (index + controls.len() - 1) % controls.len(),
@@ -12953,10 +13291,8 @@ impl Workspace {
         let content_empty = content_input.text.is_empty();
         let local_content_query = content_input.text.trim().to_lowercase();
         let content_focused = content_input.focus.is_focused(window);
-        let selected = state
-            .selected
-            .as_ref()
-            .and_then(|id| state.sessions.iter().find(|session| &session.id == id));
+        let selected = state.selected_session();
+        let owner_notice = self.session_loader_owner_notice(state);
         let target_title = self
             .graph_node(&state.session_id)
             .and_then(|node| node["title"].as_str())
@@ -13035,8 +13371,8 @@ impl Workspace {
         let content_search = div().flex_none().flex().items_center().gap(px(7.)).child(
             div()
                 .id("session-loader-content")
-                .w(px(220.))
-                .h(px(34.))
+                .w(px(if state.history { 190. } else { 220. }))
+                .h(px(if state.history { 30. } else { 34. }))
                 .flex()
                 .items_center()
                 .gap(px(7.))
@@ -13049,6 +13385,9 @@ impl Workspace {
                 })
                 .rounded(px(9.))
                 .bg(tone(0x15181c, 0xffffff))
+                .children(workspace_wiring::wiring_probe_bounds(
+                    "session-loader-content".into(),
+                ))
                 .when(content_focused, |content| {
                     content.shadow(vec![BoxShadow {
                         color: focus_ring,
@@ -13068,6 +13407,95 @@ impl Workspace {
                         .child(state.content_input.clone()),
                 ),
         );
+        let preview_search = if state.history {
+            div()
+                .flex_none()
+                .flex()
+                .items_end()
+                .gap(px(10.))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .child(
+                            div()
+                                .text_size(px(9.))
+                                .text_color(tone(0x9aa4b1, 0x5b6675))
+                                .child(
+                                    ui_text(
+                                        self.locale.text("搜索已加载内容", "Search loaded content"),
+                                    )
+                                    .normal_line_height(),
+                                ),
+                        )
+                        .child(content_search),
+                )
+                .when(
+                    !state.search_query.is_empty() && !state.loading_detail,
+                    |search| {
+                        let count = state.history_matches.len();
+                        let label = if count == 0 {
+                            self.locale
+                                .text("没有找到匹配内容", "No matches")
+                                .to_owned()
+                        } else {
+                            format!("{}/{count}", state.active_history_match + 1)
+                        };
+                        let mut nav = div()
+                            .h(px(30.))
+                            .flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .id("session-history-match-nav")
+                            .child(div().text_size(px(10.)).child(label));
+                        if count != 0 {
+                            for (id, label, tooltip, control, delta) in [
+                                (
+                                    "session-history-previous",
+                                    "↑",
+                                    self.locale.text("上一处", "Previous match"),
+                                    11,
+                                    -1,
+                                ),
+                                (
+                                    "session-history-next",
+                                    "↓",
+                                    self.locale.text("下一处", "Next match"),
+                                    12,
+                                    1,
+                                ),
+                            ] {
+                                nav = nav.child(
+                                    self.button(
+                                        div()
+                                            .id(id)
+                                            .size(px(25.))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded(px(5.))
+                                            .cursor_pointer()
+                                            .hover(move |style| {
+                                                style.bg(wash(0xffffff12, 0x30415712))
+                                            })
+                                            .tooltip(move |_, cx| {
+                                                cx.new(|_| CardTooltip(tooltip.into())).into()
+                                            })
+                                            .child(label),
+                                        &self.dialog_controls[control],
+                                        move |this, _, cx| this.step_history_match(delta, cx),
+                                        cx,
+                                    ),
+                                );
+                            }
+                        }
+                        search.child(nav)
+                    },
+                )
+        } else {
+            content_search
+        };
 
         let provider_name = match state.provider {
             "codex" => "Codex",
@@ -13075,8 +13503,24 @@ impl Workspace {
             "antigravity" => "Antigravity",
             _ => "Claude Code",
         };
-        let mut rows = Vec::with_capacity(sessions.len());
-        for session in &sessions {
+        let row_height = state.list_row_height();
+        let all_loaded = !state.loading_list && !state.has_more_sessions && !sessions.is_empty();
+        // Panel borders, header/footer, and the list's filter and count.
+        let list_viewport =
+            px(panel_height - 2. - 2. * 58. - 14. - 34. - 32. - if all_loaded { 24. } else { 0. });
+        let tail_height = px(if state.loading_list || state.has_more_sessions {
+            30.
+        } else {
+            0.
+        });
+        // GPUI clamps wheel overscroll after this render, so use the same
+        // logical extent when deciding which rows to materialize.
+        let max_top =
+            (row_height * sessions.len() + tail_height + px(12.) - list_viewport).max(px(0.));
+        let top = (-state.list_scroll.offset().y).clamp(px(0.), max_top);
+        let range = loader_row_range(sessions.len(), top, list_viewport, row_height);
+        let mut rows = Vec::with_capacity(range.len());
+        for session in &sessions[range.clone()] {
             let is_selected = state.selected.as_deref() == Some(session.id.as_str());
             let row_session_id = session.id.clone();
             let model = session
@@ -13101,6 +13545,10 @@ impl Workspace {
                     self.locale
                         .text("已载入当前卡片", "Loaded in this card")
                         .to_owned()
+                } else if owner.title.trim().is_empty() {
+                    self.locale
+                        .text("已载入另一张卡", "Loaded in another card")
+                        .to_owned()
                 } else {
                     match self.locale {
                         InterfaceLocale::Chinese => format!("已载入“{}”", owner.title),
@@ -13115,6 +13563,7 @@ impl Workspace {
                         session.id
                     )))
                     .w_full()
+                    .h(row_height - px(6.))
                     .flex_none()
                     .mb(px(6.))
                     .border_1()
@@ -13236,13 +13685,22 @@ impl Workspace {
                     _ => {}
                 }
             }))
-            .children(rows);
+            .children((range.start > 0).then(|| div().flex_none().h(row_height * range.start)))
+            .children(rows)
+            .children((range.end < sessions.len()).then(|| {
+                div()
+                    .flex_none()
+                    .h(row_height * (sessions.len() - range.end))
+            }));
         let list_results = if state.loading_list {
             list_results.child(
                 div()
                     .w_full()
-                    .py(px(7.))
-                    .text_center()
+                    .h(px(30.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
                     .text_size(px(9.))
                     .text_color(tone(0x8490a0, 0x748091))
                     .child(
@@ -13366,19 +13824,19 @@ impl Workspace {
                     ),
             )
             .child(list_results)
-            .when(
-                !state.loading_list && !state.has_more_sessions && !sessions.is_empty(),
-                |list| {
-                    list.child(
-                        div()
-                            .py(px(7.))
-                            .text_size(px(9.))
-                            .text_center()
-                            .text_color(tone(0x8490a0, 0x748091))
-                            .child(self.locale.text("已加载全部", "All loaded")),
-                    )
-                },
-            );
+            .when(all_loaded, |list| {
+                list.child(
+                    div()
+                        .h(px(24.))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(9.))
+                        .text_color(tone(0x8490a0, 0x748091))
+                        .child(self.locale.text("已加载全部", "All loaded")),
+                )
+            });
 
         let preview_title = if state.history && is_codex {
             provider_name.to_owned()
@@ -13464,7 +13922,7 @@ impl Workspace {
                             .child(ui_text(meta).normal_line_height())
                     })),
             )
-            .when(!state.history, |header| header.child(content_search));
+            .child(preview_search);
 
         let mut events = div()
             .id("session-loader-events")
@@ -13515,10 +13973,12 @@ impl Workspace {
                 .text_size(px(9.))
                 .text_color(tone(0x8490a0, 0x748091))
                 .child(
-                    ui_text(
+                    ui_text(if state.history && !state.loading_earlier {
+                        self.locale.text("载入更早内容", "Load earlier content")
+                    } else {
                         self.locale
-                            .text(SESSION_LOADER_LOADING_EARLIER, "Loading earlier content…"),
-                    )
+                            .text(SESSION_LOADER_LOADING_EARLIER, "Loading earlier content…")
+                    })
                     .normal_line_height(),
                 );
             let pill = if state.loading_earlier {
@@ -13550,15 +14010,37 @@ impl Workspace {
         } else {
             "Consolas"
         };
-        for event in &state.events {
+        let mut history_matches = state.history_matches.iter().enumerate().peekable();
+        for (position, event) in state.events.iter().enumerate() {
             let (border, background) = match event.kind.as_str() {
                 "tool" => (tone(0x4c3d5a, 0xd8cae4), tone(0x241f2a, 0xf7f2fb)),
                 "user" => (tone(0x343b46, 0xd8dee6), tone(0x252b32, 0xeef2f6)),
                 _ => (tone(0x343b46, 0xd8dee6), tone(0x20242a, 0xf7f9fb)),
             };
-            let matches = !remote_catalog
-                && !local_content_query.is_empty()
-                && event.text.to_lowercase().contains(&local_content_query);
+            let history_hit = history_matches.next_if(|(_, hit)| hit.position == position);
+            let active = history_hit.is_some_and(|(index, _)| index == state.active_history_match);
+            let matches = active
+                || !state.history
+                    && !remote_catalog
+                    && !local_content_query.is_empty()
+                    && event.text.to_lowercase().contains(&local_content_query);
+            let text = if let Some((_, hit)) = history_hit {
+                let highlight = HighlightStyle {
+                    background_color: Some(
+                        wash(
+                            if active { 0xb57821aa } else { 0xb578215c },
+                            if active { 0xffc262db } else { 0xffd888a8 },
+                        )
+                        .into(),
+                    ),
+                    ..Default::default()
+                };
+                StyledText::new(event.text.clone())
+                    .with_highlights(hit.ranges.iter().cloned().map(|range| (range, highlight)))
+                    .into_any_element()
+            } else {
+                ui_text(event.text.clone()).into_any_element()
+            };
             let assistant = if remote_catalog {
                 provider_name
             } else {
@@ -13624,7 +14106,7 @@ impl Workspace {
                                     .line_height(px(16.))
                                     .text_color(tone(0xd9dde3, 0x394250))
                                     .whitespace_normal()
-                                    .child(ui_text(event.text.clone())),
+                                    .child(text),
                             ),
                     ),
             );
@@ -13746,7 +14228,7 @@ impl Workspace {
                     )
                 },
             );
-        let hits_panel = (remote_catalog && !content_empty).then_some(hits_panel);
+        let hits_panel = (!state.history && remote_catalog && !content_empty).then_some(hits_panel);
 
         let preview = div()
             .id("session-loader-preview")
@@ -13773,6 +14255,10 @@ impl Workspace {
             self.locale
                 .text(SESSION_LOADER_LOADING, "Loading…")
                 .to_owned()
+        } else if state.error.as_deref().is_some_and(|error| {
+            error.starts_with(LOADER_EXIT_NOT_SAVED) || error.starts_with(LOADER_EXIT_NOT_SAVED_ZH)
+        }) {
+            self.locale.text("重试载入", "Retry loading").to_owned()
         } else if remote_catalog && state.confirm_running {
             self.locale
                 .text("结束当前进程并载入", "End the current run and load")
@@ -13805,13 +14291,17 @@ impl Workspace {
             self.button(
                 primary.cursor_pointer(),
                 &self.dialog_controls[2],
-                |this, _, cx| this.submit_session_loader(cx),
+                Self::submit_session_loader,
                 cx,
             )
         } else {
             primary
                 .opacity(0.48)
                 .cursor(CursorStyle::OperationNotAllowed)
+                .when_some(owner_notice.clone(), |button, notice| {
+                    button
+                        .tooltip(move |_, cx| cx.new(|_| CardTooltip(notice.clone().into())).into())
+                })
         };
 
         let footer = div()
@@ -13842,8 +14332,24 @@ impl Workspace {
                             .text_size(px(10.))
                             .text_color(tone(0xff8276, 0xa13d39))
                             .child(ui_text(error.clone()).normal_line_height())
+                            .tooltip({
+                                let error = error.clone();
+                                move |_, cx| cx.new(|_| CardTooltip(error.clone().into())).into()
+                            })
                     }))
-                    .when(confirm_warning, |left| {
+                    .when_some(owner_notice, |left, notice| {
+                        left.child(
+                            div()
+                                .id("session-loader-occupied")
+                                .text_size(px(10.))
+                                .text_color(tone(0xe5af52, 0x90601b))
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .child(ui_text(notice).normal_line_height()),
+                        )
+                    })
+                    .when(confirm_warning && state.blocked_owner().is_none(), |left| {
                         left.child(
                             div()
                                 .w_full()
@@ -14113,7 +14619,94 @@ impl Workspace {
             )
             .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
             .child(panel)
+            .children(state.confirmation.as_ref().map(|confirmation| {
+                self.render_loader_confirmation(confirmation, viewport_width, dark, cx)
+            }))
             .into_any_element()
+    }
+
+    fn render_loader_confirmation(
+        &self,
+        confirmation: &LoaderConfirmation,
+        viewport_width: f32,
+        dark: bool,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let close = self.button(
+            tabs_ui::dialog_close("session-loader-confirm-close", dark),
+            &self.dialog_controls[13],
+            Self::cancel_loader_confirmation,
+            cx,
+        );
+        let cancel = self.button(
+            tabs_ui::dialog_button(
+                "session-loader-confirm-cancel",
+                self.locale.text("取消", "Cancel"),
+                false,
+                false,
+                dark,
+            )
+            .children(workspace_wiring::wiring_probe_bounds(
+                "session-loader-confirm-cancel".into(),
+            )),
+            &self.dialog_controls[14],
+            Self::cancel_loader_confirmation,
+            cx,
+        );
+        let confirm = self.button(
+            tabs_ui::dialog_button(
+                "session-loader-confirm-continue",
+                self.locale.text("继续", "Continue"),
+                true,
+                false,
+                dark,
+            )
+            .children(workspace_wiring::wiring_probe_bounds(
+                "session-loader-confirm-continue".into(),
+            )),
+            &self.dialog_controls[15],
+            Self::confirm_loader_load,
+            cx,
+        );
+        let body = tabs_ui::dialog_body(dark)
+            .gap(px(8.))
+            .children(confirmation.takeover_from.as_ref().map(|_| {
+                ui_text(self.locale.text(
+                    "该会话已在另一张卡中打开，继续会接管它",
+                    "This session is already open in another card; continuing will take it over",
+                ))
+                .pre_line()
+            }))
+            .children(confirmation.running.then(|| {
+                ui_text(self.locale.text(
+                    "这个会话正在运行，载入历史会结束当前进程",
+                    "This session is running; loading history will end the current process",
+                ))
+                .pre_line()
+            }));
+        tabs_ui::dialog_overlay("session-loader-confirm-overlay")
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    this.cancel_loader_confirmation(window, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+            .child(
+                tabs_ui::dialog_panel(viewport_width, dark)
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
+                        tabs_ui::dialog_header()
+                            .child(tabs_ui::dialog_title(
+                                self.locale.text("载入会话", "Load session"),
+                                dark,
+                            ))
+                            .child(close),
+                    )
+                    .child(body)
+                    .child(tabs_ui::dialog_footer().child(cancel).child(confirm)),
+            )
     }
 
     fn render_fork_header(

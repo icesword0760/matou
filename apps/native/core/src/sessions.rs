@@ -864,7 +864,9 @@ pub fn claude_binding(db: &Connection, session_id: &str) -> Result<Option<Claude
                     AND restore_state <> 'failed' AND provider_session_id <> '') AS resumable
          FROM provider_bindings WHERE session_id = ? AND provider = 'claude-code'
            AND EXISTS (SELECT 1 FROM sessions WHERE id = session_id AND kind = 'claude-code')
-         ORDER BY updated_at DESC, (invalidated_at IS NULL) DESC, id DESC LIMIT 1",
+         ORDER BY CASE WHEN json_valid(metadata_json)
+                    THEN json_type(metadata_json, '$.catalogRollback') IS NOT NULL ELSE 0 END DESC,
+                  updated_at DESC, (invalidated_at IS NULL) DESC, id DESC LIMIT 1",
             [session_id],
             |row| {
                 let metadata: String = row.get("metadata_json")?;
@@ -1069,12 +1071,111 @@ pub fn ensure_codex_catalog_available(
     Ok(())
 }
 
+/// A confirmed handoff is valid for one active source in the destination scene.
+/// Return its binding ID so the caller can retire exactly that card.
+pub fn claude_catalog_source(
+    db: &Connection,
+    scene_id: &str,
+    target: &str,
+    provider_session_id: &str,
+    expected_source: Option<&str>,
+) -> Result<Option<String>> {
+    let owners = catalog_binding_owners(db, "claude-code", &[provider_session_id])?;
+    match owners.as_slice() {
+        [] if expected_source.is_none() => Ok(None),
+        [] => bail!("The confirmed source card no longer owns this session"),
+        [(_, owner, _)] if owner == target => {
+            if let Some(source) = expected_source {
+                let binding = claude_binding(db, target)?.context("The session owner changed")?;
+                ensure!(
+                    binding.provider_session_id == provider_session_id
+                        && binding.metadata["catalogTakeoverFrom"] == source,
+                    "The confirmed source card no longer owns this session"
+                );
+            }
+            Ok(None)
+        }
+        [(_, owner, _)] => {
+            ensure!(
+                expected_source == Some(owner.as_str()),
+                "This session is already open in another card. Confirm the current source before loading."
+            );
+            let binding = claude_binding(db, owner)?
+                .filter(|binding| {
+                    binding.resumable
+                        && binding.provider_session_id == provider_session_id
+                        && binding.restore_state == "none"
+                })
+                .context("The confirmed source no longer has an available session")?;
+            let in_scene: bool = db.query_row(
+                "SELECT EXISTS (SELECT 1 FROM session_canvas_memberships
+                 WHERE scene_id = ? AND session_id = ?)",
+                params![scene_id, owner],
+                |row| row.get(0),
+            )?;
+            ensure!(
+                in_scene,
+                "The confirmed source card is no longer in this scene"
+            );
+            Ok(Some(binding.id))
+        }
+        _ => bail!("More than one card owns this session. The source card is ambiguous."),
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct CatalogRollback {
+    source_binding: Option<String>,
+    target_kind: String,
+    target_title: String,
+    target_status: String,
+    target_work_status: String,
+    target_activity: i64,
+    previous_binding: Option<CatalogBindingSnapshot>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CatalogBindingSnapshot {
+    resume_state: String,
+    restore_state: String,
+    restore_error: Option<String>,
+    invalidated_at: Option<i64>,
+    user_exited_at: Option<i64>,
+    validated_at: Option<i64>,
+    updated_at: i64,
+    metadata_json: String,
+}
+
+pub struct ClaudeCatalogReplacement<'a> {
+    pub takeover_from: Option<&'a str>,
+}
+
 pub fn load_provider_catalog_binding(
     db: &mut Connection,
     command: &CommandMetadata,
     input: &ClaudeCatalogLoad<'_>,
     provider: &str,
     completed_turn: bool,
+    now: i64,
+) -> Result<DomainCommit> {
+    load_provider_catalog_binding_with_rollback(
+        db,
+        command,
+        input,
+        provider,
+        completed_turn,
+        None,
+        now,
+    )
+}
+
+pub fn load_provider_catalog_binding_with_rollback(
+    db: &mut Connection,
+    command: &CommandMetadata,
+    input: &ClaudeCatalogLoad<'_>,
+    provider: &str,
+    completed_turn: bool,
+    replacement: Option<ClaudeCatalogReplacement<'_>>,
     now: i64,
 ) -> Result<DomainCommit> {
     ensure!(
@@ -1120,6 +1221,20 @@ pub fn load_provider_catalog_binding(
             "Card has an unconfirmed fork"
         );
 
+        let expected_source = replacement
+            .as_ref()
+            .and_then(|replacement| replacement.takeover_from);
+        let source_binding = if provider == "claude-code" {
+            claude_catalog_source(
+                tx,
+                input.scene_id,
+                input.session_id,
+                input.provider_session_id,
+                expected_source,
+            )?
+        } else {
+            None
+        };
         if provider == "codex" {
             ensure_codex_catalog_available(tx, input.session_id, input.provider_session_id)?;
         }
@@ -1166,12 +1281,57 @@ pub fn load_provider_catalog_binding(
                 ),
             ),
         ]);
-        tx.execute(
-            "UPDATE provider_bindings SET resume_state = 'expired', restore_state = 'none',
-                restore_error = NULL, invalidated_at = ?, updated_at = ?
-             WHERE session_id = ? AND provider = ? AND id <> ?",
-            params![now, now, input.session_id, provider, binding_id],
-        )?;
+        if replacement.is_some() && provider == "claude-code" {
+            let target_work_status = tx.query_row(
+                "SELECT work_status FROM sessions WHERE id = ?",
+                [input.session_id],
+                |row| row.get(0),
+            )?;
+            let previous_binding = existing.as_ref().map(|(id, _)| tx.query_row(
+                "SELECT resume_state, restore_state, restore_error, invalidated_at, user_exited_at,
+                        validated_at, updated_at, metadata_json FROM provider_bindings WHERE id = ?",
+                [id],
+                |row| Ok(CatalogBindingSnapshot {
+                    resume_state: row.get(0)?,
+                    restore_state: row.get(1)?,
+                    restore_error: row.get(2)?,
+                    invalidated_at: row.get(3)?,
+                    user_exited_at: row.get(4)?,
+                    validated_at: row.get(5)?,
+                    updated_at: row.get(6)?,
+                    metadata_json: row.get(7)?,
+                }),
+            )).transpose()?;
+            if let Some(source_binding) = &source_binding {
+                let active: bool = tx.query_row(
+                    "SELECT EXISTS (SELECT 1 FROM session_runs AS run
+                       JOIN provider_bindings AS binding ON binding.session_id = run.session_id
+                       WHERE binding.id = ? AND run.status IN ('starting', 'running'))",
+                    [source_binding],
+                    |row| row.get(0),
+                )?;
+                ensure!(!active, "The source card still has a running process");
+                tx.execute(
+                    "UPDATE provider_bindings SET resume_state = 'expired' WHERE id = ?",
+                    [source_binding],
+                )?;
+                metadata.insert("catalogTakeoverFrom".into(), json!(expected_source));
+            }
+            metadata.insert(
+                "catalogRollback".into(),
+                serde_json::to_value(CatalogRollback {
+                    source_binding,
+                    target_kind: session.kind.clone(),
+                    target_title: session.title.clone(),
+                    target_status: session.status.clone(),
+                    target_work_status,
+                    target_activity: session.last_activity_at,
+                    previous_binding,
+                })?,
+            );
+        } else {
+            expire_other_catalog_bindings(tx, input.session_id, provider, binding_id, now)?;
+        }
         tx.execute(
             "INSERT INTO provider_bindings (id, session_id, provider, provider_session_id,
                 resume_state, restore_state, metadata_json, created_at, updated_at, validated_at)
@@ -1240,6 +1400,138 @@ pub fn load_provider_catalog_binding(
     })
 }
 
+fn expire_other_catalog_bindings(
+    db: &Connection,
+    session: &str,
+    provider: &str,
+    binding: &str,
+    now: i64,
+) -> Result<()> {
+    db.execute(
+        "UPDATE provider_bindings SET resume_state = 'expired', restore_state = 'none',
+            restore_error = NULL, invalidated_at = ?, updated_at = ?
+         WHERE session_id = ? AND provider = ? AND id <> ?",
+        params![now, now, session, provider, binding],
+    )?;
+    Ok(())
+}
+
+fn rollback_claude_catalog_binding(
+    db: &Connection,
+    session: &Session,
+    binding_id: &str,
+    rollback: CatalogRollback,
+    now: i64,
+) -> Result<()> {
+    if let Some(previous) = rollback.previous_binding {
+        db.execute(
+            "UPDATE provider_bindings SET resume_state = ?, restore_state = ?, restore_error = ?,
+                 invalidated_at = ?, user_exited_at = ?, validated_at = ?, updated_at = ?,
+                 metadata_json = ? WHERE id = ?",
+            params![
+                previous.resume_state,
+                previous.restore_state,
+                previous.restore_error,
+                previous.invalidated_at,
+                previous.user_exited_at,
+                previous.validated_at,
+                previous.updated_at,
+                previous.metadata_json,
+                binding_id,
+            ],
+        )?;
+    } else {
+        db.execute("DELETE FROM provider_bindings WHERE id = ?", [binding_id])?;
+    }
+    if let Some(source) = rollback.source_binding {
+        db.execute(
+            "UPDATE provider_bindings SET resume_state = 'available'
+             WHERE id = ? AND resume_state = 'expired' AND invalidated_at IS NULL
+               AND user_exited_at IS NULL",
+            [source],
+        )?;
+    }
+    if session.archived_at.is_none() {
+        db.execute(
+            "UPDATE sessions SET kind = ?, title = ?, status = ?, work_status = ?,
+                 last_activity_at = ?, updated_at = ?, version = version + 1 WHERE id = ?",
+            params![
+                rollback.target_kind,
+                rollback.target_title,
+                rollback.target_status,
+                rollback.target_work_status,
+                rollback.target_activity,
+                now,
+                session.id,
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+/// Cancel a staged takeover/replacement when the destination is disposed.
+pub fn cancel_claude_catalog_load(
+    db: &mut Connection,
+    command: &CommandMetadata,
+    session_id: &str,
+    revision: i64,
+    now: i64,
+) -> Result<()> {
+    execute(db, command, now, |tx, _| {
+        let Some(binding) = claude_binding(tx, session_id)? else {
+            return Ok(Value::Null);
+        };
+        if binding.metadata["spawnRevision"] == revision
+            && let Some(rollback) = binding.metadata.get("catalogRollback")
+        {
+            let session = require_session(tx, session_id)?;
+            rollback_claude_catalog_binding(
+                tx,
+                &session,
+                &binding.id,
+                serde_json::from_value(rollback.clone())?,
+                now,
+            )?;
+        }
+        Ok(Value::Null)
+    })?;
+    Ok(())
+}
+
+/// A process from the previous runtime cannot finish confirming its candidate.
+pub fn rollback_interrupted_catalog_loads(db: &mut Connection, now: i64) -> Result<()> {
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let staged = {
+        let mut query = tx.prepare(
+            "SELECT id, session_id, json_extract(metadata_json, '$.catalogRollback')
+             FROM provider_bindings WHERE provider = 'claude-code' AND restore_state = 'restoring'
+               AND CASE WHEN json_valid(metadata_json)
+                   THEN json_type(metadata_json, '$.catalogRollback') = 'object' ELSE 0 END",
+        )?;
+        query
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (binding_id, session_id, rollback) in staged {
+        let session = require_session(&tx, &session_id)?;
+        rollback_claude_catalog_binding(
+            &tx,
+            &session,
+            &binding_id,
+            serde_json::from_str(&rollback)?,
+            now,
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 pub fn change_claude_restore(
     db: &mut Connection,
     command: &CommandMetadata,
@@ -1280,11 +1572,21 @@ pub fn change_claude_restore(
     };
     execute(db, command, now, |tx, events| {
         let session = require_session(tx, session_id)?;
-        ensure!(
-            session.archived_at.is_none() && session.kind == "claude-code",
-            "Claude restore requires an active Claude Code card"
-        );
-        tx.execute(
+        let rollback = error.and_then(|_| metadata.remove("catalogRollback"));
+        if let Some(rollback) = rollback {
+            rollback_claude_catalog_binding(
+                tx,
+                &session,
+                &binding.id,
+                serde_json::from_value(rollback)?,
+                now,
+            )?;
+        } else {
+            ensure!(
+                session.archived_at.is_none() && session.kind == "claude-code",
+                "Claude restore requires an active Claude Code card"
+            );
+            tx.execute(
             "UPDATE provider_bindings SET resume_state = ?, restore_state = ?, restore_error = ?,
                  user_exited_at = NULL, metadata_json = ?, updated_at = ?,
                  invalidated_at = CASE WHEN ? = 'available' THEN NULL
@@ -1303,13 +1605,14 @@ pub fn change_claude_restore(
                 binding.id
             ],
         )?;
-        if let Some(work_status) = update_session {
-            tx.execute(
-                "UPDATE sessions SET
+            if let Some(work_status) = update_session {
+                tx.execute(
+                    "UPDATE sessions SET
                      status = CASE WHEN ? = 'starting' THEN 'starting' ELSE status END,
                      work_status = ?, updated_at = ?, version = version + 1 WHERE id = ?",
-                params![work_status, work_status, now, session_id],
-            )?;
+                    params![work_status, work_status, now, session_id],
+                )?;
+            }
         }
         let payload = json!({
             "sessionId": session_id, "provider": "claude-code",
@@ -1804,6 +2107,20 @@ fn record_provider_identity(
             .as_ref()
             .and_then(|(_, metadata)| serde_json::from_str(metadata).ok())
             .unwrap_or_default();
+        if provider == "claude-code"
+            && input.expected_id.is_some()
+            && let Some(rollback) = metadata.remove("catalogRollback")
+        {
+            let rollback: CatalogRollback = serde_json::from_value(rollback)?;
+            expire_other_catalog_bindings(tx, input.session_id, provider, binding_id, now)?;
+            if let Some(source) = rollback.source_binding {
+                tx.execute(
+                    "UPDATE provider_bindings SET invalidated_at = ?, updated_at = ?
+                     WHERE id = ? AND resume_state = 'expired' AND invalidated_at IS NULL",
+                    params![now, now, source],
+                )?;
+            }
+        }
         for (key, value) in input.launch_metadata.as_object().into_iter().flatten() {
             if key == "providerConfigId" || (provider == "codex" && key == "permissionMode") {
                 metadata.insert(key.clone(), value.clone());

@@ -1112,8 +1112,12 @@ mod workspace {
             self.switch_loader_provider(provider, cx);
         }
 
-        pub(super) fn codex_loader_submit_direct(&mut self, cx: &mut Context<Self>) {
-            self.submit_session_loader(cx);
+        pub(super) fn codex_loader_submit_direct(
+            &mut self,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            self.submit_session_loader(window, cx);
             assert!(self.loader().confirm_running);
         }
 
@@ -1275,9 +1279,17 @@ mod workspace {
             assert!(!self.session_loader_can_submit(self.loader()));
         }
 
-        pub(super) fn codex_history_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-            self.loader().content_input.update(cx, |input, cx| {
-                input.replace_text_in_range(Some(0..0), "祖先", window, cx);
+        pub(super) fn history_search(
+            &mut self,
+            query: &str,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            let input = self.loader().content_input.clone();
+            window.focus(&input.read(cx).focus);
+            input.update(cx, |input, cx| {
+                let length = input.text.encode_utf16().count();
+                input.replace_text_in_range(Some(0..length), query, window, cx);
             });
         }
 
@@ -1286,23 +1298,82 @@ mod workspace {
             assert!(self.loader().loading_earlier);
         }
 
-        pub(super) fn codex_history_open_hit(&mut self, cx: &mut Context<Self>) {
+        pub(super) fn assert_history_matches(&self, query: &str, count: usize, active: usize) {
             let state = self.loader();
-            assert_eq!(state.search_hits[0].excerpt, "祖先线索");
-            self.select_loader_hit(state.search_hits[0].index, cx);
+            assert_eq!(state.search_query, query);
+            assert_eq!(state.history_matches.len(), count);
+            assert_eq!(state.active_history_match, active);
+            assert!(state.pending_search.is_none());
         }
 
-        pub(super) fn codex_history_more_hits(&mut self, cx: &mut Context<Self>) {
-            assert!(self.loader().has_more_hits);
-            self.load_more_loader_hits(cx);
-        }
-
-        pub(super) fn assert_codex_history_jump(&self) {
+        pub(super) fn assert_history_jump(&self, event_index: usize) {
             let state = self.loader();
-            assert_eq!(state.events[1].text, "祖先线索");
+            let hit = &state.history_matches[state.active_history_match];
+            assert_eq!(hit.event_index, event_index);
+            let event = &state.events[hit.position];
+            assert_eq!(&event.text[hit.ranges[0].clone()], "祖先");
             let scroll = &state.preview_scroll;
-            let hit = scroll.bounds_for_item(1).unwrap();
-            assert_eq!(hit.top() + scroll.offset().y, scroll.bounds().top());
+            let position = hit.position
+                + usize::from(state.first_event.is_some())
+                + usize::from(state.has_earlier);
+            let row = scroll.bounds_for_item(position).unwrap();
+            assert!(row.top() + scroll.offset().y < scroll.bounds().bottom());
+            assert!(row.bottom() + scroll.offset().y > scroll.bounds().top());
+        }
+
+        pub(super) fn loader_probe_list_range(&self) -> (usize, Pixels, Pixels, Point<Pixels>) {
+            let state = self.loader();
+            let scroll = &state.list_scroll;
+            (
+                scroll.children_count(),
+                scroll.max_offset().height,
+                scroll.offset().y,
+                scroll.bounds().center(),
+            )
+        }
+
+        pub(super) fn loader_page(&self) -> (usize, usize, bool) {
+            let state = self.loader();
+            (state.sessions.len(), state.list_next, state.loading_list)
+        }
+
+        pub(super) fn scroll_loader_end(&mut self, cx: &mut Context<Self>) {
+            let scroll = &self.loader().list_scroll;
+            scroll.set_offset(point(px(0.), -scroll.max_offset().height));
+            cx.notify();
+        }
+
+        pub(super) fn assert_loader_confirmation(&self, expected: bool, window: &Window) {
+            let state = self.loader();
+            assert_eq!(state.confirmation.is_some(), expected);
+            assert!(self.dialog_controls[if expected { 14 } else { 2 }].is_focused(window));
+        }
+
+        pub(super) fn loader_owner_notice(&self) -> Option<String> {
+            self.session_loader_owner_notice(self.loader())
+        }
+
+        pub(super) fn open_visible_loader(
+            &mut self,
+            history: bool,
+            english: bool,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            if english {
+                self.probe_locale(InterfaceLocale::English, cx);
+            }
+            self.qualify(PEER, window, cx);
+            self.open_session_loader_mode(PEER, history, window, cx);
+        }
+
+        pub(super) fn show_loader_confirmation(
+            &mut self,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            self.focus_loader_control(2, window);
+            self.submit_session_loader(window, cx);
         }
 
         pub(super) fn close_codex_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1314,7 +1385,10 @@ mod workspace {
             let state = self.loader();
             assert!(!state.loading_detail);
             assert!(state.events.is_empty() && state.error.is_none());
-            assert_eq!(state.preview_scroll.children_count(), 1);
+            assert_eq!(
+                state.preview_scroll.children_count(),
+                1 + usize::from(state.first_event.is_some())
+            );
         }
 
         pub(super) fn focus_loader_control(&self, index: usize, window: &mut Window) {
@@ -5637,7 +5711,7 @@ mod probe {
             .unwrap();
     }
 
-    fn verify_session_loader(cx: &mut AsyncApp) {
+    fn verify_session_loader(cx: &mut AsyncApp, width: f32) {
         use serde_json::{Value, json};
 
         let mut fixture = Fixture::new();
@@ -5647,7 +5721,7 @@ mod probe {
         connection
             .execute("UPDATE sessions SET title = '目标卡' WHERE id = ?1", [PEER])
             .unwrap();
-        let (window, sink) = open_hidden(cx, 1200.);
+        let (window, sink) = open_hidden(cx, width);
         deliver(window, cx, fixture.event(true));
         draw(window, cx);
         window
@@ -5791,6 +5865,13 @@ mod probe {
             press(window, cx, "enter");
             draw(window, cx);
         };
+        let confirmation = |cx: &mut AsyncApp, expected| {
+            window
+                .update(cx, |view, window, _| {
+                    view.assert_loader_confirmation(expected, window)
+                })
+                .unwrap();
+        };
         let assert_submit = |cx: &mut AsyncApp, running, enabled, error| {
             window
                 .update(cx, |view, _, _| {
@@ -5841,6 +5922,34 @@ mod probe {
         );
         list(cx, &["history-a", "history-b"], Some("history-a"));
         detail("history-a", None, None);
+        assert_submit(cx, false, true, None);
+        control(cx, 2);
+        confirmation(cx, true);
+        assert!(commands(&sink).is_empty());
+        press(window, cx, "escape");
+        confirmation(cx, false);
+        assert!(commands(&sink).is_empty());
+        control(cx, 2);
+        control(cx, 15);
+        assert!(
+            matches!(commands(&sink).as_slice(), [Command::LoadProviderSession {
+            session_id, provider_session_id, takeover_from: Some(source),
+        }] if session_id == PEER && provider_session_id == "history-a" && source == PARENT)
+        );
+        graph(
+            &fixture,
+            cx,
+            "providerSessionLoadErrors",
+            json!({"sessionId": PEER, "providerSessionId": "history-a",
+                "error": "The process exited, but its exit record could not be saved: fixture"}),
+            false,
+        );
+        assert_submit(
+            cx,
+            false,
+            true,
+            Some("进程已结束，但退出记录写入失败: fixture"),
+        );
         graph(
             &fixture,
             cx,
@@ -5926,11 +6035,37 @@ mod probe {
         let assert_load = || {
             assert!(
                 matches!(commands(&sink).as_slice(), [Command::LoadProviderSession {
-                session_id, provider_session_id,
+                session_id, provider_session_id, takeover_from: None,
             }] if session_id == PEER && provider_session_id == "history-b")
             );
         };
         control(cx, 2);
+        confirmation(cx, true);
+        let bounds = AnyWindowHandle::from(window)
+            .update(cx, |_, window, cx| {
+                Workspace::capture_render_bounds(window, cx)
+            })
+            .unwrap();
+        let cancel = bounds["session-loader-confirm-cancel"];
+        let proceed = bounds["session-loader-confirm-continue"];
+        assert!(cancel.right() < proceed.left());
+        assert!(cancel.left() > px(0.) && proceed.right() < px(width));
+        assert!(commands(&sink).is_empty());
+        press(window, cx, "escape");
+        confirmation(cx, false);
+        assert!(commands(&sink).is_empty());
+        control(cx, 2);
+        confirmation(cx, true);
+        click(window, cx, point(px(12.), px(12.)));
+        confirmation(cx, false);
+        assert!(commands(&sink).is_empty());
+        control(cx, 2);
+        confirmation(cx, true);
+        click(window, cx, cancel.center());
+        confirmation(cx, false);
+        assert!(commands(&sink).is_empty());
+        control(cx, 2);
+        control(cx, 15);
         assert_load();
         assert_submit(cx, true, false, None);
         AnyWindowHandle::from(window)
@@ -5951,6 +6086,7 @@ mod probe {
         );
         assert_submit(cx, true, true, Some(busy));
         control(cx, 2);
+        control(cx, 15);
         assert_load();
         press(window, cx, "escape");
         assert_closed(cx);
@@ -5981,6 +6117,17 @@ mod probe {
             .as_u64()
             .unwrap();
         deliver(window, cx, Event::Graph(bound_graph));
+        assert_submit(cx, true, false, None);
+        graph(
+            &fixture,
+            cx,
+            "providerIdentityEvents",
+            json!({
+                "sessionId": PEER, "providerSessionId": "history-b", "provider": "claude-code",
+                "result": "confirmed", "spawnRevision": revision
+            }),
+            false,
+        );
         assert_closed(cx);
 
         open(cx);
@@ -5997,6 +6144,7 @@ mod probe {
         );
         detail("history-b", None, None);
         control(cx, 2);
+        control(cx, 15);
         assert_load();
         let mut confirmed = json!({
             "sessionId":PEER,"providerSessionId":"history-b",
@@ -6033,13 +6181,28 @@ mod probe {
             json!({"cwd":cwd,"sessions":large_list}),
             true,
         );
+        let (rendered, extent, top, position) = window
+            .update(cx, |view, _, _| view.loader_probe_list_range())
+            .unwrap();
+        assert!(rendered < 15 && extent > px(16_000.) && top == px(0.));
+        detail("fixture-list-0", None, None);
+        mouse(window, cx, position, NSEventType::NSScrollWheel);
+        draw(window, cx);
+        let (scrolled, _, top, _) = window
+            .update(cx, |view, _, _| view.loader_probe_list_range())
+            .unwrap();
+        assert!(scrolled < 20 && top < px(0.));
         println!(
-            "Session loader 200-row graph + hidden GPUI draw | {:?}",
+            "loader {width}pt | 200 rows, {rendered} layout children at top and {scrolled} after wheel (including spacers), {:.0}px scroll extent, {:?}; modal Cancel, Esc and backdrop sent nothing",
+            f32::from(extent),
             started.elapsed()
         );
-        detail("fixture-list-0", None, None);
         filter(cx, "fixture-list-199");
         list(cx, &["fixture-list-199"], Some("fixture-list-199"));
+        let (count, _, top, _) = window
+            .update(cx, |view, _, _| view.loader_probe_list_range())
+            .unwrap();
+        assert_eq!((count, top), (1, px(0.)));
         graph(
             &fixture,
             cx,
@@ -7526,7 +7689,7 @@ mod probe {
         );
     }
 
-    fn verify_codex_history(cx: &mut AsyncApp) {
+    fn verify_codex_history(cx: &mut AsyncApp, width: f32) {
         use serde_json::{Value, json};
 
         const CHILD: &str = "00000000-0000-4000-8000-000000000001";
@@ -7549,7 +7712,7 @@ mod probe {
             }
             event
         };
-        let (window, sink) = open_hidden(cx, 1250.);
+        let (window, sink) = open_hidden(cx, width);
         deliver(window, cx, with_binding(fixture.event(true), None));
         deliver(
             window,
@@ -7586,8 +7749,10 @@ mod probe {
                         );
                         Some(request_id)
                     }
-                    Command::LoadCodexSession { .. } | Command::RetryRecovery { .. } => {
-                        panic!("history changed the session")
+                    Command::LoadCodexSession { .. }
+                    | Command::RetryRecovery { .. }
+                    | Command::SearchCodexSession { .. } => {
+                        panic!("history sent a mutation or remote search")
                     }
                     _ => None,
                 })
@@ -7610,107 +7775,72 @@ mod probe {
         };
         open(cx);
         let request = request_detail(None, None, None);
+        let tall = "样例\n".repeat(120);
         reply(
             cx,
             request,
-            json!([{"index":3,"kind":"assistant","text":"本会话答案"}]),
+            json!([
+                {"index":3,"kind":"assistant","text":"本会话的祖先答案"},
+                {"index":4,"kind":"assistant","text":tall}
+            ]),
             3,
-            3,
-            3,
+            4,
+            4,
         );
         window
+            .update(cx, |view, window, cx| {
+                view.assert_loader_preview(&[3, 4], 4, true);
+                view.history_search("不存在", window, cx);
+            })
+            .unwrap();
+        draw(window, cx);
+        window
+            .update(cx, |view, window, cx| {
+                view.assert_history_matches("不存在", 0, 0);
+                view.history_search("祖先", window, cx);
+            })
+            .unwrap();
+        draw(window, cx);
+        window
             .update(cx, |view, _, cx| {
-                view.assert_loader_preview(&[3], 3, true);
+                view.assert_history_matches("祖先", 1, 0);
+                view.assert_history_jump(3);
                 view.codex_history_earlier(cx);
             })
             .unwrap();
-        let tall = "样例\n".repeat(120);
-        let older = json!([
-            {"index":1,"kind":"assistant","text":tall},
-            {"index":2,"kind":"user","text":"祖先线索"}
-        ]);
         let request = request_detail(Some(1), None, Some(2));
-        reply(cx, request, older.clone(), 1, 2, 3);
+        reply(
+            cx,
+            request,
+            json!([
+                {"index":1,"kind":"assistant","text":tall},
+                {"index":2,"kind":"user","text":"祖先线索"}
+            ]),
+            1,
+            2,
+            4,
+        );
         window
-            .update(cx, |view, window, cx| {
-                view.assert_loader_preview(&[1, 2, 3], 3, false);
-                view.codex_history_search(window, cx);
+            .update(cx, |view, _, _| {
+                view.assert_loader_preview(&[1, 2, 3, 4], 4, false);
+                view.assert_history_matches("祖先", 2, 1);
             })
             .unwrap();
-        println!(
-            "hidden Codex history | existing deferred panel opened child UUID, loaded latest and prepended earlier events"
-        );
-
-        let request_search = |expected_offset| {
-            std::iter::from_fn(|| sink.try_recv().ok())
-                .find_map(|command| {
-                    if let Command::SearchCodexSession {
-                        request_id,
-                        provider_session_id,
-                        query,
-                        offset,
-                        ..
-                    } = command
-                    {
-                        assert_eq!(provider_session_id, CHILD);
-                        assert_eq!(query, "祖先");
-                        assert_eq!(offset, Some(expected_offset));
-                        Some(request_id)
-                    } else {
-                        None
-                    }
-                })
-                .expect("history content search")
-        };
-        let search_reply = |cx: &mut AsyncApp, request, hits, has_more, next_offset| {
-            deliver(
-                window,
-                cx,
-                with_binding(
-                    fixture.graph_event(),
-                    Some(json!({
-                        "provider":"codex", "requestId":request, "providerSessionId":CHILD, "search":true,
-                        "hits":hits,"hasMore":has_more,"nextOffset":next_offset
-                    })),
-                ),
-            );
-            draw(window, cx);
-        };
-        search_reply(
-            cx,
-            request_search(0),
-            json!([{"eventIndex":2,"excerpt":"祖先线索"}]),
-            true,
-            1,
-        );
-        window
-            .update(cx, |view, _, cx| view.codex_history_more_hits(cx))
-            .unwrap();
-        search_reply(
-            cx,
-            request_search(1),
-            json!([{"eventIndex":3,"excerpt":"本会话也有祖先字样"}]),
-            false,
-            2,
-        );
-        window
-            .update(cx, |view, _, cx| view.codex_history_open_hit(cx))
-            .unwrap();
-        let request = request_detail(None, Some(2), None);
-        let mut events = older;
-        events
-            .as_array_mut()
-            .unwrap()
-            .push(json!({"index":3,"kind":"assistant","text":tall}));
-        reply(cx, request, events, 1, 3, 3);
+        press(window, cx, "enter");
+        draw(window, cx);
         window
             .update(cx, |view, window, cx| {
-                view.assert_codex_history_jump();
+                view.assert_history_matches("祖先", 2, 0);
+                view.assert_history_jump(2);
                 view.close_codex_history(window, cx);
             })
             .unwrap();
+        assert!(
+            !std::iter::from_fn(|| sink.try_recv().ok())
+                .any(|command| matches!(command, Command::SearchCodexSession { .. }))
+        );
         println!(
-            "hidden Codex history | paged search hit requested around index 2 and scrolled to its ancestor event"
+            "history {width}pt | no matches, local 1/1, prepend keeps query and active event at 2/2, Enter wraps to 1/2 and reveals the earlier event"
         );
 
         open(cx);
@@ -7719,6 +7849,7 @@ mod probe {
         window
             .update(cx, |view, window, _| {
                 view.assert_codex_history_empty();
+                view.assert_history_matches("", 0, 0);
                 window.remove_window();
             })
             .unwrap();
@@ -7857,6 +7988,14 @@ mod probe {
         draw(window, cx);
         assert_state(cx, "codex-second", true, false);
         window
+            .update(cx, |view, _, _| {
+                assert_eq!(
+                    view.loader_owner_notice().as_deref(),
+                    Some("该会话已在“其他卡”中打开")
+                );
+            })
+            .unwrap();
+        window
             .update(cx, |view, _, _| view.assert_loader_preview(&[1], 1, false))
             .unwrap();
         println!(
@@ -7886,14 +8025,18 @@ mod probe {
             .unwrap()["workStatus"] = json!("running");
         deliver(window, cx, Event::Graph(graph));
         window
-            .update(cx, |view, _, cx| view.codex_loader_submit_direct(cx))
+            .update(cx, |view, window, cx| {
+                view.codex_loader_submit_direct(window, cx)
+            })
             .unwrap();
         assert!(
             !std::iter::from_fn(|| sink.try_recv().ok())
                 .any(|command| matches!(command, Command::LoadCodexSession { .. }))
         );
         window
-            .update(cx, |view, _, cx| view.codex_loader_submit_direct(cx))
+            .update(cx, |view, window, cx| {
+                view.codex_loader_submit_direct(window, cx)
+            })
             .unwrap();
         assert!(std::iter::from_fn(|| sink.try_recv().ok()).any(|command| matches!(command,
             Command::LoadCodexSession { session_id, provider_session_id } if session_id == PARENT && provider_session_id == "codex-second"
@@ -7916,12 +8059,71 @@ mod probe {
             std::iter::from_fn(|| sink.try_recv().ok())
                 .any(|command| matches!(command, Command::ListProviderSessions { .. }))
         );
+        window
+            .update(cx, |view, _, cx| {
+                view.codex_loader_source_direct("codex", cx)
+            })
+            .unwrap();
+        let send_page = |cx: &mut AsyncApp, request_id, offset, next_offset, has_more| {
+            let Event::Graph(mut graph) = fixture.graph_event() else {
+                unreachable!()
+            };
+            let rows = (offset..next_offset).map(|index| json!({
+                "providerSessionId": if index == 0 { "codex-second".into() } else { format!("paged-{index}") },
+                "title": format!("Paged conversation {index}"), "updatedAt": 100 - index,
+                "permissionMode": "default", "messageCount": 1,
+            })).collect::<Vec<_>>();
+            graph["providerSessionCatalogResults"] = json!([{
+                "provider":"codex", "cwd":cwd, "requestId":request_id,
+                "total":70,"offset":offset,"nextOffset":next_offset,"hasMore":has_more,"sessions":rows
+            }]);
+            deliver(window, cx, Event::Graph(graph));
+            draw(window, cx);
+        };
+        let (request_id, _) = list_request();
+        send_page(cx, request_id, 0, 50, true);
+        window
+            .update(cx, |view, _, cx| view.scroll_loader_end(cx))
+            .unwrap();
         draw(window, cx);
+        let (_, _, before, _) = window
+            .update(cx, |view, _, _| view.loader_probe_list_range())
+            .unwrap();
+        assert!(before < px(0.));
+        window
+            .update(cx, |view, window, _| view.focus_loader_control(6, window))
+            .unwrap();
+        draw(window, cx);
+        press(window, cx, "enter");
+        let request = std::iter::from_fn(|| sink.try_recv().ok())
+            .find_map(|command| match command {
+                Command::ListCodexSessions {
+                    request_id,
+                    offset: Some(50),
+                    ..
+                } => Some(request_id),
+                _ => None,
+            })
+            .expect("next catalog page");
+        assert_eq!(
+            window.update(cx, |view, _, _| view.loader_page()).unwrap(),
+            (50, 50, true)
+        );
+        send_page(cx, request, 50, 70, false);
+        window
+            .update(cx, |view, window, _| {
+                let (rendered, _, after, _) = view.loader_probe_list_range();
+                assert!(rendered < 20);
+                assert_eq!(after, before);
+                assert_eq!(view.loader_page(), (70, 70, false));
+                view.verify_codex_loader_direct("codex-second", false, true, window);
+            })
+            .unwrap();
         window
             .update(cx, |_, window, _| window.remove_window())
             .unwrap();
         println!(
-            "provider switch reused the same panel and Claude list command; no key or mouse event delivered"
+            "provider switch reused the panel; Codex appended 50→70 rows with the selection and scroll offset preserved"
         );
     }
 
@@ -8070,6 +8272,116 @@ mod probe {
         );
     }
 
+    fn show_session_loader(cx: &mut AsyncApp, width: f32, scenario: &str, english: bool) {
+        use serde_json::json;
+
+        let fixture = Fixture::new();
+        let (window, sink) = open_probe_window(cx, width, true);
+        deliver(window, cx, fixture.event(true));
+        draw(window, cx);
+        let history = scenario == "history";
+        let running = scenario == "running";
+        let mut graph = match fixture.graph_event() {
+            Event::Graph(graph) => graph,
+            _ => unreachable!(),
+        };
+        let card = graph["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|node| node["sessionId"] == PEER)
+            .unwrap();
+        if history || running {
+            card["currentMode"] = json!("claude-code");
+        }
+        if running {
+            card["workStatus"] = json!("running");
+        }
+        card["title"] = json!("Onboarding notes");
+        if history {
+            card["historyProviderSessionId"] = json!("fixture-history");
+        }
+        deliver(window, cx, Event::Graph(graph.clone()));
+        window
+            .update(cx, |view, window, cx| {
+                window.set_window_title(&format!("Matou · probe {scenario} · {width} pt"));
+                view.open_visible_loader(history, english, window, cx);
+            })
+            .unwrap();
+        let cwd = window.update(cx, |view, _, _| view.loader_cwd()).unwrap();
+        let mut conversation = "fixture-history".to_owned();
+        if !history {
+            let sessions: Vec<_> = (0..250).map(|index| {
+                let owned = index == 0 && scenario == "takeover";
+                json!({
+                    "providerSessionId": format!("history-{index:03}"),
+                    "title": format!("Onboarding conversation {:03}", index + 1),
+                    "updatedAt": 1_798_000_000_000_i64 - index, "messageCount": index % 12 + 1,
+                    "model": "Sonnet", "permissionMode": "default",
+                    "loadedBy": owned.then(|| json!({"sessionId": PARENT, "title": "Planning"})),
+                })
+            }).collect();
+            graph["providerSessionCatalogResults"] = json!([{"cwd":cwd, "sessions":sessions}]);
+            deliver(window, cx, Event::Graph(graph.clone()));
+            conversation = "history-000".to_owned();
+        }
+        let events = (1..=14).map(|index| json!({
+            "index":index,
+            "kind": if index % 2 == 0 { "assistant" } else { "user" },
+            "text": if [2, 6, 11].contains(&index) {
+                format!("Message {index}: The onboarding checklist includes a review of the search experience.")
+            } else {
+                format!("Message {index}: Example text in an isolated conversation.")
+            },
+        })).collect::<Vec<_>>();
+        graph["providerSessionDetailResults"] = json!([{
+            "cwd":cwd,"providerSessionId":conversation, "events":events,
+            "page":{"startEventIndex":1,"endEventIndex":15,"total":14,"hasEarlier":false,"hasLater":false},
+        }]);
+        deliver(window, cx, Event::Graph(graph.clone()));
+        window
+            .update(cx, |view, window, cx| {
+                if history {
+                    view.history_search("checklist", window, cx);
+                }
+                if running || scenario == "takeover" {
+                    view.show_loader_confirmation(window, cx);
+                }
+            })
+            .unwrap();
+        // Keep mock command replies alive so a visible probe can demonstrate a
+        // retryable failure without touching any provider process.
+        cx.update(move |app| {
+            app.spawn(async move |cx| {
+                let _fixture = fixture;
+                loop {
+                if window.update(cx, |_, _, _| ()).is_err() {
+                    cx.update(|app| app.quit()).ok();
+                    return;
+                }
+                while let Ok(command) = sink.try_recv() {
+                    if let Command::LoadProviderSession { session_id, provider_session_id, .. } = command {
+                        let mut rejected = graph.clone();
+                        rejected["providerSessionCatalogResults"] = serde_json::Value::Null;
+                        rejected["providerSessionDetailResults"] = serde_json::Value::Null;
+                        rejected["providerSessionLoadErrors"] = json!([{
+                            "sessionId":session_id, "providerSessionId":provider_session_id,
+                            "error":"The process exited, but its exit record could not be saved: isolated fixture",
+                        }]);
+                        if window.update(cx, |view, window, cx| {
+                            view.deliver(Event::Graph(rejected), window, cx)
+                        }).is_err() {
+                            return;
+                        }
+                    }
+                }
+                cx.background_executor().timer(Duration::from_millis(50)).await;
+                }
+            }).detach();
+        }).unwrap();
+        // The app's runloop paints and handles real input for the visible probe.
+    }
+
     pub(super) fn run() {
         let locale_only = std::env::args().any(|arg| arg == "--locale-layout");
         let footer_only = std::env::args().any(|arg| arg == "--footer-base");
@@ -8087,7 +8399,24 @@ mod probe {
         let codex_permission_only = std::env::args().any(|arg| arg == "--codex-permission");
         let codex_loader_only = std::env::args().any(|arg| arg == "--codex-loader");
         let codex_history_only = std::env::args().any(|arg| arg == "--codex-history");
+        let loader_scenario = std::env::args().find_map(|arg| {
+            arg.strip_prefix("--show-session-loader=")
+                .map(str::to_owned)
+        });
+        let loader_width = std::env::args()
+            .find_map(|arg| {
+                arg.strip_prefix("--width=")
+                    .and_then(|width| width.parse::<f32>().ok())
+            })
+            .unwrap_or(900.);
+        let show_english = std::env::args().any(|arg| arg == "--english");
         Application::new().with_assets(NativeAssets).run(move |cx| {
+            if let Some(scenario) = loader_scenario {
+                cx.spawn(async move |cx| {
+                    show_session_loader(cx, loader_width, &scenario, show_english);
+                }).detach();
+                return;
+            }
             if locale_only {
                 cx.spawn(async |cx| {
                     verify_workspace_locale(cx);
@@ -8127,7 +8456,7 @@ mod probe {
                 cx.spawn(async |cx| {
                     verify_card_header_layout(cx);
                     verify_compact_card(cx);
-                    verify_session_loader(cx);
+                    verify_session_loader(cx, 1200.);
                     verify_card_actions(cx);
                     verify_stopped_cards(cx);
                     verify_narrow_stopped_cards(cx);
@@ -8160,7 +8489,9 @@ mod probe {
             }
             if codex_history_only {
                 cx.spawn(async |cx| {
-                    verify_codex_history(cx);
+                    for width in [720., 900., 1200.] {
+                        verify_codex_history(cx, width);
+                    }
                     cx.update(|cx| cx.quit()).unwrap();
                 }).detach();
                 return;
@@ -8191,7 +8522,9 @@ mod probe {
             }
             if loader_only {
                 cx.spawn(async |cx| {
-                    verify_session_loader(cx);
+                    for width in [720., 900., 1200.] {
+                        verify_session_loader(cx, width);
+                    }
                     cx.update(|cx| cx.quit()).unwrap();
                 })
                 .detach();
@@ -8228,7 +8561,7 @@ mod probe {
                 verify_compact_card(cx);
                 verify_start_failure_card(cx);
                 verify_provider_restore_banner(cx).await;
-                verify_session_loader(cx);
+                verify_session_loader(cx, 1200.);
                 verify_deferred_recovery(cx, false);
                 verify_card_actions(cx);
                 verify_stopped_cards(cx);

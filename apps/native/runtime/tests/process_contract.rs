@@ -4701,6 +4701,7 @@ done
     child.send(Command::LoadProviderSession {
         session_id: session.clone(),
         provider_session_id: provider_id.into(),
+        takeover_from: None,
     })?;
     child.frame(|_, screen, _| screen_has_line(screen, "stub ready"))?;
     child.send(set("plan"))?;
@@ -4841,6 +4842,7 @@ exec /bin/sleep 60
         child.send(Command::LoadProviderSession {
             session_id: session.clone(),
             provider_session_id: PROVIDER_ID.into(),
+            takeover_from: None,
         })?;
         child.frame(|_, screen, _| screen_has_line(screen, "stub ready"))?;
         post_permission_identity(&hook_path()?, PROVIDER_ID, "default")?;
@@ -4948,6 +4950,7 @@ fn catalog_replaces_a_live_process_once_and_requires_its_persisted_exit() -> Res
             child.send(Command::LoadProviderSession {
                 session_id: session.clone(),
                 provider_session_id: "replace-id".into(),
+                takeover_from: None,
             })?;
         }
         let deadline = Instant::now() + TIMEOUT;
@@ -5044,6 +5047,241 @@ fn catalog_replaces_a_live_process_once_and_requires_its_persisted_exit() -> Res
 }
 
 #[test]
+fn claude_catalog_takeover_validates_stops_and_settles_one_owner() -> Result<()> {
+    use matou_native_core::sessions::{catalog_binding_owners, claude_binding, list_runs};
+    use serde_json::Value;
+
+    fn reply(
+        child: &mut RuntimeChild,
+        key: &str,
+        card: &str,
+        mut predicate: impl FnMut(&Value) -> bool,
+    ) -> Result<Value> {
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            if let Event::Graph(graph) = child.event(deadline, true)?
+                && let Some(row) = graph[key]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|row| row["sessionId"] == card && predicate(row))
+            {
+                return Ok(row.clone());
+            }
+        }
+    }
+
+    for fail_restore in [false, true] {
+        let root = tempfile::tempdir()?;
+        let stub = root.path().join("claude-stub");
+        fs::write(
+            &stub,
+            r#"#!/bin/sh
+root=$(dirname "$0")
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --settings) settings="$2"; shift ;;
+    --resume) conversation="$2"; shift ;;
+  esac
+  shift
+done
+if [ -e "$root/fail-resume" ] && [ "$conversation" = 'source-conversation' ]; then
+  echo 'fixture refused resume'
+  exit 31
+fi
+printf '%s' "$settings" > "$root/$conversation.settings"
+printf 'fixture resumed %s\n' "$conversation"
+exec /bin/sleep 60
+"#,
+        )?;
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o700))?;
+        let mut child = RuntimeChild::spawn_configured(
+            root.path(),
+            &format!("PROMPT='{PROMPT} '\n"),
+            Path::new("/bin/zsh"),
+            Some(&stub),
+        )?;
+        child.hello()?;
+        let source = child.session.clone();
+        child.send(Command::CreateShellSibling {
+            scene_id: child.scene.clone(),
+            source_session_id: source.clone(),
+            parent_session_id: None,
+        })?;
+        let deadline = Instant::now() + TIMEOUT;
+        let target = loop {
+            if let Event::Navigation { hierarchy, .. } = child.event(deadline, true)?
+                && let Some(session) = hierarchy.session
+                && session.id != source
+            {
+                break session.id;
+            }
+        };
+        // The newly created card starts its own isolated Shell before loading.
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            if matches!(child.event(deadline, true)?, Event::Frame { session_id, .. } if session_id == target)
+            {
+                break;
+            }
+        }
+        let db = Connection::open(child.data.join("matou.sqlite"))?;
+        let load =
+            |target: &str, conversation: &str, from: Option<&str>| Command::LoadProviderSession {
+                session_id: target.into(),
+                provider_session_id: conversation.into(),
+                takeover_from: from.map(str::to_owned),
+            };
+        let confirm = |child: &mut RuntimeChild, card: &str, conversation: &str| -> Result<()> {
+            let deadline = Instant::now() + TIMEOUT;
+            let marker = format!("fixture resumed {conversation}");
+            loop {
+                if let Event::Frame {
+                    session_id, screen, ..
+                } = child.event(deadline, true)?
+                    && session_id == card
+                    && screen_has_line(&screen, &marker)
+                {
+                    break;
+                }
+            }
+            let settings =
+                fs::read_to_string(root.path().join(format!("{conversation}.settings")))?;
+            post_permission_identity(Path::new(&settings), conversation, "default")?;
+            reply(child, "providerIdentityEvents", card, |row| {
+                row["result"] == "confirmed"
+            })?;
+            Ok(())
+        };
+        for (card, conversation) in [
+            (&source, "source-conversation"),
+            (&target, "target-conversation"),
+        ] {
+            seed_catalog(root.path(), &child.workspace, conversation)?;
+            child.send(load(card, conversation, None))?;
+            confirm(&mut child, card, conversation)?;
+        }
+        let source_binding = claude_binding(&db, &source)?.context("source binding")?;
+        let target_binding = claude_binding(&db, &target)?.context("target binding")?;
+        let source_run = list_runs(&db, &source)?.pop().context("source run")?;
+        let target_run = list_runs(&db, &target)?.pop().context("target run")?;
+        let stop_reason = |child: &mut RuntimeChild| -> Result<String> {
+            Ok(
+                reply(child, "providerSessionLoadErrors", &target, |_| true)?["error"]
+                    .as_str()
+                    .context("catalog rejection")?
+                    .into(),
+            )
+        };
+        let owners = || -> Result<Vec<String>> {
+            Ok(
+                catalog_binding_owners(&db, "claude-code", &["source-conversation"])?
+                    .into_iter()
+                    .map(|(_, card, _)| card)
+                    .collect(),
+            )
+        };
+        let takeover = || load(&target, "source-conversation", Some(&source));
+
+        child.send(load(&target, "source-conversation", None))?;
+        assert!(stop_reason(&mut child)?.contains("Confirm the current source"));
+        child.send(load(&target, "source-conversation", Some("wrong-card")))?;
+        assert!(stop_reason(&mut child)?.contains("Confirm the current source"));
+
+        db.execute(
+            "INSERT INTO provider_bindings
+             (id, session_id, provider, provider_session_id, resume_state, created_at, updated_at, validated_at)
+             VALUES ('fixture-ambiguous', ?, 'claude-code', 'source-conversation', 'available', 1, 1, 1)",
+            [&target],
+        )?;
+        child.send(takeover())?;
+        assert!(stop_reason(&mut child)?.contains("ambiguous"));
+        db.execute(
+            "DELETE FROM provider_bindings WHERE id = 'fixture-ambiguous'",
+            [],
+        )?;
+
+        db.execute(
+            "UPDATE sessions SET archived_at = 1 WHERE id = ?",
+            [&source],
+        )?;
+        child.send(takeover())?;
+        assert!(stop_reason(&mut child)?.contains("no longer owns"));
+        db.execute(
+            "UPDATE sessions SET archived_at = NULL WHERE id = ?",
+            [&source],
+        )?;
+        assert_eq!(list_runs(&db, &source)?.last(), Some(&source_run));
+        assert_eq!(list_runs(&db, &target)?.last(), Some(&target_run));
+        assert_eq!(owners()?, [source.clone()]);
+
+        if fail_restore {
+            fs::write(root.path().join("fail-resume"), "")?;
+        } else {
+            db.execute_batch(
+                "CREATE TRIGGER fail_takeover_exit BEFORE UPDATE OF status ON session_runs
+                 WHEN NEW.status = 'exited' BEGIN SELECT RAISE(ABORT, 'injected takeover exit failure'); END;",
+            )?;
+            child.send(takeover())?;
+            let reason = stop_reason(&mut child)?;
+            assert!(reason.contains("process exited, but its exit record"));
+            assert!(reason.contains("injected takeover exit failure"));
+            assert_eq!(owners()?, [source.clone()]);
+            assert_eq!(list_runs(&db, &target)?.last(), Some(&target_run));
+            assert_shell_gone(source_run.pid.context("source PID")? as u32)?;
+            db.execute_batch("DROP TRIGGER fail_takeover_exit;")?;
+        }
+
+        child.send(takeover())?;
+        child.send(takeover())?;
+        if fail_restore {
+            let failure = reply(&mut child, "providerIdentityEvents", &target, |row| {
+                row["result"] == "restore-failed"
+            })?;
+            assert_eq!(failure["providerSessionId"], "source-conversation");
+            assert_eq!(owners()?, [source.clone()]);
+            assert_eq!(
+                claude_binding(&db, &source)?
+                    .context("rolled back source")?
+                    .id,
+                source_binding.id
+            );
+            let original = claude_binding(&db, &target)?.context("rolled back target")?;
+            assert_eq!(original.id, target_binding.id);
+            assert_eq!(original.provider_session_id, "target-conversation");
+            assert!(original.resumable);
+        } else {
+            confirm(&mut child, &target, "source-conversation")?;
+            assert_eq!(owners()?, [target.clone()]);
+            assert!(
+                !claude_binding(&db, &source)?
+                    .context("historical source")?
+                    .resumable
+            );
+            let source_runs = list_runs(&db, &source)?;
+            let target_runs = list_runs(&db, &target)?;
+            assert_eq!(source_runs.len(), 2);
+            assert_eq!(target_runs.len(), 3);
+            assert_eq!(source_runs[1].status, "exited");
+            assert!(source_runs[1].ended_at.context("source exit")? <= target_runs[2].started_at);
+            assert!(target_runs[1].ended_at.context("target exit")? <= target_runs[2].started_at);
+
+            child.send(takeover())?;
+            reply(&mut child, "providerIdentityEvents", &target, |row| {
+                row["reason"] == "already-loaded"
+            })?;
+            assert_eq!(list_runs(&db, &target)?, target_runs);
+        }
+        assert_shell_gone(source_run.pid.context("source PID")? as u32)?;
+        child.send(Command::Shutdown)?;
+        child.closed()?;
+        let (status, stderr) = child.wait()?;
+        ensure!(status.success(), "runtime shutdown: {stderr}");
+    }
+    Ok(())
+}
+
+#[test]
 fn closing_a_card_during_catalog_retirement_cancels_the_load() -> Result<()> {
     use matou_native_core::sessions::{claude_binding, get_session, list_runs};
 
@@ -5074,6 +5312,7 @@ fn closing_a_card_during_catalog_retirement_cancels_the_load() -> Result<()> {
     child.send(Command::LoadProviderSession {
         session_id: session.clone(),
         provider_session_id: "replace-id".into(),
+        takeover_from: None,
     })?;
     let deadline = Instant::now() + TIMEOUT;
     while !shell_home.join("retiring").is_file() {
@@ -5181,6 +5420,7 @@ fn catalog_rejects_absent_ids_and_closing_a_pending_load_stops_its_only_run() ->
     let load = |id: &str| Command::LoadProviderSession {
         session_id: session.clone(),
         provider_session_id: id.into(),
+        takeover_from: None,
     };
     let db = startup::open_read_only(&child.data.join("matou.sqlite"))?;
     child.send(load("absent"))?;
