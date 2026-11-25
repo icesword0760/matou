@@ -21,7 +21,9 @@ use matou_native_core::{
     },
     journal::checkpoint::CheckpointCandidate,
     ownership::DatabaseOwner,
-    provider_launch::{ClaudeGatewayProjection, EFFORTS, attach_claude_settings},
+    provider_launch::{
+        ClaudeGatewayProjection, ClaudeGatewayRefresh, EFFORTS, attach_claude_settings,
+    },
     pty::{LaunchProfile, ShellLaunch, get_var, set_var},
     session_graph,
     sessions::{
@@ -2969,7 +2971,7 @@ impl ShellOwner {
                 metadata,
                 secrets,
                 resume,
-                gateway,
+                gateway.map(|projection| (projection, plan.gateway_refresh)),
                 subscriptions,
                 plan.subscription_settings,
             )),
@@ -3188,7 +3190,7 @@ impl ShellOwner {
             Value,
             Vec<String>,
             Option<ResumeMonitor>,
-            Option<ClaudeGatewayProjection>,
+            Option<(ClaudeGatewayProjection, Option<ClaudeGatewayRefresh>)>,
             Option<SessionSubscriptions>,
             Option<Value>,
         )>,
@@ -3209,7 +3211,9 @@ impl ShellOwner {
         let egress_families = launch_egress_families(
             profile,
             &launch_environment,
-            provider.as_ref().and_then(|p| p.3.as_ref()),
+            provider
+                .as_ref()
+                .and_then(|p| p.3.as_ref().map(|(projection, _)| projection)),
         );
         for &family in &egress_families {
             self.egress
@@ -3355,7 +3359,7 @@ impl ShellOwner {
             );
             let mut seeded_transcript = None;
             if let (Some(plan), Some(root), Some(identity)) = (
-                gateway_plan.as_ref(),
+                gateway_plan.as_ref().map(|(projection, _)| projection),
                 claude_projects.as_deref(),
                 expected_id.as_deref(),
             ) && plan
@@ -3374,12 +3378,13 @@ impl ShellOwner {
             let mut gateway_context = None;
             // The listener belongs to this owner generation, this session_id
             // and this run_id. Publish the environment only after bind succeeds.
-            let gateway_settings = if let Some(plan) = gateway_plan {
+            let gateway_settings = if let Some((plan, refresh)) = gateway_plan {
                 let plan = Arc::new(plan);
                 let context = Arc::new(Mutex::new(hud.context_usage()));
                 let read_context = Arc::clone(&context);
                 let listener = Gateway::start_with_context(
                     Arc::clone(&plan),
+                    refresh.map(|context| (context, options.launch.data_root.clone())),
                     Some(Arc::new(move || {
                         read_context.lock().ok().map(|usage| *usage)
                     })),
@@ -7838,6 +7843,7 @@ mod provider_tests {
                 effort: None,
                 clear_assignment_environment: false,
                 gateway: None,
+                gateway_refresh: None,
                 subscription_settings: None,
                 subscription_role: None,
             },
@@ -8014,6 +8020,7 @@ mod provider_tests {
             effort: None,
             clear_assignment_environment: false,
             gateway: None,
+            gateway_refresh: None,
             subscription_settings: None,
             subscription_role: None,
         };

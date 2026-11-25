@@ -216,7 +216,7 @@ pub const CLAUDE_PERMISSION_MODES: [&str; 5] = [
     "bypassPermissions",
 ];
 
-#[derive(Default, Deserialize)]
+#[derive(Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Provider {
     id: String,
@@ -410,6 +410,7 @@ pub struct ClaudeLaunch {
     pub effort: Option<String>,
     pub clear_assignment_environment: bool,
     pub gateway: Option<ClaudeGatewayProjection>,
+    pub gateway_refresh: Option<ClaudeGatewayRefresh>,
     pub subscription_settings: Option<Value>,
     pub subscription_role: Option<&'static str>,
 }
@@ -443,6 +444,7 @@ impl ClaudeLaunch {
             effort: self.effort.clone(),
             clear_assignment_environment: self.clear_assignment_environment,
             gateway: self.gateway.clone(),
+            gateway_refresh: self.gateway_refresh.clone(),
             subscription_settings: self.subscription_settings.clone(),
             subscription_role: self.subscription_role,
         })
@@ -481,6 +483,87 @@ impl ClaudeLaunch {
     }
 }
 
+/// Private provider settings captured for rebuilding a running gateway's roles.
+#[derive(Clone)]
+pub struct ClaudeGatewayRefresh {
+    config: Value,
+    source: Provider,
+    startup_role: Option<&'static str>,
+    exact_roles: bool,
+    official_environment: OfficialClaudeEnvironment,
+}
+
+impl ClaudeGatewayRefresh {
+    pub fn refresh(&self, assignments: &ClaudeRoleAssignments) -> Option<ClaudeGatewayProjection> {
+        if assignments.is_empty()
+            || assignments.iter().any(|(role, assignment)| {
+                !ROLES.contains(&role.as_str())
+                    || assignment
+                        .effort
+                        .as_deref()
+                        .is_some_and(|effort| !EFFORTS.contains(&effort))
+            })
+        {
+            return None;
+        }
+        gateway_projection(
+            &self.config,
+            &self.source,
+            Some(assignments),
+            self.startup_role,
+        )
+    }
+
+    pub fn refresh_roles(
+        &self,
+        current: &ClaudeGatewayProjection,
+        preferences: &ClaudeRoleLaunchPreferences,
+        load_native_catalog: &dyn Fn() -> Vec<Value>,
+    ) -> Option<ClaudeGatewayProjection> {
+        let assignments = &preferences.assignments;
+        if assignments.is_empty() {
+            return None;
+        }
+        // Exact startup routes can use the native catalog and official OAuth.
+        let ordinary = (!self.exact_roles)
+            .then(|| self.refresh(assignments))
+            .flatten();
+        let roles = match ordinary {
+            Some(projection) => projection.roles,
+            None => {
+                let official = OfficialCapture::new(&self.config, self.official_environment.clone());
+                let native_catalog = std::cell::OnceCell::new();
+                let catalog = || native_catalog.get_or_init(load_native_catalog).as_slice();
+                snapshot_api_roles(
+                    &self.config,
+                    &self.source,
+                    assignments,
+                    &catalog,
+                    Some(&official),
+                )
+                .ok()?
+            }
+        };
+        let mut projection = current.clone();
+        projection.roles = roles;
+        projection.has_role_assignments = true;
+        projection.role_assignments = assignments.clone();
+        if (0..ROLES.len()).any(|index| {
+            current.role_target(index).is_some() && projection.role_target(index).is_none()
+        }) {
+            return None;
+        }
+        for role in projection.roles.iter_mut().flatten() {
+            role.context_window = effective_context_window(
+                role.context_window,
+                role.max_context_window,
+                preferences.context_preference(&role.provider_id),
+            );
+        }
+        Some(projection)
+    }
+}
+
 /// Private launch material for a CLI run.
 /// Never serialize or format it as part of a launch diagnostic.
 #[derive(Clone)]
@@ -499,6 +582,7 @@ pub struct ClaudeGatewayProjection {
     source_efforts: [Option<String>; ROLES.len()],
     source_effort: Option<String>,
     has_role_assignments: bool,
+    role_assignments: ClaudeRoleAssignments,
     startup_role: Option<&'static str>,
 }
 
@@ -684,6 +768,10 @@ impl ClaudeGatewayRole {
 }
 
 impl ClaudeGatewayProjection {
+    pub fn role_assignments(&self) -> &ClaudeRoleAssignments {
+        &self.role_assignments
+    }
+
     pub fn connections(&self) -> impl Iterator<Item = &ClaudeGatewayConnection> {
         self.source
             .iter()
@@ -977,8 +1065,9 @@ impl ClaudeLaunch {
             .or_else(|| model_role(&source, &self.model));
         let official =
             OfficialCapture::new(&config, OfficialClaudeEnvironment::new(launch_environment));
+        let exact = independent || requires_role_snapshot(&config, &source, preferences, &official);
         self.gateway =
-            if independent || requires_role_snapshot(&config, &source, preferences, &official) {
+            if exact {
                 let (mut projection, context_window) = independent_gateway_projection(
                     &config,
                     &source,
@@ -1032,6 +1121,14 @@ impl ClaudeLaunch {
                 .or(projection.context_window);
             projection.apply_context_preferences(&config, preferences);
         }
+        let official_environment = official.environment;
+        self.gateway_refresh = self.gateway.as_ref().map(|_| ClaudeGatewayRefresh {
+            config,
+            source,
+            startup_role: role,
+            exact_roles: exact && role_snapshot,
+            official_environment,
+        });
         Ok(())
     }
 }
@@ -1365,6 +1462,7 @@ fn prepare_claude(
         None => None,
     };
     let official = OfficialCapture::new(&config, OfficialClaudeEnvironment::new(&environment));
+    let mut exact_roles = false;
     let (mut gateway, context_window) = match target {
         Some(ClaudeTarget::New {
             budget_preferences: Some((preferences, catalog)),
@@ -1372,6 +1470,7 @@ fn prepare_claude(
         }) if has_independent_target(preferences)
             || requires_role_snapshot(&config, &provider, preferences, &official) =>
         {
+            exact_roles = has_role_snapshot(preferences);
             let (projection, context_window) = independent_gateway_projection(
                 &config,
                 &provider,
@@ -1400,6 +1499,13 @@ fn prepare_claude(
             None,
         ),
     };
+    let gateway_refresh = gateway.as_ref().map(|_| ClaudeGatewayRefresh {
+        config: config.clone(),
+        source: provider.clone(),
+        startup_role: startup_role(&provider),
+        exact_roles,
+        official_environment: official.environment.clone(),
+    });
     let stored_model = provider_binding["model"].as_str();
     let selected_model = match stored_model {
         Some(bound)
@@ -1545,6 +1651,7 @@ fn prepare_claude(
         effort: effort.map(str::to_owned),
         clear_assignment_environment,
         gateway,
+        gateway_refresh,
         subscription_settings: None,
         subscription_role,
     })
@@ -1583,7 +1690,13 @@ fn gateway_projection(
             .iter()
             .find(|entry| entry["id"].as_str() == Some(&provider.id));
         let metadata = entry
-            .and_then(|entry| entry["modelMetadata"].as_array())
+            .and_then(|entry| {
+                if provider.is_subscription() {
+                    entry["subscription"]["modelMetadata"].as_array()
+                } else {
+                    entry["modelMetadata"].as_array()
+                }
+            })
             .and_then(|models| {
                 models
                     .iter()
@@ -1618,6 +1731,7 @@ fn gateway_projection(
         return None;
     }
     projection.has_role_assignments = true;
+    projection.role_assignments = assignments.clone();
     projection.startup_role = startup_role;
     Some(projection)
 }
@@ -1652,6 +1766,7 @@ fn api_projection(config: &Value, source: &Provider) -> ClaudeGatewayProjection 
         }),
         source_effort: source.reasoning_effort.clone(),
         has_role_assignments: false,
+        role_assignments: ClaudeRoleAssignments::new(),
         startup_role: None,
     }
 }
@@ -1897,6 +2012,7 @@ fn independent_gateway_projection(
             .map(|target| target.connection.clone());
     }
     projection.has_role_assignments = true;
+    projection.role_assignments = preferences.assignments.clone();
     projection.startup_role = startup_role;
     let compaction = match &projection.compaction {
         Some(ClaudeGatewayCompaction::Snapshot { target, .. }) => {
@@ -3078,6 +3194,68 @@ pub(crate) fn login_shell_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gateway_refresh_rebuilds_roles_but_retains_the_source_connection() -> Result<()> {
+        let config = json!({
+            "version": 1,
+            "activeProviderIds": {"claude-code": "source"},
+            "providers": {"claude-code": [
+                {"id": "source", "endpoint": "https://api.deepseek.com/anthropic",
+                 "apiKey": "source-key", "model": "deepseek-flash",
+                 "modelMapping": {"opus": "deepseek-flash"}},
+                {"id": "gemini", "name": "Antigravity", "kind": "subscription",
+                 "endpoint": "", "model": "gemini-pro",
+                 "subscription": {"provider": "antigravity", "modelMetadata": [
+                     {"id": "gemini-pro", "supportedEfforts": ["high"], "maxOutputTokens": 4096}
+                 ]}}
+            ]}
+        });
+        let source = serde_json::from_value(config["providers"]["claude-code"][0].clone())?;
+        let refresh = ClaudeGatewayRefresh {
+            config,
+            source,
+            startup_role: Some("opus"),
+            exact_roles: false,
+            official_environment: OfficialClaudeEnvironment::new(&BTreeMap::new()),
+        };
+        let initial = parse_claude_role_assignments(&json!({
+            "opus": {"providerId": "source", "model": "deepseek-flash", "effort": "low"}
+        }))?;
+        let previous = refresh
+            .refresh(&initial)
+            .context("missing original projection")?;
+        assert_eq!(previous.role_target(0).unwrap().model, "deepseek-flash");
+        assert_eq!(previous.role_target(0).unwrap().effort.as_deref(), Some("low"));
+        let assignments = parse_claude_role_assignments(&json!({
+            "opus": {"providerId": "gemini", "model": "gemini-pro", "effort": "high"}
+        }))?;
+        let projection = refresh
+            .refresh(&assignments)
+            .context("missing refreshed projection")?;
+        let opus = projection.role_target(0).context("missing Opus target")?;
+        assert_eq!(opus.provider_id, "gemini");
+        assert_eq!(opus.model, "matou-antigravity/gemini-pro");
+        assert_eq!(opus.effort.as_deref(), Some("high"));
+        assert_eq!(opus.supported_efforts, Some(vec!["high".into()]));
+        assert_eq!(opus.max_output_tokens, Some(4096));
+        assert_eq!(
+            opus.connection.subscription.as_ref().unwrap().provider,
+            "antigravity"
+        );
+        let old_source = previous.source.as_ref().unwrap();
+        let source = projection.source.as_ref().unwrap();
+        assert_eq!(source.endpoint, old_source.endpoint);
+        assert_eq!(source.api_key, old_source.api_key);
+
+        assert!(refresh.refresh(&ClaudeRoleAssignments::new()).is_none());
+        let mut invalid = assignments;
+        invalid.get_mut("opus").unwrap().effort = Some("low".into());
+        assert!(refresh.refresh(&invalid).is_none());
+        invalid.get_mut("opus").unwrap().provider_id = "deleted-provider".into();
+        assert!(refresh.refresh(&invalid).is_none());
+        Ok(())
+    }
 
     fn effort_provider() -> Result<tempfile::TempDir> {
         let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR"))?;

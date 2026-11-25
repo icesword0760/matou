@@ -61,6 +61,128 @@ pub(crate) fn projection(source: SocketAddr, other: SocketAddr) -> Result<Claude
 }
 
 #[test]
+fn saved_roles_switch_the_next_request_without_interrupting_the_current_stream() -> Result<()> {
+    use crate::host::save_role_assignments;
+
+    const FIRST: &[u8] = b"event: message_start\ndata: first\n\n";
+    const TAIL: &[u8] = b"event: message_stop\ndata: done\n\n";
+    let root = within_workspace()?;
+    let old_upstream = listener()?;
+    let new_upstream = listener()?;
+    let config = json!({
+        "version": 1,
+        "activeProviderIds": {"claude-code": "old"},
+        "providers": {"claude-code": [
+            {"id": "old", "endpoint": "https://api.deepseek.com/anthropic",
+             "model": "deepseek-old", "apiKey": "old-key", "modelMapping": {"opus": "deepseek-old"}},
+            {"id": "new", "endpoint": format!("http://{}/new", new_upstream.local_addr()?),
+             "model": "gemini-new", "apiKey": "new-key",
+             "modelMetadata": [{"id": "gemini-new", "supportedEfforts": ["high"]}]}
+        ]}
+    });
+    std::fs::write(root.path().join("provider-config.json"), config.to_string())?;
+    rusqlite::Connection::open(root.path().join("matou.sqlite"))?.execute_batch(
+        "CREATE TABLE preferences (key TEXT PRIMARY KEY, value_json TEXT, updated_at INTEGER)",
+    )?;
+    let old = json!({"opus": {"providerId": "old", "model": "deepseek-old", "effort": "low"}});
+    save_role_assignments(root.path(), 1, &old, None, None)?;
+    let plan = prepare_new_claude_launch(
+        root.path(),
+        root.path(),
+        &Value::Null,
+        Some(&parse_claude_role_assignments(&old)?),
+        BTreeMap::from([(
+            "MATOU_CLAUDE_COMMAND".into(),
+            std::env::current_exe()?.into_os_string(),
+        )]),
+        80,
+        24,
+    )?;
+    let slot = ProjectionSlot::new(
+        Arc::new(plan.gateway.context("missing launch gateway")?),
+        None,
+        Some((
+            plan.gateway_refresh.context("missing refresh context")?,
+            root.path().to_owned(),
+        )),
+    );
+    let gateway = Gateway::start_gateway(
+        slot,
+        gemini_sse_keepalive::INTERVAL,
+        None,
+        Arc::default(),
+        InterfaceLocale::default(),
+        ProxyEnvironment::default(),
+        Some(FixtureUpstream {
+            host: deepseek_tools::HOST,
+            address: old_upstream.local_addr()?,
+            catalog: None,
+        }),
+    )?;
+    let (release, wait) = mpsc::channel();
+    let old_worker = upstream(old_upstream, move |mut io, start, headers| {
+        assert!(start.starts_with("POST /anthropic/v1/messages "));
+        assert_eq!(headers["x-api-key"], "old-key");
+        let mut body = vec![0; length(&headers)?];
+        io.read_exact(&mut body)?;
+        let payload: Value = serde_json::from_slice(&body)?;
+        assert_eq!(payload["model"], "deepseek-old");
+        assert_eq!(payload["output_config"]["effort"], "low");
+        let out = io.get_mut();
+        out.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n")?;
+        write_chunk(out, FIRST)?;
+        wait.recv_timeout(TIMEOUT)?;
+        write_chunk(out, TAIL)?;
+        write_chunk(out, b"")?;
+        Ok(())
+    });
+    let mut stream = BufReader::new(open_request(
+        &gateway,
+        MESSAGES,
+        br#"{"model":"matou-role/opus","stream":true}"#,
+        "",
+    )?);
+    assert!(head(&mut stream)?.0.starts_with("HTTP/1.1 200"));
+    let mut received = Vec::new();
+    while received.len() < FIRST.len() {
+        read_chunk(&mut stream, &mut received)?;
+    }
+    assert_eq!(received, FIRST);
+
+    let new = json!({"opus": {"providerId": "new", "model": "gemini-new", "effort": "high"}});
+    let (requests, workers) = record(new_upstream, 3, "200 OK", "", b"ok");
+    let assert_new_request = || -> Result<()> {
+        let (status, _, body) = exchange(&gateway, MESSAGES, br#"{"model":"matou-role/opus"}"#, "")?;
+        assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+        let (start, headers, body) = requests.recv_timeout(TIMEOUT)?;
+        assert!(start.starts_with("POST /new/v1/messages "));
+        assert_eq!(headers["x-api-key"], "new-key");
+        let payload: Value = serde_json::from_slice(&body)?;
+        assert_eq!(payload["model"], "gemini-new");
+        assert_eq!(payload["output_config"]["effort"], "high");
+        Ok(())
+    };
+    save_role_assignments(root.path(), 2, &new, None, None)?;
+    assert_new_request()?;
+    release.send(())?;
+    while read_chunk(&mut stream, &mut received)? != 0 {}
+    assert_eq!(received, [FIRST, TAIL].concat());
+    old_worker.join().unwrap()?;
+
+    let mut invalid = new;
+    invalid["opus"]["effort"] = json!("low");
+    assert!(save_role_assignments(root.path(), 3, &invalid, None, None).is_err());
+    assert_new_request()?;
+    save_role_assignments(root.path(), 4, &json!({}), None, None)?;
+    assert_new_request()?;
+    for worker in workers {
+        worker.join().unwrap()?;
+    }
+    assert!(!gateway.stopped.load(Ordering::Acquire));
+    Ok(())
+}
+
+#[test]
 fn fable_aliases_use_their_own_target_or_the_legacy_opus_target() -> Result<()> {
     let temp = within_workspace()?;
     let upstream = listener()?;
@@ -1422,10 +1544,9 @@ fn deferred_tool_cleanup_follows_the_resolved_route_and_model() -> Result<()> {
         });
         let state = State {
             prefix: String::new(),
-            projection: Arc::new(plan),
+            projection: ProjectionSlot::new(Arc::new(plan), None, None),
             lazy_compaction: OnceCell::new(),
             lazy_subscription: AsyncMutex::default(),
-            subscriptions: None,
             locale: InterfaceLocale::default(),
             blocked_families: Arc::default(),
             stopped: Arc::default(),
@@ -1435,10 +1556,12 @@ fn deferred_tool_cleanup_follows_the_resolved_route_and_model() -> Result<()> {
             proxy_env: ProxyEnvironment::default(),
             fixture: None,
         };
+        let routes = runtime.block_on(state.projection.current());
         for path in [MESSAGES, COUNT] {
             let input = json!({"model":"matou-role/opus","tools":tools,"messages":history});
             let (body, _, _, _, _) = runtime
                 .block_on(state.rewrite_json(
+                    &routes.projection,
                     serde_json::to_vec(&input)?.into(),
                     path,
                     None,
@@ -2538,10 +2661,9 @@ fn deepseek_gateway_reads_resumed_usage_from_hud_before_any_upstream_response() 
     let usage = Arc::new(Mutex::new((Some(186_500), Some(512_000))));
     let observed = Arc::clone(&usage);
     let gateway = Gateway::start_gateway(
-        Arc::new(plan),
+        ProjectionSlot::new(Arc::new(plan), None, None),
         Duration::from_secs(15),
         Some(Arc::new(move || observed.lock().ok().map(|usage| *usage))),
-        None,
         Arc::default(),
         InterfaceLocale::default(),
         ProxyEnvironment::default(),
