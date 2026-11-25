@@ -7,7 +7,8 @@ use std::{
 use flate2::write::{DeflateDecoder, MultiGzDecoder, ZlibDecoder};
 use serde_json::{Map, Value, json};
 
-use super::{Encoding, ObservableMedia};
+use super::{Encoding, HudUsageScope, ObservableMedia};
+use crate::agent_hud_projection::{ContextTokens, ContextUsageSample, timestamp_ms};
 
 const MAX_KEYS: usize = 256;
 const MAX_BYTES: usize = 4 * 1024 * 1024;
@@ -21,6 +22,8 @@ const MAX_RESERVED_OUTPUT: u64 = 32_000;
 pub(super) struct Tracker {
     keys: VecDeque<(Key, u64)>,
     compacted: bool,
+    usage_identity: Option<uuid::Uuid>,
+    hud_usage: Option<(std::time::Instant, Option<ContextUsageSample>)>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -39,6 +42,31 @@ pub(super) struct ContextUsage {
 }
 
 impl Tracker {
+    pub(super) fn bind_usage_identity(&mut self, identity: Option<uuid::Uuid>) {
+        if self.usage_identity != identity {
+            self.usage_identity = identity;
+            self.hud_usage = None;
+        }
+    }
+
+    pub(super) fn context_usage(&self) -> Option<ContextUsageSample> {
+        self.hud_usage.and_then(|(_, sample)| sample)
+    }
+
+    pub(super) fn publish_context_usage(
+        &mut self,
+        scope: HudUsageScope,
+        sample: Option<ContextUsageSample>,
+    ) {
+        if self.usage_identity == Some(scope.identity)
+            && self
+                .hud_usage
+                .is_none_or(|(started, _)| scope.started >= started)
+        {
+            self.hud_usage = Some((scope.started, sample));
+        }
+    }
+
     pub(super) fn note_compaction(&mut self) {
         self.compacted = true;
     }
@@ -297,6 +325,17 @@ impl ResponseObserver {
         }
     }
 
+    pub(super) fn with_hud_scope(mut self, scope: Option<HudUsageScope>) -> Self {
+        let observer = match &mut self.decoder {
+            Decoder::Identity(observer) => observer,
+            Decoder::Gzip(decoder) => &mut decoder.get_mut().0,
+            Decoder::Zlib { decoder, .. } => &mut decoder.get_mut().0,
+            Decoder::RawDeflate(decoder) => &mut decoder.get_mut().0,
+        };
+        observer.hud_scope = scope;
+        self
+    }
+
     pub(super) fn push(&mut self, chunk: &[u8]) -> bool {
         if let Decoder::Identity(observer) = &mut self.decoder {
             return observer.push(chunk);
@@ -359,6 +398,9 @@ struct Observer {
     received: usize,
     pending: Vec<u8>,
     usage: [u64; 4],
+    hud_scope: Option<HudUsageScope>,
+    hud_tokens: ContextTokens,
+    cache_expires_at_ms: Option<f64>,
     tool_ids: Vec<Key>,
     signatures: BTreeMap<u64, Vec<u16>>,
     sample: Vec<u16>,
@@ -372,6 +414,9 @@ impl Observer {
             received: 0,
             pending: Vec::new(),
             usage: [0; 4],
+            hud_scope: None,
+            hud_tokens: ContextTokens::default(),
+            cache_expires_at_ms: None,
             tool_ids: Vec::new(),
             signatures: BTreeMap::new(),
             sample: Vec::new(),
@@ -384,7 +429,9 @@ impl Observer {
         } else {
             ObservableMedia::Json
         };
-        Self::new(media, Arc::clone(&self.tracker))
+        let mut observer = Self::new(media, Arc::clone(&self.tracker));
+        observer.hud_scope = self.hud_scope;
+        observer
     }
 
     // Return false to retire observation while continuing the response unchanged.
@@ -461,6 +508,33 @@ impl Observer {
     }
 
     fn apply_usage(&mut self, usage: &Value) {
+        if self.hud_scope.is_some() {
+            if let Some(tokens) = ContextTokens::from_usage(usage) {
+                self.hud_tokens.input = tokens.input.or(self.hud_tokens.input);
+                self.hud_tokens.output = tokens.output.or(self.hud_tokens.output);
+                self.hud_tokens.cache_creation_input = tokens
+                    .cache_creation_input
+                    .or(self.hud_tokens.cache_creation_input);
+                self.hud_tokens.cache_read_input =
+                    tokens.cache_read_input.or(self.hud_tokens.cache_read_input);
+            }
+            if let Some(expires_at) = usage
+                .get("cache_expires_at_ms")
+                .or_else(|| usage.get("cache_expires_at"))
+            {
+                self.cache_expires_at_ms = if expires_at.is_string() {
+                    timestamp_ms(expires_at)
+                } else {
+                    usage["cache_expires_at_ms"].as_f64()
+                }
+                .filter(|at| *at > 0.);
+            }
+            // Streaming responses report prompt usage in message_start.
+            // Publish it even when the output is still being generated.
+            if self.hud_tokens.input.is_some() || self.cache_expires_at_ms.is_some() {
+                self.publish_hud_usage();
+            }
+        }
         for (key, stored) in [
             "input_tokens",
             "cache_creation_input_tokens",
@@ -493,6 +567,23 @@ impl Observer {
         }
     }
 
+    fn publish_hud_usage(&self) {
+        if let Some(scope) = self.hud_scope {
+            let sample = (self.hud_tokens.input.is_some() || self.cache_expires_at_ms.is_some())
+                .then_some(ContextUsageSample {
+                    tokens: self.hud_tokens,
+                    observed_at_ms: Some(scope.at_ms),
+                    cache_expires_at_ms: self.cache_expires_at_ms,
+                    estimated_cache_ttl_sec: scope.estimated_ttl_sec,
+                    window: scope.window,
+                });
+            self.tracker
+                .lock()
+                .unwrap()
+                .publish_context_usage(scope, sample);
+        }
+    }
+
     fn finish(mut self) {
         let pending = std::mem::take(&mut self.pending);
         if self.sse {
@@ -511,6 +602,7 @@ impl Observer {
                 }
             }
         }
+        self.publish_hud_usage();
         let used = self.usage.into_iter().fold(0, u64::saturating_add);
         if used > 0 {
             let keys = self

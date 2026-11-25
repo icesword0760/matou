@@ -357,6 +357,81 @@ pub(crate) fn record(
     (rx, tasks)
 }
 
+#[test]
+fn hud_usage_is_scoped_to_the_authenticated_session_without_changing_forwarding() -> Result<()> {
+    const WITH_USAGE: &[u8] = br#"{"content":"fixture","usage":{"input_tokens":10000,"output_tokens":2000,"cache_read_input_tokens":40000,"cache_creation_input_tokens":20000,"cache_expires_at":"2026-11-25T05:00:00Z"}}"#;
+    const WITHOUT_USAGE: &[u8] = br#"{"content":"fixture"}"#;
+    let upstream = listener()?;
+    let address = upstream.local_addr()?;
+    let plan = Arc::new(projection(address, address)?);
+    let first = Gateway::start(Arc::clone(&plan))?;
+    let second = Gateway::start(plan)?;
+    let first_id = Uuid::new_v4();
+    let second_id = Uuid::new_v4();
+    first.bind_usage_identity(&first_id.to_string());
+    second.bind_usage_identity(&second_id.to_string());
+
+    let request = |id| {
+        serde_json::to_vec(&json!({
+            "model": "literal-model",
+            "messages": [{"role":"user","content":"synthetic prompt"}],
+            "metadata": {"user_id": json!({"session_id": id}).to_string()}
+        }))
+        .unwrap()
+    };
+    let first_body = request(first_id);
+    let second_body = request(second_id);
+    let (recorded, tasks) = record(
+        upstream.try_clone()?,
+        3,
+        "200 OK",
+        "Content-Type: application/json\r\n",
+        WITH_USAGE,
+    );
+    assert_eq!(exchange(&first, MESSAGES, &first_body, "")?.2, WITH_USAGE);
+    assert_eq!(recorded.recv_timeout(TIMEOUT)?.2, first_body);
+    let sample = first
+        .context_usage()
+        .context("missing matched request usage")?;
+    assert_eq!(sample.tokens.used_tokens(), Some(72_000.));
+    assert_eq!(
+        sample.cache_expires_at_ms,
+        crate::agent_hud_projection::timestamp_ms(&json!("2026-11-25T05:00:00Z"))
+    );
+    assert!(sample.observed_at_ms.is_some());
+    assert!(sample.estimated_cache_ttl_sec.is_none());
+    assert!(second.context_usage().is_none());
+
+    assert_eq!(exchange(&second, MESSAGES, &first_body, "")?.2, WITH_USAGE);
+    assert_eq!(recorded.recv_timeout(TIMEOUT)?.2, first_body);
+    assert!(second.context_usage().is_none());
+    assert_eq!(exchange(&second, MESSAGES, &second_body, "")?.2, WITH_USAGE);
+    assert_eq!(recorded.recv_timeout(TIMEOUT)?.2, second_body);
+    assert_eq!(second.context_usage().unwrap().tokens, sample.tokens);
+    for task in tasks {
+        task.join().unwrap()?;
+    }
+
+    let (recorded, tasks) = record(
+        upstream,
+        1,
+        "200 OK",
+        "Content-Type: application/json\r\n",
+        WITHOUT_USAGE,
+    );
+    assert_eq!(
+        exchange(&first, MESSAGES, &first_body, "")?.2,
+        WITHOUT_USAGE
+    );
+    assert_eq!(recorded.recv_timeout(TIMEOUT)?.2, first_body);
+    assert!(first.context_usage().is_none());
+    assert!(second.context_usage().is_some());
+    for task in tasks {
+        task.join().unwrap()?;
+    }
+    Ok(())
+}
+
 fn search_payload(model: Value) -> Value {
     json!({
         "model": model,

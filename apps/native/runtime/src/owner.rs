@@ -12,7 +12,7 @@ use std::{
 use anyhow::{Context, Result, ensure};
 use matou_native_core::{
     backup::{BackupService, CLEAN_EXIT_BACKUP_TIMEOUT},
-    context_optimizer_config::ContextOptimizerConfig,
+    context_optimizer_config::{ContextOptimizerConfig, ContextOptimizerSnapshot},
     dispatch_model_catalog::resolve_control_node,
     dispatch_roles::{DispatchRolesStore, format_roles_markdown},
     hierarchy::{
@@ -178,6 +178,8 @@ struct RunHook {
     pending_startup_observations: Vec<(Scope, Observation)>,
     hud: AgentHudProjection,
     context_guard: SessionContextGuard,
+    optimizer_data_root: PathBuf,
+    codex_context_percent: Option<f64>,
     mono_origin: Instant,
     gateway_context: Option<Arc<Mutex<(Option<u64>, Option<u64>)>>>,
     external_agents: Option<(PathBuf, ExternalAgents)>,
@@ -203,6 +205,36 @@ impl RunHook {
         if let Some(context) = &self.gateway_context {
             *context.lock().unwrap() = self.hud.context_usage();
         }
+    }
+
+    fn observe_context_usage(
+        &mut self,
+        gateway: Option<&Gateway>,
+        time: f64,
+    ) -> (Option<f64>, Option<u64>, Option<u64>) {
+        let request = gateway.and_then(Gateway::context_usage).filter(|sample| {
+            sample
+                .observed_at_ms
+                .is_some_and(|at| self.hud.accepts_request_usage(at))
+        });
+        let usage = request.or_else(|| {
+            let mut fallback = self.hud.usage_sample()?;
+            fallback.estimated_cache_ttl_sec = match self.profile {
+                LaunchProfile::ClaudeCode if self.default_claude_login && !self.uses_gateway => {
+                    Some(300)
+                }
+                LaunchProfile::Antigravity => Some(900),
+                _ => None,
+            };
+            Some(fallback)
+        });
+        let (percent, used, window) = self.hud.context_metrics(request);
+        let percent = self.codex_context_percent.or(percent);
+        self.context_guard.observe_usage(usage);
+        if self.context_guard.context_percent() != percent {
+            self.context_guard.on_context_percent(percent, time);
+        }
+        (percent, used, window)
     }
 
     fn remember_claude_transcript(&mut self, payload: &Value) {
@@ -308,6 +340,7 @@ pub struct ShellOwner {
     pub(crate) fork_worktree_root: Option<PathBuf>,
     pub(crate) fork_setup: Option<Box<dyn Fn(&Path) -> Result<()> + Send>>,
     codex_forks: CodexForks,
+    next_context_reminder_poll: Instant,
 }
 
 #[derive(PartialEq, Eq)]
@@ -357,6 +390,7 @@ impl ShellOwner {
             fork_worktree_root: None,
             fork_setup: None,
             codex_forks: CodexForks::default(),
+            next_context_reminder_poll: Instant::now(),
         };
         let runs = {
             let mut query = owner.connection.prepare("SELECT id FROM session_runs WHERE status IN ('starting','running') AND runtime_generation <> ? ORDER BY started_at")?;
@@ -967,10 +1001,11 @@ impl ShellOwner {
             .as_ref()
             .and_then(|tools| tools.last())
             .map(|tool| (tool.name.as_str(), tool.target.as_deref()));
+        let (context_percent, context_used, context_window) =
+            hook.observe_context_usage(shell.gateway.as_ref(), time);
         hook.context_guard.sync_observed_state(
             preview.task_status,
-            preview.context_percent,
-            hook.hud.context_tokens(),
+            context_percent,
             active_tool,
             time,
         );
@@ -981,6 +1016,21 @@ impl ShellOwner {
         hook.hud
             .set_context_guard(hook.context_guard.project_hud(time, &optimizer_settings));
         let mut hud = json!(hook.hud.snapshot_with_agents(time, agents));
+        if let Some(percent) = context_percent {
+            hud["contextPercent"] = json!(percent.round());
+        } else if let Some(hud) = hud.as_object_mut() {
+            hud.remove("contextPercent");
+        }
+        if let Some(window) = context_window {
+            hud["contextWindowSize"] = json!(window);
+        }
+        if optimizer_settings.enabled
+            && optimizer_settings.cache_monitor
+            && let Some(used) = context_used
+            && context_window.is_some()
+        {
+            hud["contextUsedTokens"] = json!(used);
+        }
         hud["defaultAccountUsage"] = json!(
             hook.default_claude_login
                 && (hook.last_observation.is_some()
@@ -3505,6 +3555,8 @@ impl ShellOwner {
                 pending_startup_observations: Vec::new(),
                 hud,
                 context_guard: SessionContextGuard::new(hud_provider),
+                optimizer_data_root: options.launch.data_root.clone(),
+                codex_context_percent: None,
                 mono_origin: Instant::now(),
                 gateway_context,
                 external_agents: agent_status_directory
@@ -3843,9 +3895,84 @@ impl ShellOwner {
             false
         });
         self.poll_provider_hooks(&mut events);
+        self.poll_context_reminders(&mut events);
         self.flush_due_summaries(&mut events);
         self.start_due_cwd_captures();
         Ok(events)
+    }
+
+    fn poll_context_reminders(&mut self, events: &mut Vec<OwnerEvent>) {
+        let tick = Instant::now();
+        if self.closing || tick < self.next_context_reminder_poll {
+            return;
+        }
+        self.next_context_reminder_poll = tick + Duration::from_secs(1);
+        let time = now();
+        let mut settings_by_root: HashMap<PathBuf, Option<ContextOptimizerSnapshot>> =
+            HashMap::new();
+        for (session_id, shell) in &mut self.shells {
+            if shell.ended
+                || shell.retiring
+                || shell.provider_startup_pending
+                || shell.worker.is_finished()
+            {
+                continue;
+            }
+            let Some(hook) = &mut shell.hook else {
+                continue;
+            };
+            let root = hook.optimizer_data_root.clone();
+            let Some(settings) = settings_by_root
+                .entry(root.clone())
+                .or_insert_with(|| ContextOptimizerConfig::for_data_root(&root).snapshot().ok())
+                .as_ref()
+                .and_then(|snapshot| {
+                    snapshot
+                        .agents
+                        .get(hook.context_guard.provider_id())
+                        .map(|entry| &entry.settings)
+                })
+            else {
+                continue;
+            };
+            if !settings.enabled || !settings.cache_monitor {
+                continue;
+            }
+            hook.observe_context_usage(shell.gateway.as_ref(), time as f64);
+            let reminders: Vec<_> = hook
+                .context_guard
+                .pending_reminders(time as f64, settings)
+                .collect();
+            if reminders.is_empty() {
+                continue;
+            }
+            let locale =
+                sessions::current_interface_locale(sessions::read_locale_preference(&root));
+            for reminder in reminders {
+                let id = (self.next_id)();
+                let mut notification = reminder.notification(locale);
+                // The guard already deduplicates threshold crossings and cache
+                // deadlines. Distinct cycles can occur inside the UI cooldown.
+                notification["cooldownKey"] = json!(id);
+                match sessions::publish_provider_notification(
+                    &mut self.connection,
+                    &command(id.clone(), "agent.notification.publish", id),
+                    session_id,
+                    &shell.run_id,
+                    &self.generation,
+                    hook.context_guard.provider_id(),
+                    notification,
+                    time,
+                ) {
+                    Ok(commit) if commit.result["published"] == true => {
+                        hook.context_guard.mark_reminded(reminder);
+                        events.push(OwnerEvent::Domain(commit));
+                    }
+                    Ok(_) => {}
+                    Err(error) => diagnostic(events, session_id, format!("{error:#}")),
+                }
+            }
+        }
     }
 
     fn poll_provider_hook_messages(
@@ -5021,6 +5148,14 @@ impl ShellOwner {
             hook.last_observation = Some(observation);
             hook.claude_fork_rebuild = None;
             if confirms {
+                if let Some(gateway) = &shell.gateway
+                    && let Some(identity) = hook
+                        .last_observation
+                        .as_ref()
+                        .and_then(|last| last.identity.as_deref())
+                {
+                    gateway.bind_usage_identity(identity);
+                }
                 hook.claude_transcript = None;
                 hook.claude_transcript_poll = None;
                 hook.claude_observed_title = None;
@@ -5036,7 +5171,11 @@ impl ShellOwner {
         if let Some(payload) = hud_payload {
             hook.hud.set_resumable(true);
             hook.remember_claude_transcript(&payload);
-            hook.hud.ingest_provider(&payload, now() as f64);
+            let time = now() as f64;
+            if hook.hud.complete_claude_compaction(&payload, time) {
+                hook.context_guard.on_compaction();
+            }
+            hook.hud.ingest_provider(&payload, time);
             hook.sync_gateway_context();
         }
         let permission_confirmed = confirms
@@ -5410,8 +5549,17 @@ impl ShellOwner {
             if shell.ended || shell.retiring || shell.worker.is_finished() {
                 continue;
             }
-            if let Some(codex) = shell.hook.as_mut().and_then(|hook| hook.codex.as_mut()) {
-                changed |= codex.take_hud_change();
+            if let Some(hook) = &mut shell.hook
+                && let Some(codex) = &mut hook.codex
+            {
+                if codex.take_completed_compaction() {
+                    hook.context_guard.on_compaction();
+                }
+                if codex.take_hud_change() {
+                    hook.codex_context_percent =
+                        codex.hud_projection(|_| false)["contextPercent"].as_f64();
+                    changed = true;
+                }
                 if self.codex_hud.idle()
                     && let Some(due) = codex.hud_due().filter(|due| *due <= now)
                     && next
@@ -7976,10 +8124,85 @@ mod provider_tests {
         assert!(
             matches!(events.last(), Some(OwnerEvent::ProviderIdentity(value)) if value["reason"] == "retired-run")
         );
+        let config = ContextOptimizerConfig::for_data_root(root.path());
+        let at = now() - 270_000;
+        let payload = json!({
+            "session_id": "current-id", "timestamp": at, "context_window":{
+                "context_window_size": 200000, "current_usage":{
+                    "input_tokens": 35000, "output_tokens": 10000,
+                    "cache_read_input_tokens": 130000, "cache_creation_input_tokens": 0
+                }
+            }
+        });
+        let mut statusline = Observation::parse(payload.as_object().unwrap());
+        statusline.statusline = true;
+        statusline.hud_payload = Some(payload);
+        owner.apply_hook(current.clone(), statusline, &mut events);
+        let poll_reminders = |owner: &mut ShellOwner| {
+            owner.next_context_reminder_poll = Instant::now();
+            let mut events = Vec::new();
+            owner.poll_context_reminders(&mut events);
+            events
+                .into_iter()
+                .filter_map(|event| match event {
+                    OwnerEvent::Domain(commit) => Some(commit.result["agentNotification"].clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        config.set_agent_settings(
+            "claude-code",
+            matou_native_core::context_optimizer_config::AgentOptimizerSettings {
+                enabled: false,
+                cache_expiry_notify: true,
+                ..Default::default()
+            },
+        )?;
+        assert!(poll_reminders(&mut owner).is_empty());
+        assert!(owner.agent_hud(session, root.path())?["hud"]["contextGuard"].is_null());
+        config.set_agent_settings(
+            "claude-code",
+            matou_native_core::context_optimizer_config::AgentOptimizerSettings {
+                cache_expiry_notify: true,
+                ..Default::default()
+            },
+        )?;
+        let notices = poll_reminders(&mut owner);
+        assert_eq!(notices.len(), 2);
+        assert_eq!(notices[0]["eventType"], "context-water-critical");
+        assert_eq!(notices[1]["eventType"], "context-cache-expiry");
+        for notice in notices {
+            assert_eq!(notice["sessionId"], session);
+            assert_eq!(notice["taskId"], "task");
+            assert_eq!(notice["workspaceId"], "workspace");
+        }
+        let hud = owner.agent_hud(session, root.path())?;
+        assert_eq!(hud["hud"]["contextUsedTokens"], 175000);
+        assert_eq!(hud["hud"]["contextGuard"]["cache"]["timing"], "estimate");
+        assert!(poll_reminders(&mut owner).is_empty());
+
+        let compact = json!({
+            "session_id": "current-id", "hook_event_name": "SessionStart",
+            "source": "compact", "prompt_id": "fixture-compact"
+        });
+        let complete = || {
+            let mut observation = Observation::parse(compact.as_object().unwrap());
+            observation.hud_payload = Some(compact.clone());
+            observation
+        };
+        owner.apply_hook(current.clone(), complete(), &mut events);
+        owner.apply_hook(current.clone(), complete(), &mut events);
+        let hud = owner.agent_hud(session, root.path())?;
+        assert_eq!(hud["hud"]["contextGuard"]["contextPressure"], "normal");
+        assert_eq!(hud["hud"]["contextGuard"]["cache"]["timing"], "unknown");
+        assert!(poll_reminders(&mut owner).is_empty());
+        let after_context_reminders = notification_count(&owner)?;
+        assert_eq!(after_context_reminders, previous_notifications + 3);
+
         owner.retire_sessions(&[session.into()]);
         owner.apply_hook(current, stop("current-id"), &mut events);
         assert_eq!(work_state(&owner, session)?, before);
-        assert_eq!(notification_count(&owner)?, previous_notifications + 1);
+        assert_eq!(notification_count(&owner)?, after_context_reminders);
         let deadline = Instant::now() + Duration::from_secs(5);
         while owner.has_shell_worker(session) && Instant::now() < deadline {
             owner.poll(Duration::from_millis(25))?;
@@ -8059,7 +8282,7 @@ mod provider_tests {
         );
         assert!(!owner.provider_allows_derivation(session));
         assert_eq!(count(&owner)?, 2);
-        assert_eq!(notification_count(&owner)?, previous_notifications + 1);
+        assert_eq!(notification_count(&owner)?, after_context_reminders);
         assert_eq!(
             owner.claude_binding(session)?.unwrap().restore_state,
             "failed"

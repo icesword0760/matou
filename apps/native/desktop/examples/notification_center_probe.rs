@@ -61,6 +61,40 @@ mod workspace {
             );
         }
 
+        pub(super) fn request_context_fixture(&mut self, cx: &mut Context<Self>) {
+            let active = self.level_focus().unwrap().to_owned();
+            let node = self.graph["nodes"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|node| node["sessionId"] == active)
+                .unwrap();
+            node["currentMode"] = "claude-code".into();
+            self.refresh_live_wiring(cx);
+        }
+
+        pub(super) fn show_context_fixture(
+            &mut self,
+            request_id: u64,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            self.receive_wiring_reply(
+                "agentHudResult",
+                request_id,
+                &serde_json::json!({"result":{"hud":{
+                    "model":"Synthetic",
+                    "contextPercent":36, "contextUsedTokens":72000, "contextWindowSize":200000,
+                    "contextGuard":{"contextPressure":"normal","cache":{
+                        "timing":"estimate","remainingSec":47,"warm":true,"expiringSoon":true,
+                        "hitRatioPercent":57
+                    }}
+                }}}),
+                window,
+                cx,
+            );
+        }
+
         pub(super) fn use_preferences(&mut self, path: PathBuf) {
             self.notifications = Notifications::new(Some(path));
         }
@@ -245,7 +279,7 @@ mod probe {
         WindowHandle, WindowOptions, point, px, size,
     };
     use matou_native_core::hierarchy::HierarchyResult;
-    use matou_native_runtime::host::{Command, Event, LaunchOptions, RuntimeHost};
+    use matou_native_runtime::host::{Command, Event, LaunchOptions, OfflineFixtures, RuntimeHost};
     use objc::{msg_send, sel, sel_impl};
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use serde_json::{Value, json};
@@ -395,11 +429,12 @@ mod probe {
         event
     }
 
-    async fn verify(cx: &mut AsyncApp) {
+    async fn verify(cx: &mut AsyncApp, visible_fixture: bool) {
         super::workspace::verify_merge();
+        let fixture_id = uuid::Uuid::new_v4().simple().to_string();
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../target")
-            .join(format!("notification-probe-{}", uuid::Uuid::new_v4()));
+            .join(format!("np-{}", &fixture_id[..12]));
         let active_path = root.join("project-active");
         let inactive_path = root.join("project-background");
         std::fs::create_dir_all(&active_path).unwrap();
@@ -411,17 +446,22 @@ mod probe {
             shell_home: root.join("shell-home"),
             shell: "/bin/zsh".into(),
         };
-        let mut host = RuntimeHost::start(options.clone()).unwrap();
+        let fixtures = || OfflineFixtures {
+            provider_environment: Some(Default::default()),
+            dsh_session_root: Some(root.join("dsh")),
+            ..Default::default()
+        };
+        let mut host = RuntimeHost::start_with_offline_fixtures(options.clone(), fixtures()).unwrap();
         let (commands, sink) = runtime_bridge::probe_channel();
         let (_events, incoming) = async_channel::unbounded();
         let window = cx
             .open_window(
                 WindowOptions {
-                    show: false,
-                    focus: false,
+                    show: visible_fixture,
+                    focus: visible_fixture,
                     window_bounds: Some(WindowBounds::Windowed(Bounds::new(
                         point(px(0.), px(0.)),
-                        size(px(1000.), px(650.)),
+                        size(px(if visible_fixture { 1350. } else { 1000. }), px(650.)),
                     ))),
                     ..Default::default()
                 },
@@ -450,7 +490,7 @@ mod probe {
             .unwrap();
         runtime_graph(&host, cx, window, false).await;
         host.shutdown().unwrap();
-        let mut host = RuntimeHost::start(options).unwrap();
+        let mut host = RuntimeHost::start_with_offline_fixtures(options, fixtures()).unwrap();
         let (active, mut graph) = runtime_graph(&host, cx, window, true).await;
         assert_ne!(target(&active), target(&background));
         assert!(
@@ -464,8 +504,83 @@ mod probe {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis() as u64;
+        if visible_fixture {
+            let mut notice = payload(
+                "cache-fixture",
+                "缓存预计即将过期",
+                &background,
+                timestamp,
+                true,
+            );
+            notice["eventType"] = json!("context-cache-expiry");
+            notice["subtitle"] = json!("");
+            notice["body"] = json!("按路由默认时长估算。点击查看这张卡片。");
+            graph["agentNotifications"] = json!([notice]);
+            deliver(window, cx, Event::Graph(graph));
+            window
+                .update(cx, |view, window, cx| {
+                    window.set_window_title("Matou · 上下文提醒合成验收");
+                    view.request_context_fixture(cx);
+                })
+                .unwrap();
+            let request_id = std::iter::from_fn(|| sink.try_recv().ok())
+                .find_map(|cmd| match cmd {
+                    Command::GetAgentHud {
+                        request_id,
+                        session_id,
+                    } if session_id == target(&active).1 => Some(request_id),
+                    _ => None,
+                })
+                .expect("focused fixture HUD request");
+            window
+                .update(cx, |view, window, cx| {
+                    view.show_context_fixture(request_id, window, cx);
+                })
+                .unwrap();
+            draw(window, cx);
+            println!(
+                "Context fixture ready. Open the notification bell and click the cache reminder."
+            );
+
+            let deadline = Instant::now() + Duration::from_secs(180);
+            loop {
+                if let Ok(command @ Command::FocusSession { .. }) = sink.try_recv() {
+                    assert!(
+                        matches!(&command, Command::FocusSession { scene_id, session_id }
+                        if scene_id == background_scene && session_id == background_session)
+                    );
+                    host.commands.send(command).unwrap();
+                    let (selected, _) = runtime_graph(&host, cx, window, true).await;
+                    assert_eq!(target(&selected), target(&background));
+                    window
+                        .update(cx, |view, _, _| {
+                            view.assert_navigation(background_scene, background_session);
+                        })
+                        .unwrap();
+                    println!("Context fixture focused the exact background card.");
+                    cx.background_executor()
+                        .timer(Duration::from_secs(15))
+                        .await;
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    println!("Context fixture timed out while waiting for a click.");
+                    break;
+                }
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
+            }
+            host.shutdown().unwrap();
+            std::fs::remove_dir_all(root).unwrap();
+            return;
+        }
+
+        let mut cache_reminder = payload("new", "Claude Code", &background, timestamp, true);
+        cache_reminder["eventType"] = json!("context-cache-expiry");
+        cache_reminder["cooldownKey"] = json!("completed");
         graph["agentNotifications"] = json!([
-            payload("new", "Claude Code", &background, timestamp, true),
+            cache_reminder,
             payload("old", "Focused", &active, timestamp - 1_000, false),
             payload(
                 "cooled",
@@ -629,7 +744,9 @@ mod probe {
     pub(super) fn run() {
         Application::new().with_assets(NativeAssets).run(|cx| {
             cx.spawn(async |cx| {
-                verify(cx).await;
+                let visible_fixture =
+                    std::env::args().any(|arg| arg == "--context-reminder-fixture");
+                verify(cx, visible_fixture).await;
                 cx.update(|cx| cx.quit()).unwrap();
             })
             .detach();

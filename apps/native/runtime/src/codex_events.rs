@@ -433,6 +433,10 @@ impl Run {
         std::mem::take(&mut self.hud.dirty)
     }
 
+    pub(crate) fn take_completed_compaction(&mut self) -> bool {
+        std::mem::take(&mut self.hud.compaction_completed)
+    }
+
     pub fn hud_due(&self) -> Option<Instant> {
         (!self.ended && self.rollout.is_some() && self.hud.cursor.is_some()).then_some(self.hud.due)
     }
@@ -618,6 +622,8 @@ struct Hud {
     effort: Option<String>,
     context: Option<(f64, f64)>,
     caught_up: bool,
+    last_compaction_at: Option<f64>,
+    compaction_completed: bool,
     running: BTreeMap<String, Tool>,
     hook_completed: HashSet<String>,
     hook_counts: BTreeMap<String, usize>,
@@ -644,6 +650,8 @@ impl Default for Hud {
             effort: None,
             context: None,
             caught_up: false,
+            last_compaction_at: None,
+            compaction_completed: false,
             running: BTreeMap::new(),
             hook_completed: HashSet::new(),
             hook_counts: BTreeMap::new(),
@@ -758,6 +766,15 @@ impl Hud {
                 HudUpdate::Context(context) => {
                     self.dirty |= self.context != context;
                     self.context = context;
+                }
+                HudUpdate::Compacted(at) => {
+                    self.dirty |= self.context.take().is_some();
+                    if let Some(at) =
+                        at.filter(|at| self.last_compaction_at.is_none_or(|last| *at > last))
+                    {
+                        self.last_compaction_at = Some(at);
+                        self.compaction_completed |= self.caught_up;
+                    }
                 }
                 HudUpdate::Command { id, tool } => self.complete_tool(id, tool),
                 HudUpdate::Call {
@@ -1021,6 +1038,7 @@ enum HudUpdate {
         effort: Option<String>,
     },
     Context(Option<(f64, f64)>),
+    Compacted(Option<f64>),
     Command {
         id: String,
         tool: Tool,
@@ -1136,7 +1154,10 @@ fn hud_update(line: &[u8]) -> Option<HudUpdate> {
                 })
                 .map(str::to_owned),
         },
-        ("compacted", _) | ("event_msg", Some("context_compacted")) => HudUpdate::Context(None),
+        // The persisted compacted entry is the completion signal. The
+        // companion status event can clear the display but doesn't reset alerts.
+        ("compacted", _) if payload["error"].is_null() => HudUpdate::Compacted(time),
+        ("event_msg", Some("context_compacted")) => HudUpdate::Context(None),
         ("event_msg", Some("token_count")) => {
             let info = &payload["info"];
             let context = info["last_token_usage"]["total_tokens"]
@@ -1665,6 +1686,40 @@ mod hud_tests {
             more: false,
             updates,
         });
+    }
+
+    #[test]
+    fn codex_compaction_signal_requires_a_new_successful_live_marker() {
+        let mut hud = Hud::default();
+        let old = json!({"type":"compacted","timestamp":1000,"payload":{}});
+        replay(&mut hud, std::slice::from_ref(&old));
+        assert!(!hud.compaction_completed);
+
+        let failed = json!({"type":"compacted","timestamp":2000,"payload":{"error":"failed"}});
+        let status_only =
+            json!({"type":"event_msg","timestamp":2100,"payload":{"type":"context_compacted"}});
+        replay(&mut hud, &[failed, status_only]);
+        assert!(!hud.compaction_completed);
+
+        let completed = json!({"type":"compacted","timestamp":3000,"payload":{}});
+        replay(&mut hud, std::slice::from_ref(&completed));
+        assert!(std::mem::take(&mut hud.compaction_completed));
+        replay(&mut hud, std::slice::from_ref(&completed));
+        assert!(!hud.compaction_completed);
+
+        hud.accept(HudReply {
+            session: "session".into(),
+            run: "run".into(),
+            cursor: HudCursor::default(),
+            reset: true,
+            more: false,
+            updates: vec![
+                HudUpdate::Compacted(Some(3000.)),
+                HudUpdate::Context(Some((90., 100.))),
+            ],
+        });
+        assert_eq!(hud.context, Some((90., 100.)));
+        assert!(!hud.compaction_completed);
     }
 
     #[test]
