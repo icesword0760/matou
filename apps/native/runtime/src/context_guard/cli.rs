@@ -658,12 +658,17 @@ mod tests {
         )
         .unwrap();
 
+        // Pass --data-root explicitly: MATOU_DATA_ROOT, which managed
+        // sessions set, outranks the default root and would otherwise write
+        // this fixture into the real store.
         let indexed = run_ctx_command(
             &[
                 "index".into(),
                 doc.display().to_string(),
                 "--session".into(),
                 "s-42".into(),
+                "--data-root".into(),
+                dir.path().display().to_string(),
             ],
             Some(dir.path()),
         )
@@ -676,6 +681,8 @@ mod tests {
                 "database_migration_failed".into(),
                 "--source".into(),
                 "log_0001".into(),
+                "--data-root".into(),
+                dir.path().display().to_string(),
             ],
             Some(dir.path()),
         )
@@ -685,7 +692,13 @@ mod tests {
         assert!(found.contains("[REDACTED]"));
 
         let resumed = run_ctx_command(
-            &["resume".into(), "--session".into(), "s-42".into()],
+            &[
+                "resume".into(),
+                "--session".into(),
+                "s-42".into(),
+                "--data-root".into(),
+                dir.path().display().to_string(),
+            ],
             Some(dir.path()),
         )
         .unwrap();
