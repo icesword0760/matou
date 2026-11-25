@@ -42,7 +42,7 @@ use matou_native_runtime::host::{
 use matou_native_runtime::protocol::{
     ClaudeModelCatalogReply, ClaudeModelPreferencesReply, ProviderSettingsReply,
 };
-use matou_native_terminal::Theme;
+use matou_native_terminal::{Screen, Theme};
 use serde_json::Value;
 
 mod deferred_recovery_card {
@@ -140,6 +140,116 @@ fn diagnostic_toast_text(message: &str, locale: InterfaceLocale) -> String {
         toast.push('…');
     }
     toast
+}
+
+fn update_session_frame_state(
+    session_id: &str,
+    screen: &Screen,
+    valid: bool,
+    was_usable: bool,
+    session_frames: &mut HashSet<String>,
+    first_frame_content: &mut HashSet<String>,
+    restoring_sessions: &mut HashSet<String>,
+) -> (bool, bool) {
+    if !valid {
+        return (!was_usable && session_frames.remove(session_id), false);
+    }
+    let availability_changed =
+        !session_frames.contains(session_id) && session_frames.insert(session_id.to_owned());
+    // An accepted empty grid enables input but does not end the visual handoff.
+    let first_content = !first_frame_content.contains(session_id)
+        && screen.cells.iter().any(|cell| {
+            cell.has_content && !cell.invisible && cell.text.chars().any(|ch| !ch.is_whitespace())
+        });
+    if first_content {
+        first_frame_content.insert(session_id.to_owned());
+        restoring_sessions.remove(session_id);
+    }
+    (availability_changed || first_content, first_content)
+}
+
+#[cfg(test)]
+mod frame_workspace_tests {
+    use super::{loading_badge_pulse, update_session_frame_state};
+    use gpui::{Styled, div, px};
+    use matou_native_terminal::{Screen, Terminal, TerminalOptions};
+    use std::collections::HashSet;
+
+    #[test]
+    fn first_content_refreshes_workspace_but_steady_frames_do_not() {
+        let mut terminal = Terminal::new(TerminalOptions::new(12, 2, 8, 16)).unwrap();
+        let id = "restoring-session";
+        let mut session_frames = HashSet::new();
+        let mut first_frame_content = HashSet::new();
+        let mut restoring_sessions = HashSet::from([id.to_owned()]);
+        let mut apply = |screen: &Screen, valid, was_usable| {
+            let change = update_session_frame_state(
+                id,
+                screen,
+                valid,
+                was_usable,
+                &mut session_frames,
+                &mut first_frame_content,
+                &mut restoring_sessions,
+            );
+            (
+                change,
+                session_frames.contains(id),
+                first_frame_content.contains(id),
+                restoring_sessions.contains(id),
+            )
+        };
+
+        terminal.feed(b" ");
+        let blank = terminal.screen().unwrap();
+        assert_eq!(
+            apply(&blank, true, false),
+            ((true, false), true, false, true)
+        );
+        assert_eq!(
+            apply(&blank, true, true),
+            ((false, false), true, false, true)
+        );
+        assert_eq!(
+            apply(&blank, false, false),
+            ((true, false), false, false, true)
+        );
+
+        assert_eq!(
+            apply(&blank, true, false),
+            ((true, false), true, false, true)
+        );
+        terminal.feed(b"ready");
+        let first = terminal.screen().unwrap();
+        assert_eq!(apply(&first, true, true), ((true, true), true, true, false));
+
+        terminal.feed(b" more");
+        let updated = terminal.screen().unwrap();
+        assert_ne!(first.cells, updated.cells);
+        assert_eq!(
+            apply(&updated, true, true),
+            ((false, false), true, true, false)
+        );
+        assert_eq!(
+            apply(&updated, false, true),
+            ((false, false), true, true, false)
+        );
+    }
+
+    #[test]
+    fn loading_badge_pulse_preserves_the_dot_layout_size() {
+        for pulse in [0., 0.5, 1.] {
+            let mut dot = loading_badge_pulse(div().size(px(6.)), pulse);
+            let style = dot.style();
+            assert_eq!(style.size.width, Some(px(6.).into()));
+            assert_eq!(style.size.height, Some(px(6.).into()));
+            assert_eq!(style.opacity, Some(1. - 0.55 * pulse));
+            assert_eq!(
+                style.box_shadow.as_ref().unwrap()[0].spread_radius,
+                px(3. * (1. - 0.18 * pulse)),
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -4793,7 +4903,8 @@ impl Workspace {
             return;
         }
         let generation = envelope.generation();
-        if generation != self.runtime_generation {
+        let generation_changed = generation != self.runtime_generation;
+        if generation_changed {
             self.retire_transport(generation, cx);
             if matches!(self.dialog, Some(TabDialog::EndStorageProcess { .. })) {
                 self.close_dialog(window, cx);
@@ -5780,6 +5891,7 @@ impl Workspace {
                 scroll_request_id,
             } => {
                 let was_usable = !self.recovery_blocked(&session_id);
+                let mut workspace_changed = generation_changed;
                 if let Some(terminal) = self.terminals.get(&session_id).cloned() {
                     let valid = self.domain_ready
                         && screen.cols > 0
@@ -5790,40 +5902,36 @@ impl Workspace {
                                 screen.cols == cols as usize && screen.rows == rows as usize
                             },
                         );
-                    if valid {
-                        self.session_frames.insert(session_id.clone());
-                        // The first non-empty grid ends the handoff on every
-                        // platform. An accepted empty frame is not a visible
-                        // first frame.
-                        if !self.first_frame_content.contains(&session_id)
-                            && screen.cells.iter().any(|cell| {
-                                cell.has_content
-                                    && !cell.invisible
-                                    && cell.text.chars().any(|ch| !ch.is_whitespace())
-                            })
-                        {
-                            self.first_frame_content.insert(session_id.clone());
-                            self.restoring_sessions.remove(&session_id);
-                            #[cfg(all(target_os = "macos", debug_assertions))]
-                            if let Some(trace) = &self.motion_trace {
-                                record_motion(
-                                    trace,
-                                    &serde_json::json!({
-                                        "kind": "recovery-water-handoff", "session": session_id,
-                                        "at": self.motion_clock.elapsed().as_secs_f64() * 1000.,
-                                        "generation": generation, "sequence": sequence,
-                                    }),
-                                );
-                            }
-                        }
-                    } else if !was_usable {
-                        self.session_frames.remove(&session_id);
+                    let (frame_state_changed, _first_content) = update_session_frame_state(
+                        &session_id,
+                        &screen,
+                        valid,
+                        was_usable,
+                        &mut self.session_frames,
+                        &mut self.first_frame_content,
+                        &mut self.restoring_sessions,
+                    );
+                    workspace_changed |= frame_state_changed;
+                    #[cfg(all(target_os = "macos", debug_assertions))]
+                    if _first_content && let Some(trace) = &self.motion_trace {
+                        record_motion(
+                            trace,
+                            &serde_json::json!({
+                                "kind": "recovery-water-handoff", "session": session_id,
+                                "at": self.motion_clock.elapsed().as_secs_f64() * 1000.,
+                                "generation": generation, "sequence": sequence,
+                            }),
+                        );
                     }
                     terminal.update(cx, |terminal, cx| {
                         terminal.set_screen(screen, modes, selection, scroll_request_id, cx)
                     });
-                    self.sync_terminal_input(window, cx);
-                    self.resume_search_after_frame(cx);
+                    if workspace_changed {
+                        self.sync_terminal_input(window, cx);
+                    }
+                    if self.search_after_restore {
+                        self.resume_search_after_frame(cx);
+                    }
                     // The reference live-output callback restores only an unclaimed
                     // active terminal; dialogs and focused controls retain ownership.
                     if self.focused.as_ref() == Some(&session_id)
@@ -5847,6 +5955,10 @@ impl Workspace {
                         sequence,
                     },
                 );
+                if !workspace_changed {
+                    // The terminal entity has already handled any visible change.
+                    return;
+                }
             }
             Event::Recovery {
                 session_id,
@@ -13613,14 +13725,7 @@ impl Workspace {
                 Animation::new(Duration::from_millis(1350))
                     .repeat()
                     .with_easing(bounce(ease_in_out)),
-                |dot, pulse| {
-                    // CSS scales the whole dot, including its ring, and eases
-                    // back to the base state at the end of each CSS keyframe.
-                    let scale = 1. - 0.18 * pulse;
-                    dot.size(px(6. * scale))
-                        .opacity(1. - 0.55 * pulse)
-                        .shadow(vec![loading_badge_ring(3. * scale)])
-                },
+                loading_badge_pulse,
             )
             .into_any_element()
         };
@@ -21446,6 +21551,13 @@ fn carousel_shadow_fade(background: Rgba) -> Canvas<()> {
     .absolute()
     .inset_0()
     .size_full()
+}
+
+fn loading_badge_pulse(dot: Div, pulse: f32) -> Div {
+    // Keep the layout box fixed while the ring and opacity pulse.
+    let scale = 1. - 0.18 * pulse;
+    dot.opacity(1. - 0.55 * pulse)
+        .shadow(vec![loading_badge_ring(3. * scale)])
 }
 
 fn loading_badge_ring(spread: f32) -> BoxShadow {
