@@ -403,7 +403,7 @@ fn recent_replies_from_transcript(
     let mut fallback = VecDeque::with_capacity(MAX_RECENT_REPLIES);
     while let Some(row) = read_row(&mut reader, &mut line, skipped, false)? {
         observe_workspace_origin(&mut effective_origin, &row);
-        let event = preview_event(&row["message"]);
+        let event = preview_event(&row);
         title.observe(
             &row,
             event.as_ref().is_some_and(|event| event.kind == "user"),
@@ -515,7 +515,7 @@ fn preview_page(
                 .cloned()
                 .map(|timestamp| (total, timestamp));
         }
-        let Some(mut event) = preview_event(&row["message"]) else {
+        let Some(mut event) = preview_event(&row) else {
             continue;
         };
         total += 1;
@@ -582,7 +582,11 @@ fn preview_page(
     }))
 }
 
-fn preview_event(message: &Value) -> Option<PreviewEvent> {
+fn preview_event(row: &Value) -> Option<PreviewEvent> {
+    if row["type"] == "api-request-blob" {
+        return None;
+    }
+    let message = &row["message"];
     let role = match message["role"].as_str() {
         Some("user") => Some("user"),
         Some("assistant") => Some("assistant"),
@@ -1980,6 +1984,165 @@ mod tests {
             );
         }
         assert_eq!(before, (fs::read(&path)?, fs::metadata(&path)?.modified()?));
+        Ok(())
+    }
+
+    const API_LOG_SESSION_REPLY: &str = "正文首端：这是 `<command-name>` 的示例。\n\n正文尾端。";
+
+    fn api_log_session_rows(cwd: &str) -> Vec<Value> {
+        vec![
+            json!({"type": "api-request-blob", "cwd": cwd, "timestamp": 100,
+                "message": {"role": "assistant", "content": "Internal head"}}),
+            json!({"timestamp": 900, "message": {"role": "user", "content": "Legacy question"}}),
+            json!({"type": "assistant", "timestamp": 200,
+                "message": {"role": "assistant", "content": API_LOG_SESSION_REPLY}}),
+            json!({"type": "api-request-blob", "timestamp": 200,
+                "message": {"role": "assistant", "content": API_LOG_SESSION_REPLY}}),
+            json!({"type": "user", "timestamp": 800,
+                "message": {"role": "user", "content": "Repeated question"}}),
+            json!({"type": "api-request-blob", "timestamp": 300,
+                "message": {"role": "assistant", "content": "Internal page gap"}}),
+            json!({"type": "system", "subtype": "compact_boundary", "timestamp": 400}),
+            json!({"type": "assistant", "timestamp": 300,
+                "message": {"role": "assistant", "content": "Repeated reply"}}),
+            json!({"type": "user", "timestamp": 700,
+                "message": {"role": "user", "content": "Repeated question"}}),
+            json!({"type": "legacy-assistant", "timestamp": 600,
+                "message": {"role": "assistant", "content": "Repeated reply"}}),
+            json!({"type": "api-request-blob", "timestamp": 1_770_000_000_000_i64,
+                "message": {"role": "assistant", "content": "Internal tail"}}),
+        ]
+    }
+
+    #[test]
+    fn preview_pages_exclude_api_request_rows_before_indexing() -> anyhow::Result<()> {
+        let root = tempfile::tempdir()?;
+        let cwd = root.path().to_str().unwrap();
+        let projects = root.path().join("projects");
+        let bucket = projects.join(encode(root.path()));
+        fs::create_dir_all(&bucket)?;
+        let path = bucket.join("mixed.jsonl");
+        write_rows(&path, &api_log_session_rows(cwd))?;
+        let before = (fs::read(&path)?, fs::metadata(&path)?.modified()?);
+        let read_page = |start| detail(Some(&projects), cwd, "mixed", start, Some(3));
+
+        let earlier = read_page(Some(1)).map_err(anyhow::Error::msg)?;
+        let latest = read_page(None).map_err(anyhow::Error::msg)?;
+        for (page, first, end, expected) in [
+            (
+                earlier,
+                1,
+                4,
+                [
+                    "Legacy question",
+                    API_LOG_SESSION_REPLY,
+                    "Repeated question",
+                ]
+                .as_slice(),
+            ),
+            (
+                latest,
+                4,
+                7,
+                [
+                    "Repeated reply",
+                    "Repeated question",
+                    "Repeated reply",
+                    "compact_boundary",
+                ]
+                .as_slice(),
+            ),
+        ] {
+            let texts: Vec<_> = page
+                .events
+                .iter()
+                .map(|event| event.text.as_str())
+                .collect();
+            assert_eq!(texts, expected, "incorrect page beginning at event {first}");
+            assert_eq!(
+                page.page,
+                EventPage {
+                    start_event_index: first,
+                    end_event_index: end,
+                    total: 6,
+                    has_earlier: first > 1,
+                    has_later: end <= 6,
+                }
+            );
+            assert!(
+                page.events[..3]
+                    .iter()
+                    .map(|event| event.index)
+                    .eq(first..end)
+            );
+            if let Some(boundary) = page.events.get(3) {
+                assert_eq!(
+                    (boundary.index, &boundary.timestamp),
+                    (3, &Some(json!(400)))
+                );
+            }
+        }
+        assert_eq!(before, (fs::read(&path)?, fs::metadata(&path)?.modified()?));
+        Ok(())
+    }
+
+    #[test]
+    fn recent_replies_exclude_api_request_rows_and_keep_file_order() -> anyhow::Result<()> {
+        let root = tempfile::tempdir()?;
+        let cwd = root.path().to_str().unwrap();
+        let projects = root.path().join("projects");
+        let bucket = projects.join(encode(root.path()));
+        fs::create_dir_all(&bucket)?;
+        let rows = api_log_session_rows(cwd);
+        write_rows(&bucket.join("mixed.jsonl"), &rows)?;
+        write_rows(
+            &bucket.join("internal.jsonl"),
+            &[rows[0].clone(), rows.last().unwrap().clone()],
+        )?;
+
+        let mixed = recent_replies(Some(&projects), cwd, "mixed").map_err(anyhow::Error::msg)?;
+        let replies: Vec<_> = mixed
+            .events
+            .iter()
+            .map(|event| {
+                (
+                    event.kind.as_str(),
+                    event.text.as_str(),
+                    event.timestamp.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            replies,
+            [
+                ("user", "Repeated question", Some(json!(800))),
+                ("assistant", "Repeated reply", Some(json!(300))),
+                ("user", "Repeated question", Some(json!(700))),
+                ("assistant", "Repeated reply", Some(json!(600))),
+            ]
+        );
+
+        let internal =
+            recent_replies(Some(&projects), cwd, "internal").map_err(anyhow::Error::msg)?;
+        assert!(internal.events.is_empty());
+        assert!(internal.updated_label.is_some());
+        assert_eq!(mixed.updated_label, internal.updated_label);
+        assert_eq!(mixed.title.as_deref(), Some("Legacy question"));
+        assert_eq!(mixed.cwd, cwd);
+
+        let empty =
+            detail(Some(&projects), cwd, "internal", None, None).map_err(anyhow::Error::msg)?;
+        assert!(empty.events.is_empty());
+        assert_eq!(
+            empty.page,
+            EventPage {
+                start_event_index: 0,
+                end_event_index: 0,
+                total: 0,
+                has_earlier: false,
+                has_later: false,
+            }
+        );
         Ok(())
     }
 
