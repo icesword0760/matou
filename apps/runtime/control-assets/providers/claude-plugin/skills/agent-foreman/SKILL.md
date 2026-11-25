@@ -72,7 +72,7 @@ description: Use whenever work is handed to another coding agent — the user sa
 
 ## 并行
 
-推进时优先并行：能拆开的事用 worktree 或不同分支隔离开发，验收后合并，bug 也可以并行修；但不要为了并行而并行。派活前先判断能不能拆，先读 `parallel.md`（判断标准、隔离方式、一次最多几个、验收和合并）。
+推进时优先并行：能拆开的事用 worktree 或不同分支隔离开发，验收后合并，bug 也可以并行修；但不要为了并行而并行。单个执行者和全局总并发均不设个数上限；派活前先判断能不能拆，先读 `parallel.md`（判断标准、隔离方式、验收和合并）。
 
 ## 裁决总原则：从大局取舍
 
