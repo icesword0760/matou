@@ -20,6 +20,7 @@ raw-window-handle = "0.6"
 gpui = { version = "=0.2.2", default-features = false, features = ["font-kit", "runtime_shaders"] }
 cocoa = "=0.26.0"
 objc = "=0.2.7"
+block2 = "=0.6.2"
 core-graphics = "=0.24.0"
 core-foundation = "=0.10.0"
 

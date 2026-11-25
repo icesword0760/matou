@@ -413,6 +413,7 @@ mod workspace_board_ui {
         card_title: Rgba,
         column_header: Rgba,
         drop_target: Rgba,
+        drop_tint: Rgba,
         feedback_text: Rgba,
         feedback_bg: Rgba,
     }
@@ -435,6 +436,7 @@ mod workspace_board_ui {
                     card_title: rgb(0xe1e5eb),
                     column_header: rgb(0xd2d7de),
                     drop_target: rgb(0x202e3d),
+                    drop_tint: rgb(0x347fd6),
                     feedback_text: rgb(0xd6dbe2),
                     feedback_bg: rgba(0x272a2ff5),
                 }
@@ -454,6 +456,7 @@ mod workspace_board_ui {
                     card_title: rgb(0x3b4350),
                     column_header: rgb(0x4f5966),
                     drop_target: rgba(0xf1f7fec7),
+                    drop_tint: rgb(0x347fd6),
                     feedback_text: rgb(0x596372),
                     feedback_bg: rgba(0xfffffff0),
                 }
@@ -483,30 +486,11 @@ mod workspace_board_ui {
 
     /// Public board entry point. The caller owns all state and reacts to move requests.
     type MoveHandler = Rc<dyn Fn(BoardMoveRequest, &mut Window, &mut App)>;
-    type SessionRows = Rc<dyn Fn(&str) -> Vec<AnyElement>>;
 
     pub fn render_workspace_board(
         view: &BoardView,
         dark: bool,
         on_move: MoveHandler,
-    ) -> impl IntoElement {
-        render_board(view, dark, Some(on_move), None)
-    }
-
-    pub fn render_workspace_board_with_sessions(
-        view: &BoardView,
-        dark: bool,
-        on_move: MoveHandler,
-        session_rows: SessionRows,
-    ) -> impl IntoElement {
-        render_board(view, dark, Some(on_move), Some(session_rows))
-    }
-
-    fn render_board(
-        view: &BoardView,
-        dark: bool,
-        on_move: Option<MoveHandler>,
-        session_rows: Option<SessionRows>,
     ) -> impl IntoElement {
         let palette = BoardPalette::new(dark);
         let columns = view
@@ -519,7 +503,6 @@ mod workspace_board_ui {
                     dark,
                     view.empty,
                     on_move.clone(),
-                    session_rows.as_ref(),
                 )
                 .into_any_element()
             })
@@ -555,19 +538,17 @@ mod workspace_board_ui {
                             .child(view.task_count.clone()),
                     ),
             )
-            .when(on_move.is_some(), |header| {
-                header.child(
-                    div()
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .text_size(px(11.))
-                        .text_color(palette.muted)
-                        .child(board_guide_icon())
-                        .child(view.drag_hint),
-                )
-            });
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .text_size(px(11.))
+                    .text_color(palette.muted)
+                    .child(board_guide_icon())
+                    .child(view.drag_hint),
+            );
 
         let scroll = div()
             .id("workspace-board-scroll")
@@ -676,8 +657,7 @@ mod workspace_board_ui {
         workspace_id: &str,
         dark: bool,
         empty_text: &'static str,
-        on_move: Option<MoveHandler>,
-        session_rows: Option<&SessionRows>,
+        on_move: MoveHandler,
     ) -> impl IntoElement {
         let palette = BoardPalette::new(dark);
         let tone = palette.tone(column.status);
@@ -688,10 +668,7 @@ mod workspace_board_ui {
             SharedString::from(format!("board-column-header:{workspace_id}:{status_key}"));
         let tail_id = SharedString::from(format!("board-column-tail:{workspace_id}:{status_key}"));
 
-        let mut halo = tone;
-        halo.a = 0.13;
-
-        let mut header = div()
+        let header = div()
             .children(board_probe_bounds(&header_id))
             .id(header_id)
             .relative()
@@ -705,15 +682,26 @@ mod workspace_board_ui {
             .border_color(palette.line)
             .text_color(palette.column_header)
             .child(
-                div()
-                    .size(px(13.))
-                    .flex_none()
-                    .rounded_full()
-                    .bg(halo)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(div().size(px(7.)).rounded_full().bg(tone)),
+                canvas(
+                    |_, _, _| (),
+                    move |bounds, _, window, _| {
+                        // GPUI expands the shadow bounds but keeps their corner
+                        // radii. Give the expanded halo its own circle radius.
+                        window.paint_shadows(
+                            bounds,
+                            Corners::all(px(6.5)),
+                            &[BoxShadow {
+                                color: Rgba { a: 0.13, ..tone }.into(),
+                                offset: Point::default(),
+                                blur_radius: px(0.),
+                                spread_radius: px(3.),
+                            }],
+                        );
+                        window.paint_quad(fill(bounds, tone).corner_radii(px(3.5)));
+                    },
+                )
+                .size(px(7.))
+                .flex_none(),
             )
             .child(
                 div()
@@ -728,41 +716,6 @@ mod workspace_board_ui {
                     .child(column.count.clone()),
             );
 
-        // Dropping on the header is the same append operation as the column tail.
-        // Header and tail are siblings, never nested, so one drop dispatches once.
-        {
-            let workspace_id = workspace_id.to_owned();
-            let drag_workspace = workspace_id.clone();
-            let on_move = on_move.clone();
-            header = header
-                .can_drop({
-                    let workspace_id = workspace_id.clone();
-                    move |value, _, _| {
-                        value
-                            .downcast_ref::<BoardDrag>()
-                            .is_some_and(|drag| drag.workspace_id == workspace_id)
-                    }
-                })
-                .drag_over::<BoardDrag>(move |style, drag, _, _| {
-                    if drag.workspace_id == drag_workspace {
-                        style.bg(palette.drop_target)
-                    } else {
-                        style
-                    }
-                })
-                .on_drop(move |drag: &BoardDrag, window, cx| {
-                    board_emit_move(
-                        &workspace_id,
-                        drag,
-                        column_status,
-                        None,
-                        &on_move,
-                        window,
-                        cx,
-                    );
-                });
-        }
-
         let cards = column
             .cards
             .iter()
@@ -770,7 +723,6 @@ mod workspace_board_ui {
                 BoardCardComponent {
                     workspace_id: workspace_id.to_owned(),
                     card: card.clone(),
-                    session_rows: session_rows.map_or_else(Vec::new, |rows| rows(&card.id)),
                     status: column_status,
                     dark,
                     on_move: on_move.clone(),
@@ -779,7 +731,9 @@ mod workspace_board_ui {
             })
             .collect::<Vec<_>>();
 
-        let mut tail = div()
+        let tail = div()
+            .relative()
+            .children(board_probe_bounds(&tail_id))
             .id(tail_id)
             .flex_grow()
             .min_h(px(if column.cards.is_empty() { 104. } else { 24. }))
@@ -793,58 +747,28 @@ mod workspace_board_ui {
                     .child(empty_text)
             });
 
-        // The append target is a sibling of every card target. Putting `on_drop` on
-        // the column as well would dispatch twice for a card: GPUI keeps every
-        // hovered hitbox in the drop path and does not require the event to bubble.
-        {
-            let workspace_id = workspace_id.to_owned();
-            let drag_workspace = workspace_id.clone();
-            let on_move = on_move.clone();
-            tail = tail
-                .can_drop({
-                    let workspace_id = workspace_id.clone();
-                    move |value, _, _| {
-                        value
-                            .downcast_ref::<BoardDrag>()
-                            .is_some_and(|drag| drag.workspace_id == workspace_id)
-                    }
-                })
-                .drag_over::<BoardDrag>(move |style, drag, _, _| {
-                    if drag.workspace_id == drag_workspace {
-                        style.bg(palette.drop_target)
-                    } else {
-                        style
-                    }
-                })
-                .on_drop(move |drag: &BoardDrag, window, cx| {
-                    board_emit_move(
-                        &workspace_id,
-                        drag,
-                        column_status,
-                        None,
-                        &on_move,
-                        window,
-                        cx,
-                    );
-                });
-        }
-
-        // GPUI consumes the active payload at the first matching hitbox. In the
-        // gaps around a card, the column is the first match and appends it.
+        // Cards block their parent column's drop hitbox but still pass scrolling through.
+        // Every other part of the column is an append target.
         let drop_workspace_id = workspace_id.to_owned();
+        let inset_workspace_id = drop_workspace_id.clone();
+        let column_group = column_id.clone();
         div()
             .id(column_id)
-            .on_drop(move |drag: &BoardDrag, window, cx| {
-                board_emit_move(
-                    &drop_workspace_id,
-                    drag,
-                    column_status,
-                    None,
-                    &on_move,
-                    window,
-                    cx,
-                );
+            .group(column_group.clone())
+            .can_drop(move |value, _, _| {
+                value
+                    .downcast_ref::<BoardDrag>()
+                    .is_some_and(|drag| drag.workspace_id == drop_workspace_id)
             })
+            .drag_over::<BoardDrag>(move |style, _, _, _| {
+                style
+                    .border_color(palette.accent_line)
+                    .bg(palette.drop_target)
+            })
+            .on_drop(move |drag: &BoardDrag, window, cx| {
+                board_emit_move(drag, column_status, None, &on_move, window, cx);
+            })
+            .relative()
             .flex_1()
             .min_w(px(BOARD_COLUMN_MIN_WIDTH))
             .h_full()
@@ -872,21 +796,35 @@ mod workspace_board_ui {
                     .children(cards)
                     .child(tail),
             )
+            .child(
+                div()
+                    .group("board-column-inset")
+                    .absolute()
+                    .inset_0()
+                    .rounded(px(10.))
+                    .border_1()
+                    .border_color(Rgba {
+                        a: 0.08,
+                        ..palette.drop_tint
+                    })
+                    .opacity(0.)
+                    .can_drop(move |value, _, _| {
+                        value
+                            .downcast_ref::<BoardDrag>()
+                            .is_some_and(|drag| drag.workspace_id == inset_workspace_id)
+                    })
+                    .group_drag_over::<BoardDrag>(column_group, |style| style.opacity(1.)),
+            )
     }
 
     fn board_emit_move(
-        workspace_id: &str,
         drag: &BoardDrag,
         status: BoardStatus,
         before_task_id: Option<String>,
-        on_move: &Option<MoveHandler>,
+        on_move: &MoveHandler,
         window: &mut Window,
         cx: &mut App,
     ) {
-        let Some(on_move) = on_move else { return };
-        if drag.workspace_id != workspace_id {
-            return;
-        }
         if before_task_id
             .as_deref()
             .is_some_and(|before| before == drag.task_id)
@@ -895,7 +833,7 @@ mod workspace_board_ui {
         }
         on_move(
             BoardMoveRequest {
-                workspace_id: workspace_id.to_owned(),
+                workspace_id: drag.workspace_id.clone(),
                 task_id: drag.task_id.clone(),
                 status,
                 before_task_id,
@@ -909,69 +847,86 @@ mod workspace_board_ui {
     struct BoardCardComponent {
         workspace_id: String,
         card: BoardCard,
-        session_rows: Vec<AnyElement>,
         status: BoardStatus,
         dark: bool,
-        on_move: Option<MoveHandler>,
+        on_move: MoveHandler,
     }
 
     impl RenderOnce for BoardCardComponent {
-        fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
             let palette = BoardPalette::new(self.dark);
             let tone = palette.tone(self.status);
             let card_id =
                 SharedString::from(format!("board-card:{}:{}", self.workspace_id, self.card.id));
-            let dragged = cx.has_active_drag()
+            let dragging = cx.has_active_drag();
+            let dragged = dragging
                 && cx.try_global::<BoardDragState>().is_some_and(|state| {
                     state.workspace_id == self.workspace_id
                         && state.source_task_id == self.card.id
                         && state.preview.upgrade().is_some()
                 });
 
-            let insert_before = self.card.id.clone();
-            let hover_id = self.card.id.clone();
-            let drop_workspace = self.workspace_id.clone();
-            let move_workspace = self.workspace_id.clone();
-            let drag_title = self.card.title.clone();
-            let drop_on_move = self.on_move.clone();
-            let drag_dark = self.dark;
-            let drag_status = self.status;
+            let current = self.card.current.is_some();
+            // GPUI applies hover styles at paint time; the position has to be
+            // available at layout time. Keep the hover hitbox at its original position.
+            let hover_state =
+                (!current).then(|| window.use_keyed_state(card_id.clone(), cx, |_, _| false));
+            let hovered = !dragging && hover_state.as_ref().is_some_and(|state| *state.read(cx));
+            let shadows = if current {
+                vec![board_shadow(0x2f5d94, 0.08, 5., 18.)]
+            } else if hovered && self.dark {
+                vec![board_shadow(0x000000, 0.2, 8., 24.)]
+            } else if hovered {
+                vec![
+                    board_shadow(0x1c2634, 0.03, 1., 2.),
+                    board_shadow(0x2c3a4d, 0.045, 9., 24.),
+                ]
+            } else {
+                vec![board_shadow(0x223244, 0.035, 1., 2.)]
+            };
+            let border = if current {
+                palette.accent_line
+            } else if hovered {
+                palette.line_strong
+            } else {
+                palette.line
+            };
 
             let card = div()
                 .children(board_probe_bounds(&card_id))
-                .id(card_id)
                 .relative()
-                .mb(px(7.))
+                .when(hovered, |card| card.top(px(-1.)))
                 .p(px(11.))
                 .overflow_hidden()
                 .rounded(px(9.))
                 .border_1()
-                .border_color(palette.line)
+                .border_color(border)
                 .bg(palette.panel)
-                .shadow(vec![board_shadow(0x223244, 0.035, 1., 2.)])
-                .when(self.on_move.is_some(), |card| {
-                    card.cursor(CursorStyle::OpenHand)
-                })
-                .when(self.card.current.is_some(), |card| {
-                    card.border_color(palette.accent_line).child(
-                        div()
-                            .absolute()
-                            .left(px(0.))
-                            .top(px(0.))
-                            .bottom(px(0.))
-                            .w(px(2.))
-                            .bg(palette.accent),
+                .shadow(shadows)
+                .when(current, |card| {
+                    card.child(
+                        canvas(
+                            |_, _, _| (),
+                            move |bounds, _, window, _| {
+                                window.paint_quad(
+                                    fill(bounds, transparent_black())
+                                        .corner_radii(px(8.))
+                                        .border_widths(Edges {
+                                            left: px(2.),
+                                            ..Default::default()
+                                        })
+                                        .border_color(palette.accent),
+                                );
+                            },
+                        )
+                        .absolute()
+                        .inset_0(),
                     )
-                })
-                .when(dragged, |card| {
-                    card.opacity(0.38).cursor(CursorStyle::ClosedHand)
-                })
-                .when(self.card.current.is_none(), |card| {
-                    card.hover(|style| style.border_color(palette.line_strong))
                 })
                 .child(
                     div()
                         .mb(px(12.))
+                        .truncate()
                         .text_size(px(12.))
                         .font_weight(FontWeight(600.))
                         .line_height(px(16.8))
@@ -984,6 +939,7 @@ mod workspace_board_ui {
                         .items_center()
                         .justify_between()
                         .text_size(px(10.))
+                        .line_height(px(14.))
                         .text_color(palette.muted)
                         .child(
                             div()
@@ -1001,63 +957,108 @@ mod workspace_board_ui {
                                     .rounded(px(5.))
                                     .bg(palette.accent_soft)
                                     .text_size(px(9.))
+                                    .line_height(px(12.6))
+                                    .font_weight(FontWeight::BOLD)
                                     .text_color(palette.accent)
                                     .child(current),
                             )
                         }),
+                );
+
+            let insert_before = self.card.id.clone();
+            let drop_workspace = self.workspace_id.clone();
+            let line_workspace = self.workspace_id.clone();
+            let line_task = self.card.id.clone();
+            let drag_dark = self.dark;
+            div()
+                .id(card_id.clone())
+                .group(card_id.clone())
+                .relative()
+                .flex_none()
+                .mb(px(7.))
+                .cursor(CursorStyle::OpenHand)
+                .active(|style| style.cursor(CursorStyle::ClosedHand))
+                .block_mouse_except_scroll()
+                .when(dragged, |card| card.opacity(0.38))
+                .when_some(hover_state, |card, state| {
+                    card.on_hover(move |hovered, _, cx| {
+                        state.update(cx, |state, cx| {
+                            *state = *hovered;
+                            cx.notify();
+                        });
+                    })
+                })
+                .on_drag(
+                    BoardDrag {
+                        task_id: self.card.id,
+                        workspace_id: self.workspace_id,
+                        title: self.card.title,
+                    },
+                    move |info, _, _, cx| {
+                        let preview = cx.new(|_| BoardDragPreview {
+                            title: info.title.clone(),
+                            dark: drag_dark,
+                        });
+                        cx.set_global(BoardDragState {
+                            workspace_id: info.workspace_id.clone(),
+                            source_task_id: info.task_id.clone(),
+                            preview: preview.downgrade(),
+                        });
+                        preview
+                    },
                 )
-                .children(self.session_rows)
-                .when(self.on_move.is_some(), |card| {
-                    card.on_drag(
-                        BoardDrag {
-                            task_id: self.card.id,
-                            workspace_id: self.workspace_id,
-                            title: drag_title,
-                        },
-                        move |info, _, _, cx| {
-                            let preview = cx.new(|_| BoardDragPreview {
-                                title: info.title.clone(),
-                                dark: drag_dark,
-                            });
-                            cx.set_global(BoardDragState {
-                                workspace_id: info.workspace_id.clone(),
-                                source_task_id: info.task_id.clone(),
-                                preview: preview.downgrade(),
-                            });
-                            preview
-                        },
-                    )
+                .can_drop(move |value, _, _| {
+                    value
+                        .downcast_ref::<BoardDrag>()
+                        .is_some_and(|drag| drag.workspace_id == drop_workspace)
                 })
                 .on_drop(move |drag: &BoardDrag, window, cx| {
                     board_emit_move(
-                        &move_workspace,
                         drag,
-                        drag_status,
+                        self.status,
                         Some(insert_before.clone()),
-                        &drop_on_move,
+                        &self.on_move,
                         window,
                         cx,
                     );
                 })
-                .drag_over::<BoardDrag>({
-                    let drag_workspace = drop_workspace;
-                    move |style, drag, _, _| {
-                        if drag.workspace_id == drag_workspace && drag.task_id != hover_id {
-                            style.border_color(palette.accent).bg(palette.accent_soft)
-                        } else {
-                            style
-                        }
-                    }
-                });
-
-            card
+                .child(card)
+                // Paint the line outside the clipped card content.
+                .child(
+                    div()
+                        .group("board-insertion-line")
+                        .absolute()
+                        .top(px(-5.))
+                        .left(px(2.))
+                        .right(px(2.))
+                        .h(px(2.))
+                        .rounded_full()
+                        .bg(palette.accent)
+                        .shadow(vec![BoxShadow {
+                            color: Rgba {
+                                a: 0.32,
+                                ..palette.drop_tint
+                            }
+                            .into(),
+                            offset: Point::default(),
+                            blur_radius: px(5.),
+                            spread_radius: px(0.),
+                        }])
+                        .opacity(0.)
+                        .can_drop(move |value, _, _| {
+                            value.downcast_ref::<BoardDrag>().is_some_and(|drag| {
+                                drag.workspace_id == line_workspace && drag.task_id != line_task
+                            })
+                        })
+                        .group_drag_over::<BoardDrag>(card_id, |style| style.opacity(1.)),
+                )
         }
     }
 }
 
 #[cfg(debug_assertions)]
 pub use workspace_board_ui::capture_board_bounds;
-pub use workspace_board_ui::{render_workspace_board, render_workspace_board_with_sessions};
+pub use workspace_board_ui::render_workspace_board;
 
 #[cfg(test)]
 mod tests {

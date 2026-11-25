@@ -79,6 +79,12 @@ pub enum LaunchProfile {
     Antigravity,
 }
 
+#[derive(Clone, Copy)]
+pub struct HistorySeamProfile {
+    pub input_rows: usize,
+    pub scroll_to_bottom_keys: &'static [u8],
+}
+
 impl LaunchProfile {
     pub fn kind(self) -> &'static str {
         match self {
@@ -88,6 +94,18 @@ impl LaunchProfile {
             Self::Dsh => "dsh",
             Self::Antigravity => "antigravity",
         }
+    }
+
+    pub fn history_seam(self) -> Option<HistorySeamProfile> {
+        let (input_rows, scroll_to_bottom_keys): (_, &[_]) = match self {
+            Self::ClaudeCode => (5, b"\x1b[1;5F"),
+            Self::Codex => (3, b"\x1b[1;5F"),
+            Self::Shell | Self::Dsh | Self::Antigravity => return None,
+        };
+        Some(HistorySeamProfile {
+            input_rows,
+            scroll_to_bottom_keys,
+        })
     }
 }
 

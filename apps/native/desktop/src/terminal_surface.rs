@@ -17,7 +17,7 @@ use gpui::{
     StatefulInteractiveElement, Styled, Task, TextRun, UTF16Selection, Window, canvas, div, fill,
     font, point, prelude::FluentBuilder, px, rgb, rgba, size,
 };
-use matou_native_core::sessions::InterfaceLocale;
+use matou_native_core::{pty::LaunchProfile, sessions::InterfaceLocale};
 use matou_native_terminal::{
     Cell, Color, CursorStyle, GridSelection, InputModes, MouseEncoding, MouseEvent, MouseProtocol,
     MouseReporter, MouseWheel, Screen, SelectionAction, SelectionMode, Theme,
@@ -28,7 +28,8 @@ use serde_json::Value;
 pub mod session_history_seam;
 use session_history_seam::{
     Action as HistoryAction, Binding as HistoryBinding, FALSE_START, HistoryStyle, HistoryView,
-    INPUT_ROWS, Page as HistoryPage, READ_TIMEOUT, WHEEL_SETTLE, WheelProbe, fingerprint,
+    JumpHint, Page as HistoryPage, READ_TIMEOUT, UserRowPaint, WHEEL_SETTLE, WheelProbe,
+    fingerprint,
 };
 
 use crate::terminal_input::{
@@ -445,19 +446,25 @@ pub struct TerminalSurface {
     scrollbar_frame_pending: bool,
     scroll_request_id: u64,
     history_binding: Option<HistoryBinding>,
+    history_user_row: Option<UserRowPaint>,
+    history_without_live: bool,
     history_locale: InterfaceLocale,
     history_probe: WheelProbe,
     session_history: Option<HistoryView>,
     history_request_serial: u64,
     history_updates: Option<Task<()>>,
-    history_keyboard_navigation: bool,
 }
 
 impl EventEmitter<SurfaceEvent> for TerminalSurface {}
 
 impl TerminalSurface {
     fn emit(&self, kind: SurfaceEventKind, cx: &mut Context<Self>) {
-        if self.transport_suspended && !matches!(kind, SurfaceEventKind::Resize { .. }) {
+        if self.transport_suspended
+            && !matches!(
+                kind,
+                SurfaceEventKind::Resize { .. } | SurfaceEventKind::SessionHistory(_)
+            )
+        {
             return;
         }
         cx.emit(SurfaceEvent {
@@ -619,12 +626,13 @@ impl TerminalSurface {
             scrollbar_frame_pending: false,
             scroll_request_id: 0,
             history_binding: None,
+            history_user_row: None,
+            history_without_live: false,
             history_locale: InterfaceLocale::default(),
             history_probe: WheelProbe::default(),
             session_history: None,
             history_request_serial: 0,
             history_updates: None,
-            history_keyboard_navigation: true,
         }
     }
 
@@ -708,13 +716,21 @@ impl TerminalSurface {
         cx: &mut Context<Self>,
     ) {
         if screen.alternate {
+            if self.history_user_row.is_none()
+                && let Some(binding) = &self.history_binding
+            {
+                self.history_user_row = UserRowPaint::from_screen(binding.profile, &screen);
+            }
             if self.history_probe.needs_observation() {
-                self.history_probe.observe(fingerprint(&screen));
+                let input_rows = self.history_input_rows(&screen);
+                self.history_probe.observe(fingerprint(&screen, input_rows));
             }
         } else {
             self.history_probe.reset();
-            self.session_history = None;
-            self.history_updates = None;
+            if self.session_history.as_ref().is_some_and(HistoryView::live) {
+                self.session_history = None;
+                self.history_updates = None;
+            }
         }
         self.scroll_request_id = self.scroll_request_id.max(scroll_request_id);
         let modes_changed = self.modes != modes;
@@ -819,7 +835,7 @@ impl TerminalSurface {
         } else if self
             .session_history
             .as_ref()
-            .is_some_and(|history| history.ready)
+            .is_some_and(|history| history.ready && history.live())
         {
             self.schedule_history_updates(cx);
         }
@@ -851,6 +867,7 @@ impl TerminalSurface {
     pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
         if self.theme != theme {
             self.theme = theme;
+            self.history_user_row = None;
             cx.notify();
         }
     }
@@ -858,11 +875,14 @@ impl TerminalSurface {
     pub(crate) fn set_history_binding(
         &mut self,
         binding: Option<HistoryBinding>,
+        without_live: bool,
         locale: InterfaceLocale,
         cx: &mut Context<Self>,
     ) {
+        self.history_without_live = without_live;
         if self.history_binding != binding {
             self.history_binding = binding;
+            self.history_user_row = None;
             self.history_probe.reset();
             self.session_history = None;
             self.history_updates = None;
@@ -880,12 +900,53 @@ impl TerminalSurface {
         self.history_binding.as_ref()
     }
 
+    fn history_input_rows(&self, screen: &Screen) -> usize {
+        self.history_binding.as_ref().map_or(0, |binding| {
+            session_history_seam::input_rows(binding.profile, screen)
+        })
+    }
+
+    fn hidden_cli_jump_hint(&self, screen: &Screen) -> Option<JumpHint> {
+        if !self
+            .session_history
+            .as_ref()
+            .is_some_and(|history| history.live() && history.visible())
+        {
+            return None;
+        }
+        session_history_seam::jump_hint(self.history_binding.as_ref()?.profile, screen)
+    }
+
+    fn over_hidden_cli_jump_hint(&self, position: Point<Pixels>) -> bool {
+        let Some((grid, row, col)) = self.selection_location(position) else {
+            return false;
+        };
+        grid.bounds.contains(&position)
+            && self.screen.as_ref().is_some_and(|screen| {
+                self.hidden_cli_jump_hint(screen).is_some_and(|hint| {
+                    hint.row + screen.scrollbar.offset as usize == row
+                        && hint.columns.contains(&(col as usize))
+                })
+            })
+    }
+
     fn history_body_contains(&self, position: Point<Pixels>) -> bool {
+        let input_rows = if self
+            .session_history
+            .as_ref()
+            .is_some_and(|history| !history.live())
+        {
+            0
+        } else {
+            self.screen
+                .as_ref()
+                .map_or(0, |screen| self.history_input_rows(screen))
+        };
         self.grid.is_some_and(|grid| {
             grid.bounds.contains(&position)
                 && position.y
                     < grid.bounds.top()
-                        + self.metrics.height * grid.rows.saturating_sub(INPUT_ROWS) as f32
+                        + self.metrics.height * grid.rows.saturating_sub(input_rows) as f32
         })
     }
 
@@ -905,7 +966,10 @@ impl TerminalSurface {
         let Some(screen) = &self.screen else {
             return;
         };
-        let Some(serial) = self.history_probe.start(fingerprint(screen)) else {
+        let Some(serial) = self
+            .history_probe
+            .start(fingerprint(screen, self.history_input_rows(screen)))
+        else {
             return;
         };
         let timer = cx.background_executor().timer(WHEEL_SETTLE);
@@ -918,13 +982,14 @@ impl TerminalSurface {
                 if this.input_disabled
                     || this.transport_suspended
                     || this.session_history.is_some()
-                    || !this.history_probe.settled(serial, fingerprint(screen))
+                    || !this
+                        .history_probe
+                        .settled(serial, fingerprint(screen, this.history_input_rows(screen)))
                 {
                     return;
                 }
                 this.history_probe.reset();
-                this.history_keyboard_navigation = true;
-                this.session_history = Some(HistoryView::new(screen, cx.focus_handle()));
+                this.session_history = Some(HistoryView::new(Some(screen), cx.focus_handle()));
                 this.request_history_page(HistoryPage::Latest, cx);
             });
         })
@@ -981,7 +1046,19 @@ impl TerminalSurface {
         }
     }
 
-    pub(crate) fn receive_history(&mut self, result: &Value, cx: &mut Context<Self>) {
+    pub(crate) fn set_history_request_id(&mut self, request_id: u64) {
+        if let Some(history) = self.session_history.as_mut() {
+            history.request_id = Some(request_id);
+        }
+    }
+
+    pub(crate) fn receive_history(
+        &mut self,
+        reply_provider: Option<&str>,
+        request_id: Option<u64>,
+        result: &Value,
+        cx: &mut Context<Self>,
+    ) {
         let Some(binding) = &self.history_binding else {
             return;
         };
@@ -991,14 +1068,22 @@ impl TerminalSurface {
         let Some((page, _)) = history.pending else {
             return;
         };
-        if result["provider"].is_null()
-            && result["cwd"].as_str() == Some(binding.cwd.as_str())
-            && result["providerSessionId"].as_str() == binding.provider_session_id.as_deref()
-            && page.matches(result)
-        {
+        let matches = if let Some(provider) = reply_provider {
+            provider == binding.profile.kind()
+                && request_id.is_some()
+                && request_id == history.request_id
+        } else {
+            binding.profile == matou_native_core::pty::LaunchProfile::ClaudeCode
+                && result["cwd"].as_str() == Some(binding.cwd.as_str())
+                && result["providerSessionId"].as_str() == binding.provider_session_id.as_deref()
+                && page.matches(result)
+        };
+        if matches {
             #[cfg(debug_assertions)]
             let received_at = Instant::now();
-            history.receive(page, result);
+            #[cfg(debug_assertions)]
+            let previous_count = history.new_messages;
+            history.receive(page, result, binding.profile);
             #[cfg(debug_assertions)]
             {
                 let phase = match page {
@@ -1008,6 +1093,9 @@ impl TerminalSurface {
                 };
                 session_history_seam::trace(phase, history.request_sent_at);
                 session_history_seam::trace("integrate-page", received_at);
+                if previous_count != history.new_messages && session_history_seam::tracing() {
+                    eprintln!("[history-seam] new-messages count={}", history.new_messages);
+                }
             }
             let next = match page {
                 HistoryPage::Updates(start)
@@ -1035,6 +1123,7 @@ impl TerminalSurface {
                 this.history_updates = None;
                 if let Some(history) = &this.session_history
                     && history.ready
+                    && history.live()
                     && !history.closing
                 {
                     if history.pending.is_some() {
@@ -1072,6 +1161,11 @@ impl TerminalSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let scroll_to_bottom = self
+            .history_binding
+            .as_ref()
+            .and_then(|binding| binding.profile.history_seam())
+            .map(|profile| profile.scroll_to_bottom_keys);
         let Some(history) = self.session_history.as_mut() else {
             return;
         };
@@ -1081,14 +1175,16 @@ impl TerminalSurface {
         if history.focus.is_focused(window) {
             self.focus.focus(window);
         }
-        if !restore || self.input_disabled || self.transport_suspended {
+        let Some(keys) = scroll_to_bottom.filter(|_| {
+            restore && history.live() && !self.input_disabled && !self.transport_suspended
+        }) else {
             self.session_history = None;
             self.history_updates = None;
             cx.notify();
             return;
-        }
+        };
         history.closing = true;
-        self.send(crate::terminal_input::CLAUDE_SCROLL_TO_BOTTOM.to_vec(), cx);
+        self.send(keys.to_vec(), cx);
         let timer = cx.background_executor().timer(WHEEL_SETTLE);
         cx.spawn(async move |this, cx| {
             timer.await;
@@ -1131,9 +1227,14 @@ impl TerminalSurface {
             self.close_session_history(history.ready, window, cx);
             return true;
         }
-        if !history.ready || !self.history_keyboard_navigation {
+        if !history.visible() || !matches!(key, "pageup" | "pagedown" | "home" | "end") {
             return false;
         }
+        if !history.ready {
+            return true;
+        }
+        #[cfg(debug_assertions)]
+        let previous = history.list.logical_scroll_top();
         let page_height = (history.list.viewport_bounds().size.height - self.metrics.height)
             .max(self.metrics.height);
         match key {
@@ -1147,7 +1248,15 @@ impl TerminalSurface {
                 item_ix: history.list.item_count(),
                 offset_in_item: px(0.),
             }),
-            _ => return false,
+            _ => unreachable!(),
+        }
+        #[cfg(debug_assertions)]
+        if session_history_seam::tracing() {
+            let current = history.list.logical_scroll_top();
+            eprintln!(
+                "[history-seam] navigation key={key} from={}:{:?} to={}:{:?}",
+                previous.item_ix, previous.offset_in_item, current.item_ix, current.offset_in_item
+            );
         }
         self.maybe_prefetch_history(cx);
         cx.notify();
@@ -1161,16 +1270,72 @@ impl TerminalSurface {
             .filter(|history| history.visible())?;
         #[cfg(debug_assertions)]
         let paint_start = session_history_seam::tracing().then(Instant::now);
-        let screen = self.screen.as_ref()?;
+        let screen = self.screen.as_ref();
+        let live = history.live();
         let height = self.metrics.height;
-        let rows = self.grid.map_or(screen.rows, |grid| grid.rows);
-        let history_height = height * rows.saturating_sub(INPUT_ROWS) as f32;
-        let dim = rgb(mix(screen.foreground, screen.background));
+        let rows = self
+            .grid
+            .map_or_else(|| screen.map_or(0, |screen| screen.rows), |grid| grid.rows);
+        let input_rows = if live {
+            screen.map_or(0, |screen| self.history_input_rows(screen))
+        } else {
+            0
+        };
+        let history_height = height * rows.saturating_sub(input_rows) as f32;
+        let foreground = screen.map_or(self.theme.foreground, |screen| screen.foreground);
+        let background = screen.map_or(self.theme.background, |screen| screen.background);
+        let light = self.theme == Theme::LIGHT;
+        let dim = rgb(if light {
+            0x8a919b
+        } else {
+            mix(foreground, background)
+        });
+        let background = rgb(background);
+        let foreground = rgb(foreground);
+        let profile = self
+            .history_binding
+            .as_ref()
+            .map_or(LaunchProfile::ClaudeCode, |binding| binding.profile);
         let style = HistoryStyle {
             locale: self.history_locale,
-            foreground: rgb(screen.foreground),
+            foreground,
             dim,
             line_height: height,
+            cell_width: self.metrics.width,
+            grid_width: self.grid.map(|grid| grid.bounds.size.width),
+            user_row: self
+                .history_user_row
+                .or_else(|| screen.and_then(|screen| UserRowPaint::from_screen(profile, screen)))
+                .unwrap_or_else(|| UserRowPaint::fallback(profile, self.theme, screen)),
+            accent: rgb(if light { 0x2f6fd0 } else { self.theme.ansi[12] }),
+            amber: rgb(self.theme.ansi[3]),
+            rule: if light {
+                rgb(0xd5dce6)
+            } else {
+                background.blend(gpui::Rgba {
+                    a: 0.27,
+                    ..foreground
+                })
+            },
+            start_dot: if light { rgb(0xb9c2cf) } else { dim },
+            tool_rule: if light {
+                rgba(0x424b581a)
+            } else {
+                gpui::Rgba {
+                    a: 0.15,
+                    ..foreground
+                }
+            },
+            tool_background: if light {
+                rgb(0xf4f6f9)
+            } else {
+                background.blend(gpui::Rgba {
+                    a: 0.07,
+                    ..foreground
+                })
+            },
+            tool_foreground: if light { rgb(0x5a6475) } else { dim },
+            label_font_size: px(self.font_size as f32 * 0.92),
         };
         let surface = cx.entity();
         let row_surface = surface.clone();
@@ -1181,7 +1346,9 @@ impl TerminalSurface {
                 return div().into_any_element();
             };
             if let Some(snapshot) = history.snapshot_at(index) {
-                let snapshot_rows = snapshot.rows.saturating_sub(INPUT_ROWS);
+                let snapshot_rows = snapshot
+                    .rows
+                    .saturating_sub(surface.history_input_rows(&snapshot));
                 let painter = row_surface.clone();
                 return canvas(
                     |_, _, _| {},
@@ -1211,24 +1378,26 @@ impl TerminalSurface {
         .size_full();
         let return_text = self.history_locale.text("回到最新", "Jump to latest");
         let return_text = if history.new_messages == 0 {
-            format!("{return_text} ↓")
+            return_text.to_owned()
         } else {
             let count = history.new_messages;
-            format!("{return_text} · {count} ↓")
+            format!("{return_text} · {count}")
         };
         let layer = div()
             .id("session-history-seam")
             .absolute()
             .top(self.vertical_inset)
-            .bottom(self.vertical_inset + height * INPUT_ROWS as f32)
-            .max_h(history_height)
+            .bottom(self.vertical_inset + height * input_rows as f32)
+            .when(live, |layer| layer.max_h(history_height))
             .left(px(14.))
             .right(px(14.))
             .overflow_hidden()
             .occlude()
             .track_focus(&history.focus)
             .cursor(PointerStyle::Arrow)
-            .bg(rgb(screen.background))
+            .bg(background)
+            .flex()
+            .flex_col()
             .text_color(style.foreground)
             .text_size(px(self.font_size as f32))
             .font_family(self.font.family.clone())
@@ -1237,7 +1406,6 @@ impl TerminalSurface {
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
                     if let Some(history) = &this.session_history {
-                        this.history_keyboard_navigation = true;
                         history.focus.focus(window);
                     }
                     cx.stop_propagation();
@@ -1250,9 +1418,9 @@ impl TerminalSurface {
                     this.emit(SurfaceEventKind::FontZoom(zoom), cx);
                 } else if let Some(history) = &this.session_history {
                     let down = event.delta.pixel_delta(px(20.)).y < px(0.);
-                    if down && history.opened_at.elapsed() <= FALSE_START {
+                    if history.live() && down && history.opened_at.elapsed() <= FALSE_START {
                         this.close_session_history(false, window, cx);
-                    } else if down && history.ready && history.at_bottom() {
+                    } else if history.live() && down && history.ready && history.at_bottom() {
                         this.close_session_history(true, window, cx);
                     } else {
                         this.maybe_prefetch_history(cx);
@@ -1260,36 +1428,65 @@ impl TerminalSurface {
                 }
                 cx.stop_propagation();
             }))
-            .when(history.ready, |div| div.child(rows))
-            .when(!history.ready, |div| {
-                div.child(session_history_seam::error_row(
-                    self.history_locale,
-                    &surface.downgrade(),
-                ))
-            })
             .child(
                 div()
-                    .id("session-history-latest")
-                    .absolute()
-                    .right(px(8.))
-                    .bottom(px(8.))
-                    .px(px(8.))
-                    .py(px(4.))
-                    .border_1()
-                    .border_color(dim)
-                    .rounded(px(5.))
-                    .bg(rgb(screen.background))
-                    .cursor_pointer()
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        let ready = this
-                            .session_history
-                            .as_ref()
-                            .is_some_and(|history| history.ready);
-                        this.close_session_history(ready, window, cx);
-                        cx.stop_propagation();
-                    }))
-                    .child(return_text),
-            );
+                    .min_h_0()
+                    .flex_1()
+                    .overflow_hidden()
+                    .when(history.ready, |div| div.child(rows))
+                    .when(!history.ready, |div| {
+                        div.child(session_history_seam::error_row(
+                            self.history_locale,
+                            &surface.downgrade(),
+                        ))
+                    }),
+            )
+            .when(live, |layer| {
+                layer.child(
+                    div()
+                        .flex()
+                        .flex_shrink_0()
+                        .justify_center()
+                        .px(px(8.))
+                        .py(px(5.))
+                        .bg(background)
+                        .child(
+                            div()
+                                .id("session-history-latest")
+                                .min_w_0()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .px(px(12.))
+                                .py(px(5.))
+                                .text_size(style.label_font_size)
+                                .text_color(if light {
+                                    rgb(0x4a5262)
+                                } else {
+                                    style.foreground
+                                })
+                                .border_1()
+                                .border_color(if light { rgba(0x424b582e) } else { style.rule })
+                                .rounded_full()
+                                .bg(if light {
+                                    rgb(0xffffff)
+                                } else {
+                                    style.tool_background
+                                })
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    let ready = this
+                                        .session_history
+                                        .as_ref()
+                                        .is_some_and(|history| history.ready);
+                                    this.close_session_history(ready, window, cx);
+                                    cx.stop_propagation();
+                                }))
+                                .child(div().min_w_0().text_ellipsis().child(return_text))
+                                .child(div().flex_shrink_0().text_color(style.accent).child("↓")),
+                        ),
+                )
+            });
         #[cfg(debug_assertions)]
         let layer = layer.children(paint_start.map(|start| {
             canvas(
@@ -2021,6 +2218,19 @@ impl TerminalSurface {
         let alternate = self.screen.as_ref().is_some_and(|screen| screen.alternate);
         let upwards = event.delta.pixel_delta(px(20.)).y > px(0.);
         let downwards = event.delta.pixel_delta(px(20.)).y < px(0.);
+        if upwards
+            && !alternate
+            && self.history_without_live
+            && self.history_binding.is_some()
+            && self.search.is_none()
+        {
+            if self.session_history.is_none() {
+                self.session_history = Some(HistoryView::new(None, cx.focus_handle()));
+                self.request_history_page(HistoryPage::Latest, cx);
+            }
+            cx.stop_propagation();
+            return;
+        }
         if downwards {
             self.history_probe.reset();
             if self
@@ -2283,6 +2493,7 @@ impl TerminalSurface {
             }
         });
         let cursor_color = screen.cursor_color.unwrap_or(self.theme.cursor);
+        let hidden_hint = self.hidden_cli_jump_hint(screen);
         let first_row = screen.scrollbar.offset as usize;
         for (row, cells) in screen
             .cells
@@ -2290,8 +2501,20 @@ impl TerminalSurface {
             .take(rows)
             .enumerate()
         {
+            let hidden = hidden_hint.as_ref().filter(|hint| hint.row == row);
+            let hidden_bg = hidden.map(|hint| {
+                hint.columns
+                    .start
+                    .checked_sub(1)
+                    .and_then(|col| cells.get(col))
+                    .or_else(|| cells.get(hint.columns.end))
+                    .map_or(screen.background, |cell| cell_colors(cell, screen).1)
+            });
             for (col, cell) in cells.iter().take(cols).enumerate() {
-                let (_, bg) = cell_colors(cell, screen);
+                let bg = hidden
+                    .zip(hidden_bg)
+                    .filter(|(hint, _)| hint.columns.contains(&col))
+                    .map_or_else(|| cell_colors(cell, screen).1, |(_, bg)| bg);
                 if bg != screen.background {
                     window.paint_quad(fill(self.metrics.cell(origin, col, row, 1), rgb(bg)));
                 }
@@ -2332,7 +2555,7 @@ impl TerminalSurface {
                 }
             }
             for (col, cell) in cells.iter().take(cols).enumerate() {
-                if cell.width == 0 {
+                if cell.width == 0 || hidden.is_some_and(|hint| hint.columns.contains(&col)) {
                     continue;
                 }
                 let cell_width = usize::from(cell.width);
@@ -2440,7 +2663,9 @@ impl Render for TerminalSurface {
                 cx.notify();
             }))
             .on_key_down(cx.listener(move |this, event, window, cx| {
-                if this.transport_generation == generation && !this.transport_suspended {
+                if this.transport_generation == generation
+                    && (!this.transport_suspended || this.session_history.is_some())
+                {
                     this.handle_key(event, window, cx);
                 }
             }))
@@ -2450,12 +2675,12 @@ impl Render for TerminalSurface {
                     if this.transport_generation != generation || this.transport_suspended {
                         return;
                     }
-                    if this.scrollbar_down(event, cx) {
+                    if this.over_hidden_cli_jump_hint(event.position) {
+                        cx.stop_propagation();
                         return;
                     }
-                    if this.session_history.is_some() && !this.history_body_contains(event.position)
-                    {
-                        this.history_keyboard_navigation = false;
+                    if this.scrollbar_down(event, cx) {
+                        return;
                     }
                     let mods = event.modifiers;
                     let link_modifier = if cfg!(target_os = "macos") {
@@ -2556,7 +2781,9 @@ impl Render for TerminalSurface {
                 }),
             )
             .on_scroll_wheel(cx.listener(move |this, event, _, cx| {
-                if this.transport_generation == generation && !this.transport_suspended {
+                if this.transport_generation == generation
+                    && (!this.transport_suspended || this.history_without_live)
+                {
                     this.on_scroll(event, cx);
                 }
             }))

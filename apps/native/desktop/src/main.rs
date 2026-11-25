@@ -80,6 +80,8 @@ fn main() -> Result<()> {
         #[cfg(target_os = "windows")]
         bounds_path,
     });
+    #[cfg(target_os = "macos")]
+    matou_native_desktop::system_notifications::install();
     let application = Application::new().with_assets(NativeAssets);
     #[cfg(target_os = "macos")]
     {
@@ -116,7 +118,7 @@ fn main() -> Result<()> {
         #[cfg(target_os = "macos")]
         {
             let desktop = desktop.clone();
-            let mut cx = cx.to_async();
+            let cx = cx.to_async();
             if termination_hook
                 && let Err(error) = macos::defer_termination(move || {
                     cx.update(|cx| desktop.begin_quit(cx))
