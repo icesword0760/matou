@@ -7,8 +7,8 @@ use std::{
 
 use anyhow::ensure;
 use matou_native_core::provider_launch::{
-    parse_claude_role_assignments, prepare_claude_launch, prepare_new_claude_launch,
-    prepare_new_claude_launch_with_budget,
+    PreparedSubscriptionTarget, parse_claude_role_assignments, prepare_claude_launch,
+    prepare_new_claude_launch, prepare_new_claude_launch_with_budget,
 };
 use matou_native_core::sessions::read_claude_role_launch_preferences;
 
@@ -1298,6 +1298,143 @@ fn gateway_effort_only_uses_the_source_and_rewrites_messages_not_counts() -> Res
             .gateway
             .is_none()
     );
+    Ok(())
+}
+
+#[test]
+fn deferred_tool_cleanup_follows_the_resolved_route_and_model() -> Result<()> {
+    let address = SocketAddr::from((Ipv4Addr::LOCALHOST, 1));
+    let plan = projection(address, address)?;
+    let runtime = tokio::runtime::Builder::new_current_thread().build()?;
+    let tools = json!([
+        {"name":"DeferredToolPlaceholder","input_schema":{"type":"object"},"defer_loading":true},
+        {"name":"tool_search_deferred_anchor","input_schema":{},"defer_loading":true},
+        {"name":"lookup","input_schema":{"type":"object"},"defer_loading":true},
+        {"name":"list","input_schema":{},"defer_loading":false}
+    ]);
+    let stripped = json!([
+        {"name":"lookup","input_schema":{"type":"object"}},
+        {"name":"list","input_schema":{}}
+    ]);
+    let history = json!([{"role":"user","content":[{"type":"tool_result","tool_use_id":"old-call",
+        "content":[{"type":"tool_reference","tool_name":"lookup"}]}]}]);
+    for (provider, endpoint, model, strip) in [
+        (
+            Some("antigravity"),
+            "http://127.0.0.1:1",
+            "claude-opus",
+            true,
+        ),
+        (Some("codex"), "http://127.0.0.1:1", "codex-fixture", true),
+        (None, "http://127.0.0.1:1", "  GeMiNi-fixture  ", true),
+        (None, "http://127.0.0.1:1", "  ClAuDe-fixture  ", false),
+        (None, "https://API.ANTHROPIC.COM", "gpt-fixture", false),
+        (
+            None,
+            "https://api.deepseek.com/anthropic",
+            "deepseek-fixture",
+            false,
+        ),
+    ] {
+        let mut plan = plan.clone();
+        let target = plan.roles[0].as_mut().context("missing opus target")?;
+        target.model = model.into();
+        target.connection.endpoint = endpoint.parse()?;
+        target.connection.subscription = provider.map(|provider| PreparedSubscriptionTarget {
+            provider_id: format!("{provider}-fixture"),
+            provider,
+            model: Some(model.into()),
+        });
+        let state = State {
+            prefix: String::new(),
+            projection: Arc::new(plan),
+            lazy_compaction: OnceCell::new(),
+            lazy_subscription: AsyncMutex::default(),
+            subscriptions: None,
+            locale: InterfaceLocale::default(),
+            blocked_families: Arc::default(),
+            stopped: Arc::default(),
+            token_usage: Arc::default(),
+            read_context_usage: None,
+            keep_alive_interval: gemini_sse_keepalive::INTERVAL,
+            proxy_env: ProxyEnvironment::default(),
+            fixture: None,
+        };
+        for path in [MESSAGES, COUNT] {
+            let input = json!({"model":"matou-role/opus","tools":tools,"messages":history});
+            let (body, _, _, _, _) = runtime
+                .block_on(state.rewrite_json(
+                    serde_json::to_vec(&input)?.into(),
+                    path,
+                    None,
+                    &HeaderMap::new(),
+                ))
+                .map_err(|fault| anyhow!("rewrite {path}: {}", fault.1))?;
+            let body: Value = serde_json::from_slice(&body)?;
+            assert_eq!(body["model"], model);
+            let expected = if strip { &stripped } else { &tools };
+            assert_eq!(&body["tools"], expected, "{provider:?} {endpoint} {path}");
+            assert_eq!(body["messages"], history);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn deferred_tool_cleanup_handles_forced_choices_and_preserves_untouched_bodies() -> Result<()> {
+    let server = listener()?;
+    let address = server.local_addr()?;
+    let gateway = Gateway::start(Arc::new(projection(address, address)?))?;
+    let cases = [
+        (
+            r#"{ "model":"gpt-fixture", "tools":[{"name":"DeferredToolPlaceholder","defer_loading":true}] }"#,
+            Some(json!({"model":"gpt-fixture"})),
+        ),
+        (
+            r#"{ "model":"gpt-fixture", "tools":[{"name":"tool_search_deferred_anchor","defer_loading":true}], "tool_choice":{"type":"tool","name":"tool_search_deferred_anchor"} }"#,
+            Some(json!({"model":"gpt-fixture"})),
+        ),
+        (
+            r#"{ "model":"gpt-fixture", "tools":[{"name":"DeferredToolPlaceholder","defer_loading":true}], "tool_choice":{"type":"any"} }"#,
+            Some(json!({"model":"gpt-fixture","tools":[],"tool_choice":{"type":"any"}})),
+        ),
+        (
+            r#"{ "model":"gpt-fixture", "tools":[{"name":"DeferredToolPlaceholder","defer_loading":true}], "tool_choice":{"type":"auto"} }"#,
+            Some(json!({"model":"gpt-fixture","tool_choice":{"type":"auto"}})),
+        ),
+        (
+            r#"{ "model":"gpt-fixture", "tools":[null,17,{"name":"DeferredToolPlaceholder","defer_loading":false},{"name":"lookup","defer_loading":null}], "tool_choice":{"type":"tool","name":"lookup"} }"#,
+            Some(
+                json!({"model":"gpt-fixture","tools":[null,17,{"name":"DeferredToolPlaceholder"},
+                {"name":"lookup"}],"tool_choice":{"type":"tool","name":"lookup"}}),
+            ),
+        ),
+        (r#"{ "model":"gpt-fixture", "tools":[] }"#, None),
+        (
+            r#"{ "model":"gpt-fixture", "tools":{"defer_loading":true} }"#,
+            None,
+        ),
+        (r#"{ "model":"gpt-fixture" }"#, None),
+        ("not JSON", None),
+    ];
+    let (requests, workers) = record(server, cases.len(), "200 OK", "", b"ok");
+    for (input, expected) in cases {
+        assert_eq!(
+            exchange(&gateway, MESSAGES, input.as_bytes(), "Digest: fixture\r\n")?.0,
+            200
+        );
+        let (_, headers, bytes) = requests.recv_timeout(TIMEOUT)?;
+        if let Some(expected) = expected {
+            assert_eq!(serde_json::from_slice::<Value>(&bytes)?, expected);
+            assert!(!headers.contains_key("digest"));
+        } else {
+            assert_eq!(bytes, input.as_bytes());
+            assert_eq!(headers["digest"], "fixture");
+        }
+    }
+    for worker in workers {
+        worker.join().unwrap()?;
+    }
     Ok(())
 }
 
