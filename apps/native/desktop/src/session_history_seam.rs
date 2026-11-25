@@ -22,6 +22,10 @@ use super::TerminalSurface;
 #[path = "local_time.rs"]
 pub(crate) mod local_time;
 use local_time::local_date_time;
+#[path = "session_history_markdown.rs"]
+mod markdown;
+#[path = "session_history_markdown_render.rs"]
+mod markdown_render;
 
 pub(super) const WHEEL_SETTLE: Duration = Duration::from_millis(120);
 pub(super) const FALSE_START: Duration = Duration::from_millis(200);
@@ -513,6 +517,17 @@ impl Message {
             Some(truncate(&self.text, COLLAPSED_CHARS))
         }
     }
+
+    fn cache_markdown(&self, cache: &mut markdown::Cache, expanded: bool) {
+        if matches!(
+            self.kind,
+            MessageKind::User | MessageKind::Assistant | MessageKind::CompactSummary
+        ) && cache.get(self.index, expanded).is_none()
+            && let Some((text, clipped)) = self.body(expanded)
+        {
+            cache.insert(self.index, expanded, text, clipped);
+        }
+    }
 }
 
 fn timestamp(value: &Value) -> Option<u64> {
@@ -670,6 +685,24 @@ fn group(messages: impl IntoIterator<Item = Message>) -> Vec<Row> {
     rows
 }
 
+fn cache_page_markdown(cache: &mut markdown::Cache, rows: &[Row], _page: Page) {
+    #[cfg(debug_assertions)]
+    let measurement = tracing().then(|| (Instant::now(), cache.parses()));
+    for row in rows {
+        if let Row::Message(message) = row {
+            message.cache_markdown(cache, false);
+        }
+    }
+    #[cfg(debug_assertions)]
+    if let Some((started, before)) = measurement {
+        eprintln!(
+            "[history-seam] markdown-page page={_page:?} parsed={} ms={:.3}",
+            cache.parses() - before,
+            started.elapsed().as_secs_f64() * 1000.
+        );
+    }
+}
+
 /// Match against the same bounded text range that the history view can show.
 fn anchor(screen: &Screen, input_rows: usize, messages: &[Message]) -> Option<(i64, usize)> {
     let visible: Vec<_> = screen_lines(screen, screen.rows.saturating_sub(input_rows)).collect();
@@ -748,6 +781,7 @@ pub(super) struct HistoryView {
     start_time: Option<u64>,
     compact_time: Option<u64>,
     rows: Vec<Row>,
+    markdown: markdown::Cache,
     expanded: HashSet<i64>,
     full_text: HashSet<i64>,
     snapshot: Option<Rc<Screen>>,
@@ -775,6 +809,7 @@ impl HistoryView {
             start_time: None,
             compact_time: None,
             rows: Vec::new(),
+            markdown: markdown::Cache::default(),
             expanded: HashSet::new(),
             full_text: HashSet::new(),
             snapshot: screen.cloned().map(Rc::new),
@@ -864,6 +899,8 @@ impl HistoryView {
                     Some(message)
                 });
                 self.rows = group(messages);
+                self.markdown = markdown::Cache::default();
+                cache_page_markdown(&mut self.markdown, &self.rows, request);
                 self.first_index = first;
                 self.has_earlier = page["hasEarlier"] == true;
                 self.ready = true;
@@ -910,6 +947,7 @@ impl HistoryView {
                     replaced = 1;
                 }
                 let added = earlier.len();
+                cache_page_markdown(&mut self.markdown, &earlier, request);
                 let offset = self.list.logical_scroll_top();
                 earlier.append(&mut self.rows);
                 self.rows = earlier;
@@ -969,6 +1007,18 @@ impl HistoryView {
     pub fn expand_text(&mut self, index: i64) {
         if !self.full_text.remove(&index) {
             self.full_text.insert(index);
+            if let Some(Row::Message(message)) = self.rows.iter().find(|row| row.index() == index)
+            {
+                #[cfg(debug_assertions)]
+                let measurement = tracing().then(|| (Instant::now(), self.markdown.parses()));
+                message.cache_markdown(&mut self.markdown, true);
+                #[cfg(debug_assertions)]
+                if let Some((started, before)) = measurement
+                    && self.markdown.parses() > before
+                {
+                    trace("markdown-expand parsed=1", started);
+                }
+            }
         }
         self.remeasure(index);
     }
@@ -1081,7 +1131,8 @@ impl HistoryView {
         } = style;
         let open = self.full_text.contains(&message.index);
         let summary = message.kind == MessageKind::CompactSummary;
-        let content = message.body(open);
+        let markdown = self.markdown.get(message.index, open);
+        let content = markdown.is_none().then(|| message.body(open)).flatten();
         let output = message.command_output.as_ref().map(|output| {
             truncate(
                 output,
@@ -1092,10 +1143,11 @@ impl HistoryView {
                 },
             )
         });
-        let clipped = content.is_some_and(|(_, clipped)| clipped)
+        let clipped = markdown.is_some_and(|body| body.clipped)
+            || content.is_some_and(|(_, clipped)| clipped)
             || output.is_some_and(|(_, clipped)| clipped);
         let prefix = match (prefix_visible, message.kind) {
-            (true, MessageKind::Assistant) => "⏺ ",
+            (true, MessageKind::Assistant) => "⏺",
             (true, MessageKind::Command) => style.user_row.prefix,
             _ => "",
         };
@@ -1118,6 +1170,9 @@ impl HistoryView {
                             (InterfaceLocale::English, true) => "Compaction summary (Collapse)",
                         }),
                 )
+            })
+            .when_some(markdown, |body, markdown| {
+                body.child(markdown_render::render(&markdown.blocks, message.index, style))
             })
             .when_some(content, |body, (text, clipped)| {
                 body.child(
@@ -1203,10 +1258,16 @@ impl HistoryView {
                 div.px(style.cell_width * 2.)
             })
             .flex()
-            .gap(px(4.))
+            .when(message.kind != MessageKind::Assistant, |div| div.gap(px(4.)))
             .text_color(if muted { dim } else { foreground })
             .when(!prefix.is_empty(), |div| {
-                div.child(div_prefix(prefix).text_color(style.accent))
+                div.child(
+                    div_prefix(prefix)
+                        .text_color(style.accent)
+                        .when(message.kind == MessageKind::Assistant, |marker| {
+                            marker.w(style.cell_width * 2.)
+                        }),
+                )
             })
             .child(body)
             .into_any_element()
@@ -1395,6 +1456,44 @@ pub(super) fn error_row(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn markdown_page_merge_and_body_lookups_parse_each_variant_once() {
+        let message = |index, text: &str| {
+            Message::parse(&json!({"index": index, "kind": "assistant", "text": text})).unwrap()
+        };
+        let latest = message(
+            200,
+            &format!("\x1b[1m**bold**\x1b[0m\n\n{}", "灯".repeat(21_000)),
+        );
+        let earlier = message(199, "### Earlier");
+        let mut cache = markdown::Cache::default();
+        let rows = group([latest.clone()]);
+        cache_page_markdown(&mut cache, &rows, Page::Latest);
+        assert_eq!(cache.parses(), 1);
+        for _ in 0..90 {
+            let body = cache.get(200, false).unwrap();
+            assert!(body.clipped);
+            assert!(matches!(&body.blocks[0], markdown::Block::Paragraph(body)
+                if body.text.as_ref() == "bold" && body.spans[0].bold));
+        }
+        assert_eq!(cache.parses(), 1);
+
+        let earlier_rows = group([earlier, latest.clone()]);
+        cache_page_markdown(&mut cache, &earlier_rows, Page::Earlier(200));
+        cache_page_markdown(&mut cache, &earlier_rows, Page::Earlier(200));
+        assert_eq!(cache.parses(), 2);
+
+        for _ in 0..3 {
+            latest.cache_markdown(&mut cache, true);
+            assert!(cache.get(200, true).unwrap().clipped);
+            assert!(cache.get(200, false).unwrap().clipped);
+        }
+        assert_eq!(cache.parses(), 3);
+        let expanded = cache.get(200, true).unwrap();
+        assert!(matches!(&expanded.blocks[1], markdown::Block::Literal(text)
+            if text.chars().count() == EXPANDED_CHARS - "**bold**\n\n".len() + 1));
+    }
 
     #[test]
     fn probe_needs_two_unchanged_forwarded_wheels_and_resets_on_content() {
