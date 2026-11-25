@@ -206,6 +206,7 @@ pub struct HistoryView {
     interaction_subscriptions: Option<[Subscription; 2]>,
     scroll: ScrollHandle,
     center_on_anchor: bool,
+    search_keyword: Option<String>,
     font_family: SharedString,
     locale: InterfaceLocale,
     colors: HistoryColors,
@@ -246,6 +247,7 @@ impl HistoryView {
             interaction_subscriptions: None,
             scroll: ScrollHandle::new(),
             center_on_anchor: false,
+            search_keyword: None,
             font_family: font_family.into(),
             locale: InterfaceLocale::Chinese,
             colors: HistoryColors::for_theme(false),
@@ -390,8 +392,7 @@ impl HistoryView {
                 .push(SelectableText::new("正在读取历史上下文…"));
         }
         self.body_entries = body_start..self.entries.len();
-        self.entries
-            .push(SelectableText::new("命中行前后各最多 250 行"));
+        self.entries.push(SelectableText::new("命中内容及上下文"));
         if gap_count > 0 {
             self.entries
                 .push(SelectableText::new(format!("{gap_count} 处历史缺口")));
@@ -402,6 +403,10 @@ impl HistoryView {
         self.stop_drag();
         self.state = Some(state);
         cx.notify();
+    }
+
+    pub(crate) fn set_search_keyword(&mut self, keyword: Option<String>) {
+        self.search_keyword = keyword;
     }
 
     fn set_offline_state(&mut self, state: HistoryViewState, cx: &mut Context<Self>) {
@@ -1232,6 +1237,26 @@ impl HistoryView {
             let current = page.anchor_index == Some(index);
             let entry = line_start + index;
             let view = view.clone();
+            let text = &self.entries[entry];
+            let hit = self
+                .search_keyword
+                .as_deref()
+                .filter(|_| current)
+                .and_then(|keyword| {
+                    text.source
+                        .find(keyword)
+                        .or_else(|| {
+                            text.source
+                                .to_ascii_lowercase()
+                                .find(&keyword.to_ascii_lowercase())
+                        })
+                        .map(|start| start..start + keyword.len())
+                });
+            let hit_geometry = text.geometry.clone();
+            let hit_color = Rgba {
+                a: 0.32,
+                ..self.colors.current_line_marker
+            };
             div()
                 .relative()
                 .flex()
@@ -1271,6 +1296,19 @@ impl HistoryView {
                         .flex_none()
                         .min_w_0()
                         .cursor(CursorStyle::IBeam)
+                        .children(hit.clone().map(|range| {
+                            canvas(
+                                |_, _, _| (),
+                                move |_, _, window, _| {
+                                    if let Some(bounds) = match_bounds(&hit_geometry, &range) {
+                                        window.paint_quad(fill(bounds, hit_color));
+                                    }
+                                },
+                            )
+                            .absolute()
+                            .inset_0()
+                            .size_full()
+                        }))
                         .children(self.selectable_text(entry, selection_background)),
                 )
                 .when(current && self.center_on_anchor, |row| {
@@ -1290,8 +1328,21 @@ impl HistoryView {
                                     let offset = this.scroll.offset();
                                     let y = (offset.y + viewport.center().y - bounds.center().y)
                                         .clamp(-this.scroll.max_offset().height, px(0.));
-                                    if y != offset.y {
-                                        this.scroll.set_offset(point(offset.x, y));
+                                    let x = hit
+                                        .as_ref()
+                                        .and_then(|range| {
+                                            match_bounds(&this.entries[entry].geometry, range)
+                                        })
+                                        .filter(|matched| {
+                                            matched.left() < viewport.left()
+                                                || matched.right() > viewport.right()
+                                        })
+                                        .map_or(offset.x, |matched| {
+                                            (offset.x + viewport.center().x - matched.center().x)
+                                                .clamp(-this.scroll.max_offset().width, px(0.))
+                                        });
+                                    if x != offset.x || y != offset.y {
+                                        this.scroll.set_offset(point(x, y));
                                         cx.notify();
                                     }
                                 });
@@ -1425,6 +1476,17 @@ impl HistoryView {
                 .children(children),
         )
     }
+}
+
+fn match_bounds(geometry: &TextGeometryHandle, range: &Range<usize>) -> Option<Bounds<Pixels>> {
+    let geometry = geometry.borrow();
+    let text = geometry.as_ref()?;
+    let a = text.layout.x_for_index(range.start);
+    let b = text.layout.x_for_index(range.end);
+    Some(Bounds::new(
+        point(text.bounds.left() + a.min(b), text.bounds.top()),
+        size((b - a).abs(), text.bounds.size.height),
+    ))
 }
 
 fn history_line_entries(

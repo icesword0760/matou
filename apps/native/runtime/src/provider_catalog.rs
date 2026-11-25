@@ -13,6 +13,8 @@ use rusqlite::{Connection, Statement};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::history::{HistoryCursor, HistoryLine};
+
 const LIST_LIMIT: usize = 200;
 const MAX_LINE_BYTES: u64 = 8 * 1024 * 1024;
 const DEFAULT_EVENT_PAGE_LIMIT: i64 = 200;
@@ -352,6 +354,97 @@ fn transcript_in_projects<T>(
         }
     }
     found.ok_or(SESSION_NOT_FOUND)
+}
+
+/// Read the visible conversation from the same project-bound transcript as the catalog.
+pub(crate) fn search_lines(
+    root: Option<&Path>,
+    cwd: &str,
+    id: &str,
+) -> Result<Vec<HistoryLine>, &'static str> {
+    if !valid_id(id) {
+        return Err("Invalid provider session ID");
+    }
+    let (root, cwd, workspace) = catalog_paths(root, cwd)?.ok_or(SESSION_NOT_FOUND)?;
+    let mut skipped = Skipped::default();
+    let result = transcript_in_projects(
+        &root,
+        &cwd,
+        &workspace,
+        id,
+        &mut skipped,
+        |reader, _, skipped| read_search_lines(reader, &workspace, skipped),
+    );
+    skipped.report();
+    result
+}
+
+fn read_search_lines(
+    mut reader: impl BufRead,
+    workspace: &Path,
+    skipped: &mut Skipped,
+) -> io::Result<Option<(Vec<HistoryLine>, bool)>> {
+    let mut origin = None;
+    let mut raw = Vec::new();
+    let mut lines = Vec::new();
+    while let Some(row) = read_row(&mut reader, &mut raw, skipped, false)? {
+        observe_workspace_origin(&mut origin, &row);
+        let source = match row["type"].as_str() {
+            Some("user") => HistoryTextSource::User,
+            Some("assistant") => HistoryTextSource::Assistant,
+            _ => continue,
+        };
+        if [
+            "isMeta",
+            "isCompactSummary",
+            "isSidechain",
+            "is_sidechain",
+            "isApiErrorMessage",
+        ]
+        .into_iter()
+        .any(|flag| row[flag] == true)
+        {
+            continue;
+        }
+        let content = &row["message"]["content"];
+        let blocks = content.as_str().into_iter().chain(
+            content
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|block| block["type"] == "text")
+                .filter_map(|block| block["text"].as_str()),
+        );
+        for block in blocks {
+            if matches!(source, HistoryTextSource::User)
+                && trim_preview(block).starts_with("<tool_use_error>")
+            {
+                continue;
+            }
+            let HistoryText::Plain(text) = history_text(block, source) else {
+                continue;
+            };
+            for text in text.lines().filter(|line| !trim_preview(line).is_empty()) {
+                let sequence = lines.len() as u64 + 1;
+                lines.push(HistoryLine {
+                    sequence,
+                    cursor: HistoryCursor {
+                        sequence,
+                        line_index: 0,
+                    },
+                    text: text.to_owned(),
+                });
+            }
+        }
+    }
+    match origin {
+        Some(origin) if matches_workspace(&origin, workspace)? => {
+            let has_lines = !lines.is_empty();
+            Ok(Some((lines, has_lines)))
+        }
+        None if lines.is_empty() => Ok(Some((lines, false))),
+        _ => Ok(None),
+    }
 }
 
 pub(crate) fn recent_replies(
@@ -1154,6 +1247,7 @@ pub enum HistoryText<'a> {
     CommandOutput(String),
 }
 
+#[derive(Clone, Copy)]
 pub enum HistoryTextSource {
     Assistant,
     User,

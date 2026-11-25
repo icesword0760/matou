@@ -6307,7 +6307,18 @@ fn run_writable(
                     )
                 }
                 Command::History(request) => {
-                    history.send(request)?;
+                    if matches!(
+                        request,
+                        HistoryRequest::Search { .. } | HistoryRequest::Context { .. }
+                    ) && let Some(session) = owner.session(request.session_id())?
+                        && session.kind == "claude-code"
+                        && let Some(binding) =
+                            owner.environment_provider_binding(&session.id, &session.kind)?
+                    {
+                        history.send_claude(request, session.cwd, binding.provider_session_id)?;
+                    } else {
+                        history.send(request)?;
+                    }
                     continue;
                 }
                 Command::Search {

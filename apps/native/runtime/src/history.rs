@@ -12,7 +12,7 @@ use matou_native_core::journal::{Frame, Record, codec::read_segment};
 use regress::{Flags, Regex};
 use serde::{Deserialize, Serialize};
 
-const MAX_LINES: usize = 1_000;
+pub(crate) const MAX_LINES: usize = 1_000;
 const DEFAULT_CONTEXT_LINES: usize = 250;
 const MAX_CONTEXT_LINES: usize = 499;
 
@@ -414,14 +414,14 @@ fn history_line(cursor: HistoryCursor, mut text: String) -> HistoryLine {
     }
 }
 
-enum SearchPattern {
+pub(crate) enum SearchPattern {
     Regex(Regex),
     WholeWord(Regex),
     Literal(String),
 }
 
 impl SearchPattern {
-    fn compile(query: &str, options: HistorySearchOptions) -> Result<Self> {
+    pub(crate) fn compile(query: &str, options: HistorySearchOptions) -> Result<Self> {
         if options.regex {
             let flags = Flags {
                 icase: !options.case_sensitive,
@@ -451,7 +451,7 @@ impl SearchPattern {
         Ok(Self::WholeWord(Regex::with_flags(&expression, "u")?))
     }
 
-    fn matches(&self, text: &str, case_sensitive: bool) -> bool {
+    pub(crate) fn matches(&self, text: &str, case_sensitive: bool) -> bool {
         if let Self::Regex(regex) = self {
             let units: Vec<u16> = text.encode_utf16().collect();
             return regex.find_from_ucs2(&units, 0).next().is_some();

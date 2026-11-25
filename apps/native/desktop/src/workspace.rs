@@ -1929,6 +1929,7 @@ struct ArchivedMatches {
 
 struct TerminalSearchState {
     input: Entity<RenameInput>,
+    debounce: Option<gpui::Task<()>>,
     controls: [FocusHandle; 6],
     query: String,
     open: bool,
@@ -3055,6 +3056,7 @@ impl Workspace {
             result_count: context.result_count,
             gap_count: archive.gap_count,
         };
+        let keyword = (!archive.options.regex).then(|| archive.query.clone());
         let command = HistoryRequest::Context {
             session_id: context.session_id.clone(),
             sequence: context.sequence,
@@ -3067,7 +3069,10 @@ impl Workspace {
             read_only.history.error = None;
             self.sync_read_only_history(cx);
         } else if let Some(view) = &self.history_view {
-            view.update(cx, |view, cx| view.set_state(state, cx));
+            view.update(cx, |view, cx| {
+                view.set_search_keyword(keyword);
+                view.set_state(state, cx);
+            });
         }
         self.history_request = Some(context);
         self.sync_terminal_input(window, cx);
@@ -3198,6 +3203,10 @@ impl Workspace {
                 sequence,
                 result,
             } => {
+                let has_transcript = self.graph_node(&session_id).is_some_and(|node| {
+                    node["currentMode"] == "claude-code"
+                        && node["historyProviderSessionId"].is_string()
+                });
                 let Some(search) = self.search.as_mut().filter(|search| {
                     search.open
                         && search.sequence == sequence
@@ -3239,7 +3248,7 @@ impl Workspace {
                     }
                     Err(error) => {
                         // Frozen archive RPC failures quietly return to the live view.
-                        if self.read_only.is_some() {
+                        if self.read_only.is_some() || has_transcript {
                             search.error = Some(error);
                         }
                         if let Some(archive) = &mut search.archive {
@@ -3477,10 +3486,7 @@ impl Workspace {
                 window,
                 |this, _, event, window, cx| match event {
                     RenameInputEvent::Changed => {
-                        if let Some(search) = this.search.as_mut() {
-                            search.query = search.input.read(cx).text.clone();
-                        }
-                        this.run_search(false, cx);
+                        this.schedule_search(cx);
                     }
                     RenameInputEvent::Cancel => this.close_search(window, cx),
                     RenameInputEvent::Confirm => this.run_search(false, cx),
@@ -3488,6 +3494,7 @@ impl Workspace {
             ));
             self.search = Some(TerminalSearchState {
                 input,
+                debounce: None,
                 controls: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
                 query: String::new(),
                 open: false,
@@ -3509,7 +3516,42 @@ impl Workspace {
         self.run_search(false, cx);
     }
 
+    fn schedule_search(&mut self, cx: &mut Context<Self>) {
+        let Some(search) = &mut self.search else {
+            return;
+        };
+        search.query = search.input.read(cx).text.clone();
+        if !search.open || search.query.is_empty() {
+            self.run_search(false, cx);
+            return;
+        }
+        // Reject replies from the previous query while the user is still typing.
+        search.sequence += 1;
+        search.archive_pending = None;
+        search.archive_count = None;
+        search.result = None;
+        search.error = None;
+        let sequence = search.sequence;
+        let timer = cx.background_executor().timer(Duration::from_millis(160));
+        search.debounce = Some(cx.spawn(async move |this, cx| {
+            timer.await;
+            let _ = this.update(cx, |this, cx| {
+                if this
+                    .search
+                    .as_ref()
+                    .is_some_and(|search| search.open && search.sequence == sequence)
+                {
+                    this.run_search(false, cx);
+                }
+            });
+        }));
+        cx.notify();
+    }
+
     fn run_search(&mut self, previous: bool, cx: &mut Context<Self>) {
+        if let Some(search) = &mut self.search {
+            search.debounce = None;
+        }
         if self
             .focused
             .as_ref()
@@ -3609,6 +3651,7 @@ impl Workspace {
     fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.dismiss_history_context(cx);
         if let Some(search) = self.search.as_mut() {
+            search.debounce = None;
             search.archive = None;
             search.archive_pending = None;
             search.archive_count = None;
@@ -3709,6 +3752,8 @@ impl Workspace {
             error.clone()
         } else if search.input.read(cx).text.is_empty() {
             String::new()
+        } else if search.debounce.is_some() || search.archive_pending.is_some() {
+            self.locale.text("搜索中…", "Searching…").into()
         } else if let Some((index, count)) = search.archive_count {
             if count == 0 {
                 "0/0".into()
