@@ -17079,22 +17079,9 @@ impl Workspace {
             .as_ref()
             .filter(|fields| codex_hud::supports_details(fields.mode))
             .map_or((None, None, None), |fields| {
-                let mut stats = codex_hud::statistics(live, fields.node, locale, dark);
-                let agents = stats
-                    .iter()
-                    .position(|stat| stat.id() == "agents")
-                    .map(|index| stats.remove(index).slot(locale, dark));
-                let tools = if live["runningTools"].is_array() || live["toolCounts"].is_array() {
-                    fields.live_hud.as_ref().or(fields.codex.as_ref())
-                } else {
-                    fields.codex.as_ref()
-                };
-                if let Some(tools) = tools.and_then(|hud| hud.tools_detail(locale)) {
-                    let index = usize::from(stats.first().is_some_and(|stat| stat.id() == "mcps"));
-                    stats.insert(index, tools);
-                }
+                let stats = codex_hud::stats_summary(live, fields.node, locale);
                 (
-                    agents,
+                    codex_hud::agents_slot(live, locale, dark),
                     self.footer_quota(fields.mode, live, footer_menu, window, cx),
                     self.footer_stats(&stats, footer_menu, window, cx),
                 )
@@ -17201,6 +17188,7 @@ impl Workspace {
         let show_model = codex_hud::shows_model(mode, status_content_width);
         let show_context = status_content_width > codex_hud::CONTEXT_HIDE_BELOW;
         let compact = !show_count || status_content_width < FOOTER_COMPACT_STATUS_WIDTH;
+        let font_size = px(if compact { 10. } else { 10.5 });
         let cache_usage = session.and_then(|_| footer_cache_usage(live, locale, compact));
         // Give the quota and cache reminder the room normally used by model details.
         let compact_cache_with_quota = compact && cache_usage.is_some() && quota.is_some();
@@ -17302,7 +17290,10 @@ impl Workspace {
                     .min_w_0()
                     .flex()
                     .items_center()
-                    .px(px(breadcrumb_padding))
+                    .when(
+                        fields.as_ref().is_none_or(|fields| !codex_hud::supports_details(fields.mode)),
+                        |breadcrumb| breadcrumb.px(px(breadcrumb_padding)),
+                    )
                     .child(content),
             )
         };
@@ -17316,7 +17307,7 @@ impl Workspace {
             .border_t_1()
             .border_color(rgba(palette.top_line))
             .bg(background)
-            .text_size(px(10.))
+            .text_size(font_size)
             .text_color(rgba(palette.text))
             .when(!detached && self.graph.is_object(), |footer| {
                 footer.child(breadcrumb)
@@ -17487,15 +17478,25 @@ impl Workspace {
             .min_w_0()
             .h_full()
             .pl(px(status_padding))
-            .when(!detached, |status| {
-                status.border_l_1().border_color(rgba(palette.divider))
+            .when(!detached, |status| status.pl(px(status_padding + 1.)))
+            .when(!detached && self.graph.is_object(), |status| {
+                status.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .top(relative(0.5))
+                        .mt(px(-6.))
+                        .w(px(1.))
+                        .h(px(12.))
+                        .bg(rgba(palette.divider)),
+                )
             })
             .flex()
             .items_center()
             .gap(px(status_gap))
             .overflow_hidden()
             .whitespace_nowrap()
-            .text_size(px(10.))
+            .text_size(font_size)
             .text_color(rgba(palette.text));
         let mut primary = div()
             .id("footer-primary")
@@ -17602,7 +17603,8 @@ impl Workspace {
                     let tokens = live["contextUsedTokens"]
                         .as_u64()
                         .zip(live["contextWindowSize"].as_u64());
-                    primary = primary.child(codex_hud::context_ring(percent, tokens));
+                    primary =
+                        primary.child(codex_hud::context_ring(percent, tokens, palette, dark));
                 } else if codex_hud::supports_details(fields.mode)
                     && context.is_some_and(|hud| hud.has_context_window())
                 {
@@ -17626,6 +17628,7 @@ impl Workspace {
                 use matou_native_desktop::context_optimizer_settings::HudPillTone;
                 let pill_colors = |tone: HudPillTone| match tone {
                     HudPillTone::Danger => (0xb34d47, 0xb34d4722),
+                    HudPillTone::Warning if dark => (0xe3b341, 0xd2992224),
                     HudPillTone::Warning => (0xb45309, 0xd9770622),
                     HudPillTone::Accent => (0x2679d8, 0x2679d81a),
                     HudPillTone::Neutral => (
@@ -17638,18 +17641,6 @@ impl Workspace {
                     primary = primary.child(self.context_hud_pill(pill.label.clone(), fg, bg));
                 }
                 if let Some(session) = session {
-                    if let Some(pill) = guard_view.saved_pill.as_ref() {
-                        let (fg, bg) = pill_colors(pill.tone);
-                        primary = primary.child(self.context_details_trigger(
-                            "footer-context-saved",
-                            session,
-                            pill.label.clone(),
-                            None,
-                            fg,
-                            bg,
-                            cx,
-                        ));
-                    }
                     if let Some((label, detail, tone)) = cache_usage {
                         let (fg, bg) = pill_colors(tone);
                         primary = primary.child(
@@ -20553,7 +20544,7 @@ fn footer_cache_usage(
     if remaining > 600 {
         return None;
     }
-    let (mut label, detail) = match cache.get("timing").and_then(Value::as_str) {
+    let (label, detail) = match cache.get("timing").and_then(Value::as_str) {
         Some("precise") => (
             format_cache_countdown(remaining, remaining > 0, locale),
             locale.text(
@@ -20580,22 +20571,19 @@ fn footer_cache_usage(
         }
         _ => return None,
     };
-    if let Some(hit) = cache.get("hitRatioPercent").and_then(Value::as_f64) {
-        label.push_str(&format!(" · {} {hit:.0}%", locale.text("命中", "hit")));
-    }
-    if compact {
-        label = if remaining == 0 {
+    let label = if compact {
+        if remaining == 0 {
             locale.text("◷ 已过期", "◷ expired").to_owned()
         } else {
             format!("{}m", remaining.div_ceil(60))
-        };
-    }
+        }
+    } else {
+        format!("◷ {label}")
+    };
     let tone = if remaining == 0 {
         HudPillTone::Neutral
-    } else if cache.get("expiringSoon").and_then(Value::as_bool) == Some(true) {
-        HudPillTone::Warning
     } else {
-        HudPillTone::Accent
+        HudPillTone::Warning
     };
     Some((label, detail, tone))
 }
@@ -20884,8 +20872,12 @@ mod hud_theme_and_footer_tests {
                     remaining <= 600
                 );
                 if (1..=600).contains(&remaining) {
-                    let (label, _, _) = footer_cache_usage(&hud, locale, true).unwrap();
+                    let (label, _, tone) = footer_cache_usage(&hud, locale, true).unwrap();
                     assert_eq!(label, format!("{}m", (remaining as u64).div_ceil(60)));
+                    assert_eq!(
+                        tone,
+                        matou_native_desktop::context_optimizer_settings::HudPillTone::Warning
+                    );
                 }
             }
         }

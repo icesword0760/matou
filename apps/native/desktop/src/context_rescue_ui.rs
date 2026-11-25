@@ -75,19 +75,30 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Div {
         let locale = self.locale;
-        let busy = self.context_rescue_requests.contains_key(session);
-        let rescue_session = session.to_owned();
-        let copy_session = session.to_owned();
-        let (fg, bg) = if urgent {
-            (0xffffff, 0xb34d47ff)
+        let footer = placement == "footer";
+        let (copy_label, copy_fg, copy_bg) = if footer {
+            let dark = self.theme.effective() == AppTheme::Dark;
+            (
+                locale.text("交接摘要", "Handoff brief"),
+                if dark { 0xff9a73 } else { 0x9a3412 },
+                0xff6b351f,
+            )
         } else {
-            (0x2679d8, 0x2679d81f)
+            (locale.text("复制摘要", "Copy brief"), 0x2679d8, 0x2679d81f)
         };
+        let copy_session = session.to_owned();
         div()
             .flex()
             .flex_none()
             .gap(px(4.))
-            .child(
+            .children((!footer).then(|| {
+                let busy = self.context_rescue_requests.contains_key(session);
+                let rescue_session = session.to_owned();
+                let (fg, bg) = if urgent {
+                    (0xffffff, 0xb34d47ff)
+                } else {
+                    (0x2679d8, 0x2679d81f)
+                };
                 self.context_hud_pill(
                     if busy {
                         locale.text("正在交接…", "Starting…")
@@ -104,23 +115,20 @@ impl Workspace {
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.request_context_rescue(&rescue_session, cx);
                     cx.stop_propagation();
-                })),
-            )
+                }))
+            }))
             .child(
-                self.context_hud_pill(
-                    locale.text("复制摘要", "Copy brief").to_owned(),
-                    0x2679d8,
-                    0x2679d81f,
-                )
-                .id(SharedString::from(format!(
-                    "{placement}-copy-handoff-{session}"
-                )))
-                .cursor_pointer()
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.request_session_handoff(copy_session.clone(), cx);
-                    cx.stop_propagation();
-                })),
+                self.context_hud_pill(copy_label.to_owned(), copy_fg, copy_bg)
+                    .id(SharedString::from(format!(
+                        "{placement}-copy-handoff-{session}"
+                    )))
+                    .when(footer, |pill| pill.children(footer_bounds_probe("handoff")))
+                    .cursor_pointer()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.request_session_handoff(copy_session.clone(), cx);
+                        cx.stop_propagation();
+                    })),
             )
     }
 

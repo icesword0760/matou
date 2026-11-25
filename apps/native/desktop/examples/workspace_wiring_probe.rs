@@ -3118,9 +3118,10 @@ mod workspace {
                 cx.notify();
             })
             .unwrap();
-        assert!(!draw_hud(window.into(), cx).contains_key("quota"));
+        let empty = draw_hud(window.into(), cx);
+        assert!(!empty.contains_key("quota") && !empty.contains_key("stats"));
         let live = json!({
-            "model":"Long full model name","contextWindowSize":200000,"permissionMode":"ask","resumable":true,
+            "model":"Long full model name","contextUsedTokens":136000,"contextWindowSize":200000,"permissionMode":"ask","resumable":true,
             "usageWindows":[{"id":"five","label":"5h","usedPercent":91,"resetText":"12:00"},
                 {"id":"week","label":"Weekly","usedPercent":65}],
             "allUsageWindows":[{"id":"group","label":"All models","usedPercent":77,"resetText":"13:00"}],
@@ -3182,7 +3183,7 @@ mod workspace {
             );
         }
         assert!(!bounds.contains_key("account"));
-        for key in ["mcps", "tools", "hooks", "todos", "mcp-errors"] {
+        for key in ["mcps", "tools", "hooks", "todos", "stats-context"] {
             assert!(
                 hud_text(window.into(), cx, key).is_none(),
                 "{key} stayed in the footer"
@@ -3204,13 +3205,11 @@ mod workspace {
         );
         assert!(draw_hud(window.into(), cx).contains_key("footer-stats-menu"));
         for (key, text) in [
-            ("mcps", "2 MCPs"),
-            ("tools", "3 Tools"),
-            ("hooks", "1 hooks"),
-            ("todos", "▸ Check results"),
-            ("todo-count", "(0/1)"),
-            ("mcp-errors", "⚠ server offline"),
-            ("mcp-error-count", "1"),
+            ("mcps", "2 · 1 错误"),
+            ("tools", "3"),
+            ("hooks", "1"),
+            ("todos", "0 / 1"),
+            ("stats-context", "136k / 200k"),
         ] {
             assert_eq!(hud_text(window.into(), cx, key).as_deref(), Some(text));
         }
@@ -3789,21 +3788,26 @@ mod workspace {
         windows.truncate(quota_count);
         let mut hud = json!({
             "model":model, "permissionMode":permission, "contextPercent":percent,
-            "contextUsedTokens":percent * 2000, "contextWindowSize":200000, "resumable":true,
+            "contextWindowSize":200000, "resumable":true,
             "usageWindows":windows, "gitBranch":"main", "gitDirty":true,
             "agents":(0..agent_count).map(|n| json!({"name":format!("Agent {}", n + 1), "status":"running"})).collect::<Vec<_>>(),
             "contextGuard":{"cache":{"timing":"precise","remainingSec":cache_remaining_sec}},
         });
         if with_stats {
-            hud["configCounts"] = json!({"mcps":2,"hooks":1,"mcpServerNames":["files","notes"]});
-            hud["mcpErrors"] = json!(["Server offline"]);
-            hud["hookNames"] = json!(["PostToolUse"]);
-            hud["todos"] = json!([{"content":"Check results","status":"in_progress"}]);
-            hud["toolCounts"] = json!(
-                (1..=8)
-                    .map(|n| json!({"name":format!("Tool {n}"),"count":n}))
+            hud["contextUsedTokens"] = json!(percent * 2000);
+            hud["configCounts"] = json!({"mcps":4,"hooks":11});
+            if mode != "claude-code" {
+                hud["mcpErrors"] = json!(["Server offline"]);
+            }
+            hud["todos"] = json!(
+                (0..7)
+                    .map(|index| json!({
+                        "content": format!("Task {index}"),
+                        "status": if index < 3 { "completed" } else { "pending" }
+                    }))
                     .collect::<Vec<_>>()
             );
+            hud["toolCount"] = json!(123);
             if mode != "claude-code" {
                 hud["allUsageWindows"] =
                     json!([{"label":"All models","usedPercent":77,"resetText":"13:00"}]);
@@ -3921,6 +3925,145 @@ mod workspace {
         assert!(!bounds.contains_key("name") && !bounds.contains_key("context"));
     }
 
+    fn assert_stats_grid(bounds: &HashMap<&'static str, Bounds<Pixels>>) {
+        let panel = bounds["footer-stats-menu"];
+        assert_eq!(panel.size.width, px(360.));
+        assert!(
+            (px(150.)..=px(180.)).contains(&panel.size.height),
+            "stats panel height: {:?}",
+            panel.size.height,
+        );
+        let (tools, hooks) = (bounds["tools"], bounds["hooks"]);
+        let (mcps, todos) = (bounds["mcps"], bounds["todos"]);
+        let context = bounds["stats-context"];
+        assert_eq!(tools.top(), hooks.top());
+        assert_eq!(mcps.top(), todos.top());
+        assert_eq!((tools.left(), tools.right()), (mcps.left(), mcps.right()));
+        assert_eq!((tools.left(), tools.right()), (context.left(), context.right()));
+        assert_eq!((hooks.left(), hooks.right()), (todos.left(), todos.right()));
+        assert_eq!(hooks.left() - tools.right(), px(18.));
+        assert!((mcps.top() - tools.bottom() - px(7.)).abs() <= px(0.5));
+        assert!((context.top() - mcps.bottom() - px(7.)).abs() <= px(0.5));
+    }
+
+    async fn capture_footer_stats(cx: &mut AsyncApp, root: &std::path::Path, output: &std::path::Path) {
+        use cocoa::base::nil;
+        use objc::{msg_send, sel, sel_impl};
+
+        let (window, sink) = open_probe_window(cx, 970., Some("Matou · 会话统计"));
+        load_footer_fixture(window, cx, &sink, "claude-code", root, 2, 2, true, 1018);
+        let handle: AnyWindowHandle = window.into();
+        let draw_preview = |cx: &mut AsyncApp| {
+            capture_hud(|| {
+                handle
+                    .update(cx, |_, window, cx| {
+                        window.refresh();
+                        window.draw(cx).clear();
+                    })
+                    .unwrap();
+            })
+        };
+        window
+            .update(cx, |view, _, cx| {
+                view.locale = InterfaceLocale::Chinese;
+                view.graph["nodes"][0]["title"] = json!("根会话");
+                view.graph["nodes"][0]["cwd"] = Value::Null;
+                view.theme.set_preference(ThemePreference::Dark);
+                view.apply_theme_palette(cx);
+            })
+            .unwrap();
+        let (native_view, _) = native_view(window.into(), cx);
+        let window_number: isize = unsafe {
+            let native_window: cocoa::base::id = msg_send![native_view, window];
+            msg_send![native_window, windowNumber]
+        };
+        assert!(window_number > 0);
+        draw_preview(cx);
+        let bounds = draw_preview(cx);
+        assert!(!bounds.contains_key("cache") && !bounds.contains_key("handoff"));
+        click(window.into(), cx, MouseButton::Left, bounds["stats"].center());
+        for (preference, variant) in [
+            (ThemePreference::Dark, "dark"),
+            (ThemePreference::Light, "light"),
+        ] {
+            window
+                .update(cx, |view, _, cx| {
+                    if view.theme.set_preference(preference) {
+                        view.apply_theme_palette(cx);
+                    }
+                })
+                .unwrap();
+            assert_stats_grid(&draw_preview(cx));
+            // The layout probe draws the frame. Ask AppKit to present it even
+            // when another window has interrupted the probe's display link.
+            unsafe {
+                let _: () = msg_send![native_view, displayLayer: nil];
+            }
+            cx.background_executor().timer(Duration::from_millis(400)).await;
+            let path = output.join(format!("footer-stats-{variant}.png"));
+            let result = std::process::Command::new("/usr/sbin/screencapture")
+                .args(["-x", "-o", "-t", "png", "-l"])
+                .arg(window_number.to_string())
+                .arg(&path)
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "capture {}: {}",
+                path.display(),
+                String::from_utf8_lossy(&result.stderr),
+            );
+            assert!(path.metadata().unwrap().len() > 0);
+            println!("Saved {}", path.display());
+        }
+    }
+
+    fn verify_footer_handoff(cx: &mut AsyncApp) {
+        let (window, sink) = open_probe_at(cx, 970.);
+        let handle = window.into();
+        window
+            .update(cx, |view, window, cx| {
+                let node = &mut view.graph["nodes"][0];
+                node["currentMode"] = json!("codex");
+                node["codexHud"] = json!({
+                    "model": "gpt-5.4-codex",
+                    "contextPercent": 34,
+                    "contextGuard": {
+                        "savedNoiseBytes": 96_000,
+                        "cache": {"timing":"precise","remainingSec":1018,"warm":true}
+                    }
+                });
+                view.refresh_terminals(window, cx);
+                cx.notify();
+            })
+            .unwrap();
+        let normal = draw_hud(handle, cx);
+        assert!(!normal.contains_key("cache") && !normal.contains_key("handoff"));
+        window
+            .update(cx, |view, _, cx| {
+                let hud = &mut view.graph["nodes"][0]["codexHud"];
+                hud["contextPercent"] = json!(68);
+                hud["contextGuard"]["contextPressure"] = json!("critical");
+                hud["contextGuard"]["cache"]["remainingSec"] = json!(252);
+                cx.notify();
+            })
+            .unwrap();
+        let critical = draw_hud(handle, cx);
+        assert_full_hud_text(handle, cx, "context", "68%");
+        assert!(critical["cache"].right() <= critical["handoff"].left());
+        click(handle, cx, MouseButton::Left, critical["handoff"].center());
+        assert!(
+            std::iter::from_fn(|| sink.try_recv().ok()).any(|command| matches!(
+                command, Command::GetSessionHandoffBrief { session_id, .. } if session_id == A
+            )),
+            "footer handoff pill requests a brief to copy"
+        );
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        println!("footer pressure | normal HUD stays clean, critical cache and copy brief are clickable");
+    }
+
     fn verify_footer_widths(cx: &mut AsyncApp, root: &std::path::Path) {
         for (mode, model, agent_count, five_hour, weekly) in [
             ("claude-code", "matou-role/opus", 2, "82%", "41%"),
@@ -3950,9 +4093,10 @@ mod workspace {
                     let [left, right] = [bounds[cells[0]], bounds[cells[1]]];
                     assert!(
                         left.right() <= right.left() + px(0.5),
-                        "{mode} {width}: {} overlaps {}",
+                        "{mode} {width}: {} {left:?} overlaps {} {right:?} in status {:?}",
                         cells[0],
-                        cells[1]
+                        cells[1],
+                        bounds["status"]
                     );
                     assert!(
                         (left.center().y - right.center().y).abs() < px(1.5),
@@ -3996,7 +4140,7 @@ mod workspace {
                 );
                 assert_full_hud_text(handle, cx, "agents", &agents);
                 assert_eq!(hud_text(handle, cx, "context-usage"), None);
-                for stat in ["tools", "hooks", "mcps", "todos", "mcp-errors"] {
+                for stat in ["tools", "hooks", "mcps", "todos", "stats-context"] {
                     assert_eq!(hud_text(handle, cx, stat), None);
                 }
                 click(handle, cx, MouseButton::Left, bounds["quota"].center());
@@ -4004,13 +4148,35 @@ mod workspace {
                 press(window, cx, "escape");
                 assert!(!draw_hud(handle, cx).contains_key("footer-quota-menu"));
                 click(handle, cx, MouseButton::Left, bounds["stats"].center());
-                let panel = draw_hud(handle, cx)["footer-stats-menu"];
-                assert!(panel.size.width <= px(335.) && panel.size.height <= px(360.));
-                assert_eq!(
-                    hud_text(handle, cx, "stats-overflow").as_deref(),
-                    Some("+2")
-                );
-                assert_eq!(hud_text(handle, cx, "tools").as_deref(), Some("36 Tools"));
+                let locale = if width == 970. {
+                    InterfaceLocale::English
+                } else {
+                    InterfaceLocale::Chinese
+                };
+                window
+                    .update(cx, |view, _, cx| {
+                        view.locale = locale;
+                        cx.notify();
+                    })
+                    .unwrap();
+                assert_stats_grid(&draw_hud(handle, cx));
+                let errors = if mode == "claude-code" { 0 } else { 1 };
+                let title = locale.text("会话统计", "Session stats");
+                let errors_label = locale.text("错误", "errors");
+                for (key, expected) in [
+                    ("stats-title", title.into()),
+                    ("tools", "123".into()),
+                    ("hooks", "11".into()),
+                    ("mcps", format!("4 · {errors} {errors_label}")),
+                    ("todos", "3 / 7".into()),
+                    ("stats-context", format!("{}k / 200k", match mode {
+                        "claude-code" => 52,
+                        "codex" => 82,
+                        _ => 36,
+                    })),
+                ] {
+                    assert_full_hud_text(handle, cx, key, &expected);
+                }
                 click(handle, cx, MouseButton::Left, point(px(20.), px(90.)));
                 assert!(!draw_hud(handle, cx).contains_key("footer-stats-menu"));
                 println!(
@@ -4097,7 +4263,13 @@ mod workspace {
         Application::new().with_assets(NativeAssets).run(move |cx| {
             cx.spawn(async move |cx| {
                 if let Some(probe) = footer_probe {
+                    if let Some(path) = probe.strip_prefix("screenshots:") {
+                        capture_footer_stats(cx, &fixture_root, std::path::Path::new(path)).await;
+                        cx.update(|cx| cx.quit()).unwrap();
+                        return;
+                    }
                     if probe == "verify" {
+                        verify_footer_handoff(cx);
                         verify_footer_widths(cx, &fixture_root);
                         verify_footer_hud(cx, &fixture_root).await;
                         cx.update(|cx| cx.quit()).unwrap();
