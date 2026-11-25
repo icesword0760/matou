@@ -840,6 +840,9 @@ struct LoaderEvent {
 
 impl LoaderEvent {
     fn from_graph(value: &Value) -> Option<Self> {
+        if terminal_surface::session_history_seam::is_compaction(value) {
+            return None;
+        }
         Some(Self {
             index: value["index"].as_u64()?.try_into().ok()?,
             kind: value["kind"].as_str()?.into(),
@@ -5884,6 +5887,15 @@ impl Workspace {
                     };
                     self.finish_session_loader(&rows(errors), window, cx);
                     let details = rows(details);
+                    for result in &details {
+                        if result["provider"].is_null() {
+                            for terminal in self.terminals.values() {
+                                terminal.update(cx, |terminal, cx| {
+                                    terminal.receive_history(result, cx)
+                                });
+                            }
+                        }
+                    }
                     self.loader_detail_result(&details, cx);
                     self.loader_search_result(&details, cx);
                     self.loader_catalog_result(&rows(catalog), cx);
@@ -6270,7 +6282,21 @@ impl Workspace {
                     .entry(id.to_owned())
                     .or_insert_with(|| cx.focus_handle().tab_stop(true));
             }
-            if Self::team_member_node(node) || self.terminals.contains_key(id) {
+            if Self::team_member_node(node) {
+                continue;
+            }
+            let history_binding = (node["currentMode"] == "claude-code")
+                .then(|| node["cwd"].as_str())
+                .flatten()
+                .map(|cwd| terminal_surface::session_history_seam::Binding {
+                    cwd: cwd.to_owned(),
+                    provider_session_id: trimmed_graph_text(&node["historyProviderSessionId"])
+                        .map(str::to_owned),
+                });
+            if let Some(terminal) = self.terminals.get(id) {
+                terminal.update(cx, |surface, cx| {
+                    surface.set_history_binding(history_binding, self.locale, cx)
+                });
                 continue;
             }
             let disabled = !self.active_path_valid();
@@ -6296,6 +6322,7 @@ impl Workspace {
                 surface.set_theme(theme, cx);
                 surface.set_font_size(self.terminal_font_size, cx);
                 surface.begin_transport_generation(self.runtime_generation, cx);
+                surface.set_history_binding(history_binding, self.locale, cx);
                 surface.set_input_disabled(disabled || self.recovery_blocked(id), cx);
                 surface
             });
@@ -6392,6 +6419,23 @@ impl Workspace {
         }
         match &event.kind {
             SurfaceEventKind::FontZoom(_) => unreachable!(),
+            SurfaceEventKind::SessionHistory(page) => {
+                let target = terminal.read(cx).history_binding().and_then(|binding| {
+                    let provider_session_id = binding.provider_session_id.clone()?;
+                    Some(Command::GetProviderSession {
+                        cwd: binding.cwd.clone(),
+                        provider_session_id,
+                        start_event_index: page.start(),
+                        limit: Some(page.limit()),
+                    })
+                });
+                if let Some(command) = target
+                    && self.commands.send_at(generation, command).is_ok()
+                {
+                    return;
+                }
+                terminal.update(cx, |terminal, cx| terminal.history_read_failed(*page, cx));
+            }
             SurfaceEventKind::Select(action) => self.send(
                 Command::Select {
                     session_id: session_id.clone(),
@@ -19096,10 +19140,12 @@ impl Render for Workspace {
                     let body = body.when(water.is_some(), |body| body.opacity(0.));
                     body
                 })
-                .child(Self::session_card_header_shadow(self.wiring_dark()))
             };
             #[cfg(target_os = "macos")]
             let card = card.children(water);
+            let card = card.when(!compact, |card| {
+                card.child(Self::session_card_header_shadow(self.wiring_dark()))
+            });
             #[cfg(debug_assertions)]
             let card = if let Some(trace) = self
                 .motion_trace
@@ -20264,7 +20310,7 @@ fn notification_time(timestamp: u64) -> String {
     local_date_time(timestamp).1
 }
 
-fn local_date_time(timestamp: u64) -> (String, String) {
+pub(crate) fn local_date_time(timestamp: u64) -> (String, String) {
     let (_, date, time) = local_date_time_with_year(timestamp);
     (date, time)
 }
