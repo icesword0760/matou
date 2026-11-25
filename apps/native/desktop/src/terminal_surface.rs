@@ -17,9 +17,18 @@ use gpui::{
     StatefulInteractiveElement, Styled, Task, TextRun, UTF16Selection, Window, canvas, div, fill,
     font, point, prelude::FluentBuilder, px, rgb, rgba, size,
 };
+use matou_native_core::sessions::InterfaceLocale;
 use matou_native_terminal::{
     Cell, Color, CursorStyle, GridSelection, InputModes, MouseEncoding, MouseEvent, MouseProtocol,
     MouseReporter, MouseWheel, Screen, SelectionAction, SelectionMode, Theme,
+};
+use serde_json::Value;
+
+#[path = "session_history_seam.rs"]
+pub mod session_history_seam;
+use session_history_seam::{
+    Action as HistoryAction, Binding as HistoryBinding, FALSE_START, HistoryStyle, HistoryView,
+    INPUT_ROWS, Page as HistoryPage, READ_TIMEOUT, WHEEL_SETTLE, WheelProbe, fingerprint,
 };
 
 use crate::terminal_input::{
@@ -135,6 +144,7 @@ pub struct SurfaceEvent {
 }
 pub enum SurfaceEventKind {
     Input(Vec<u8>),
+    SessionHistory(HistoryPage),
     FontZoom(FontZoom),
     Select(SelectionAction),
     Copy {
@@ -434,6 +444,13 @@ pub struct TerminalSurface {
     scrollbar_hide_timer: Option<Task<()>>,
     scrollbar_frame_pending: bool,
     scroll_request_id: u64,
+    history_binding: Option<HistoryBinding>,
+    history_locale: InterfaceLocale,
+    history_probe: WheelProbe,
+    session_history: Option<HistoryView>,
+    history_request_serial: u64,
+    history_updates: Option<Task<()>>,
+    history_keyboard_navigation: bool,
 }
 
 impl EventEmitter<SurfaceEvent> for TerminalSurface {}
@@ -480,6 +497,9 @@ impl TerminalSurface {
         self.scrollbar_opacity = 0.;
         self.surface_hovered = false;
         self.scrollport_hovered = false;
+        self.history_probe.reset();
+        self.session_history = None;
+        self.history_updates = None;
         cx.notify();
     }
     pub fn set_transport_available(&mut self, available: bool, cx: &mut Context<Self>) {
@@ -598,6 +618,13 @@ impl TerminalSurface {
             scrollbar_hide_timer: None,
             scrollbar_frame_pending: false,
             scroll_request_id: 0,
+            history_binding: None,
+            history_locale: InterfaceLocale::default(),
+            history_probe: WheelProbe::default(),
+            session_history: None,
+            history_request_serial: 0,
+            history_updates: None,
+            history_keyboard_navigation: true,
         }
     }
 
@@ -622,6 +649,7 @@ impl TerminalSurface {
         if disabled {
             self.composition.clear();
             self.reset_blink();
+            self.history_probe.reset();
         }
         cx.notify();
     }
@@ -679,6 +707,15 @@ impl TerminalSurface {
         scroll_request_id: u64,
         cx: &mut Context<Self>,
     ) {
+        if screen.alternate {
+            if self.history_probe.needs_observation() {
+                self.history_probe.observe(fingerprint(&screen));
+            }
+        } else {
+            self.history_probe.reset();
+            self.session_history = None;
+            self.history_updates = None;
+        }
         self.scroll_request_id = self.scroll_request_id.max(scroll_request_id);
         let modes_changed = self.modes != modes;
         if self.modes.input_epoch != modes.input_epoch {
@@ -764,6 +801,28 @@ impl TerminalSurface {
             }
             return;
         }
+        #[cfg(debug_assertions)]
+        if let Some(sent) = self
+            .session_history
+            .as_mut()
+            .and_then(|history| history.input_sent_at.take())
+        {
+            session_history_seam::trace("input-to-next-screen", sent);
+        }
+        if self
+            .session_history
+            .as_ref()
+            .is_some_and(|history| history.closing)
+        {
+            self.session_history = None;
+            self.history_updates = None;
+        } else if self
+            .session_history
+            .as_ref()
+            .is_some_and(|history| history.ready)
+        {
+            self.schedule_history_updates(cx);
+        }
         if let Some(old) = &self.screen {
             let scrollbar_changed = old.scrollbar != screen.scrollbar;
             let cursor_changed = old.cursor_col != screen.cursor_col
@@ -796,6 +855,454 @@ impl TerminalSurface {
         }
     }
 
+    pub(crate) fn set_history_binding(
+        &mut self,
+        binding: Option<HistoryBinding>,
+        locale: InterfaceLocale,
+        cx: &mut Context<Self>,
+    ) {
+        if self.history_binding != binding {
+            self.history_binding = binding;
+            self.history_probe.reset();
+            self.session_history = None;
+            self.history_updates = None;
+            cx.notify();
+        }
+        if self.history_locale != locale {
+            self.history_locale = locale;
+            if self.session_history.is_some() {
+                cx.notify();
+            }
+        }
+    }
+
+    pub(crate) fn history_binding(&self) -> Option<&HistoryBinding> {
+        self.history_binding.as_ref()
+    }
+
+    fn history_body_contains(&self, position: Point<Pixels>) -> bool {
+        self.grid.is_some_and(|grid| {
+            grid.bounds.contains(&position)
+                && position.y
+                    < grid.bounds.top()
+                        + self.metrics.height * grid.rows.saturating_sub(INPUT_ROWS) as f32
+        })
+    }
+
+    fn history_covers(&self, position: Point<Pixels>) -> bool {
+        self.history_body_contains(position)
+            && self
+                .session_history
+                .as_ref()
+                .is_some_and(HistoryView::visible)
+    }
+
+    fn start_history_probe(&mut self, cx: &mut Context<Self>) {
+        if self.history_binding.is_none() || self.session_history.is_some() || self.search.is_some()
+        {
+            return;
+        }
+        let Some(screen) = &self.screen else {
+            return;
+        };
+        let Some(serial) = self.history_probe.start(fingerprint(screen)) else {
+            return;
+        };
+        let timer = cx.background_executor().timer(WHEEL_SETTLE);
+        cx.spawn(async move |this, cx| {
+            timer.await;
+            let _ = this.update(cx, |this, cx| {
+                let Some(screen) = this.screen.as_ref().filter(|screen| screen.alternate) else {
+                    return;
+                };
+                if this.input_disabled
+                    || this.transport_suspended
+                    || this.session_history.is_some()
+                    || !this.history_probe.settled(serial, fingerprint(screen))
+                {
+                    return;
+                }
+                this.history_probe.reset();
+                this.history_keyboard_navigation = true;
+                this.session_history = Some(HistoryView::new(screen, cx.focus_handle()));
+                this.request_history_page(HistoryPage::Latest, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn request_history_page(&mut self, page: HistoryPage, cx: &mut Context<Self>) {
+        let Some(history) = self.session_history.as_mut() else {
+            return;
+        };
+        if history.pending.is_some() || history.closing {
+            return;
+        }
+        self.history_request_serial += 1;
+        let serial = self.history_request_serial;
+        history.pending = Some((page, serial));
+        #[cfg(debug_assertions)]
+        {
+            history.request_sent_at = Instant::now();
+        }
+        if self
+            .history_binding
+            .as_ref()
+            .and_then(|binding| binding.provider_session_id.as_ref())
+            .is_none()
+        {
+            self.history_read_failed(page, cx);
+            return;
+        }
+        self.emit(SurfaceEventKind::SessionHistory(page), cx);
+        let timer = cx.background_executor().timer(READ_TIMEOUT);
+        cx.spawn(async move |this, cx| {
+            timer.await;
+            let _ = this.update(cx, |this, cx| {
+                if this
+                    .session_history
+                    .as_ref()
+                    .and_then(|history| history.pending)
+                    == Some((page, serial))
+                {
+                    this.history_read_failed(page, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    pub(crate) fn history_read_failed(&mut self, page: HistoryPage, cx: &mut Context<Self>) {
+        if let Some(history) = self.session_history.as_mut()
+            && history.pending.is_some_and(|(pending, _)| pending == page)
+        {
+            history.fail(page);
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn receive_history(&mut self, result: &Value, cx: &mut Context<Self>) {
+        let Some(binding) = &self.history_binding else {
+            return;
+        };
+        let Some(history) = self.session_history.as_mut() else {
+            return;
+        };
+        let Some((page, _)) = history.pending else {
+            return;
+        };
+        if result["provider"].is_null()
+            && result["cwd"].as_str() == Some(binding.cwd.as_str())
+            && result["providerSessionId"].as_str() == binding.provider_session_id.as_deref()
+            && page.matches(result)
+        {
+            #[cfg(debug_assertions)]
+            let received_at = Instant::now();
+            history.receive(page, result);
+            #[cfg(debug_assertions)]
+            {
+                let phase = match page {
+                    HistoryPage::Latest => "latest-page",
+                    HistoryPage::Earlier(_) => "earlier-page",
+                    HistoryPage::Updates(_) => "updates-page",
+                };
+                session_history_seam::trace(phase, history.request_sent_at);
+                session_history_seam::trace("integrate-page", received_at);
+            }
+            let next = match page {
+                HistoryPage::Updates(start)
+                    if result["page"]["hasLater"] == true && history.latest_index >= start =>
+                {
+                    Some(HistoryPage::Updates(history.latest_index + 1))
+                }
+                _ => None,
+            };
+            cx.notify();
+            if let Some(next) = next {
+                self.request_history_page(next, cx);
+            }
+        }
+    }
+
+    fn schedule_history_updates(&mut self, cx: &mut Context<Self>) {
+        if self.history_updates.is_some() {
+            return;
+        }
+        let timer = cx.background_executor().timer(Duration::from_secs(1));
+        self.history_updates = Some(cx.spawn(async move |this, cx| {
+            timer.await;
+            let _ = this.update(cx, |this, cx| {
+                this.history_updates = None;
+                if let Some(history) = &this.session_history
+                    && history.ready
+                    && !history.closing
+                {
+                    if history.pending.is_some() {
+                        this.schedule_history_updates(cx);
+                    } else {
+                        this.request_history_page(
+                            HistoryPage::Updates(history.latest_index + 1),
+                            cx,
+                        );
+                    }
+                }
+            });
+        }));
+    }
+
+    fn history_action(&mut self, action: HistoryAction, cx: &mut Context<Self>) {
+        let Some(history) = self.session_history.as_mut() else {
+            return;
+        };
+        match action {
+            HistoryAction::Retry => {
+                if let Some(page) = history.retry {
+                    self.request_history_page(page, cx);
+                }
+            }
+            HistoryAction::Tool(index) => history.expand_tool(index),
+            HistoryAction::Text(index) => history.expand_text(index),
+        }
+        cx.notify();
+    }
+
+    fn close_session_history(
+        &mut self,
+        restore: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(history) = self.session_history.as_mut() else {
+            return;
+        };
+        if history.closing {
+            return;
+        }
+        if history.focus.is_focused(window) {
+            self.focus.focus(window);
+        }
+        if !restore || self.input_disabled || self.transport_suspended {
+            self.session_history = None;
+            self.history_updates = None;
+            cx.notify();
+            return;
+        }
+        history.closing = true;
+        self.send(crate::terminal_input::CLAUDE_SCROLL_TO_BOTTOM.to_vec(), cx);
+        let timer = cx.background_executor().timer(WHEEL_SETTLE);
+        cx.spawn(async move |this, cx| {
+            timer.await;
+            let _ = this.update(cx, |this, cx| {
+                if this
+                    .session_history
+                    .as_ref()
+                    .is_some_and(|history| history.closing)
+                {
+                    this.session_history = None;
+                    this.history_updates = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn maybe_prefetch_history(&mut self, cx: &mut Context<Self>) {
+        if let Some(page) = self
+            .session_history
+            .as_ref()
+            .filter(|view| view.near_top(self.metrics.height))
+            .and_then(HistoryView::earlier_page)
+        {
+            self.request_history_page(page, cx);
+        }
+    }
+
+    fn handle_history_key(
+        &mut self,
+        key: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(history) = self.session_history.as_ref() else {
+            return false;
+        };
+        if key == "escape" {
+            self.close_session_history(history.ready, window, cx);
+            return true;
+        }
+        if !history.ready || !self.history_keyboard_navigation {
+            return false;
+        }
+        let page_height = (history.list.viewport_bounds().size.height - self.metrics.height)
+            .max(self.metrics.height);
+        match key {
+            "pageup" => history.list.scroll_by(-page_height),
+            "pagedown" => history.list.scroll_by(page_height),
+            "home" => history.list.scroll_to(gpui::ListOffset {
+                item_ix: 0,
+                offset_in_item: px(0.),
+            }),
+            "end" => history.list.scroll_to(gpui::ListOffset {
+                item_ix: history.list.item_count(),
+                offset_in_item: px(0.),
+            }),
+            _ => return false,
+        }
+        self.maybe_prefetch_history(cx);
+        cx.notify();
+        true
+    }
+
+    fn render_session_history(&self, cx: &Context<Self>) -> Option<gpui::Stateful<gpui::Div>> {
+        let history = self
+            .session_history
+            .as_ref()
+            .filter(|history| history.visible())?;
+        #[cfg(debug_assertions)]
+        let paint_start = session_history_seam::tracing().then(Instant::now);
+        let screen = self.screen.as_ref()?;
+        let height = self.metrics.height;
+        let rows = self.grid.map_or(screen.rows, |grid| grid.rows);
+        let history_height = height * rows.saturating_sub(INPUT_ROWS) as f32;
+        let dim = rgb(mix(screen.foreground, screen.background));
+        let style = HistoryStyle {
+            locale: self.history_locale,
+            foreground: rgb(screen.foreground),
+            dim,
+            line_height: height,
+        };
+        let surface = cx.entity();
+        let row_surface = surface.clone();
+        let row_weak = surface.downgrade();
+        let rows = gpui::list(history.list.clone(), move |index, _, cx| {
+            let surface = row_surface.read(cx);
+            let Some(history) = &surface.session_history else {
+                return div().into_any_element();
+            };
+            if let Some(snapshot) = history.snapshot_at(index) {
+                let snapshot_rows = snapshot.rows.saturating_sub(INPUT_ROWS);
+                let painter = row_surface.clone();
+                return canvas(
+                    |_, _, _| {},
+                    move |bounds, (), window, cx| {
+                        painter.update(cx, |surface, cx| {
+                            let cols = (f32::from(bounds.size.width)
+                                / f32::from(surface.metrics.width))
+                                as usize;
+                            surface.paint_grid(
+                                &snapshot,
+                                bounds.origin,
+                                snapshot.cols.min(cols),
+                                snapshot_rows,
+                                None,
+                                window,
+                                cx,
+                            );
+                        });
+                    },
+                )
+                .w_full()
+                .h(height * snapshot_rows as f32)
+                .into_any_element();
+            }
+            history.item(index, style, &row_weak)
+        })
+        .size_full();
+        let return_text = self.history_locale.text("回到最新", "Jump to latest");
+        let return_text = if history.new_messages == 0 {
+            format!("{return_text} ↓")
+        } else {
+            let count = history.new_messages;
+            format!("{return_text} · {count} ↓")
+        };
+        let layer = div()
+            .id("session-history-seam")
+            .absolute()
+            .top(self.vertical_inset)
+            .bottom(self.vertical_inset + height * INPUT_ROWS as f32)
+            .max_h(history_height)
+            .left(px(14.))
+            .right(px(14.))
+            .overflow_hidden()
+            .occlude()
+            .track_focus(&history.focus)
+            .cursor(PointerStyle::Arrow)
+            .bg(rgb(screen.background))
+            .text_color(style.foreground)
+            .text_size(px(self.font_size as f32))
+            .font_family(self.font.family.clone())
+            .line_height(height)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    if let Some(history) = &this.session_history {
+                        this.history_keyboard_navigation = true;
+                        history.focus.focus(window);
+                    }
+                    cx.stop_propagation();
+                }),
+            )
+            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
+                if let Some(zoom) =
+                    font_zoom_for_wheel(event.delta, event.modifiers, cfg!(target_os = "macos"))
+                {
+                    this.emit(SurfaceEventKind::FontZoom(zoom), cx);
+                } else if let Some(history) = &this.session_history {
+                    let down = event.delta.pixel_delta(px(20.)).y < px(0.);
+                    if down && history.opened_at.elapsed() <= FALSE_START {
+                        this.close_session_history(false, window, cx);
+                    } else if down && history.ready && history.at_bottom() {
+                        this.close_session_history(true, window, cx);
+                    } else {
+                        this.maybe_prefetch_history(cx);
+                    }
+                }
+                cx.stop_propagation();
+            }))
+            .when(history.ready, |div| div.child(rows))
+            .when(!history.ready, |div| {
+                div.child(session_history_seam::error_row(
+                    self.history_locale,
+                    &surface.downgrade(),
+                ))
+            })
+            .child(
+                div()
+                    .id("session-history-latest")
+                    .absolute()
+                    .right(px(8.))
+                    .bottom(px(8.))
+                    .px(px(8.))
+                    .py(px(4.))
+                    .border_1()
+                    .border_color(dim)
+                    .rounded(px(5.))
+                    .bg(rgb(screen.background))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        let ready = this
+                            .session_history
+                            .as_ref()
+                            .is_some_and(|history| history.ready);
+                        this.close_session_history(ready, window, cx);
+                        cx.stop_propagation();
+                    }))
+                    .child(return_text),
+            );
+        #[cfg(debug_assertions)]
+        let layer = layer.children(paint_start.map(|start| {
+            canvas(
+                |_, _, _| (),
+                move |_, (), _, _| session_history_seam::trace("render-to-paint", start),
+            )
+            .absolute()
+            .top_0()
+            .left_0()
+        }));
+        Some(layer)
+    }
+
     fn send(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
         if self.input_disabled || bytes.is_empty() {
             return;
@@ -804,6 +1311,18 @@ impl TerminalSurface {
         self.stop_drag();
         self.reset_blink();
         self.scroll_on_input(cx);
+        #[cfg(debug_assertions)]
+        if session_history_seam::tracing()
+            && bytes
+                .first()
+                .is_some_and(|first| *first >= b' ' && *first != 127)
+            && let Some(history) = self
+                .session_history
+                .as_mut()
+                .filter(|history| history.ready)
+        {
+            history.input_sent_at = Some(Instant::now());
+        }
         self.emit(SurfaceEventKind::Input(bytes), cx);
         cx.notify();
     }
@@ -875,11 +1394,15 @@ impl TerminalSurface {
             self.font_size = size;
             self.metrics = Self::measure_font(&self.font, size, cx);
             self.last_dimensions = None;
+            self.history_probe.reset();
+            if let Some(history) = &self.session_history {
+                history.remeasure_rows();
+            }
             cx.notify();
         }
     }
 
-    fn handle_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+    fn handle_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if self.composition.is_active() {
             self.scroll_on_input(cx);
             cx.stop_propagation();
@@ -887,6 +1410,15 @@ impl TerminalSurface {
         }
         let key = event.keystroke.key.as_str();
         let mods = event.keystroke.modifiers;
+        if !mods.control
+            && !mods.alt
+            && !mods.platform
+            && !mods.shift
+            && self.handle_history_key(key, window, cx)
+        {
+            cx.stop_propagation();
+            return;
+        }
         let rows = self.screen.as_ref().map_or(0, |screen| screen.rows);
         if let Some(lines) = page_scroll_lines(key, mods.shift, rows) {
             self.move_scrollbar(lines * f64::from(f32::from(self.metrics.height)), cx);
@@ -1418,9 +1950,9 @@ impl TerminalSurface {
         button: u8,
         action: u8,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let Some(grid) = self.grid else {
-            return;
+            return false;
         };
         let x = f32::from(position.x - grid.bounds.origin.x).clamp(
             0.,
@@ -1453,7 +1985,9 @@ impl TerminalSurface {
             && let Some(bytes) = bytes
         {
             self.send(bytes, cx);
+            return !self.input_disabled;
         }
+        false
     }
 
     fn mouse_down(&mut self, event: &gpui::MouseDownEvent, cx: &mut Context<Self>) -> bool {
@@ -1475,6 +2009,7 @@ impl TerminalSurface {
         if let Some(zoom) =
             font_zoom_for_wheel(event.delta, event.modifiers, cfg!(target_os = "macos"))
         {
+            self.history_probe.reset();
             self.emit(SurfaceEventKind::FontZoom(zoom), cx);
             cx.stop_propagation();
             return;
@@ -1484,6 +2019,20 @@ impl TerminalSurface {
             MouseProtocol::Vt200 | MouseProtocol::Drag | MouseProtocol::Any
         );
         let alternate = self.screen.as_ref().is_some_and(|screen| screen.alternate);
+        let upwards = event.delta.pixel_delta(px(20.)).y > px(0.);
+        let downwards = event.delta.pixel_delta(px(20.)).y < px(0.);
+        if downwards {
+            self.history_probe.reset();
+            if self
+                .session_history
+                .as_ref()
+                .is_some_and(|history| !history.visible())
+            {
+                self.session_history = None;
+                cx.stop_propagation();
+                return;
+            }
+        }
         if reports_wheel || alternate {
             let delta = match event.delta {
                 gpui::ScrollDelta::Pixels(delta) => -f32::from(delta.y),
@@ -1498,14 +2047,14 @@ impl TerminalSurface {
                 event.modifiers.control,
             );
             if lines != 0. {
-                if reports_wheel {
+                let sent = if reports_wheel {
                     self.report_mouse(
                         event.position,
                         event.modifiers,
                         4,
                         if delta < 0. { 0 } else { 1 },
                         cx,
-                    );
+                    )
                 } else {
                     let prefix = if self.modes.application_cursor_keys {
                         b'O'
@@ -1513,6 +2062,10 @@ impl TerminalSurface {
                         b'['
                     };
                     self.send(vec![27, prefix, if delta < 0. { b'A' } else { b'B' }], cx);
+                    !self.input_disabled
+                };
+                if sent && alternate && upwards && self.history_body_contains(event.position) {
+                    self.start_history_probe(cx);
                 }
             }
             cx.stop_propagation();
@@ -1886,9 +2439,9 @@ impl Render for TerminalSurface {
                 }
                 cx.notify();
             }))
-            .on_key_down(cx.listener(move |this, event, _, cx| {
+            .on_key_down(cx.listener(move |this, event, window, cx| {
                 if this.transport_generation == generation && !this.transport_suspended {
-                    this.handle_key(event, cx);
+                    this.handle_key(event, window, cx);
                 }
             }))
             .on_mouse_down(
@@ -1899,6 +2452,10 @@ impl Render for TerminalSurface {
                     }
                     if this.scrollbar_down(event, cx) {
                         return;
+                    }
+                    if this.session_history.is_some() && !this.history_body_contains(event.position)
+                    {
+                        this.history_keyboard_navigation = false;
                     }
                     let mods = event.modifiers;
                     let link_modifier = if cfg!(target_os = "macos") {
@@ -2058,7 +2615,8 @@ impl Render for TerminalSurface {
                                         });
                                         let reporting_hover = event.pressed_button.is_none()
                                             && this.modes.mouse_protocol == MouseProtocol::Any
-                                            && this.contains_position(event.position);
+                                            && this.contains_position(event.position)
+                                            && !this.history_covers(event.position);
                                         if reporting_drag || reporting_hover {
                                             this.report_mouse(
                                                 event.position,
@@ -2120,6 +2678,7 @@ impl Render for TerminalSurface {
                         * self.screen.as_ref().map_or(0, |screen| screen.rows) as f32)
                     .cursor(PointerStyle::Arrow),
             )
+            .children(self.render_session_history(cx))
             .when(can_drop_files, |element| {
                 // Paint the tint above the opaque terminal canvas.
                 element.child(

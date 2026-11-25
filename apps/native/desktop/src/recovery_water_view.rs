@@ -7,7 +7,7 @@ use matou_native_terminal::Theme;
 use std::{sync::Arc, time::Instant};
 
 impl RecoveryWater {
-    pub const TOP: Pixels = px(32.);
+    pub const TOP: Pixels = px(42.);
 
     /// Append after the title and body of the card's relative container.
     pub fn overlay(entity: Entity<Self>) -> Div {

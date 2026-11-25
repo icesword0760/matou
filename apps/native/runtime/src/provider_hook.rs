@@ -990,10 +990,6 @@ fn settings(url: &str, script: &Path) -> Result<Value> {
     Ok(json!({
         "hooks": hooks,
         "statusLine": { "type": "command", "command": command, "padding": 0 },
-        // Keep Claude Code on the primary terminal buffer so Ghostty scrollback,
-        // checkpoints, and restart recovery preserve conversation history even when
-        // the user enabled fullscreen TUI globally in ~/.claude/settings.json.
-        "tui": "default",
     }))
 }
 
