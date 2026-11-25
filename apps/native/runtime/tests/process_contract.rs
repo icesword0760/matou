@@ -4022,6 +4022,53 @@ fn permission_mode_result(child: &mut RuntimeChild, mode: &str) -> Result<serde_
     }
 }
 
+fn assert_fresh_permission_confirmed(child: &mut RuntimeChild, mode: &str) -> Result<()> {
+    use matou_native_runtime::host::RecoveryState;
+
+    let deadline = Instant::now() + TIMEOUT;
+    let mut restoring = false;
+    let mut ready = false;
+    loop {
+        match child.event(deadline, true)? {
+            Event::Recovery {
+                session_id, state, ..
+            } if session_id == child.session => match state {
+                RecoveryState::Restoring => restoring = true,
+                RecoveryState::Ready if restoring => ready = true,
+                _ => {}
+            },
+            Event::Graph(graph) => {
+                let receipt = graph["providerPermissionModeResults"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|result| {
+                        result["sessionId"] == child.session && result["permissionMode"] == mode
+                    });
+                if let Some(receipt) = receipt {
+                    assert!(receipt.get("error").is_none(), "{receipt}");
+                    assert!(
+                        ready,
+                        "permission switch did not return the terminal to Ready"
+                    );
+                    let card = graph["nodes"]
+                        .as_array()
+                        .context("session graph nodes")?
+                        .iter()
+                        .find(|node| node["sessionId"] == child.session)
+                        .context("permission switch card")?;
+                    assert_eq!(card["permissionMode"], mode);
+                    assert_eq!(card["providerRestoreState"], "none");
+                    assert_eq!(card["resumable"], false);
+                    assert!(card["historyProviderSessionId"].is_null());
+                    return Ok(());
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 fn post_permission_identity(settings_path: &Path, provider_id: &str, mode: &str) -> Result<()> {
     post_claude_identity(settings_path, provider_id, mode, "fixture-model")
 }
@@ -5850,6 +5897,89 @@ done
         "substitute CLI pid={pid} run={} reached A(messages) and B(count_tokens/messages) with the same upstream model and distinct key checks; host replied during SSE; card close cancelled upstream and refused old URL",
         run.id
     );
+    Ok(())
+}
+
+#[test]
+fn antigravity_fresh_permission_restart_confirms_without_a_conversation() -> Result<()> {
+    use matou_native_core::sessions::{antigravity_binding, list_runs};
+
+    let temp = tempfile::tempdir()?;
+    let root = temp.path();
+    let stub = root.join("agy-fixture");
+    fs::write(
+        &stub,
+        r#"#!/bin/sh
+set -eu
+printf '%s\n' "$@" > "$AGY_FIXTURE_ROOT/argv"
+case " $* " in *' --mode plan '*) exit 23;; esac
+printf 'ANTIGRAVITY FIXTURE READY\n'
+while IFS= read -r line; do printf 'INPUT <%s>\n' "$line"; done
+"#,
+    )?;
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o700))?;
+    let mut child = RuntimeChild::spawn_configured_with(
+        root,
+        &format!("PROMPT='{PROMPT} '\nagy() {{ :; }}\n"),
+        Path::new("/bin/zsh"),
+        None,
+        |command| {
+            command
+                .env("MATOU_ANTIGRAVITY_COMMAND", &stub)
+                .env("MATOU_ANTIGRAVITY_HOME", root.join("catalog"))
+                .env("MATOU_PERMISSION_STARTUP_WINDOW_MS", "600")
+                .env("AGY_FIXTURE_ROOT", root);
+        },
+    )?;
+    child.hello()?;
+    child.input("agy")?;
+    child.frame(|_, screen, _| screen_has_line(screen, "ANTIGRAVITY FIXTURE READY"))?;
+    let db = Connection::open(child.data.join("matou.sqlite"))?;
+    let old = list_runs(&db, &child.session)?
+        .pop()
+        .context("initial run")?;
+    assert_eq!(old.profile, "antigravity");
+    assert!(antigravity_binding(&db, &child.session)?.is_none());
+
+    let mode = "bypassPermissions";
+    child.send(Command::SetProviderPermissionMode {
+        session_id: child.session.clone(),
+        mode: mode.into(),
+    })?;
+    assert_fresh_permission_confirmed(&mut child, mode)?;
+    let args = fs::read_to_string(root.join("argv"))?;
+    assert!(
+        args.lines()
+            .any(|arg| arg == "--dangerously-skip-permissions")
+    );
+    assert!(!args.lines().any(|arg| arg == "--conversation"));
+    let runs = list_runs(&db, &child.session)?;
+    let new = runs.last().context("replacement run")?;
+    assert_eq!(new.ordinal, old.ordinal + 1);
+    assert_eq!(new.profile, "antigravity");
+    assert_eq!(new.status, "running");
+    assert_eq!(runs[runs.len() - 2].status, "exited");
+    assert!(antigravity_binding(&db, &child.session)?.is_none());
+    child.input("after-switch")?;
+    child.frame(|_, screen, _| screen_has_line(screen, "INPUT <after-switch>"))?;
+
+    child.send(Command::SetProviderPermissionMode {
+        session_id: child.session.clone(),
+        mode: "plan".into(),
+    })?;
+    let failure = permission_mode_result(&mut child, "plan")?;
+    assert!(
+        failure["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("process exited with code 23")),
+        "{failure}"
+    );
+    assert!(antigravity_binding(&db, &child.session)?.is_none());
+
+    child.send(Command::Shutdown)?;
+    child.closed()?;
+    let (exit, stderr) = child.wait()?;
+    ensure!(exit.success(), "{stderr}");
     Ok(())
 }
 

@@ -2638,15 +2638,26 @@ impl ShellOwner {
             self.claude_binding(session_id)?
         };
         let Some(binding) = binding.filter(|binding| binding.resumable) else {
-            ensure!(!codex && !antigravity, "{ACTIVE_PERMISSION_SESSION}");
-            ensure!(
-                !shell.is_some_and(|shell| shell.is_shell),
-                "{ACTIVE_PERMISSION_SESSION}"
-            );
-            ensure!(
-                self.pending_claude_fork(session_id)?.is_none(),
-                "Card has an unconfirmed fork"
-            );
+            if codex || antigravity {
+                let shell = shell.context(ACTIVE_PERMISSION_SESSION)?;
+                ensure!(
+                    !shell.is_shell && !shell.ended && !shell.worker.is_finished(),
+                    "{ACTIVE_PERMISSION_SESSION}"
+                );
+            } else {
+                ensure!(
+                    !shell.is_some_and(|shell| shell.is_shell),
+                    "{ACTIVE_PERMISSION_SESSION}"
+                );
+            }
+            let pending_fork = if codex {
+                self.pending_codex_fork(session_id)?.is_some()
+            } else if antigravity {
+                self.pending_antigravity_fork(session_id)?.is_some()
+            } else {
+                self.pending_claude_fork(session_id)?.is_some()
+            };
+            ensure!(!pending_fork, "Card has an unconfirmed fork");
             return Ok(None);
         };
         let shell = shell.context(ACTIVE_PERMISSION_SESSION)?;
@@ -3364,32 +3375,55 @@ impl ShellOwner {
         plan: antigravity_launch::LaunchPlan,
         permission: AntigravityPermission,
     ) -> Result<String> {
-        let binding = self
-            .antigravity_binding(session_id)?
-            .context(ACTIVE_PERMISSION_SESSION)?;
+        let binding = self.antigravity_binding(session_id)?;
+        let awaiting_resume = matches!(&plan.mode, AntigravityMode::Resume(_)) && binding.is_some();
         let run_id = match self
             .launch_antigravity(session_id, terminal, data_root, plan, permission, false)
         {
             Ok(run_id) => run_id,
             Err(error) => {
-                self.change_antigravity_restore(
-                    session_id,
-                    ClaudeRestore::Fail {
-                        binding_id: &binding.id,
-                        error: "Antigravity permission restart could not start",
-                    },
-                )?;
+                if let Some(binding) = binding {
+                    self.change_antigravity_restore(
+                        session_id,
+                        ClaudeRestore::Fail {
+                            binding_id: &binding.id,
+                            error: "Antigravity permission restart could not start",
+                        },
+                    )?;
+                }
                 return Err(error);
             }
         };
-        self.shells
-            .get_mut(session_id)
-            .unwrap()
-            .hook
-            .as_mut()
-            .unwrap()
-            .deadline = Some(Instant::now() + IDENTITY_TIMEOUT);
+        if awaiting_resume {
+            self.shells
+                .get_mut(session_id)
+                .unwrap()
+                .hook
+                .as_mut()
+                .unwrap()
+                .deadline = Some(Instant::now() + IDENTITY_TIMEOUT);
+        }
         Ok(run_id)
+    }
+
+    pub(crate) fn fresh_provider_permission(&self, session_id: &str) -> Option<&str> {
+        if !self.environment_worker_active(session_id) {
+            return None;
+        }
+        let hook = self.shells.get(session_id)?.hook.as_ref()?;
+        let fresh = match hook.profile {
+            LaunchProfile::Codex => hook.codex_resume.is_none() && hook.fork.is_none(),
+            LaunchProfile::Antigravity => hook
+                .antigravity
+                .as_ref()
+                .is_some_and(|agy| agy.binding.is_none() && !agy.fork_pending),
+            _ => false,
+        };
+        if fresh {
+            hook.launch_metadata["permissionMode"].as_str()
+        } else {
+            None
+        }
     }
 
     fn screen_recovery_options(&self, session_id: &str) -> Result<ScreenRecoveryOptions> {

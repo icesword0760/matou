@@ -9500,22 +9500,15 @@ impl Workspace {
                 "终端存储异常，请先恢复或结束当前会话",
                 "Terminal storage failed. Recover or end the current session first.",
             ))
-        } else if self.recovery_blocked(id)
-            || (node["currentMode"] == "codex"
-                && matches!(node["workStatus"].as_str(), Some("starting" | "exited")))
-            || generation != self.runtime_generation
-            || phase != ConnectionPhase::Ready
-            || matches!(
-                Self::provider_restore_state(node),
-                Some("restoring" | "failed")
-            )
-        {
-            Some(self.locale.text(
-                "当前终端需要先完成恢复",
-                "This terminal must finish recovering first.",
-            ))
         } else {
-            self.card_mutation_blocked_reason(id, node)
+            permission_recovery_blocked_reason(
+                node,
+                self.recovery_blocked(id)
+                    || generation != self.runtime_generation
+                    || phase != ConnectionPhase::Ready,
+                self.locale,
+            )
+            .or_else(|| self.card_mutation_blocked_reason(id, node))
         }
     }
 
@@ -9673,6 +9666,7 @@ impl Workspace {
             let live = self.live_agent_hud(&session_id);
             let resumable = live
                 .and_then(|hud| hud["resumable"].as_bool())
+                .or_else(|| node["resumable"].as_bool())
                 .unwrap_or_else(|| {
                     node["currentMode"] == "codex"
                         || node["canFork"] == true
@@ -21094,6 +21088,49 @@ struct FooterFields<'a> {
 
 fn footer_shows_account(mode: &str) -> bool {
     matches!(mode, "claude-code" | "shell")
+}
+
+fn permission_recovery_blocked_reason(
+    node: &Value,
+    recovery_blocked: bool,
+    locale: InterfaceLocale,
+) -> Option<&'static str> {
+    (recovery_blocked
+        || (node["currentMode"] == "codex" && node["workStatus"] == "exited")
+        || Workspace::provider_restore_state(node).is_some())
+    .then_some(locale.text(
+        "当前终端需要先完成恢复",
+        "This terminal must finish recovering first.",
+    ))
+}
+
+#[cfg(test)]
+#[::core::prelude::v1::test]
+fn codex_permission_availability_tracks_terminal_recovery() {
+    let mut node = serde_json::json!({"currentMode": "codex", "workStatus": "starting"});
+    let locale = InterfaceLocale::English;
+    let blocked = Some("This terminal must finish recovering first.");
+    assert_eq!(
+        permission_recovery_blocked_reason(&node, false, locale),
+        None
+    );
+    assert_eq!(
+        permission_recovery_blocked_reason(&node, true, locale),
+        blocked
+    );
+    node["workStatus"] = "exited".into();
+    assert_eq!(
+        permission_recovery_blocked_reason(&node, false, locale),
+        blocked
+    );
+    node["workStatus"] = "starting".into();
+    for state in ["restoring", "failed"] {
+        node["providerRestoreState"] = state.into();
+        assert_eq!(
+            permission_recovery_blocked_reason(&node, false, locale),
+            blocked
+        );
+    }
 }
 
 fn permission_provider(node: &Value) -> &'static str {
