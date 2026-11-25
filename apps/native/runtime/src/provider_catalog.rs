@@ -392,7 +392,7 @@ fn recent_replies_from_transcript(
     updated_label: &mut Statement<'_>,
     skipped: &mut Skipped,
 ) -> io::Result<Option<(RecentReplies, bool)>> {
-    let mut cwd = None;
+    let mut effective_origin = None;
     let mut updated_at = 0;
     let mut title = TranscriptTitle::default();
     let mut line = Vec::new();
@@ -400,14 +400,7 @@ fn recent_replies_from_transcript(
     let mut dialogue = VecDeque::with_capacity(MAX_RECENT_REPLIES);
     let mut fallback = VecDeque::with_capacity(MAX_RECENT_REPLIES);
     while let Some(row) = read_row(&mut reader, &mut line, skipped, false)? {
-        if cwd.is_none()
-            && let Some(origin) = nonempty(&row["cwd"])
-        {
-            if !matches_workspace(origin, workspace)? {
-                return Ok(None);
-            }
-            cwd = Some(origin.to_owned());
-        }
+        observe_workspace_origin(&mut effective_origin, &row);
         let event = preview_event(&row["message"]);
         title.observe(
             &row,
@@ -422,7 +415,12 @@ fn recent_replies_from_transcript(
         }
         push_recent(&mut fallback, total, &event, date, "other");
     }
-    let Some(cwd) = cwd else { return Ok(None) };
+    let Some(cwd) = effective_origin else {
+        return Ok(None);
+    };
+    if !matches_workspace(&cwd, workspace)? {
+        return Ok(None);
+    }
     let first = total.saturating_sub(DEFAULT_EVENT_PAGE_LIMIT as usize);
     dialogue.retain(|(index, _)| *index > first);
     fallback.retain(|(index, _)| *index > first);
@@ -501,18 +499,13 @@ fn preview_page(
     timestamp: &mut Statement<'_>,
     skipped: &mut Skipped,
 ) -> io::Result<Option<SessionDetail>> {
-    let mut origin_found = false;
+    let mut effective_origin = None;
     let mut line = Vec::new();
     let mut total = 0;
     let mut events = VecDeque::with_capacity(limit);
     let mut last_before_start = None;
     while let Some(row) = read_row(&mut reader, &mut line, skipped, false)? {
-        if !origin_found && let Some(origin) = nonempty(&row["cwd"]) {
-            if !matches_workspace(origin, workspace)? {
-                return Ok(None);
-            }
-            origin_found = true;
-        }
+        observe_workspace_origin(&mut effective_origin, &row);
         let Some(mut event) = preview_event(&row["message"]) else {
             continue;
         };
@@ -534,8 +527,10 @@ fn preview_page(
         events.push_back(event);
     }
     // A file without an origin can only return an empty page.
-    if !origin_found && total > 0 {
-        return Ok(None);
+    match effective_origin {
+        Some(origin) if matches_workspace(&origin, workspace)? => {}
+        None if total == 0 => {}
+        _ => return Ok(None),
     }
     if let Some(last) = last_before_start {
         events.push_back(last);
@@ -932,6 +927,20 @@ fn read_row(
     }
 }
 
+fn observe_workspace_origin(effective_origin: &mut Option<String>, row: &Value) {
+    // The first cwd establishes the origin. Only session-level migrations can update it.
+    let migrated = match row["type"].as_str() {
+        Some("relocated") => nonempty(&row["relocatedCwd"]),
+        Some("worktree-state") => nonempty(&row["worktreeSession"]["worktreePath"]),
+        _ => None,
+    };
+    if let Some(path) = migrated {
+        *effective_origin = Some(path.to_owned());
+    } else if effective_origin.is_none() {
+        *effective_origin = nonempty(&row["cwd"]).map(str::to_owned);
+    }
+}
+
 fn matches_workspace(origin: &str, workspace: &Path) -> io::Result<bool> {
     let origin = absolute(Path::new(origin))?;
     Ok(fs::canonicalize(&origin).unwrap_or(origin) == workspace)
@@ -962,7 +971,7 @@ fn index(
 ) -> io::Result<Option<CatalogEntry>> {
     let mut reader = BufReader::new(file);
     let mut line = Vec::new();
-    let mut origin_found = false;
+    let mut effective_origin = None;
     let mut title = TranscriptTitle::default();
     let mut entry = CatalogEntry {
         provider_session_id: id.to_owned(),
@@ -974,13 +983,7 @@ fn index(
         loaded_by: None,
     };
     while let Some(row) = read_row(&mut reader, &mut line, skipped, true)? {
-        // The first cwd is the conversation's origin even after later cd commands.
-        if !origin_found && let Some(origin) = nonempty(&row["cwd"]) {
-            if !matches_workspace(origin, workspace)? {
-                return Ok(None);
-            }
-            origin_found = true;
-        }
+        observe_workspace_origin(&mut effective_origin, &row);
         if let Some(millis) = update_millis(&row["timestamp"], timestamp) {
             entry.updated_at = entry.updated_at.max(millis);
         }
@@ -1005,10 +1008,16 @@ fn index(
         }
         title.observe(&row, has_text && !tool && message["role"] == "user");
     }
+    let Some(origin) = effective_origin else {
+        return Ok(None);
+    };
+    if !matches_workspace(&origin, workspace)? || entry.message_count == 0 {
+        return Ok(None);
+    }
     entry.title = title
         .into_title()
         .unwrap_or_else(|| "未命名 Claude 会话".into());
-    Ok((origin_found && entry.message_count > 0).then_some(entry))
+    Ok(Some(entry))
 }
 
 fn nonempty(value: &Value) -> Option<&str> {
@@ -1379,6 +1388,117 @@ mod tests {
             )
             .unwrap()
             .is_empty()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn relocated_worktree_keeps_history_before_compaction() -> anyhow::Result<()> {
+        let root = tempfile::tempdir()?;
+        let parent = root.path().join("project");
+        let worktree = parent.join(".claude/worktrees/active");
+        fs::create_dir_all(&worktree)?;
+        let projects = root.path().join("projects");
+        let bucket = projects.join(encode(&worktree));
+        fs::create_dir_all(&bucket)?;
+        let mut rows = vec![transcript(&parent, json!(1))];
+        rows.resize(
+            35_340,
+            json!({"cwd": parent, "timestamp": 2, "message": {
+                "role": "assistant", "content": "Inherited reply"
+            }}),
+        );
+        rows.extend([
+            json!({"type": "system", "subtype": "compact_boundary"}),
+            json!({"type": "relocated", "relocatedCwd": worktree, "sessionId": "forked"}),
+            json!({"cwd": worktree, "timestamp": 3, "message": {
+                "role": "assistant", "content": "Worktree reply"
+            }}),
+        ]);
+        write_rows(&bucket.join("forked.jsonl"), &rows)?;
+
+        let cwd = worktree.to_str().unwrap();
+        let entries = read(Some(&projects), cwd, None).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].provider_session_id, "forked");
+        assert_eq!(entries[0].title, "First question");
+        assert_eq!(entries[0].message_count, 35_341);
+
+        let first = detail(Some(&projects), cwd, "forked", Some(1), Some(2)).unwrap();
+        assert_eq!(first.page.total, 35_341);
+        assert!(first.page.has_later);
+        assert_eq!(first.events[0].text, "First   question");
+        assert_eq!(first.events[1].text, "Inherited reply");
+        let latest = detail(Some(&projects), cwd, "forked", None, Some(2)).unwrap();
+        assert!(latest.page.has_earlier);
+        assert_eq!(latest.events[0].text, "Inherited reply");
+        assert_eq!(latest.events[1].text, "Worktree reply");
+
+        let replies = recent_replies(Some(&projects), cwd, "forked").unwrap();
+        assert_eq!(replies.cwd, cwd);
+        assert!(replies.events.iter().map(|event| event.text.as_str()).eq([
+            "Inherited reply",
+            "Inherited reply",
+            "Inherited reply",
+            "Worktree reply"
+        ]));
+        Ok(())
+    }
+
+    #[test]
+    fn final_worktree_state_moves_history_before_any_new_message() -> anyhow::Result<()> {
+        let root = tempfile::tempdir()?;
+        let parent = root.path().join("project");
+        let previous = parent.join(".claude/worktrees/previous");
+        let worktree = parent.join(".claude/worktrees/active");
+        fs::create_dir_all(&previous)?;
+        fs::create_dir_all(&worktree)?;
+        let projects = root.path().join("projects");
+        let current_bucket = projects.join(encode(&worktree));
+        let previous_bucket = projects.join(encode(&previous));
+        fs::create_dir_all(&current_bucket)?;
+        fs::create_dir_all(&previous_bucket)?;
+        let file = "moved.jsonl";
+        write_rows(
+            &current_bucket.join(file),
+            &[
+                transcript(&parent, json!(1)),
+                json!({"type": "relocated", "relocatedCwd": previous, "sessionId": "moved"}),
+                json!({"cwd": previous, "timestamp": 2, "message": {
+                    "role": "assistant", "content": "Previous worktree reply"
+                }}),
+                json!({"type": "worktree-state", "worktreeSession": {"worktreePath": worktree}}),
+            ],
+        )?;
+        fs::copy(current_bucket.join(file), previous_bucket.join(file))?;
+
+        let cwd = worktree.to_str().unwrap();
+        let entries = read(Some(&projects), cwd, Some("moved")).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].message_count, 2);
+        let history = detail(Some(&projects), cwd, "moved", None, None).unwrap();
+        assert_eq!(history.page.total, 2);
+        assert_eq!(history.events[0].text, "First   question");
+        assert_eq!(history.events[1].text, "Previous worktree reply");
+        let replies = recent_replies(Some(&projects), cwd, "moved").unwrap();
+        assert_eq!(replies.cwd, cwd);
+        assert_eq!(replies.events.len(), 2);
+        assert_eq!(replies.events[0].text, "First question");
+        assert_eq!(replies.events[1].text, "Previous worktree reply");
+
+        let previous = previous.to_str().unwrap();
+        assert!(
+            read(Some(&projects), previous, Some("moved"))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            detail(Some(&projects), previous, "moved", None, None).unwrap_err(),
+            SESSION_NOT_FOUND
+        );
+        assert_eq!(
+            recent_replies(Some(&projects), previous, "moved").unwrap_err(),
+            SESSION_NOT_FOUND
         );
         Ok(())
     }
