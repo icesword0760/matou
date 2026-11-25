@@ -2443,9 +2443,12 @@ impl Workspace {
     pub(super) fn egress_trigger_for(
         &self,
         session: Option<&str>,
+        compact: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
+        use matou_native_desktop::egress_panel::EgressTone;
+
         let bounds = self.egress_anchor(window, cx);
         let mut view = self.wiring.egress.chip(
             true,
@@ -2457,14 +2460,25 @@ impl Workspace {
             && self.wiring.egress_status.state == EgressState::Unknown
         {
             view.label = self.locale.text("出口", "Exit").into();
-            view.tone = matou_native_desktop::egress_panel::EgressTone::Neutral;
+            view.tone = EgressTone::Neutral;
         }
-        let label = view
+        let label = view.as_ref().map(|view| {
+            let region = if view.tone == EgressTone::Ok {
+                self.wiring
+                    .egress_status
+                    .footer_region(session.unwrap_or_default(), self.locale)
+            } else {
+                None
+            };
+            footer_text("egress", region.unwrap_or_else(|| view.label.clone()))
+        });
+        let tooltip = view
             .as_ref()
-            .map(|view| footer_text("egress", view.label.clone()));
+            .map(|view| SharedString::from(view.accessible_label.clone()));
         div()
             .id("footer-egress")
             .flex_none()
+            .when(compact, |element| element.max_w(px(76.)))
             .relative()
             .capture_any_mouse_down(preserve_overlay_mouse_focus)
             .children(footer_bounds_probe("egress"))
@@ -2476,6 +2490,9 @@ impl Workspace {
             ))
             .child(measure_trigger(bounds))
             .children(self.egress_probe())
+            .when_some(tooltip, |element, tooltip| {
+                element.tooltip(move |_, cx| cx.new(|_| CardTooltip(tooltip.clone())).into())
+            })
     }
 
     fn egress_probe(&self) -> Option<Canvas<()>> {
@@ -3500,7 +3517,7 @@ mod egress_tests {
     use super::{EgressPanelState, InterfaceLocale, project_egress};
 
     #[test]
-    fn runtime_session_families_show_the_egress_country_in_the_footer() {
+    fn runtime_session_families_supply_the_flag_and_full_egress_copy() {
         let families = ["anthropic", "openai", "google"].map(|family| {
             serde_json::json!({
                 "family": family, "state": "ok", "exit": {"ip": "203.0.113.1", "country": "US"},
@@ -3516,12 +3533,16 @@ mod egress_tests {
         .unwrap();
         let panel = EgressPanelState::default();
         for session in ["claude-card", "codex-card", "agy-card"] {
+            let chip = panel
+                .chip(true, Some(&status), session, InterfaceLocale::Chinese)
+                .unwrap();
+            assert_eq!(chip.label, "🇺🇸 美国 · 出口正常");
+            assert_eq!(chip.accessible_label, chip.label);
             assert_eq!(
-                panel
-                    .chip(true, Some(&status), session, InterfaceLocale::Chinese)
-                    .unwrap()
-                    .label,
-                "🇺🇸 美国 · 出口正常"
+                status
+                    .footer_region(session, InterfaceLocale::Chinese)
+                    .as_deref(),
+                Some("🇺🇸")
             );
         }
     }

@@ -84,8 +84,8 @@ mod workspace {
         card_context_menu::CardMenuAction,
         detach_window::probe_detached_header,
         egress_panel::{
-            EgressFamily, EgressFamilyStatus, EgressState, EgressStatus, EgressTransition,
-            EgressViolation,
+            EgressExit, EgressFamily, EgressFamilyStatus, EgressState, EgressStatus,
+            EgressTransition, EgressViolation,
         },
         update_popover::{
             UpdateAction, UpdateInstallMode, UpdateProgress, UpdateRelease, UpdateStatus,
@@ -371,6 +371,14 @@ mod workspace {
         cx: &mut AsyncApp,
         width: f32,
     ) -> (Handle, crate::runtime_bridge::ProbeReceiver) {
+        open_probe_window(cx, width, None)
+    }
+
+    fn open_probe_window(
+        cx: &mut AsyncApp,
+        width: f32,
+        title: Option<&str>,
+    ) -> (Handle, crate::runtime_bridge::ProbeReceiver) {
         cx.update(|cx| {
             let (commands, sink) = crate::runtime_bridge::probe_channel();
             let (_, events) = async_channel::unbounded();
@@ -378,8 +386,8 @@ mod workspace {
             let handle = cx
                 .open_window(
                     WindowOptions {
-                        show: false,
-                        focus: false,
+                        show: title.is_some(),
+                        focus: title.is_some(),
                         window_bounds: Some(WindowBounds::Windowed(bounds)),
                         ..Default::default()
                     },
@@ -387,6 +395,11 @@ mod workspace {
                 )
                 .unwrap();
             handle.update(cx, install_fixture).unwrap();
+            if let Some(title) = title {
+                handle
+                    .update(cx, |_, window, _| window.set_window_title(title))
+                    .unwrap();
+            }
             (handle, sink)
         })
         .unwrap()
@@ -2682,8 +2695,14 @@ mod workspace {
         window: AnyWindowHandle,
         cx: &mut AsyncApp,
     ) -> HashMap<&'static str, Bounds<Pixels>> {
+        capture_hud(|| {
+            draw(window, cx);
+        })
+    }
+
+    fn capture_hud(draw: impl FnOnce()) -> HashMap<&'static str, Bounds<Pixels>> {
         FOOTER_READINGS.with_borrow_mut(|slot| *slot = Some(FooterReadings::default()));
-        draw(window, cx);
+        draw();
         FOOTER_READINGS.with_borrow_mut(|slot| {
             let readings = slot.take().unwrap();
             std::mem::take(&mut *readings.bounds.borrow_mut())
@@ -2701,6 +2720,31 @@ mod workspace {
                 .remove(key)
                 .map(|(text, _)| text.to_string())
         })
+    }
+
+    fn assert_full_hud_text(
+        window: AnyWindowHandle,
+        cx: &mut AsyncApp,
+        key: &'static str,
+        expected: &str,
+    ) {
+        FOOTER_READINGS.with_borrow_mut(|slot| *slot = Some(FooterReadings::default()));
+        draw(window, cx);
+        FOOTER_READINGS.with_borrow_mut(|slot| {
+            let readings = slot.take().unwrap();
+            let labels = readings.text.borrow();
+            let (text, geometry) = &labels[key];
+            assert_eq!(text.as_ref(), expected, "{key}");
+            let geometry = geometry.borrow();
+            let geometry = geometry
+                .as_ref()
+                .unwrap_or_else(|| panic!("{key} did not paint"));
+            assert_eq!(geometry.layout.len, expected.len(), "{key} was truncated");
+            assert!(
+                geometry.layout.width <= geometry.bounds.size.width + px(0.5),
+                "{key} overflowed"
+            );
+        });
     }
 
     async fn wait_for_hud_element(
@@ -3019,11 +3063,11 @@ mod workspace {
                 cx.notify();
             })
             .unwrap();
-        wait_for_hud_element(window.into(), cx, "quota").await;
-        assert_eq!(hud_text(window.into(), cx, "quota").as_deref(), Some("—"));
+        assert!(!draw_hud(window.into(), cx).contains_key("quota"));
         let live = json!({
             "model":"Long full model name","contextWindowSize":200000,"permissionMode":"ask","resumable":true,
-            "usageWindows":[{"id":"current","label":"Current model","usedPercent":91,"resetText":"12:00"}],
+            "usageWindows":[{"id":"five","label":"5h","usedPercent":91,"resetText":"12:00"},
+                {"id":"week","label":"Weekly","usedPercent":65}],
             "allUsageWindows":[{"id":"group","label":"All models","usedPercent":77,"resetText":"13:00"}],
             "runningTools":[{"id":"read","name":"Read","target":"notes.md"}],
             "toolCounts":[{"name":"Find","count":2}],
@@ -3070,16 +3114,12 @@ mod workspace {
             "permission",
             "name",
             "context",
-            "mcps",
-            "tools",
             "agents",
-            "hooks",
             "quota",
-            "mcp-errors",
-            "todos",
             "git",
             "environment",
             "egress",
+            "stats",
         ] {
             assert!(
                 bounds.contains_key(key),
@@ -3087,6 +3127,40 @@ mod workspace {
             );
         }
         assert!(!bounds.contains_key("account"));
+        for key in ["mcps", "tools", "hooks", "todos", "mcp-errors"] {
+            assert!(
+                hud_text(window.into(), cx, key).is_none(),
+                "{key} stayed in the footer"
+            );
+        }
+        assert_eq!(
+            hud_text(window.into(), cx, "quota-first").as_deref(),
+            Some("5h")
+        );
+        assert_eq!(
+            hud_text(window.into(), cx, "quota-second").as_deref(),
+            Some("Weekly")
+        );
+        click(
+            window.into(),
+            cx,
+            MouseButton::Left,
+            bounds["stats"].center(),
+        );
+        assert!(draw_hud(window.into(), cx).contains_key("footer-stats-menu"));
+        for (key, text) in [
+            ("mcps", "2 MCPs"),
+            ("tools", "3 Tools"),
+            ("hooks", "1 hooks"),
+            ("todos", "▸ Check results"),
+            ("todo-count", "(0/1)"),
+            ("mcp-errors", "⚠ server offline"),
+            ("mcp-error-count", "1"),
+        ] {
+            assert_eq!(hud_text(window.into(), cx, key).as_deref(), Some(text));
+        }
+        press(window, cx, "escape");
+        assert!(!draw_hud(window.into(), cx).contains_key("footer-stats-menu"));
         window
             .update(cx, |view, _, _| {
                 assert_eq!(view.permission_chip().unwrap().mode, PermissionMode::Ask);
@@ -3591,7 +3665,9 @@ mod workspace {
         wait_for_hud_element(child, cx, "permission").await;
         let detached = draw_hud(child, cx);
         assert!(detached.contains_key("name"));
-        assert!(detached.contains_key("tools"));
+        assert!(detached.contains_key("stats"));
+        assert!(detached.contains_key("quota"));
+        assert!(detached.contains_key("agents"));
         assert!(detached.contains_key("git"));
         assert!(detached.contains_key("environment"));
         assert!(detached.contains_key("egress"));
@@ -3614,18 +3690,442 @@ mod workspace {
         );
     }
 
+    const FOOTER_MODES: [&str; 3] = ["claude-code", "codex", "antigravity"];
+
+    fn load_footer_fixture(
+        window: Handle,
+        cx: &mut AsyncApp,
+        sink: &crate::runtime_bridge::ProbeReceiver,
+        mode: &str,
+        root: &std::path::Path,
+        agent_count: usize,
+        quota_count: usize,
+        with_stats: bool,
+        cache_remaining_sec: u64,
+    ) {
+        use matou_native_runtime::claude_accounts::{
+            AccountUsage, ClaudeAccount, ClaudeAccountsState, UsageWindow,
+        };
+
+        let (model, permission, percent, five_hour, weekly, family) = match mode {
+            "claude-code" => (
+                "matou-role/opus",
+                "bypassPermissions",
+                26,
+                82,
+                41,
+                EgressFamily::Anthropic,
+            ),
+            "codex" => (
+                "gpt-5.4-codex",
+                "acceptEdits",
+                41,
+                63,
+                28,
+                EgressFamily::OpenAi,
+            ),
+            "antigravity" => ("Gemini 3 Pro", "auto", 18, 72, 55, EgressFamily::Google),
+            _ => unreachable!(),
+        };
+        let mut windows = vec![
+            json!({"label":"5h","usedPercent":five_hour,"resetText":"2h"}),
+            json!({"label":"Weekly","usedPercent":weekly,"resetText":"4d"}),
+        ];
+        windows.truncate(quota_count);
+        let mut hud = json!({
+            "model":model, "permissionMode":permission, "contextPercent":percent,
+            "contextUsedTokens":percent * 2000, "contextWindowSize":200000, "resumable":true,
+            "usageWindows":windows, "gitBranch":"main", "gitDirty":true,
+            "agents":(0..agent_count).map(|n| json!({"name":format!("Agent {}", n + 1), "status":"running"})).collect::<Vec<_>>(),
+            "contextGuard":{"cache":{"timing":"precise","remainingSec":cache_remaining_sec}},
+        });
+        if with_stats {
+            hud["configCounts"] = json!({"mcps":2,"hooks":1,"mcpServerNames":["files","notes"]});
+            hud["mcpErrors"] = json!(["Server offline"]);
+            hud["hookNames"] = json!(["PostToolUse"]);
+            hud["todos"] = json!([{"content":"Check results","status":"in_progress"}]);
+            hud["toolCounts"] = json!(
+                (1..=8)
+                    .map(|n| json!({"name":format!("Tool {n}"),"count":n}))
+                    .collect::<Vec<_>>()
+            );
+            if mode != "claude-code" {
+                hud["allUsageWindows"] =
+                    json!([{"label":"All models","usedPercent":77,"resetText":"13:00"}]);
+            }
+        }
+        if mode == "claude-code" {
+            hud["defaultAccountUsage"] = json!(true);
+            hud["usageWindows"] = Value::Null;
+        }
+        window
+            .update(cx, |view, window, cx| {
+                view.dismiss_footer_popover(window, cx);
+                let node = &mut view.graph["nodes"][0];
+                node["currentMode"] = json!(mode);
+                node["permissionMode"] = json!(permission);
+                node["cwd"] = json!(root);
+                node["environment"] = json!({"kind":"local","state":"ready","path":root});
+                node["git"] = json!({"state":"ready","branch":"main","dirty":true});
+                let mut status = frozen_status();
+                status.state = EgressState::Ok;
+                status.families = vec![EgressFamilyStatus {
+                    family,
+                    state: EgressState::Ok,
+                    exit: Some(EgressExit {
+                        ip: "203.0.113.1".into(),
+                        country: "US".into(),
+                    }),
+                    baseline: None,
+                    violation: None,
+                    overridden: false,
+                    frozen_session_ids: vec![],
+                }];
+                status.session_families.insert(A.into(), family);
+                status.last_transition = None;
+                view.set_egress_status(status, window, cx);
+                view.refresh_terminals(window, cx);
+                view.refresh_live_wiring(cx);
+                cx.notify();
+            })
+            .unwrap();
+        let mut hud_request = None;
+        for command in std::iter::from_fn(|| sink.try_recv().ok()) {
+            match command {
+                Command::GetAgentHud {
+                    request_id,
+                    session_id,
+                } if session_id == A => {
+                    hud_request = Some(request_id);
+                }
+                Command::GetClaudeAccounts { request_id } if mode == "claude-code" => {
+                    let state = ClaudeAccountsState {
+                        current_id: Some("preview".into()),
+                        accounts: vec![ClaudeAccount {
+                            id: "preview".into(),
+                            name: "gmail".into(),
+                            email: "fixture@example.invalid".into(),
+                            needs_login: false,
+                            usage: Some(AccountUsage {
+                                checked_at: 1,
+                                stale: false,
+                                five_hour: (quota_count > 0).then_some(UsageWindow {
+                                    used: f64::from(five_hour),
+                                    resets_at: None,
+                                }),
+                                weekly: (quota_count > 1).then_some(UsageWindow {
+                                    used: f64::from(weekly),
+                                    resets_at: None,
+                                }),
+                            }),
+                        }],
+                        ..Default::default()
+                    };
+                    window
+                        .update(cx, |view, window, cx| {
+                            view.receive_wiring_reply(
+                                "claudeAccountsResult",
+                                request_id,
+                                &json!({"result":state}),
+                                window,
+                                cx,
+                            );
+                        })
+                        .unwrap();
+                }
+                _ => {}
+            }
+        }
+        window
+            .update(cx, |view, window, cx| {
+                view.receive_wiring_reply(
+                    "agentHudResult",
+                    hud_request.unwrap(),
+                    &json!({"result":{"hud":hud}}),
+                    window,
+                    cx,
+                );
+            })
+            .unwrap();
+    }
+
+    fn assert_footer_cache_two_windows(bounds: &HashMap<&'static str, Bounds<Pixels>>) {
+        assert!(bounds["quota-first"].right() < bounds["quota-second"].left());
+        assert!(bounds["quota-second"].right() <= bounds["cache"].left());
+        for key in ["quota-second", "cache"] {
+            assert!(
+                bounds[key].right() <= bounds["primary"].right(),
+                "{key} {:?} is clipped by primary {:?}",
+                bounds[key],
+                bounds["primary"]
+            );
+        }
+        for key in ["agents", "git", "environment", "egress"] {
+            assert!(bounds.contains_key(key), "missing {key} in compact footer");
+        }
+        assert!(!bounds.contains_key("name") && !bounds.contains_key("context"));
+    }
+
+    fn verify_footer_widths(cx: &mut AsyncApp, root: &std::path::Path) {
+        for (mode, model, agent_count, five_hour, weekly) in [
+            ("claude-code", "matou-role/opus", 2, "82%", "41%"),
+            ("codex", "gpt-5.4-codex", 1, "63%", "28%"),
+            ("antigravity", "Gemini 3 Pro", 3, "72%", "55%"),
+        ] {
+            for width in [970., 720.] {
+                let (window, sink) = open_probe_at(cx, width);
+                let handle = window.into();
+                load_footer_fixture(window, cx, &sink, mode, root, agent_count, 2, true, 1018);
+                draw_hud(handle, cx);
+                let bounds = draw_hud(handle, cx);
+                let mut row = vec![
+                    "label",
+                    "permission",
+                    "agents",
+                    "quota",
+                    "git",
+                    "environment",
+                    "egress",
+                ];
+                if mode == "claude-code" {
+                    row.push("account");
+                }
+                row.push("stats");
+                for cells in row.windows(2) {
+                    let [left, right] = [bounds[cells[0]], bounds[cells[1]]];
+                    assert!(
+                        left.right() <= right.left() + px(0.5),
+                        "{mode} {width}: {} overlaps {}",
+                        cells[0],
+                        cells[1]
+                    );
+                    assert!(
+                        (left.center().y - right.center().y).abs() < px(1.5),
+                        "{mode} {width}: second row"
+                    );
+                }
+                let padding = if width == 720. { 10. } else { 20. };
+                assert!(bounds["stats"].right() <= px(width - padding));
+                assert_eq!(bounds.contains_key("count"), width == 970.);
+                if width == 970. {
+                    assert_full_hud_text(handle, cx, "name", model);
+                }
+                assert!(!bounds.contains_key("cache"));
+                if mode == "claude-code" && width == 720. {
+                    assert_full_hud_text(handle, cx, "context", "26%");
+                }
+                assert!(bounds["quota-first"].right() < bounds["quota-second"].left());
+                assert!(bounds["quota-second"].right() <= bounds["quota"].right() + px(0.5));
+                assert!(
+                    bounds["quota"].right() <= bounds["primary"].right() + px(0.5),
+                    "{mode} {width}: quota clipped by the primary viewport"
+                );
+                assert_eq!(bounds.contains_key("account"), mode == "claude-code");
+                assert_eq!(
+                    hud_text(handle, cx, "account").as_deref(),
+                    (mode == "claude-code" && width == 970.).then_some("gmail")
+                );
+                for (key, text) in [
+                    ("quota-first", "5h"),
+                    ("quota-first-percent", five_hour),
+                    ("quota-second", "Weekly"),
+                    ("quota-second-percent", weekly),
+                    ("egress", "🇺🇸"),
+                    ("git", "main*"),
+                ] {
+                    assert_full_hud_text(handle, cx, key, text);
+                }
+                let agents = format!(
+                    "{agent_count} {}",
+                    if agent_count == 1 { "Agent" } else { "Agents" }
+                );
+                assert_full_hud_text(handle, cx, "agents", &agents);
+                assert_eq!(hud_text(handle, cx, "context-usage"), None);
+                for stat in ["tools", "hooks", "mcps", "todos", "mcp-errors"] {
+                    assert_eq!(hud_text(handle, cx, stat), None);
+                }
+                click(handle, cx, MouseButton::Left, bounds["quota"].center());
+                assert!(draw_hud(handle, cx).contains_key("footer-quota-menu"));
+                press(window, cx, "escape");
+                assert!(!draw_hud(handle, cx).contains_key("footer-quota-menu"));
+                click(handle, cx, MouseButton::Left, bounds["stats"].center());
+                let panel = draw_hud(handle, cx)["footer-stats-menu"];
+                assert!(panel.size.width <= px(335.) && panel.size.height <= px(360.));
+                assert_eq!(
+                    hud_text(handle, cx, "stats-overflow").as_deref(),
+                    Some("+2")
+                );
+                assert_eq!(hud_text(handle, cx, "tools").as_deref(), Some("36 Tools"));
+                click(handle, cx, MouseButton::Left, point(px(20.), px(90.)));
+                assert!(!draw_hud(handle, cx).contains_key("footer-stats-menu"));
+                println!(
+                    "footer {mode} {width}pt | {agents} | 5h {five_hour} · Weekly {weekly} | 🇺🇸 | stats and quota open and dismiss"
+                );
+                if mode == "claude-code" && width == 720. {
+                    window
+                        .update(cx, |view, window, cx| {
+                            view.graph["nodes"][0]["parentSessionId"] = json!(B);
+                            view.graph["nodes"][1]["title"] =
+                                json!("Long parent session title ".repeat(6));
+                            view.open_child_level(B, window, cx);
+                        })
+                        .unwrap();
+                    draw_hud(handle, cx);
+                    let child = draw_hud(handle, cx);
+                    assert!(child.contains_key("return"));
+                    assert!(child["agents"].right() < child["quota"].left());
+                    assert!(
+                        child["quota"].right() <= child["primary"].right() + px(0.5),
+                        "quota {:?} is clipped by primary {:?} in status {:?}",
+                        child["quota"],
+                        child["primary"],
+                        child["status"]
+                    );
+                    assert_full_hud_text(handle, cx, "quota-second-percent", weekly);
+                }
+                window
+                    .update(cx, |_, window, _| window.remove_window())
+                    .unwrap();
+            }
+        }
+        let (window, sink) = open_probe_at(cx, 970.);
+        load_footer_fixture(window, cx, &sink, "antigravity", root, 1, 1, false, 1018);
+        let bounds = draw_hud(window.into(), cx);
+        assert!(bounds.contains_key("agents") && bounds.contains_key("quota-first"));
+        assert!(!bounds.contains_key("quota-second") && !bounds.contains_key("stats"));
+        assert!(
+            (bounds["quota"].right() - bounds["quota-first"].right()).abs() <= px(0.5),
+            "single-window quota leaves space for an orphan separator"
+        );
+        println!(
+            "footer Antigravity | one real usage window remains visible, agents alone do not open stats"
+        );
+        let expected = window
+            .update(cx, |view, window, cx| {
+                let mut status = frozen_status();
+                status.state = EgressState::Ok;
+                status.families.clear();
+                status.session_families.clear();
+                status.last_transition = None;
+                view.set_egress_status(status, window, cx);
+                view.locale.text("出口正常", "Exit OK")
+            })
+            .unwrap();
+        assert_full_hud_text(window.into(), cx, "egress", expected);
+        println!("footer global egress | healthy session without a family paints {expected}");
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+
+        let (window, sink) = open_probe_at(cx, 720.);
+        let handle = window.into();
+        load_footer_fixture(window, cx, &sink, "claude-code", root, 2, 2, true, 300);
+        draw_hud(handle, cx);
+        let bounds = draw_hud(handle, cx);
+        assert_full_hud_text(handle, cx, "quota-first-percent", "82%");
+        assert_full_hud_text(handle, cx, "quota-second", "Weekly");
+        assert_full_hud_text(handle, cx, "quota-second-percent", "41%");
+        assert_footer_cache_two_windows(&bounds);
+        println!("footer Claude Code 720pt | 5h 82% · Weekly 41% and 5m cache fit");
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+    }
+
     pub(super) fn run() {
         if let Ok(mode) = std::env::var("MATOU_CANVAS_CARDS_PROBE") {
             canvas_cards::run(mode);
             return;
         }
         let fixture_root = live_wiring::prepare();
+        let footer_probe = std::env::var("MATOU_FOOTER_PROBE").ok();
         Application::new().with_assets(NativeAssets).run(move |cx| {
             cx.spawn(async move |cx| {
+                if let Some(probe) = footer_probe {
+                    if probe == "verify" {
+                        verify_footer_widths(cx, &fixture_root);
+                        verify_footer_hud(cx, &fixture_root).await;
+                        cx.update(|cx| cx.quit()).unwrap();
+                        return;
+                    }
+                    let (mode, settings) = probe.split_once(':').expect("provider:width[:preview]");
+                    let (width, preview) = settings.split_once(':').unwrap_or((settings, ""));
+                    assert!(FOOTER_MODES.contains(&mode) && ["970", "720"].contains(&width));
+                    assert!(matches!(
+                        preview,
+                        "" | "stats" | "quota" | "cache" | "cache-two-windows"
+                    ));
+                    let title = if preview.is_empty() {
+                        format!("Matou footer · {mode} · {width}pt")
+                    } else {
+                        format!("Matou footer · {mode} · {width}pt · {preview}")
+                    };
+                    let (window, sink) =
+                        open_probe_window(cx, width.parse().unwrap(), Some(&title));
+                    window
+                        .update(cx, |view, _, cx| {
+                            if view.theme.set_preference(ThemePreference::Dark) {
+                                view.apply_theme_palette(cx);
+                            }
+                        })
+                        .unwrap();
+                    let agents = match mode {
+                        "claude-code" => 2,
+                        "codex" => 1,
+                        _ => 3,
+                    };
+                    let (quota_count, remaining_sec) = match preview {
+                        "cache" => (1, 300),
+                        "cache-two-windows" => (2, 300),
+                        _ => (2, 1018),
+                    };
+                    load_footer_fixture(
+                        window,
+                        cx,
+                        &sink,
+                        mode,
+                        &fixture_root,
+                        agents,
+                        quota_count,
+                        true,
+                        remaining_sec,
+                    );
+                    if !preview.is_empty() {
+                        let handle: AnyWindowHandle = window.into();
+                        let draw_preview = |cx: &mut AsyncApp| {
+                            capture_hud(|| {
+                                handle
+                                    .update(cx, |_, window, cx| {
+                                        window.refresh();
+                                        window.draw(cx).clear();
+                                    })
+                                    .unwrap();
+                            })
+                        };
+                        draw_preview(cx);
+                        let bounds = draw_preview(cx);
+                        if preview == "cache-two-windows" {
+                            assert_footer_cache_two_windows(&bounds);
+                        } else if preview == "cache" {
+                            assert!(bounds["cache"].right() <= bounds["primary"].right() + px(0.5));
+                        } else {
+                            click(handle, cx, MouseButton::Left, bounds[preview].center());
+                            let panel = if preview == "stats" {
+                                "footer-stats-menu"
+                            } else {
+                                "footer-quota-menu"
+                            };
+                            assert!(draw_preview(cx).contains_key(panel));
+                        }
+                        println!("{title} ready");
+                    }
+                    return;
+                }
                 verify_sidebar_return(cx);
                 verify(cx, &fixture_root).await;
                 verify_card_headers(cx);
                 verify_footer_hud(cx, &fixture_root).await;
+                verify_footer_widths(cx, &fixture_root);
                 verify_horizontal_divider_drag(cx);
                 verify_splits(cx);
                 verify_carousel_focus(cx).await;

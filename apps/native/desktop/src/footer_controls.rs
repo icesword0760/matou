@@ -12,6 +12,7 @@ pub(super) enum FooterMenu {
     Git,
     Environment,
     Quota,
+    Stats,
 }
 
 impl FooterMenu {
@@ -20,12 +21,13 @@ impl FooterMenu {
             Self::Git => "footer-git",
             Self::Environment => "footer-environment",
             Self::Quota => "footer-quota",
+            Self::Stats => "footer-stats",
         }
     }
 }
 
-struct ClaudeQuotaSlot {
-    usage: Option<codex_hud::UsageWindow>,
+struct QuotaSlot {
+    usage: codex_hud::UsageWindow,
     tooltip: String,
 }
 
@@ -35,69 +37,55 @@ fn claude_quota_slots(
     accounts: Option<&ClaudeAccountsState>,
     locale: InterfaceLocale,
     now: u64,
-) -> Vec<ClaudeQuotaSlot> {
+) -> Vec<QuotaSlot> {
     let unavailable = locale.text("暂无用量数据", "Usage unavailable");
     if !default_account {
-        let windows = codex_hud::usage_windows(hud, "usageWindows");
-        if windows.is_empty() {
-            return vec![ClaudeQuotaSlot {
-                usage: None,
-                tooltip: unavailable.into(),
-            }];
-        }
-        return windows
+        return codex_hud::usage_windows(hud, "usageWindows")
             .into_iter()
-            .map(|mut usage| {
+            .map(|usage| {
                 let reset = usage.reset.as_ref().map_or_else(
                     || locale.text("暂无重置时间", "Reset time unavailable").into(),
                     |text| format!("{} {text}", locale.text("距离重置", "resets in")),
                 );
                 let tooltip = format!("{} usage: {}% · {reset}", usage.label, usage.percent);
-                usage.reset.get_or_insert_with(|| "—".into());
-                ClaudeQuotaSlot {
-                    usage: Some(usage),
-                    tooltip,
-                }
+                QuotaSlot { usage, tooltip }
             })
             .collect();
     }
 
-    let account = accounts.and_then(|state| {
-        state
-            .accounts
-            .iter()
-            .find(|account| Some(&account.id) == state.current_id.as_ref())
-            .or(state.detected.as_ref())
-    });
+    let Some(accounts) = accounts else {
+        return Vec::new();
+    };
+    let Some(account) = accounts
+        .accounts
+        .iter()
+        .find(|account| Some(&account.id) == accounts.current_id.as_ref())
+        .or(accounts.detected.as_ref())
+        .filter(|account| !account.needs_login)
+    else {
+        return Vec::new();
+    };
+    let Some(usage) = account.usage.as_ref() else {
+        return Vec::new();
+    };
     let prefix = format!(
         "{}: {}",
         locale.text("默认账户", "Default account"),
-        account.map_or("—", |account| account.name.as_str())
+        account.name
     );
-    let usage = account
-        .filter(|account| !account.needs_login)
-        .and_then(|account| account.usage.as_ref());
-    let problem = if account.is_some_and(|account| account.needs_login) {
-        Some(locale.text("登录已失效", "Sign-in expired"))
-    } else {
-        match accounts.and_then(|state| state.error.as_deref()) {
-            Some("rate-limited") => {
-                Some(locale.text("限流，稍后重试", "Rate limited; retrying later"))
-            }
-            Some("unsupported") => Some(unavailable),
-            Some(_) => Some(locale.text("读取失败，保留上次数据", "Read failed; last known usage")),
-            None if usage.is_some_and(|usage| usage.stale) => {
-                Some(locale.text("上次记录，使用后更新", "Last known; updates after use"))
-            }
-            None => None,
+    let problem = match accounts.error.as_deref() {
+        Some("rate-limited") => Some(locale.text("限流，稍后重试", "Rate limited; retrying later")),
+        Some("unsupported") => Some(unavailable),
+        Some(_) => Some(locale.text("读取失败，保留上次数据", "Read failed; last known usage")),
+        None if usage.stale => {
+            Some(locale.text("上次记录，使用后更新", "Last known; updates after use"))
         }
+        None => None,
     };
-    let mut slots = Vec::new();
-    if let Some(usage) = usage {
-        for (label, window) in [("5h", &usage.five_hour), ("Weekly", &usage.weekly)] {
-            let Some(window) = window.as_ref().filter(|window| window.used.is_finite()) else {
-                continue;
-            };
+    [("5h", &usage.five_hour), ("Weekly", &usage.weekly)]
+        .into_iter()
+        .filter_map(|(label, window)| {
+            let window = window.as_ref().filter(|window| window.used.is_finite())?;
             let percent = window.used.round();
             let (reset, detail) = claude_quota_reset(window.reset_timestamp(), now, locale);
             let mut tooltip = format!("{prefix} · {label} usage: {percent}% · {detail}");
@@ -105,36 +93,26 @@ fn claude_quota_slots(
                 tooltip.push_str(" · ");
                 tooltip.push_str(problem);
             }
-            slots.push(ClaudeQuotaSlot {
-                usage: Some(codex_hud::UsageWindow {
+            Some(QuotaSlot {
+                usage: codex_hud::UsageWindow {
                     label: label.into(),
                     percent,
-                    reset: Some(reset.into()),
-                }),
+                    reset: reset.map(Into::into),
+                },
                 tooltip,
-            });
-        }
-    }
-    if slots.is_empty() {
-        let reason = problem.unwrap_or_else(|| match accounts {
-            None => locale.text("正在读取用量", "Loading usage"),
-            Some(state) if account.is_none() && state.login_attempt_id.is_none() => {
-                locale.text("添加账户后查看用量", "Add an account to view usage")
-            }
-            Some(_) => locale.text("使用后更新用量", "Usage updates after use"),
-        });
-        slots.push(ClaudeQuotaSlot {
-            usage: None,
-            tooltip: format!("{prefix} · {reason}"),
-        });
-    }
-    slots
+            })
+        })
+        .collect()
 }
 
-fn claude_quota_reset(reset: Option<u64>, now: u64, locale: InterfaceLocale) -> (String, String) {
+fn claude_quota_reset(
+    reset: Option<u64>,
+    now: u64,
+    locale: InterfaceLocale,
+) -> (Option<String>, String) {
     let Some(reset) = reset.filter(|reset| *reset != 0) else {
         return (
-            "—".into(),
+            None,
             locale.text("暂无重置时间", "Reset time unavailable").into(),
         );
     };
@@ -154,7 +132,7 @@ fn claude_quota_reset(reset: Option<u64>, now: u64, locale: InterfaceLocale) -> 
                 "Reset time reached; updates after use"
             ),
         );
-        return (text, detail);
+        return (Some(text), detail);
     }
     let minutes = (reset - now).div_ceil(60_000);
     let hours = minutes / 60;
@@ -167,17 +145,18 @@ fn claude_quota_reset(reset: Option<u64>, now: u64, locale: InterfaceLocale) -> 
         text.push_str(&format!("{remainder}{unit}"));
     }
     let detail = format!("{} {text}", locale.text("距离重置", "resets in"));
-    (text, detail)
+    (Some(text), detail)
 }
 
 pub(super) struct FooterPopover {
     pub(super) session: String,
-    menu: FooterMenu,
+    pub(super) menu: FooterMenu,
     cwd: Option<PathBuf>,
     request: Option<u64>,
     result: Option<Value>,
     error: Option<String>,
     git: Option<GitMenu>,
+    _activation: Option<Subscription>,
 }
 
 use matou_native_runtime::host::{
@@ -361,6 +340,18 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
+        self.footer_menu_trigger_with_stats(button, menu, popup, &[], window, cx)
+    }
+
+    fn footer_menu_trigger_with_stats(
+        &self,
+        button: Stateful<Div>,
+        menu: FooterMenu,
+        popup: Option<&FooterPopover>,
+        stats: &[codex_hud::Detail],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         let button = self.button(
             button.relative().cursor_pointer(),
             &self.control_focus[menu.id()],
@@ -373,11 +364,51 @@ impl Workspace {
                     .absolute()
                     .top_0()
                     .left_0()
-                    .child(self.footer_popover(popup, window, cx)),
+                    .child(self.footer_popover(popup, stats, window, cx)),
             )
         } else {
             button
         }
+    }
+
+    pub(super) fn footer_stats(
+        &self,
+        stats: &[codex_hud::Detail],
+        popup: Option<&FooterPopover>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Stateful<Div>> {
+        if stats.is_empty() {
+            return None;
+        }
+        let title = codex_hud::stats_title(self.locale);
+        let palette = self.theme_palette().footer;
+        let button = div()
+            .id("footer-stats")
+            .flex_none()
+            .size(px(20.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(4.))
+            .text_size(px(15.))
+            .line_height(px(18.))
+            .hover(move |style| {
+                style
+                    .bg(rgba(palette.breadcrumb_hover))
+                    .text_color(rgba(palette.breadcrumb_hover_text))
+            })
+            .child(footer_text("stats", "⋯"))
+            .children(footer_bounds_probe("stats"))
+            .tooltip(move |_, cx| cx.new(|_| CardTooltip(title.into())).into());
+        Some(self.footer_menu_trigger_with_stats(
+            button,
+            FooterMenu::Stats,
+            popup,
+            stats,
+            window,
+            cx,
+        ))
     }
 
     pub(super) fn footer_quota(
@@ -388,47 +419,30 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<Stateful<Div>> {
-        if mode == "claude-code" {
-            let slots = claude_quota_slots(
+        let slots = match mode {
+            "claude-code" => claude_quota_slots(
                 hud,
                 hud["defaultAccountUsage"] == true,
                 self.claude_quota_state(),
                 self.locale,
                 notification_now(),
-            );
-            return Some(
-                div()
-                    .id("footer-quota")
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .children(footer_bounds_probe("quota"))
-                    .children(slots.into_iter().enumerate().map(|(index, slot)| {
-                        let tooltip: SharedString = slot.tooltip.into();
-                        let field = div()
-                            .id(("claude-quota", index))
-                            .flex_none()
-                            .text_color(rgb(0x7f8a99))
-                            .tooltip(move |_, cx| cx.new(|_| CardTooltip(tooltip.clone())).into());
-                        match slot.usage {
-                            Some(usage) => field.child(codex_hud::claude_quota_row(&usage)),
-                            None => field.child(footer_text("quota", "—")),
-                        }
-                    })),
-            );
-        }
-        if mode != "antigravity" {
-            return None;
-        }
-        let usages = codex_hud::usage_windows(hud, "usageWindows");
-        if usages.is_empty() {
-            return None;
-        }
-        let dark = self.theme.effective() == AppTheme::Dark;
-        let tooltip: SharedString = usages
+            ),
+            "codex" | "antigravity" => codex_hud::usage_windows(hud, "usageWindows")
+                .into_iter()
+                .map(|usage| QuotaSlot {
+                    tooltip: usage.summary(),
+                    usage,
+                })
+                .collect(),
+            _ => return None,
+        };
+        let usages: Vec<_> = slots.iter().map(|slot| &slot.usage).collect();
+        let selected = codex_hud::footer_usage_windows(&usages);
+        let first = usages[*selected.first()?];
+        let palette = self.theme_palette().footer;
+        let tooltip: SharedString = selected
             .iter()
-            .map(|usage| usage.summary())
+            .map(|&index| slots[index].tooltip.as_str())
             .collect::<Vec<_>>()
             .join("\n")
             .into();
@@ -437,9 +451,30 @@ impl Workspace {
             .flex_none()
             .flex()
             .items_center()
-            .gap(px(8.))
+            .gap(px(4.))
+            .whitespace_nowrap()
+            .text_color(rgba(palette.usage))
             .children(footer_bounds_probe("quota"))
-            .children(usages.iter().map(|usage| codex_hud::quota_row(usage, dark)))
+            .child(codex_hud::footer_quota_row(
+                first,
+                palette,
+                "quota-first",
+                "quota-first-percent",
+            ))
+            .children(selected.get(1).map(|&second| {
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .child(ui_text("·"))
+                    .child(codex_hud::footer_quota_row(
+                        usages[second],
+                        palette,
+                        "quota-second",
+                        "quota-second-percent",
+                    ))
+            }))
             .tooltip(move |_, cx| cx.new(|_| CardTooltip(tooltip.clone())).into());
         Some(self.footer_menu_trigger(quota, FooterMenu::Quota, popup, window, cx))
     }
@@ -517,12 +552,19 @@ impl Workspace {
                 result: None,
                 error: None,
                 git,
+                _activation: matches!(menu, FooterMenu::Quota | FooterMenu::Stats).then(|| {
+                    cx.observe_window_activation(window, |this, window, cx| {
+                        if !window.is_window_active() {
+                            this.dismiss_footer_popover(window, cx);
+                        }
+                    })
+                }),
             },
         );
         match menu {
             FooterMenu::Git => self.refresh_footer_git(window, cx),
             FooterMenu::Environment => self.request_footer_diagnostics(window, cx),
-            FooterMenu::Quota => {}
+            FooterMenu::Quota | FooterMenu::Stats => {}
         }
         cx.notify();
     }
@@ -1463,7 +1505,7 @@ impl Workspace {
             return true;
         }
         if stroke.key == "tab"
-            && popup.menu != FooterMenu::Quota
+            && matches!(popup.menu, FooterMenu::Git | FooterMenu::Environment)
             && !stroke.modifiers.alt
             && !stroke.modifiers.control
             && !stroke.modifiers.platform
@@ -1519,6 +1561,7 @@ impl Workspace {
     fn footer_popover(
         &self,
         popup: &FooterPopover,
+        stats: &[codex_hud::Detail],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -1530,11 +1573,30 @@ impl Workspace {
                 self.environment_panel(popup, window, cx, dark),
             ),
             FooterMenu::Git => ("footer-git-menu", self.git_panel(popup, window, cx, dark)),
+            FooterMenu::Stats => (
+                "footer-stats-menu",
+                codex_hud::stats_panel(stats, self.locale, dark),
+            ),
             FooterMenu::Quota => {
-                let live = self.live_agent_hud(&popup.session).unwrap_or(&Value::Null);
+                let node = self.hud_node(&popup.session).unwrap_or(&Value::Null);
+                let live = self
+                    .live_agent_hud(&popup.session)
+                    .unwrap_or(&node["codexHud"]);
                 let mut usage = codex_hud::usage_windows(live, "allUsageWindows");
                 if usage.is_empty() {
                     usage = codex_hud::usage_windows(live, "usageWindows");
+                }
+                if usage.is_empty() && node["currentMode"] == "claude-code" {
+                    usage = claude_quota_slots(
+                        live,
+                        live["defaultAccountUsage"] == true,
+                        self.claude_quota_state(),
+                        self.locale,
+                        notification_now(),
+                    )
+                    .into_iter()
+                    .map(|slot| slot.usage)
+                    .collect();
                 }
                 let palette = self.theme_palette().workspace;
                 (
@@ -3441,33 +3503,14 @@ mod tests {
     use serde_json::json;
 
     #[::core::prelude::v1::test]
-    fn claude_quota_placeholder_has_the_original_localized_tooltip() {
-        for (locale, unavailable, loading, no_account) in [
-            (
-                InterfaceLocale::Chinese,
-                "暂无用量数据",
-                "默认账户: — · 正在读取用量",
-                "默认账户: — · 添加账户后查看用量",
-            ),
-            (
-                InterfaceLocale::English,
-                "Usage unavailable",
-                "Default account: — · Loading usage",
-                "Default account: — · Add an account to view usage",
-            ),
-        ] {
-            let empty = ClaudeAccountsState::default();
-            let hud = json!({"usageWindows": []});
-            for (default_account, state, tooltip) in [
-                (false, None, unavailable),
-                (true, None, loading),
-                (true, Some(&empty), no_account),
-            ] {
-                let slots = claude_quota_slots(&hud, default_account, state, locale, 0);
-                assert_eq!(slots.len(), 1);
-                assert!(slots[0].usage.is_none());
-                assert_eq!(slots[0].tooltip, tooltip);
-            }
+    fn claude_quota_has_no_slot_without_usage() {
+        let empty = ClaudeAccountsState::default();
+        let hud = json!({"usageWindows": []});
+        for (default_account, state) in [(false, None), (true, None), (true, Some(&empty))] {
+            assert!(
+                claude_quota_slots(&hud, default_account, state, InterfaceLocale::Chinese, 0)
+                    .is_empty()
+            );
         }
     }
 
@@ -3501,9 +3544,9 @@ mod tests {
         assert_eq!(
             slots
                 .iter()
-                .map(|slot| slot.usage.as_ref().unwrap().summary())
+                .map(|slot| slot.usage.summary())
                 .collect::<Vec<_>>(),
-            ["5h 38% · 1h", "Weekly 62% · —"]
+            ["5h 38% · 1h", "Weekly 62%"]
         );
         assert_eq!(
             slots[0].tooltip,
@@ -3521,12 +3564,10 @@ mod tests {
         accounts.current_id = Some(personal.id.clone());
         accounts.accounts.push(personal);
         let slots = claude_quota_slots(&hud, true, Some(&accounts), InterfaceLocale::Chinese, now);
-        assert_eq!(slots.len(), 1);
-        assert!(slots[0].usage.is_none());
-        assert_eq!(slots[0].tooltip, "默认账户: Personal · 登录已失效");
+        assert!(slots.is_empty());
 
         let slots = claude_quota_slots(&hud, false, Some(&accounts), InterfaceLocale::English, now);
-        assert_eq!(slots[0].usage.as_ref().unwrap().summary(), "5h 99% · —");
+        assert_eq!(slots[0].usage.summary(), "5h 99%");
         assert_eq!(slots[0].tooltip, "5h usage: 99% · Reset time unavailable");
     }
 
