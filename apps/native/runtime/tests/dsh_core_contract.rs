@@ -59,7 +59,9 @@ fn launch_input(cwd: &Path) -> DshLaunchInput<'_> {
 
 #[test]
 fn dsh_missing_cli_uses_frozen_localized_messages() {
-    let cwd = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = tempfile::tempdir().unwrap();
+    let cwd = root.path();
+    std::fs::write(cwd.join("dsh"), "not executable").unwrap();
     for (locale, expected) in [
         (
             "zh-CN",
@@ -71,12 +73,12 @@ fn dsh_missing_cli_uses_frozen_localized_messages() {
         ),
     ] {
         let mut input = launch_input(cwd);
-        input
-            .inherited_environment
-            .insert("MATOU_LOCALE".into(), locale.into());
-        let error = dsh_launch::prepare(input)
-            .err()
-            .expect("empty PATH must not find DSH");
+        input.inherited_environment.extend([
+            ("MATOU_LOCALE".into(), locale.into()),
+            ("MATOU_DISABLE_LOGIN_PATH_PROBE".into(), "1".into()),
+            ("PATH".into(), cwd.as_os_str().into()),
+        ]);
+        let error = dsh_launch::prepare(input).err().expect("no executable DSH");
         assert_eq!(error.to_string(), expected);
     }
 }

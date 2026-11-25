@@ -243,6 +243,84 @@ fn antigravity_launch_contract() -> Result<()> {
 }
 
 #[test]
+fn antigravity_missing_cli_uses_frozen_localized_messages() -> Result<()> {
+    let temp = sandbox()?;
+    let cwd = temp.path();
+    fs::write(cwd.join("agy"), "not executable")?;
+    for (locale, expected) in [
+        (
+            "zh-CN",
+            "未检测到 Antigravity CLI（命令：agy）。请先安装并确保它在 PATH 中。",
+        ),
+        (
+            "en",
+            "Antigravity CLI (agy) was not found. Install it and ensure it is on PATH.",
+        ),
+    ] {
+        let mut inherited = environment(&[("MATOU_LOCALE", locale), ("SHELL", "./missing-shell")]);
+        inherited.insert("PATH".into(), cwd.as_os_str().into());
+        inherited.insert("MATOU_DISABLE_LOGIN_PATH_PROBE".into(), "1".into());
+        let error = prepare(LaunchInput {
+            cwd,
+            settings_path: None,
+            model: None,
+            permission: PermissionMode::Default,
+            mode: LaunchMode::Fresh,
+            inherited_environment: inherited,
+            run_environment: BTreeMap::new(),
+        })
+        .err()
+        .expect("no executable agy");
+        assert_eq!(error.to_string(), expected);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn antigravity_and_dsh_share_the_login_path() -> Result<()> {
+    use matou_native_runtime::dsh_launch::{self, DshLaunchInput};
+
+    let temp = sandbox()?;
+    let cwd = temp.path();
+    let agy = executable(cwd, "agy")?;
+    let dsh = executable(cwd, "dsh")?;
+    let login_shell = executable(cwd, "login-shell")?;
+    fs::write(
+        &login_shell,
+        "#!/bin/sh\nprintf 'probe\\n' >> \"$HOME/probes\"\nprintf '__MATOU_LOGIN_PATH__=%s\\n' \"$HOME\"\n",
+    )?;
+    let inherited = BTreeMap::from([
+        ("HOME".into(), cwd.as_os_str().into()),
+        ("SHELL".into(), login_shell.into_os_string()),
+        ("PATH".into(), "missing-bin".into()),
+    ]);
+    let launch = prepare(LaunchInput {
+        cwd,
+        settings_path: None,
+        model: None,
+        permission: PermissionMode::Default,
+        mode: LaunchMode::Fresh,
+        inherited_environment: inherited.clone(),
+        run_environment: BTreeMap::new(),
+    })?;
+    assert_eq!(launch.executable, agy);
+    assert_eq!(launch.environment[&OsString::from("PATH")], cwd.as_os_str());
+
+    let launch = dsh_launch::prepare(DshLaunchInput {
+        cwd,
+        patch_path: None,
+        resume_session_id: None,
+        inherited_environment: inherited,
+        run_environment: BTreeMap::new(),
+    })?;
+    assert_eq!(launch.executable, dsh);
+    assert_eq!(launch.environment[&OsString::from("PATH")], cwd.as_os_str());
+    assert_eq!(fs::read_to_string(cwd.join("probes"))?, "probe\n");
+    Ok(())
+}
+
+#[test]
 fn antigravity_plugin_install_update_and_repair() -> Result<()> {
     let temp = sandbox()?;
     let plugin = plugin_directory(temp.path(), &environment(&[]));

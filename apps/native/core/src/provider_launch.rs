@@ -1,4 +1,6 @@
 //! Prepare a Claude Code run from the frozen runtime's V1 settings.
+#[cfg(unix)]
+use std::sync::OnceLock;
 use std::{
     collections::BTreeMap,
     ffi::{OsStr, OsString},
@@ -3057,16 +3059,73 @@ pub fn resolve_claude_executable(
     }
 }
 
+/// Resolve a CLI using the launch PATH first, then the user's login-shell PATH.
+#[cfg(unix)]
+pub fn resolve_command_with_login_path(
+    command: &Path,
+    cwd: &Path,
+    environment: &mut BTreeMap<OsString, OsString>,
+) -> io::Result<PathBuf> {
+    static LOGIN_PATH: OnceLock<Option<String>> = OnceLock::new();
+    resolve_command_with_cached_login_path(command, cwd, environment, &LOGIN_PATH)
+}
+
+#[cfg(unix)]
+fn resolve_command_with_cached_login_path(
+    command: &Path,
+    cwd: &Path,
+    environment: &mut BTreeMap<OsString, OsString>,
+    cache: &OnceLock<Option<String>>,
+) -> io::Result<PathBuf> {
+    let resolved =
+        search_command_with_file_filter(command, cwd, environment, fs::Metadata::is_file);
+    if resolved.is_ok()
+        || command.file_name() != Some(command.as_os_str())
+        || get_var(environment, "MATOU_DISABLE_LOGIN_PATH_PROBE") == Some(OsStr::new("1"))
+    {
+        return resolved;
+    }
+
+    // get_or_init waits for an in-flight probe and remembers failure as well.
+    let Some(path) = cache.get_or_init(|| {
+        login_shell_path(
+            environment,
+            get_var(environment, "SHELL").unwrap_or(OsStr::new("/bin/zsh")),
+            std::time::Duration::from_secs(10),
+        )
+        .filter(|path| {
+            !path.contains('\0')
+                && std::env::split_paths(path).any(|entry| !entry.as_os_str().is_empty())
+        })
+    }) else {
+        return resolved;
+    };
+    set_var(environment, "PATH".into(), path.into());
+    search_command_with_file_filter(command, cwd, environment, fs::Metadata::is_file).or(resolved)
+}
+
 pub(crate) fn search_command(
     command: &Path,
     cwd: &Path,
     environment: &BTreeMap<OsString, OsString>,
+) -> io::Result<PathBuf> {
+    search_command_with_file_filter(command, cwd, environment, |_| true)
+}
+
+fn search_command_with_file_filter(
+    command: &Path,
+    cwd: &Path,
+    environment: &BTreeMap<OsString, OsString>,
+    matches_file: impl Fn(&fs::Metadata) -> bool,
 ) -> io::Result<PathBuf> {
     let mut failure = io::Error::from(io::ErrorKind::NotFound);
     let mut check = |path: PathBuf| {
         let result = fs::metadata(&path).and_then(|metadata| {
             if metadata.is_dir() {
                 return Err(io::Error::from(io::ErrorKind::IsADirectory));
+            }
+            if !matches_file(&metadata) {
+                return Err(io::Error::from(io::ErrorKind::NotFound));
             }
             #[cfg(unix)]
             check_execute_access(&path)?;
@@ -3194,6 +3253,146 @@ pub(crate) fn login_shell_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    mod login_path {
+        use super::*;
+        use std::{os::unix::fs::PermissionsExt, sync::Barrier, thread};
+
+        fn fixture() -> Result<(tempfile::TempDir, BTreeMap<OsString, OsString>)> {
+            let root = tempfile::tempdir()?;
+            let shell = root.path().join("login-shell");
+            fs::write(
+                &shell,
+                "#!/bin/sh\nprintf 'probe\\n' >> \"$HOME/probes\"\nprintf '__MATOU_LOGIN_PATH__=%s\\n' \"$LOGIN_PATH\"\nexit \"$PROBE_STATUS\"\n",
+            )?;
+            fs::set_permissions(shell.as_path(), fs::Permissions::from_mode(0o700))?;
+            let executable = root.path().join("agent");
+            fs::write(&executable, "#!/bin/sh\nexit 0\n")?;
+            fs::set_permissions(executable, fs::Permissions::from_mode(0o700))?;
+            let environment = BTreeMap::from([
+                ("SHELL".into(), shell.into_os_string()),
+                ("HOME".into(), root.path().as_os_str().into()),
+                ("LOGIN_PATH".into(), root.path().as_os_str().into()),
+                ("PROBE_STATUS".into(), "0".into()),
+                ("PATH".into(), "missing-bin".into()),
+            ]);
+            Ok((root, environment))
+        }
+
+        #[test]
+        fn concurrent_launches_probe_once_and_receive_the_login_path() -> Result<()> {
+            let (root, environment) = fixture()?;
+            let cache = OnceLock::new();
+            let barrier = Barrier::new(4);
+            let cwd = root.path();
+            thread::scope(|scope| {
+                for _ in 0..4 {
+                    scope.spawn(|| {
+                        let mut environment = environment.clone();
+                        barrier.wait();
+                        let executable = resolve_command_with_cached_login_path(
+                            Path::new("agent"),
+                            cwd,
+                            &mut environment,
+                            &cache,
+                        )
+                        .unwrap();
+                        assert_eq!(executable, cwd.join("agent"));
+                        assert_eq!(get_var(&environment, "PATH"), Some(cwd.as_os_str()));
+                    });
+                }
+            });
+            let mut next = environment.clone();
+            assert_eq!(
+                resolve_command_with_cached_login_path(Path::new("agent"), cwd, &mut next, &cache)?,
+                cwd.join("agent")
+            );
+            assert_eq!(get_var(&next, "PATH"), Some(cwd.as_os_str()));
+            assert_eq!(
+                get_var(&environment, "PATH"),
+                Some(OsStr::new("missing-bin"))
+            );
+            assert_eq!(fs::read_to_string(cwd.join("probes"))?, "probe\n");
+            Ok(())
+        }
+
+        #[test]
+        fn failed_or_empty_probe_is_cached_without_replacing_path() -> Result<()> {
+            for (login_path, exit_status) in [("::", "0"), ("", "0"), ("/bin", "1")] {
+                let (root, mut environment) = fixture()?;
+                let cache = OnceLock::new();
+                let cwd = root.path();
+                set_var(&mut environment, "LOGIN_PATH".into(), login_path.into());
+                set_var(&mut environment, "PROBE_STATUS".into(), exit_status.into());
+                let command = Path::new("agent");
+                assert!(
+                    resolve_command_with_cached_login_path(command, cwd, &mut environment, &cache)
+                        .is_err()
+                );
+                assert_eq!(
+                    get_var(&environment, "PATH"),
+                    Some(OsStr::new("missing-bin"))
+                );
+                set_var(
+                    &mut environment,
+                    "LOGIN_PATH".into(),
+                    cwd.as_os_str().into(),
+                );
+                set_var(&mut environment, "PROBE_STATUS".into(), "0".into());
+                assert!(
+                    resolve_command_with_cached_login_path(command, cwd, &mut environment, &cache)
+                        .is_err()
+                );
+                assert_eq!(
+                    get_var(&environment, "PATH"),
+                    Some(OsStr::new("missing-bin"))
+                );
+                assert_eq!(fs::read_to_string(cwd.join("probes"))?, "probe\n");
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn existing_path_explicit_paths_and_opt_out_do_not_probe() -> Result<()> {
+            let (root, mut environment) = fixture()?;
+            let cwd = root.path();
+            let cache = OnceLock::new();
+            assert!(
+                resolve_command_with_cached_login_path(
+                    Path::new("./missing/agent"),
+                    cwd,
+                    &mut environment,
+                    &cache,
+                )
+                .is_err()
+            );
+            let command = Path::new("agent");
+            set_var(&mut environment, "PATH".into(), ".".into());
+            assert_eq!(
+                resolve_command_with_cached_login_path(command, cwd, &mut environment, &cache)?,
+                cwd.join(".").join(command)
+            );
+            assert_eq!(get_var(&environment, "PATH"), Some(OsStr::new(".")));
+            set_var(&mut environment, "PATH".into(), "missing-bin".into());
+            set_var(
+                &mut environment,
+                "MATOU_DISABLE_LOGIN_PATH_PROBE".into(),
+                "1".into(),
+            );
+            assert!(
+                resolve_command_with_cached_login_path(command, cwd, &mut environment, &cache)
+                    .is_err()
+            );
+            assert_eq!(
+                get_var(&environment, "PATH"),
+                Some(OsStr::new("missing-bin"))
+            );
+            assert!(cache.get().is_none());
+            assert!(!cwd.join("probes").exists());
+            Ok(())
+        }
+    }
 
     #[test]
     fn gateway_refresh_rebuilds_roles_but_retains_the_source_connection() -> Result<()> {
