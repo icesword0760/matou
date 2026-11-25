@@ -7,11 +7,11 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Result;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 const DB_FILE_NAME: &str = "context_guard.sqlite";
 const DEFAULT_RETENTION_SECS: i64 = 7 * 24 * 60 * 60; // 7 days
@@ -39,17 +39,27 @@ pub struct SearchHit {
 pub struct ContextGuardStore {
     db_path: PathBuf,
     fts5_enabled: bool,
+    busy_timeout: Duration,
 }
 
 impl ContextGuardStore {
     pub fn open(data_root: &Path) -> Result<Self> {
+        Self::open_with_timeout(data_root, Duration::from_millis(80))
+    }
+
+    pub(super) fn open_for_hook(data_root: &Path) -> Result<Self> {
+        Self::open_with_timeout(data_root, Duration::ZERO)
+    }
+
+    fn open_with_timeout(data_root: &Path, busy_timeout: Duration) -> Result<Self> {
         fs::create_dir_all(data_root)?;
         let db_path = data_root.join(DB_FILE_NAME);
-        let conn = open_connection(&db_path)?;
+        let conn = open_connection(&db_path, busy_timeout)?;
         let fts5_enabled = init_schema(&conn)?;
         Ok(Self {
             db_path,
             fts5_enabled,
+            busy_timeout,
         })
     }
 
@@ -70,40 +80,59 @@ impl ContextGuardStore {
         command: &str,
         content: &str,
     ) -> Result<StoredLogRecord> {
+        self.save_log_before(session_id, tool_name, command, content, None)
+    }
+
+    pub(super) fn save_log_before(
+        &self,
+        session_id: &str,
+        tool_name: &str,
+        command: &str,
+        content: &str,
+        deadline: Option<Instant>,
+    ) -> Result<StoredLogRecord> {
         let now_sec = unix_now_sec();
-        let conn = open_connection(&self.db_path)?;
-        let seq: i64 = conn
-            .query_row(
-                "SELECT COALESCE(MAX(seq), 0) + 1 FROM log_sources",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap_or(1);
+        let mut conn = open_connection(&self.db_path, self.busy_timeout)?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let seq: i64 = tx.query_row(
+            "SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'log_sources'), 0) + 1",
+            [],
+            |row| row.get(0),
+        )?;
         let id = format!("log_{seq:04}");
         let raw_bytes = content.len();
 
-        let tx = conn.unchecked_transaction()?;
         tx.execute(
             "INSERT INTO log_sources (id, session_id, tool_name, command, raw_bytes, created_at_sec)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![id, session_id, tool_name, command, raw_bytes as i64, now_sec],
         )?;
 
-        let chunks = split_into_chunks(content, CHUNK_MAX_BYTES);
-        for (idx, chunk) in chunks.iter().enumerate() {
+        for (idx, chunk) in log_chunks(content).enumerate() {
+            anyhow::ensure!(
+                deadline.is_none_or(|time| Instant::now() < time),
+                "log write expired"
+            );
             tx.execute(
                 "INSERT INTO log_chunks (source_id, chunk_index, heading, body)
                  VALUES (?1, ?2, ?3, ?4)",
                 params![id, idx as i64, command, chunk],
             )?;
             if self.fts5_enabled {
-                let _ = tx.execute(
+                let indexed = tx.execute(
                     "INSERT INTO log_chunks_fts (source_id, chunk_index, heading, body)
                      VALUES (?1, ?2, ?3, ?4)",
                     params![id, idx as i64, command, chunk],
                 );
+                if deadline.is_some() {
+                    indexed?;
+                }
             }
         }
+        anyhow::ensure!(
+            deadline.is_none_or(|time| Instant::now() < time),
+            "log write expired"
+        );
         tx.commit()?;
 
         Ok(StoredLogRecord {
@@ -118,17 +147,32 @@ impl ContextGuardStore {
 
     /// Reads the complete stored text for a given `source_id`.
     pub fn get_full_log(&self, source_id: &str) -> Result<Option<String>> {
-        let conn = open_connection(&self.db_path)?;
-        let mut stmt = conn.prepare(
-            "SELECT body FROM log_chunks WHERE source_id = ?1 ORDER BY chunk_index ASC",
-        )?;
+        let conn = open_connection(&self.db_path, self.busy_timeout)?;
+        let raw_bytes = conn
+            .query_row(
+                "SELECT raw_bytes FROM log_sources WHERE id = ?1",
+                params![source_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        let Some(raw_bytes) = raw_bytes else {
+            return Ok(None);
+        };
+        let mut stmt = conn
+            .prepare("SELECT body FROM log_chunks WHERE source_id = ?1 ORDER BY chunk_index ASC")?;
         let rows = stmt
             .query_map(params![source_id], |row| row.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         if rows.is_empty() {
             Ok(None)
         } else {
-            Ok(Some(rows.join("\n")))
+            // Older rows omitted the separator between chunks.
+            let separator = if rows.iter().map(String::len).sum::<usize>() as i64 == raw_bytes {
+                ""
+            } else {
+                "\n"
+            };
+            Ok(Some(rows.join(separator)))
         }
     }
 
@@ -144,7 +188,7 @@ impl ContextGuardStore {
             return Ok(Vec::new());
         }
         let limit = limit.clamp(1, 20) as i64;
-        let conn = open_connection(&self.db_path)?;
+        let conn = open_connection(&self.db_path, self.busy_timeout)?;
 
         if self.fts5_enabled {
             let fts_query = sanitize_fts_query(clean);
@@ -201,12 +245,10 @@ impl ContextGuardStore {
     /// Removes logs older than `retention_secs` (defaults to 7 days).
     pub fn prune_expired(&self, retention_secs: Option<i64>) -> Result<usize> {
         let cutoff = unix_now_sec() - retention_secs.unwrap_or(DEFAULT_RETENTION_SECS);
-        let conn = open_connection(&self.db_path)?;
+        let conn = open_connection(&self.db_path, self.busy_timeout)?;
         let tx = conn.unchecked_transaction()?;
         let expired_ids: Vec<String> = {
-            let mut stmt = tx.prepare(
-                "SELECT id FROM log_sources WHERE created_at_sec < ?1",
-            )?;
+            let mut stmt = tx.prepare("SELECT id FROM log_sources WHERE created_at_sec < ?1")?;
             stmt.query_map(params![cutoff], |row| row.get(0))?
                 .collect::<std::result::Result<Vec<_>, _>>()?
         };
@@ -224,8 +266,12 @@ impl ContextGuardStore {
         Ok(expired_ids.len())
     }
 
-    pub fn list_session_logs(&self, session_id: &str, limit: usize) -> Result<Vec<StoredLogRecord>> {
-        let conn = open_connection(&self.db_path)?;
+    pub fn list_session_logs(
+        &self,
+        session_id: &str,
+        limit: usize,
+    ) -> Result<Vec<StoredLogRecord>> {
+        let conn = open_connection(&self.db_path, self.busy_timeout)?;
         let mut stmt = conn.prepare(
             "SELECT id, session_id, tool_name, command, raw_bytes, created_at_sec
              FROM log_sources
@@ -249,7 +295,7 @@ impl ContextGuardStore {
     }
 
     pub fn latest_source_id(&self, session_id: &str) -> Result<Option<String>> {
-        let conn = open_connection(&self.db_path)?;
+        let conn = open_connection(&self.db_path, self.busy_timeout)?;
         conn.query_row(
             "SELECT id FROM log_sources WHERE session_id = ?1 ORDER BY seq DESC LIMIT 1",
             params![session_id],
@@ -260,9 +306,9 @@ impl ContextGuardStore {
     }
 }
 
-fn open_connection(path: &Path) -> Result<Connection> {
+fn open_connection(path: &Path, busy_timeout: Duration) -> Result<Connection> {
     let conn = Connection::open(path)?;
-    conn.busy_timeout(Duration::from_millis(80))?;
+    conn.busy_timeout(busy_timeout)?;
     let _ = conn.pragma_update(None, "journal_mode", "WAL");
     let _ = conn.pragma_update(None, "synchronous", "NORMAL");
     Ok(conn)
@@ -327,33 +373,18 @@ fn collect_hits<P: rusqlite::Params>(
     Ok(rows)
 }
 
-fn split_into_chunks(text: &str, max_bytes: usize) -> Vec<String> {
-    if text.is_empty() {
-        return vec![String::new()];
-    }
-    let mut chunks = Vec::new();
-    let mut current = String::new();
-    for line in text.lines() {
-        if !current.is_empty() && current.len() + line.len() + 1 > max_bytes {
-            chunks.push(std::mem::take(&mut current));
+fn log_chunks(text: &str) -> impl Iterator<Item = &str> {
+    let mut remaining = Some(text);
+    std::iter::from_fn(move || {
+        let text = remaining.take()?;
+        if text.len() <= CHUNK_MAX_BYTES {
+            return Some(text);
         }
-        if !current.is_empty() {
-            current.push('\n');
-        }
-        if line.len() > max_bytes {
-            let mut end = max_bytes;
-            while end > 0 && !line.is_char_boundary(end) {
-                end -= 1;
-            }
-            current.push_str(&line[..end]);
-        } else {
-            current.push_str(line);
-        }
-    }
-    if !current.is_empty() {
-        chunks.push(current);
-    }
-    chunks
+        let limit = text.floor_char_boundary(CHUNK_MAX_BYTES);
+        let end = text[..limit].rfind('\n').map_or(limit, |index| index + 1);
+        remaining = Some(&text[end..]);
+        Some(&text[..end])
+    })
 }
 
 fn sanitize_fts_query(query: &str) -> String {

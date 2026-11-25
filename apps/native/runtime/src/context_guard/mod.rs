@@ -8,6 +8,7 @@
 use std::collections::VecDeque;
 
 pub mod cli;
+mod claude_output;
 pub mod dedup;
 pub mod filter;
 pub mod interceptor;

@@ -3956,9 +3956,10 @@ exec /bin/sleep 60
                     .keys()
                     .map(String::as_str)
                     .collect::<Vec<_>>(),
-                ["hooks", "statusLine"],
-                "{scenario}: direct launch only writes the hook settings",
+                ["hooks", "statusLine", "tui"],
+                "{scenario}: direct launch writes the hook settings and keeps the primary terminal buffer",
             );
+            assert_eq!(settings["tui"], "default");
         }
         let expected: &[&str] = if scenario == "save" {
             &[

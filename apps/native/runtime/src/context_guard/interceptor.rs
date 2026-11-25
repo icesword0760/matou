@@ -7,21 +7,19 @@
 //! effects.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Mutex,
     time::Instant,
 };
 
-use matou_native_core::{
-    context_optimizer_config::ContextOptimizerConfig,
-    pty::LaunchProfile,
-};
+use matou_native_core::{context_optimizer_config::ContextOptimizerConfig, pty::LaunchProfile};
 use serde_json::{Value, json};
 
 use crate::context_guard::{
+    claude_output::ClaudeOutput,
     dedup::{ReadDecision, ReadDedupGuard},
-    filter::{HARD_CAP_BYTES, is_sensitive_path, trim_terminal_output},
+    filter::{HARD_CAP_BYTES, is_sensitive_path, strip_ansi_and_progress, trim_terminal_output},
     redact_secrets,
     store::ContextGuardStore,
 };
@@ -30,6 +28,7 @@ use crate::context_guard::{
 pub struct HookEvaluation {
     pub response_json: String,
     pub saved_noise_bytes: u64,
+    replacement_source: Option<String>,
 }
 
 impl HookEvaluation {
@@ -37,6 +36,7 @@ impl HookEvaluation {
         Self {
             response_json: "{}".to_owned(),
             saved_noise_bytes: 0,
+            replacement_source: None,
         }
     }
 }
@@ -44,7 +44,14 @@ impl HookEvaluation {
 #[derive(Default)]
 pub struct HookInterceptor {
     dedup: Mutex<ReadDedupGuard>,
-    saved_by_session: Mutex<HashMap<String, u64>>,
+    saved_by_session: Mutex<HashMap<String, SavedNoise>>,
+    replacement_sources: Mutex<HashMap<(String, String, String), String>>,
+}
+
+#[derive(Default)]
+struct SavedNoise {
+    bytes: u64,
+    counted_sources: HashSet<String>,
 }
 
 impl HookInterceptor {
@@ -56,7 +63,7 @@ impl HookInterceptor {
         self.saved_by_session
             .lock()
             .ok()
-            .and_then(|map| map.get(session_id).copied())
+            .and_then(|map| map.get(session_id).map(|saved| saved.bytes))
             .unwrap_or(0)
     }
 
@@ -66,15 +73,29 @@ impl HookInterceptor {
         profile: LaunchProfile,
         session_id: &str,
         payload: &Value,
+        deadline: Instant,
     ) -> HookEvaluation {
         let Some(agent_id) = agent_id_for_profile(profile) else {
             return HookEvaluation::allow();
         };
-        let Ok(settings) = ContextOptimizerConfig::for_data_root(data_root).effective_for(agent_id)
-        else {
+        let config = ContextOptimizerConfig::for_data_root(data_root);
+        let Ok(snapshot) = config.snapshot() else {
             return HookEvaluation::allow();
         };
-        if !settings.enabled || (!settings.noise_filter && !settings.read_dedup) {
+        // The config treats missing and invalid files alike. Invalid files
+        // should fail open, while a fresh data root uses the displayed defaults.
+        if !snapshot.exists && !matches!(config.path().try_exists(), Ok(false)) {
+            return HookEvaluation::allow();
+        }
+        let Some(entry) = snapshot.agents.get(agent_id) else {
+            return HookEvaluation::allow();
+        };
+        if !entry.capabilities.sync_hook_intercept {
+            return HookEvaluation::allow();
+        }
+        let settings = entry.settings.effective_for(agent_id);
+        let sensitive_reads = settings.block_sensitive_reads;
+        if !settings.enabled || !(settings.noise_filter || settings.read_dedup || sensitive_reads) {
             return HookEvaluation::allow();
         }
 
@@ -86,10 +107,13 @@ impl HookInterceptor {
                 }
                 HookEvaluation::allow()
             }
-            "PreToolUse" => self.evaluate_pre_tool_use(session_id, payload, &settings),
-            "PostToolUse" => {
-                self.evaluate_post_tool_use(data_root, session_id, payload, &settings)
+            "PreToolUse" => {
+                self.evaluate_pre_tool_use(session_id, payload, &settings, sensitive_reads)
             }
+            "PostToolUse" if profile == LaunchProfile::ClaudeCode => self
+                .replace_claude_tool_output(data_root, session_id, payload, &settings, deadline)
+                .unwrap_or_else(HookEvaluation::allow),
+            "PostToolUse" => self.evaluate_post_tool_use(data_root, session_id, payload, &settings),
             _ => HookEvaluation::allow(),
         }
     }
@@ -99,6 +123,7 @@ impl HookInterceptor {
         session_id: &str,
         payload: &Value,
         settings: &matou_native_core::context_optimizer_config::AgentOptimizerSettings,
+        sensitive_reads: bool,
     ) -> HookEvaluation {
         let tool_name = extract_tool_name(payload);
         if !is_read_tool(tool_name) {
@@ -117,13 +142,13 @@ impl HookInterceptor {
             .or_else(|| input.get("Path"))
             .or_else(|| input.get("AbsolutePath"))
             .and_then(Value::as_str)
-            .filter(|s| !s.trim().is_empty())
+            .filter(|s| !s.trim().is_empty() && !s.contains('\0'))
         else {
             return HookEvaluation::allow();
         };
         let path = PathBuf::from(raw_path);
 
-        if settings.noise_filter && settings.block_sensitive_reads && is_sensitive_path(&path) {
+        if sensitive_reads && is_sensitive_path(&path) {
             let reason = format!(
                 "[matou context-guard] Blocked direct read of sensitive file `{}`. Disable sensitive-file protection in Matou Settings if you intentionally need to inspect it.",
                 path.display()
@@ -131,6 +156,7 @@ impl HookInterceptor {
             return HookEvaluation {
                 response_json: deny_pre_tool_json(&reason),
                 saved_noise_bytes: 0,
+                replacement_source: None,
             };
         }
 
@@ -156,6 +182,7 @@ impl HookInterceptor {
                 HookEvaluation {
                     response_json: deny_pre_tool_json(&reason),
                     saved_noise_bytes: saved_bytes as u64,
+                    replacement_source: None,
                 }
             }
             ReadDecision::ReturnDiff { diff, saved_bytes } => {
@@ -163,11 +190,13 @@ impl HookInterceptor {
                 HookEvaluation {
                     response_json: deny_pre_tool_json(&diff),
                     saved_noise_bytes: saved_bytes as u64,
+                    replacement_source: None,
                 }
             }
             ReadDecision::BlockOversized { reason, .. } => HookEvaluation {
                 response_json: deny_pre_tool_json(&reason),
                 saved_noise_bytes: 0,
+                replacement_source: None,
             },
         }
     }
@@ -233,6 +262,80 @@ impl HookInterceptor {
         HookEvaluation {
             response_json: response.to_string(),
             saved_noise_bytes: trimmed.saved_bytes as u64,
+            replacement_source: None,
+        }
+    }
+
+    fn replace_claude_tool_output(
+        &self,
+        data_root: &Path,
+        session_id: &str,
+        payload: &Value,
+        settings: &matou_native_core::context_optimizer_config::AgentOptimizerSettings,
+        deadline: Instant,
+    ) -> Option<HookEvaluation> {
+        if !settings.noise_filter || Instant::now() >= deadline {
+            return None;
+        }
+        let host_session = payload.get("session_id")?.as_str()?.trim();
+        let tool_use_id = payload.get("tool_use_id")?.as_str()?.trim();
+        if host_session.is_empty() || tool_use_id.is_empty() {
+            return None;
+        }
+        let tool = extract_tool_name(payload);
+        let threshold = settings.max_log_bytes.max(HARD_CAP_BYTES);
+        let output = ClaudeOutput::parse(payload, tool, threshold, deadline)?;
+        if output.reported_bytes <= threshold || Instant::now() >= deadline {
+            return None;
+        }
+        let full = redact_secrets(&output.body);
+        let cleaned = redact_secrets(&strip_ansi_and_progress(&full));
+        let command = redact_secrets(output.command);
+        let key = (
+            session_id.to_owned(),
+            host_session.to_owned(),
+            tool_use_id.to_owned(),
+        );
+        // A retry of the same host tool call reuses its source. Concurrent DB
+        // access follows the same immediate fail-open policy as SQLite locks.
+        let mut sources = self.replacement_sources.try_lock().ok()?;
+        if Instant::now() >= deadline {
+            return None;
+        }
+        let source = if let Some(id) = sources.get(&key) {
+            id.clone()
+        } else {
+            let store = ContextGuardStore::open_for_hook(data_root).ok()?;
+            let record = store
+                .save_log_before(session_id, tool, &command, &full, Some(deadline))
+                .ok()?;
+            sources.insert(key, record.id.clone());
+            record.id
+        };
+        drop(sources);
+        let (replacement, saved_bytes) = output.replacement(&cleaned, &command, &source)?;
+        if Instant::now() >= deadline {
+            return None;
+        }
+        Some(HookEvaluation {
+            response_json: json!({"hookSpecificOutput": {
+                "hookEventName": "PostToolUse", "updatedToolOutput": replacement,
+            }})
+            .to_string(),
+            saved_noise_bytes: saved_bytes as u64,
+            replacement_source: Some(source),
+        })
+    }
+
+    pub(crate) fn record_claude_replacement(&self, session_id: &str, decision: &HookEvaluation) {
+        let Some(source) = &decision.replacement_source else {
+            return;
+        };
+        if let Ok(mut map) = self.saved_by_session.lock() {
+            let saved = map.entry(session_id.to_owned()).or_default();
+            if saved.counted_sources.insert(source.clone()) {
+                saved.bytes = saved.bytes.saturating_add(decision.saved_noise_bytes);
+            }
         }
     }
 
@@ -241,8 +344,8 @@ impl HookInterceptor {
             return;
         }
         if let Ok(mut map) = self.saved_by_session.lock() {
-            let entry = map.entry(session_id.to_owned()).or_insert(0);
-            *entry = entry.saturating_add(bytes);
+            let entry = map.entry(session_id.to_owned()).or_default();
+            entry.bytes = entry.bytes.saturating_add(bytes);
         }
     }
 }
@@ -282,9 +385,7 @@ fn is_shell_tool(name: &str) -> bool {
     matches!(name, "Bash" | "run_command" | "shell" | "exec_command")
 }
 
-fn extract_line_range(
-    input: &serde_json::Map<String, Value>,
-) -> (Option<usize>, Option<usize>) {
+fn extract_line_range(input: &serde_json::Map<String, Value>) -> (Option<usize>, Option<usize>) {
     let start = input
         .get("StartLine")
         .or_else(|| input.get("start_line"))
@@ -339,15 +440,31 @@ mod tests {
     use super::*;
     use matou_native_core::context_optimizer_config::AgentOptimizerSettings;
     use std::fs;
+    use std::time::Duration;
+
+    fn deadline() -> Instant {
+        Instant::now() + Duration::from_secs(5)
+    }
 
     #[test]
-    fn default_off_interception_always_allows() {
+    fn independent_sensitive_reads_block_env_but_allow_templates() {
         let dir = tempfile::tempdir().unwrap();
         let env_file = dir.path().join(".env");
         fs::write(&env_file, "SECRET=123").unwrap();
 
         let interceptor = HookInterceptor::new();
-        let payload = json!({
+        ContextOptimizerConfig::for_data_root(dir.path())
+            .set_agent_settings(
+                "claude-code",
+                AgentOptimizerSettings {
+                    noise_filter: false,
+                    read_dedup: false,
+                    block_sensitive_reads: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let mut payload = json!({
             "hook_event_name": "PreToolUse",
             "tool_name": "Read",
             "tool_input": { "file_path": env_file }
@@ -357,8 +474,72 @@ mod tests {
             LaunchProfile::ClaudeCode,
             "s1",
             &payload,
+            deadline(),
+        );
+        assert!(
+            eval.response_json
+                .contains("\"permissionDecision\":\"deny\"")
+        );
+        payload["tool_input"]["file_path"] = json!(dir.path().join(".env.example"));
+        let eval = interceptor.evaluate_hook(
+            dir.path(),
+            LaunchProfile::ClaudeCode,
+            "s1",
+            &payload,
+            deadline(),
         );
         assert_eq!(eval.response_json, "{}");
+    }
+
+    #[test]
+    fn sensitive_read_defaults_match_settings_on_fresh_data_and_fail_open_on_invalid_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = ContextOptimizerConfig::for_data_root(dir.path());
+        let interceptor = HookInterceptor::new();
+        let read = |profile, name| {
+            interceptor.evaluate_hook(
+                dir.path(),
+                profile,
+                "card",
+                &json!({
+                    "hook_event_name": "PreToolUse", "tool_name": "Read",
+                    "tool_input": {"file_path": dir.path().join(name)}
+                }),
+                deadline(),
+            )
+        };
+        assert!(!config.path().exists());
+        for profile in [
+            LaunchProfile::ClaudeCode,
+            LaunchProfile::Codex,
+            LaunchProfile::Antigravity,
+        ] {
+            assert!(
+                read(profile, ".env")
+                    .response_json
+                    .contains("\"permissionDecision\":\"deny\"")
+            );
+            assert_eq!(read(profile, ".env.example"), HookEvaluation::allow());
+        }
+        assert!(!config.path().exists());
+        config
+            .set_agent_settings(
+                "claude-code",
+                AgentOptimizerSettings {
+                    block_sensitive_reads: false,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            read(LaunchProfile::ClaudeCode, ".env"),
+            HookEvaluation::allow()
+        );
+        fs::write(config.path(), "{").unwrap();
+        assert_eq!(
+            read(LaunchProfile::ClaudeCode, ".env"),
+            HookEvaluation::allow()
+        );
     }
 
     #[test]
@@ -391,28 +572,70 @@ mod tests {
             LaunchProfile::ClaudeCode,
             "s1",
             &pre_env,
+            deadline(),
         );
-        assert!(env_eval.response_json.contains("\"permissionDecision\":\"deny\""));
+        assert!(
+            env_eval
+                .response_json
+                .contains("\"permissionDecision\":\"deny\"")
+        );
 
         // PostToolUse with huge test log stores full log in SQLite and trims response.
         let mut big_log = "test ok\n".repeat(3_000);
         big_log.push_str("error[E0308]: mismatched types\n");
         let post_bash = json!({
             "hook_event_name": "PostToolUse",
+            "session_id": "provider-1",
+            "tool_use_id": "toolu_1",
             "tool_name": "Bash",
             "tool_input": { "command": "cargo test" },
-            "tool_response": { "stdout": big_log }
+            "tool_response": { "stdout": big_log, "stderr": "", "interrupted": false, "isImage": false }
         });
         let post_eval = interceptor.evaluate_hook(
             dir.path(),
             LaunchProfile::ClaudeCode,
             "s1",
             &post_bash,
+            deadline(),
         );
         assert!(post_eval.saved_noise_bytes > 10_000);
         assert!(post_eval.response_json.contains("mismatched types"));
         assert!(post_eval.response_json.contains("log_0001"));
-        assert!(interceptor.saved_noise_bytes("s1") > 10_000);
+        let reply: Value = serde_json::from_str(&post_eval.response_json).unwrap();
+        assert!(
+            reply["hookSpecificOutput"]
+                .get("additionalContext")
+                .is_none()
+        );
+        let summary = reply["hookSpecificOutput"]["updatedToolOutput"]["stdout"]
+            .as_str()
+            .unwrap();
+        assert!(summary.len() <= HARD_CAP_BYTES);
+        assert_eq!(
+            post_eval.saved_noise_bytes as usize,
+            big_log.trim_end().len() - summary.len()
+        );
+        assert_eq!(interceptor.saved_noise_bytes("s1"), 0);
+        interceptor.record_claude_replacement("s1", &post_eval);
+        let retry = interceptor.evaluate_hook(
+            dir.path(),
+            LaunchProfile::ClaudeCode,
+            "s1",
+            &post_bash,
+            deadline(),
+        );
+        assert_eq!(retry, post_eval);
+        interceptor.record_claude_replacement("s1", &retry);
+        assert_eq!(
+            interceptor.saved_noise_bytes("s1"),
+            post_eval.saved_noise_bytes
+        );
+        let store = ContextGuardStore::open(dir.path()).unwrap();
+        assert_eq!(store.list_session_logs("s1", 10).unwrap().len(), 1);
+        assert_eq!(
+            store.get_full_log("log_0001").unwrap().as_deref(),
+            Some(big_log.as_str())
+        );
     }
 
     #[test]
@@ -437,7 +660,130 @@ mod tests {
             "tool_name": "Read",
             "tool_input": { "file_path": env_file }
         });
-        let eval = interceptor.evaluate_hook(dir.path(), LaunchProfile::Dsh, "s1", &payload);
+        let eval =
+            interceptor.evaluate_hook(dir.path(), LaunchProfile::Dsh, "s1", &payload, deadline());
         assert_eq!(eval.response_json, "{}");
+    }
+
+    #[test]
+    fn claude_post_tool_use_fails_open_for_unknown_outputs_disabled_switch_lock_and_expiry() {
+        let dir = tempfile::tempdir().unwrap();
+        let interceptor = HookInterceptor::new();
+        let mut payload = json!({
+            "hook_event_name": "PostToolUse", "session_id": "provider", "tool_use_id": "toolu_1",
+            "tool_name": "Bash", "tool_input": {"command": "test"},
+            "tool_response": {"stdout": "ERROR\n".repeat(4_000), "stderr": "", "interrupted": false, "isImage": false}
+        });
+        let evaluate = |payload: &Value, deadline| {
+            interceptor.evaluate_hook(
+                dir.path(),
+                LaunchProfile::ClaudeCode,
+                "card",
+                payload,
+                deadline,
+            )
+        };
+        assert_eq!(evaluate(&payload, deadline()), HookEvaluation::allow());
+        ContextOptimizerConfig::for_data_root(dir.path())
+            .set_agent_settings(
+                "claude-code",
+                AgentOptimizerSettings {
+                    noise_filter: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(evaluate(&payload, Instant::now()), HookEvaluation::allow());
+        payload["tool_name"] = json!("Other");
+        assert_eq!(evaluate(&payload, deadline()), HookEvaluation::allow());
+        payload["tool_name"] = json!("Bash");
+        for bad in [json!(true), json!("false"), Value::Null] {
+            payload["tool_response"]["isImage"] = bad;
+            assert_eq!(evaluate(&payload, deadline()), HookEvaluation::allow());
+        }
+        payload["tool_response"]["isImage"] = json!(false);
+        payload["tool_response"]["backgroundTaskId"] = json!("task-1");
+        assert_eq!(evaluate(&payload, deadline()), HookEvaluation::allow());
+        payload["tool_response"]
+            .as_object_mut()
+            .unwrap()
+            .remove("backgroundTaskId");
+        assert!(!dir.path().join("context_guard.sqlite").exists());
+        let store = ContextGuardStore::open(dir.path()).unwrap();
+        let db = rusqlite::Connection::open(store.path()).unwrap();
+        db.execute_batch("BEGIN IMMEDIATE").unwrap();
+        assert_eq!(evaluate(&payload, deadline()), HookEvaluation::allow());
+        assert_eq!(interceptor.saved_noise_bytes("card"), 0);
+        db.execute_batch("ROLLBACK").unwrap();
+        assert!(store.list_session_logs("card", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn claude_text_read_replacement_keeps_errors_redacts_full_log_and_counts_rendered_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        ContextOptimizerConfig::for_data_root(dir.path())
+            .set_agent_settings(
+                "claude-code",
+                AgentOptimizerSettings {
+                    noise_filter: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let secret = "sk-testsecret0123456789012345";
+        let content = format!(
+            "{}ERROR first {secret}\n{}FAIL second\n{}panic third\n{}assert fourth\n",
+            "ok\n".repeat(1700),
+            "ok\n".repeat(1700),
+            "ok\n".repeat(1700),
+            "ok\n".repeat(1700)
+        );
+        let payload = json!({
+            "hook_event_name": "PostToolUse", "session_id": "provider", "tool_use_id": "toolu_1",
+            "tool_name": "Read", "tool_input": {"file_path": "/tmp/log.txt"},
+            "tool_response": {"type": "text", "file": {
+                "filePath": "/tmp/log.txt", "content": content, "startLine": 17,
+                "numLines": content.split('\n').count(), "totalLines": 10_000
+            }}
+        });
+        let interceptor = HookInterceptor::new();
+        let eval = interceptor.evaluate_hook(
+            dir.path(),
+            LaunchProfile::ClaudeCode,
+            "card",
+            &payload,
+            deadline(),
+        );
+        let reply: Value = serde_json::from_str(&eval.response_json).unwrap();
+        let replacement = &reply["hookSpecificOutput"]["updatedToolOutput"];
+        assert_eq!(replacement["type"], "text");
+        assert_eq!(replacement["file"]["startLine"], 17);
+        let summary = replacement["file"]["content"].as_str().unwrap();
+        for error in [
+            "ERROR first [REDACTED]",
+            "FAIL second",
+            "panic third",
+            "assert fourth",
+        ] {
+            assert!(summary.contains(error), "missing {error}");
+        }
+        assert!(!summary.contains(secret));
+        let rendered_size = |text: &str| {
+            text.split('\n')
+                .enumerate()
+                .map(|(index, line)| format!("{}\t{line}", index + 17))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .trim_end()
+                .len()
+        };
+        assert!(rendered_size(summary) < HARD_CAP_BYTES);
+        assert_eq!(
+            eval.saved_noise_bytes as usize,
+            rendered_size(&content) - rendered_size(summary)
+        );
+        let store = ContextGuardStore::open(dir.path()).unwrap();
+        let full = store.get_full_log("log_0001").unwrap().unwrap();
+        assert_eq!(full, content.replace(secret, "[REDACTED]"));
     }
 }
