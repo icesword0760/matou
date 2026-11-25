@@ -2464,7 +2464,6 @@ impl RuntimeWiring {
                         json!({
                             "sessionId": session_id,
                             "markdown": brief.markdown,
-                            "stalledTool": brief.stalled_tool,
                             "modifiedFiles": brief.modified_files,
                             "logIds": brief.log_ids,
                             "contextPercent": brief.context_percent,

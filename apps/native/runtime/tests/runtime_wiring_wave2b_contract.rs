@@ -1340,6 +1340,8 @@ fn codex_fork_leases_roll_back_unbound_checkout_and_retry_bound_checkout_after_r
 fn hud_projects_verified_claude_team_context_and_running_tools() -> Result<()> {
     let root = tempfile::tempdir()?;
     let options = options(root.path())?;
+    git(&options.workspace, &["init", "-q"])?;
+    fs::write(options.workspace.join("worktree-only.txt"), "fixture change")?;
     let claude = root.path().join("claude-fixture");
     let config = root.path().join("claude-config");
     let projects = config.join("projects/project");
@@ -1429,6 +1431,51 @@ exec /bin/cat
     assert_eq!(hud["hud"]["contextPercent"].as_f64(), Some(21.0));
     assert_eq!(hud["teammates"][0]["teammateId"], "reviewer@team");
     assert_eq!(hud["teammates"][0]["workStatus"], "idle");
+    let guard = &hud["hud"]["contextGuard"];
+    assert!(guard["cache"].is_object());
+    assert_eq!(
+        *guard,
+        json!({
+            "contextPressure": "normal",
+            "savedNoiseBytes": 0,
+            "cache": guard["cache"],
+            "handoffReady": guard["handoffReady"]
+        })
+    );
+    let details = result(
+        &host,
+        Command::GetContextGuardDetails {
+            request_id: 70,
+            session_id: id.clone(),
+        },
+        70,
+        "contextGuardDetailsResult",
+    )?;
+    assert!(details["cache"].is_object());
+    assert_eq!(
+        details,
+        json!({"sessionId": id, "cache": details["cache"], "logs": []})
+    );
+    let brief = result(
+        &host,
+        Command::GetSessionHandoffBrief {
+            request_id: 71,
+            session_id: id.clone(),
+        },
+        71,
+        "sessionHandoffBriefResult",
+    )?;
+    assert!(brief["markdown"].as_str().is_some_and(|text| !text.is_empty()));
+    assert_eq!(
+        brief,
+        json!({
+            "sessionId": id,
+            "markdown": brief["markdown"],
+            "modifiedFiles": ["worktree-only.txt"],
+            "logIds": [],
+            "contextPercent": 21.0
+        })
+    );
     host.shutdown()
 }
 

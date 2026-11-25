@@ -38,19 +38,6 @@ pub(crate) fn redact(text: &str, secrets: &[String]) -> String {
         .into_owned()
 }
 
-/// Plain complete lines are progress. Terminal repaints, cursor movement and
-/// in-place spinners are already covered by provider activity when meaningful.
-pub(crate) fn has_completed_output_line(data: &str) -> bool {
-    data.split_inclusive('\n').any(|line| {
-        let Some(line) = line.strip_suffix('\n') else {
-            return false;
-        };
-        let line = line.strip_suffix('\r').unwrap_or(line);
-        !line.chars().any(|ch| ch.is_control() && ch != '\t')
-            && line.chars().filter(|ch| ch.is_alphabetic()).take(3).count() == 3
-    })
-}
-
 pub(crate) fn start_git_snapshot(cwd: PathBuf) -> std::io::Result<mpsc::Receiver<Vec<String>>> {
     let (send, receive) = mpsc::channel();
     std::thread::Builder::new()

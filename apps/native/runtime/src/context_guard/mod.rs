@@ -1,5 +1,5 @@
 //! Built-in context & KV-cache optimizer engine (Phase 1: observation,
-//! KV-cache countdown, sleep-safe stall watchdog, and redacted handoff briefs).
+//! KV-cache countdown, context pressure reminders, and redacted handoff briefs).
 //!
 //! All state stays in-process inside `matou-native-runtime` with zero MCP
 //! servers and zero extra background processes. Behavior is gated per-agent by
@@ -25,9 +25,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use std::sync::LazyLock;
 
-use crate::agent_hud_projection::{
-    ContextUsageSample, HudProvider, TaskStatus, ToolActivity, ToolStatus,
-};
+use crate::agent_hud_projection::{ContextUsageSample, HudProvider, ToolActivity, ToolStatus};
 
 #[path = "rescue.rs"]
 pub(crate) mod rescue;
@@ -106,12 +104,6 @@ impl KeepaliveController {
     }
 }
 
-const SLEEP_DRIFT_THRESHOLD_MS: f64 = 15_000.0;
-const NORMAL_WARN_SILENCE_MS: f64 = 90_000.0;
-const NORMAL_STALL_SILENCE_MS: f64 = 180_000.0;
-const LONG_TOOL_WARN_SILENCE_MS: f64 = 600_000.0;
-const LONG_TOOL_STALL_SILENCE_MS: f64 = 1_200_000.0;
-
 const CONTEXT_WARN_PERCENT: f64 = 75.0;
 const CONTEXT_CRITICAL_PERCENT: f64 = 85.0;
 
@@ -130,14 +122,6 @@ static SECRET_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     .filter_map(|p| Regex::new(p).ok())
     .collect()
 });
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum StallSeverity {
-    Normal,
-    Warning,
-    Stalled,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -167,16 +151,6 @@ pub struct CacheHudStatus {
     pub hit_ratio_percent: Option<f64>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct StallHudStatus {
-    pub severity: StallSeverity,
-    pub silent_sec: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stalled_tool: Option<String>,
-    pub sleep_guard_recoveries: u32,
-}
-
 /// Compact optimizer projection embedded into `HudSnapshot` whenever enabled
 /// for the session's agent provider.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -186,8 +160,6 @@ pub struct ContextGuardHudSummary {
     pub saved_noise_bytes: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache: Option<CacheHudStatus>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stall: Option<StallHudStatus>,
     pub handoff_ready: bool,
 }
 
@@ -207,33 +179,18 @@ pub struct HandoffBrief {
     pub context_percent: Option<f64>,
     pub modified_files: Vec<String>,
     pub recent_tools: Vec<ToolTraceEntry>,
-    pub stalled_tool: Option<String>,
     pub log_ids: Vec<String>,
     pub markdown: String,
 }
 
-#[derive(Clone, Debug)]
-struct ActiveToolLease {
-    name: String,
-    target: Option<String>,
-    started_at_ms: f64,
-    long_running: bool,
-}
-
-/// Per-session state machine for KV-cache countdown, stall detection, and
-/// rescue handoff generation.
+/// Per-session KV-cache, context pressure, and handoff state.
 #[derive(Clone, Debug)]
 pub struct SessionContextGuard {
     provider: HudProvider,
     usage: Option<ContextUsageSample>,
     warned_pressure: ContextPressure,
     warned_cache_deadline_ms: Option<f64>,
-    last_activity_ms: Option<f64>,
-    last_wall_tick_ms: Option<f64>,
-    last_mono_tick_ms: Option<f64>,
-    sleep_guard_recoveries: u32,
-    active_tool: Option<ActiveToolLease>,
-    task_status: TaskStatus,
+    has_active_tool: bool,
     context_percent: Option<f64>,
     saved_noise_bytes: u64,
     modified_files: VecDeque<String>,
@@ -248,12 +205,7 @@ impl SessionContextGuard {
             usage: None,
             warned_pressure: ContextPressure::Normal,
             warned_cache_deadline_ms: None,
-            last_activity_ms: None,
-            last_wall_tick_ms: None,
-            last_mono_tick_ms: None,
-            sleep_guard_recoveries: 0,
-            active_tool: None,
-            task_status: TaskStatus::Idle,
+            has_active_tool: false,
             context_percent: None,
             saved_noise_bytes: 0,
             modified_files: VecDeque::new(),
@@ -274,51 +226,11 @@ impl SessionContextGuard {
         self.saved_noise_bytes = bytes;
     }
 
-    pub fn on_task_status(&mut self, status: TaskStatus, now_ms: f64) {
-        self.task_status = status;
-        self.last_activity_ms = Some(now_ms);
-        if status != TaskStatus::Running {
-            self.active_tool = None;
-        }
+    pub(crate) fn set_active_tool(&mut self, active: bool) {
+        self.has_active_tool = active;
     }
 
-    /// Idempotent polling sync used by `RuntimeOwner::agent_hud`. Only
-    /// advances activity/tool timestamps when observed state actually changes,
-    /// so periodic HUD refreshes never mask a genuine stall.
-    pub fn sync_observed_state(
-        &mut self,
-        status: TaskStatus,
-        context_percent: Option<f64>,
-        active_tool: Option<(&str, Option<&str>)>,
-        now_ms: f64,
-    ) {
-        if status != self.task_status {
-            self.on_task_status(status, now_ms);
-        }
-        if context_percent != self.context_percent {
-            self.on_context_percent(context_percent, now_ms);
-        }
-        if status != TaskStatus::Running {
-            return;
-        }
-        if let Some((name, target)) = active_tool {
-            let same_tool = self
-                .active_tool
-                .as_ref()
-                .is_some_and(|cur| cur.name == name && cur.target.as_deref() == target);
-            if !same_tool {
-                self.on_tool_started(name, target, now_ms);
-            }
-        } else {
-            self.active_tool = None;
-        }
-    }
-
-    pub(crate) fn note_activity(&mut self, now_ms: f64) {
-        self.last_activity_ms = Some(now_ms);
-    }
-
-    pub(crate) fn observe_last_tool(&mut self, tool: Option<&ToolActivity>, now_ms: f64) {
+    pub(crate) fn observe_last_tool(&mut self, tool: Option<&ToolActivity>) {
         if self.observed_last_tool.as_ref() == tool {
             return;
         }
@@ -329,13 +241,8 @@ impl SessionContextGuard {
                 tool.tool.target.as_deref(),
                 tool.status == ToolStatus::Completed,
                 None,
-                now_ms,
             );
         }
-    }
-
-    pub(crate) fn is_stalled(&self, now_ms: f64) -> bool {
-        self.compute_stall_status(now_ms).severity == StallSeverity::Stalled
     }
 
     pub(crate) fn has_critical_context(&self) -> bool {
@@ -346,19 +253,11 @@ impl SessionContextGuard {
         self.context_percent
     }
 
-    pub fn on_context_percent(&mut self, percent: Option<f64>, now_ms: f64) {
+    pub fn on_context_percent(&mut self, percent: Option<f64>) {
         self.context_percent = percent;
-        if percent.is_some() {
-            self.last_activity_ms = Some(now_ms);
-        }
     }
 
     pub(crate) fn observe_usage(&mut self, usage: Option<ContextUsageSample>) {
-        if let Some(at) = usage.and_then(|sample| sample.observed_at_ms)
-            && self.last_activity_ms.is_none_or(|last| at > last)
-        {
-            self.last_activity_ms = Some(at);
-        }
         self.usage = usage;
     }
 
@@ -411,43 +310,19 @@ impl SessionContextGuard {
         }
     }
 
-    pub fn on_tool_started(&mut self, name: &str, target: Option<&str>, now_ms: f64) {
-        let long_running = is_long_running_tool(name, target);
-        self.active_tool = Some(ActiveToolLease {
-            name: name.to_owned(),
-            target: target.map(str::to_owned),
-            started_at_ms: now_ms,
-            long_running,
-        });
-        self.task_status = TaskStatus::Running;
-        self.last_activity_ms = Some(now_ms);
-    }
-
-    pub fn on_tool_finished(&mut self, name: &str, target: Option<&str>, succeeded: bool, now_ms: f64) {
-        self.active_tool = None;
-        self.record_tool_result(name, target, succeeded, None, now_ms);
-    }
-
     pub(crate) fn record_tool_result(
         &mut self,
         name: &str,
         target: Option<&str>,
         succeeded: bool,
         exit_code: Option<i64>,
-        now_ms: f64,
     ) {
-        self.note_activity(now_ms);
         self.push_tool_trace(ToolTraceEntry {
             tool_name: name.to_owned(),
             target: target.map(str::to_owned),
             succeeded: Some(succeeded),
             exit_code,
         });
-    }
-
-    pub fn on_file_modified(&mut self, path: &str, now_ms: f64) {
-        self.note_activity(now_ms);
-        self.record_modified_file(path);
     }
 
     pub(crate) fn record_modified_file(&mut self, path: &str) {
@@ -464,68 +339,28 @@ impl SessionContextGuard {
         }
     }
 
-    /// Advances the watchdog clock and applies OS sleep/lid-close drift
-    /// protection so waking from suspend never triggers a false stall alert.
-    pub fn tick(&mut self, wall_now_ms: f64, mono_now_ms: f64) {
-        if let (Some(prev_wall), Some(prev_mono)) = (self.last_wall_tick_ms, self.last_mono_tick_ms) {
-            let delta_wall = (wall_now_ms - prev_wall).max(0.0);
-            let delta_mono = (mono_now_ms - prev_mono).max(0.0);
-            let drift = delta_wall - delta_mono;
-            if drift > SLEEP_DRIFT_THRESHOLD_MS {
-                self.sleep_guard_recoveries = self.sleep_guard_recoveries.saturating_add(1);
-                if let Some(last) = self.last_activity_ms.as_mut() {
-                    if *last <= prev_wall {
-                        *last += drift;
-                    }
-                }
-                if let Some(tool) = self.active_tool.as_mut() {
-                    tool.started_at_ms += drift;
-                }
-            }
-        }
-        self.last_wall_tick_ms = Some(wall_now_ms);
-        self.last_mono_tick_ms = Some(mono_now_ms);
-    }
-
     /// Computes the compact HUD projection respecting the effective per-agent
-    /// settings. Returns `None` when the master switch is off or neither
-    /// monitoring feature is enabled.
+    /// settings. Requires both the master switch and cache monitoring.
     pub fn project_hud(
         &self,
         now_ms: f64,
         raw_settings: &AgentOptimizerSettings,
     ) -> Option<ContextGuardHudSummary> {
         let settings = raw_settings.effective_for(self.provider_id());
-        if !settings.enabled || (!settings.cache_monitor && !settings.stall_rescue) {
+        if !settings.enabled || !settings.cache_monitor {
             return None;
         }
 
-        let cache = settings
-            .cache_monitor
-            .then(|| self.compute_cache_status(now_ms));
-        let stall = settings
-            .stall_rescue
-            .then(|| self.compute_stall_status(now_ms));
-        let context_pressure = if settings.cache_monitor {
-            classify_context_pressure(self.context_percent)
-        } else {
-            ContextPressure::Normal
-        };
-        let handoff_ready = settings.stall_rescue
-            && (context_pressure == ContextPressure::Critical
-                || !self.modified_files.is_empty()
-                || !self.recent_tools.is_empty()
-                || self.active_tool.is_some()
-                || matches!(
-                    stall.as_ref().map(|s| s.severity),
-                    Some(StallSeverity::Stalled)
-                ));
+        let context_pressure = classify_context_pressure(self.context_percent);
+        let handoff_ready = context_pressure == ContextPressure::Critical
+            || !self.modified_files.is_empty()
+            || !self.recent_tools.is_empty()
+            || self.has_active_tool;
 
         Some(ContextGuardHudSummary {
             context_pressure,
             saved_noise_bytes: self.saved_noise_bytes,
-            cache,
-            stall,
+            cache: Some(self.compute_cache_status(now_ms)),
             handoff_ready,
         })
     }
@@ -536,10 +371,9 @@ impl SessionContextGuard {
         &self,
         session_name: Option<&str>,
         cwd: Option<&str>,
-        now_ms: f64,
         locale: InterfaceLocale,
     ) -> HandoffBrief {
-        self.build_handoff_with_observations(session_name, cwd, now_ms, locale, &[], &[], &[])
+        self.build_handoff_with_observations(session_name, cwd, locale, &[], &[], &[])
     }
 
     pub(crate) fn recorded_modified_files(&self) -> impl Iterator<Item = &str> {
@@ -550,13 +384,11 @@ impl SessionContextGuard {
         &self,
         session_name: Option<&str>,
         cwd: Option<&str>,
-        now_ms: f64,
         locale: InterfaceLocale,
         modified_files: &[String],
         log_ids: &[String],
         secrets: &[String],
     ) -> HandoffBrief {
-        let stall = self.compute_stall_status(now_ms);
         let redact = |text: &str| rescue::redact(text, secrets);
         let session_name = session_name.map(redact);
         let cwd = cwd.map(redact);
@@ -577,7 +409,6 @@ impl SessionContextGuard {
                 exit_code: tool.exit_code,
             })
             .collect();
-        let stalled_tool = stall.stalled_tool.as_deref().map(redact);
 
         let mut markdown = render_handoff_markdown(
             self.provider,
@@ -586,9 +417,6 @@ impl SessionContextGuard {
             self.context_percent,
             &modified_files,
             &recent_tools,
-            stalled_tool.as_deref(),
-            stall.severity,
-            stall.silent_sec,
             locale,
         );
         for tool in &mut recent_tools {
@@ -614,7 +442,6 @@ impl SessionContextGuard {
             context_percent: self.context_percent,
             modified_files,
             recent_tools,
-            stalled_tool,
             log_ids: log_ids.to_vec(),
             markdown: redact_secrets(&markdown),
         }
@@ -656,57 +483,6 @@ impl SessionContextGuard {
             warm,
             expiring_soon: warm && remaining_sec <= CACHE_EXPIRING_SOON_SEC,
             hit_ratio_percent: self.usage.and_then(|usage| usage.tokens.cache_hit_ratio()),
-        }
-    }
-
-    fn compute_stall_status(&self, now_ms: f64) -> StallHudStatus {
-        if self.task_status != TaskStatus::Running {
-            return StallHudStatus {
-                severity: StallSeverity::Normal,
-                silent_sec: 0,
-                stalled_tool: None,
-                sleep_guard_recoveries: self.sleep_guard_recoveries,
-            };
-        }
-
-        let reference_ms = self
-            .active_tool
-            .as_ref()
-            .map(|t| {
-                t.started_at_ms
-                    .max(self.last_activity_ms.unwrap_or(t.started_at_ms))
-            })
-            .or(self.last_activity_ms)
-            .unwrap_or(now_ms);
-        let silent_ms = (now_ms - reference_ms).max(0.0);
-        let (warn_ms, stall_ms) = if self.active_tool.as_ref().is_some_and(|t| t.long_running) {
-            (LONG_TOOL_WARN_SILENCE_MS, LONG_TOOL_STALL_SILENCE_MS)
-        } else {
-            (NORMAL_WARN_SILENCE_MS, NORMAL_STALL_SILENCE_MS)
-        };
-
-        let severity = if silent_ms >= stall_ms {
-            StallSeverity::Stalled
-        } else if silent_ms >= warn_ms {
-            StallSeverity::Warning
-        } else {
-            StallSeverity::Normal
-        };
-
-        let stalled_tool = (severity != StallSeverity::Normal)
-            .then(|| {
-                self.active_tool.as_ref().map(|t| match t.target.as_deref() {
-                    Some(target) if !target.trim().is_empty() => format!("{} ({})", t.name, target),
-                    _ => t.name.clone(),
-                })
-            })
-            .flatten();
-
-        StallHudStatus {
-            severity,
-            silent_sec: (silent_ms / 1000.0).floor() as u64,
-            stalled_tool,
-            sleep_guard_recoveries: self.sleep_guard_recoveries,
         }
     }
 
@@ -818,38 +594,6 @@ fn classify_context_pressure(percent: Option<f64>) -> ContextPressure {
     }
 }
 
-pub(crate) fn is_long_running_tool(name: &str, target: Option<&str>) -> bool {
-    let lower_name = name.to_ascii_lowercase();
-    if lower_name.contains("bash") || lower_name.contains("command") || lower_name.contains("shell")
-    {
-        let Some(target) = target else {
-            // Some hosts expose the shell tool name without its command.
-            return true;
-        };
-        let lower_target = target.to_ascii_lowercase();
-        return [
-            "cargo ",
-            "pnpm ",
-            "npm ",
-            "yarn ",
-            "pytest",
-            "playwright",
-            "vitest",
-            "jest",
-            "docker ",
-            "xcodebuild",
-            "gradle",
-            "make ",
-            "build",
-            "test",
-        ]
-        .iter()
-        .any(|kw| lower_target.contains(kw));
-    }
-    false
-}
-
-#[allow(clippy::too_many_arguments)]
 fn render_handoff_markdown(
     provider: HudProvider,
     session_name: Option<&str>,
@@ -857,9 +601,6 @@ fn render_handoff_markdown(
     context_percent: Option<f64>,
     modified_files: &[String],
     recent_tools: &[ToolTraceEntry],
-    stalled_tool: Option<&str>,
-    severity: StallSeverity,
-    silent_sec: u64,
     locale: InterfaceLocale,
 ) -> String {
     let is_en = matches!(locale, InterfaceLocale::English);
@@ -875,13 +616,6 @@ fn render_handoff_markdown(
         }
         if let Some(pct) = context_percent {
             lines.push(format!("- **Context Usage**: {:.0}%", pct));
-        }
-        if severity != StallSeverity::Normal {
-            let tool_note = stalled_tool.unwrap_or("waiting for model response");
-            lines.push(format!(
-                "- **Interrupted At**: {} (silent {}s)",
-                tool_note, silent_sec
-            ));
         }
         if !modified_files.is_empty() {
             lines.push(String::new());
@@ -927,13 +661,6 @@ fn render_handoff_markdown(
         }
         if let Some(pct) = context_percent {
             lines.push(format!("- **原上下文占用**：{:.0}%", pct));
-        }
-        if severity != StallSeverity::Normal {
-            let tool_note = stalled_tool.unwrap_or("等待模型响应");
-            lines.push(format!(
-                "- **中断位置**：{}（静默 {} 秒）",
-                tool_note, silent_sec
-            ));
         }
         if !modified_files.is_empty() {
             lines.push(String::new());
@@ -1109,9 +836,9 @@ mod tests {
         };
         let due = at + 240_000.;
         guard.observe_usage(Some(cache_sample(at, None)));
-        guard.on_context_percent(Some(74.99), at);
+        guard.on_context_percent(Some(74.99));
         assert_eq!(guard.pending_reminders(due - 1., &settings).count(), 0);
-        guard.on_context_percent(Some(75.), at);
+        guard.on_context_percent(Some(75.));
         let reminders: Vec<_> = guard.pending_reminders(due, &settings).collect();
         assert_eq!(
             reminders,
@@ -1127,19 +854,19 @@ mod tests {
             guard.mark_reminded(reminder);
         }
         assert_eq!(guard.pending_reminders(due + 1., &settings).count(), 0);
-        guard.on_context_percent(Some(85.), at);
+        guard.on_context_percent(Some(85.));
         let critical = ContextReminder::Pressure(ContextPressure::Critical);
         assert_eq!(
             guard.pending_reminders(due, &settings).collect::<Vec<_>>(),
             [critical]
         );
         guard.mark_reminded(critical);
-        guard.on_context_percent(Some(80.), at);
+        guard.on_context_percent(Some(80.));
         assert_eq!(guard.pending_reminders(due, &settings).count(), 0);
 
         guard.on_compaction();
         assert_eq!(guard.pending_reminders(due, &settings).count(), 0);
-        guard.on_context_percent(Some(85.), due);
+        guard.on_context_percent(Some(85.));
         guard.observe_usage(Some(cache_sample(at, None)));
         for disabled in [
             AgentOptimizerSettings {
@@ -1163,62 +890,20 @@ mod tests {
     }
 
     #[test]
-    fn sleep_drift_guard_prevents_false_stall_alerts() {
-        let mut guard = SessionContextGuard::new(HudProvider::Codex);
-        let settings = AgentOptimizerSettings::default();
-        let wall0 = 10_000_000.0;
-        let mono0 = 1_000.0;
-
-        guard.tick(wall0, mono0);
-        guard.on_tool_started("Read", Some("src/main.rs"), wall0);
-
-        // Laptop slept for 10 minutes: wall clock jumped 600s, monotonic advanced 2s.
-        let wall1 = wall0 + 600_000.0;
-        let mono1 = mono0 + 2_000.0;
-        guard.tick(wall1, mono1);
-
-        let hud = guard.project_hud(wall1, &settings).unwrap();
-        let stall = hud.stall.unwrap();
-        assert_eq!(stall.severity, StallSeverity::Normal);
-        assert_eq!(stall.sleep_guard_recoveries, 1);
-
-        // Genuine 200s silence without sleep triggers Stalled.
-        let wall2 = wall1 + 200_000.0;
-        let mono2 = mono1 + 200_000.0;
-        guard.tick(wall2, mono2);
-        let hud2 = guard.project_hud(wall2, &settings).unwrap();
-        assert_eq!(hud2.stall.unwrap().severity, StallSeverity::Stalled);
-    }
-
-    #[test]
-    fn long_running_build_uses_extended_stall_window() {
-        let mut guard = SessionContextGuard::new(HudProvider::ClaudeCode);
-        let settings = AgentOptimizerSettings::default();
-        let t0 = 5_000_000.0;
-        guard.on_tool_started("Bash", Some("cargo test --workspace"), t0);
-
-        // 5 minutes into a cargo build should still be Normal.
-        let hud = guard.project_hud(t0 + 300_000.0, &settings).unwrap();
-        assert_eq!(hud.stall.unwrap().severity, StallSeverity::Normal);
-    }
-
-    #[test]
     fn handoff_brief_redacts_secrets_and_respects_locale() {
         let mut guard = SessionContextGuard::new(HudProvider::Antigravity);
-        let t0 = 2_000_000.0;
-        guard.on_context_percent(Some(88.0), t0);
-        guard.on_file_modified("apps/native/runtime/src/host.rs", t0);
-        guard.on_tool_finished(
+        guard.on_context_percent(Some(88.0));
+        guard.record_modified_file("apps/native/runtime/src/host.rs");
+        guard.record_tool_result(
             "Bash",
             Some("curl -H 'Authorization: Bearer sk-secret1234567890abcdef'"),
             false,
-            t0 + 1_000.0,
+            None,
         );
 
         let brief_zh = guard.build_handoff_brief(
             Some("修复路由"),
             Some("/repo/matou"),
-            t0 + 2_000.0,
             InterfaceLocale::Chinese,
         );
         assert!(brief_zh.markdown.contains("# 会话交接摘要"));
@@ -1229,7 +914,6 @@ mod tests {
         let brief_en = guard.build_handoff_brief(
             Some("Fix router"),
             Some("/repo/matou"),
-            t0 + 2_000.0,
             InterfaceLocale::English,
         );
         assert!(brief_en.markdown.contains("# Session Handoff Brief"));
@@ -1252,16 +936,16 @@ mod tests {
             guard.recent_tools.clear();
             guard.observed_last_tool = None;
             if hud_first {
-                guard.observe_last_tool(Some(&hud_tool), 1.0);
+                guard.observe_last_tool(Some(&hud_tool));
             }
-            guard.record_tool_result("Bash", Some(command), true, Some(0), 2.0);
+            guard.record_tool_result("Bash", Some(command), true, Some(0));
             if !hud_first {
-                guard.observe_last_tool(Some(&hud_tool), 3.0);
+                guard.observe_last_tool(Some(&hud_tool));
             }
 
             for locale in [InterfaceLocale::Chinese, InterfaceLocale::English] {
                 let brief =
-                    guard.build_handoff_brief(None, Some("/repo/long workspace name"), 4.0, locale);
+                    guard.build_handoff_brief(None, Some("/repo/long workspace name"), locale);
                 assert_eq!(brief.recent_tools.len(), 1);
                 assert_eq!(brief.recent_tools[0].target.as_deref(), Some(command));
                 assert_eq!(brief.recent_tools[0].exit_code, Some(0));
@@ -1276,11 +960,11 @@ mod tests {
             }
         }
 
-        guard.record_tool_result("Bash", Some(command), false, Some(1), 5.0);
+        guard.record_tool_result("Bash", Some(command), false, Some(1));
         assert_eq!(guard.recent_tools.len(), 2);
 
-        guard.record_tool_result("Read", Some("/repo/file..."), true, None, 6.0);
-        guard.record_tool_result("Read", Some("/repo/filename"), true, None, 7.0);
+        guard.record_tool_result("Read", Some("/repo/file..."), true, None);
+        guard.record_tool_result("Read", Some("/repo/filename"), true, None);
         assert_eq!(guard.recent_tools.len(), 4);
     }
 
@@ -1289,9 +973,9 @@ mod tests {
         let mut guard = SessionContextGuard::new(HudProvider::ClaudeCode);
         let cwd = format!("/repo/{}", "x".repeat(700));
         let command = format!("cd {cwd}\r\nprintf {}", "测试".repeat(170));
-        guard.record_tool_result("Bash", Some(&command), true, None, 1.0);
-        guard.record_tool_result("Bash", Some("cd /repo/other && pwd"), true, None, 2.0);
-        let brief = guard.build_handoff_brief(None, Some(&cwd), 3.0, InterfaceLocale::English);
+        guard.record_tool_result("Bash", Some(&command), true, None);
+        guard.record_tool_result("Bash", Some("cd /repo/other && pwd"), true, None);
+        let brief = guard.build_handoff_brief(None, Some(&cwd), InterfaceLocale::English);
         let mut steps = brief
             .markdown
             .lines()
@@ -1304,14 +988,21 @@ mod tests {
     }
 
     #[test]
-    fn disabled_master_switch_returns_no_hud_projection() {
+    fn hud_projection_requires_an_enabled_cache_monitor() {
         let mut guard = SessionContextGuard::new(HudProvider::ClaudeCode);
-        guard.on_context_percent(Some(90.0), 1_000.0);
-        let off = AgentOptimizerSettings {
-            enabled: false,
-            ..Default::default()
-        };
-        assert!(guard.project_hud(2_000.0, &off).is_none());
+        guard.on_context_percent(Some(90.0));
+        for settings in [
+            AgentOptimizerSettings {
+                enabled: false,
+                ..Default::default()
+            },
+            AgentOptimizerSettings {
+                cache_monitor: false,
+                ..Default::default()
+            },
+        ] {
+            assert!(guard.project_hud(2_000.0, &settings).is_none());
+        }
     }
 
     #[test]

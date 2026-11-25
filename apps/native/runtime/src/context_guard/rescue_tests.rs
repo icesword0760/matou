@@ -1,6 +1,7 @@
 use super::*;
 
 use matou_native_core::{
+    context_optimizer_config::AgentOptimizerSettings,
     journal::JournalOptions,
     startup::{self, BootstrapResult},
 };
@@ -72,7 +73,7 @@ exec /bin/cat > "$CAPTURE_FILE"
             &hierarchy::BootstrapWindowInput {
                 window_id: WINDOW.into(),
                 default_root_directory: cwd.to_string_lossy().into_owned(),
-                default_name: "Watchdog workspace".into(),
+                default_name: "Handoff workspace".into(),
                 now: 1,
             },
             &ids,
@@ -176,34 +177,168 @@ exec /bin/cat > "$CAPTURE_FILE"
     }
 }
 
+fn poll_idle_recovery(owner: &mut ShellOwner) -> Vec<OwnerEvent> {
+    owner.next_context_reminder_poll = Instant::now();
+    let mut events = Vec::new();
+    owner.poll_context_reminders(&mut events);
+    events
+}
+
+fn source_hook(owner: &mut ShellOwner) -> &mut RunHook {
+    owner.shells.get_mut(SOURCE).unwrap().hook.as_mut().unwrap()
+}
+
+fn source_work_status(owner: &ShellOwner) -> Result<String> {
+    Ok(owner.connection.query_row(
+        "SELECT work_status FROM sessions WHERE id = ?",
+        [SOURCE],
+        |row| row.get(0),
+    )?)
+}
+
 #[test]
-fn background_stall_notifies_once_and_collects_tool_paths_worktree_changes_and_logs() -> Result<()>
-{
+fn claude_idle_recovery_requires_confirmed_hooks_and_continuous_idle() -> Result<()> {
     let mut fixture = Fixture::new(LaunchProfile::ClaudeCode)?;
-    let scene = fixture
-        .owner
-        .notification_scene_id(WINDOW, SOURCE)?
-        .unwrap();
     fixture.launch(SOURCE, LaunchProfile::ClaudeCode)?;
-    let other = fixture.root.path().join("other-workspace");
-    fs::create_dir(&other)?;
-    fixture.owner.create_workspace(
-        &command(
-            "other-workspace".into(),
-            "hierarchy.create-workspace",
-            "other".into(),
-        ),
-        &workspaces::CreateWorkspaceInput {
-            window_id: WINDOW.into(),
-            name: "Elsewhere".into(),
-            root_directory: other.to_string_lossy().into_owned(),
-            navigation: None,
-            now: now(),
+    let config = ContextOptimizerConfig::for_data_root(&fixture.data);
+    config.set_agent_settings(
+        "claude-code",
+        AgentOptimizerSettings {
+            enabled: false,
+            ..Default::default()
         },
-        &hierarchy_ids(),
-        now(),
     )?;
-    assert_ne!(fixture.owner.hierarchy(WINDOW)?.scene.unwrap().id, scene);
+    let scope = fixture.scope(SOURCE);
+    let expire = |owner: &mut ShellOwner| {
+        let hook = source_hook(owner);
+        let past = Instant::now() - PROVIDER_IDLE_RECOVERY;
+        hook.idle_while_running_since = Some(past);
+        hook.last_submission = hook.last_submission.map(|_| past);
+    };
+    let submit = |owner: &mut ShellOwner| {
+        owner.apply(
+            WorkerEvent {
+                session_id: SOURCE.into(),
+                run_id: scope.run_id.clone(),
+                event: SessionEvent::InputSubmitted(Instant::now()),
+            },
+            &mut Vec::new(),
+        );
+    };
+    submit(&mut fixture.owner);
+    assert_eq!(source_work_status(&fixture.owner)?, "running");
+    assert!(source_hook(&mut fixture.owner).last_observation.is_none());
+    expire(&mut fixture.owner);
+    assert!(poll_idle_recovery(&mut fixture.owner).is_empty());
+    assert_eq!(source_work_status(&fixture.owner)?, "running");
+    assert!(
+        source_hook(&mut fixture.owner)
+            .idle_while_running_since
+            .is_none()
+    );
+
+    fixture.hook("SessionStart", json!({}));
+    assert!(poll_idle_recovery(&mut fixture.owner).is_empty());
+    let hook = source_hook(&mut fixture.owner);
+    assert!(hook.last_observation.is_some());
+    assert!(hook.idle_while_running_since.is_some());
+    expire(&mut fixture.owner);
+    let events = poll_idle_recovery(&mut fixture.owner);
+    assert_eq!(source_work_status(&fixture.owner)?, "idle");
+    assert!(matches!(events.as_slice(), [OwnerEvent::Domain(commit)]
+        if commit.first_event_sequence.is_some()
+            && commit.result["sessionId"] == SOURCE
+            && commit.result["previousStatus"] == "running"
+            && commit.result["workStatus"] == "idle"
+            && commit.result["graph"]["nodes"][0]["workStatus"] == "idle"));
+
+    submit(&mut fixture.owner);
+    assert!(poll_idle_recovery(&mut fixture.owner).is_empty());
+    assert_eq!(source_work_status(&fixture.owner)?, "running");
+    expire(&mut fixture.owner);
+    submit(&mut fixture.owner);
+    assert!(poll_idle_recovery(&mut fixture.owner).is_empty());
+    assert_eq!(source_work_status(&fixture.owner)?, "running");
+    expire(&mut fixture.owner);
+    fixture.hook("UserPromptSubmit", json!({}));
+    assert!(poll_idle_recovery(&mut fixture.owner).is_empty());
+    assert_eq!(source_work_status(&fixture.owner)?, "running");
+    let hook = source_hook(&mut fixture.owner);
+    assert_eq!(
+        hook.hud.snapshot(now() as f64).task_status,
+        TaskStatus::Running
+    );
+    assert!(hook.idle_while_running_since.is_none());
+
+    config.set_agent_settings(
+        "claude-code",
+        AgentOptimizerSettings {
+            cache_monitor: false,
+            ..Default::default()
+        },
+    )?;
+    fixture.hook("Stop", json!({}));
+    submit(&mut fixture.owner);
+    assert!(poll_idle_recovery(&mut fixture.owner).is_empty());
+    assert_eq!(source_work_status(&fixture.owner)?, "running");
+    expire(&mut fixture.owner);
+    poll_idle_recovery(&mut fixture.owner);
+    assert_eq!(source_work_status(&fixture.owner)?, "idle");
+
+    submit(&mut fixture.owner);
+    let question = json!({
+        "type": "assistant",
+        "message": { "content": [{"type": "tool_use", "id": "ask", "name": "AskUserQuestion"}] }
+    });
+    source_hook(&mut fixture.owner)
+        .hud
+        .ingest_live_claude_row(Some(&question));
+    expire(&mut fixture.owner);
+    assert!(poll_idle_recovery(&mut fixture.owner).is_empty());
+    assert_eq!(source_work_status(&fixture.owner)?, "running");
+    source_hook(&mut fixture.owner)
+        .hud
+        .ingest_live_claude_row(None);
+
+    fixture
+        .owner
+        .set_work_status(SOURCE, &mut Vec::new(), |_| Some("needs-input"))?;
+    expire(&mut fixture.owner);
+    assert!(poll_idle_recovery(&mut fixture.owner).is_empty());
+    assert_eq!(source_work_status(&fixture.owner)?, "needs-input");
+    Ok(())
+}
+
+#[test]
+fn idle_recovery_does_not_reclaim_dsh() -> Result<()> {
+    let mut fixture = Fixture::new(LaunchProfile::Dsh)?;
+    fixture.launch(SOURCE, LaunchProfile::Dsh)?;
+    fixture
+        .owner
+        .set_work_status(SOURCE, &mut Vec::new(), |_| Some("running"))?;
+    let hook = source_hook(&mut fixture.owner);
+    // Satisfy the hook and HUD checks to isolate the provider check.
+    let payload = json!({"hook_event_name": "SessionStart", "session_id": "provider-fixture-id"});
+    hook.last_observation = Some(Observation::parse(payload.as_object().unwrap()));
+    hook.idle_while_running_since = Some(Instant::now() - PROVIDER_IDLE_RECOVERY);
+    assert_eq!(
+        hook.hud.snapshot(now() as f64).task_status,
+        TaskStatus::Idle
+    );
+    assert!(poll_idle_recovery(&mut fixture.owner).is_empty());
+    assert_eq!(source_work_status(&fixture.owner)?, "running");
+    assert!(
+        source_hook(&mut fixture.owner)
+            .idle_while_running_since
+            .is_none()
+    );
+    Ok(())
+}
+
+#[test]
+fn handoff_collects_tool_paths_worktree_changes_and_logs_on_demand() -> Result<()> {
+    let mut fixture = Fixture::new(LaunchProfile::ClaudeCode)?;
+    fixture.launch(SOURCE, LaunchProfile::ClaudeCode)?;
 
     fs::write(fixture.cwd.join(".git/info/exclude"), "/already saved.rs\n")?;
     fs::write(fixture.cwd.join("already saved.rs"), "tool-written fixture")?;
@@ -216,14 +351,6 @@ fn background_stall_notifies_once_and_collects_tool_paths_worktree_changes_and_l
         "Bash",
         "cargo test",
         "truncated fixture",
-    )?;
-    ContextOptimizerConfig::for_data_root(&fixture.data).set_agent_settings(
-        "claude-code",
-        matou_native_core::context_optimizer_config::AgentOptimizerSettings {
-            cache_monitor: false,
-            stall_rescue: true,
-            ..Default::default()
-        },
     )?;
     fixture.hook("SessionStart", json!({}));
     fixture.hook(
@@ -240,55 +367,6 @@ fn background_stall_notifies_once_and_collects_tool_paths_worktree_changes_and_l
             "tool_input":{"command":"cargo test TOKEN=fixture"},
             "tool_response":{"exit_code":17},
         }),
-    );
-    fixture.hook("UserPromptSubmit", json!({}));
-    // Publish the provider tool observations first so the simulated quiet
-    // interval starts after the final tool result.
-    fixture.owner.next_context_reminder_poll = Instant::now();
-    fixture.owner.poll_context_reminders(&mut Vec::new());
-    fixture
-        .owner
-        .shells
-        .get_mut(SOURCE)
-        .unwrap()
-        .hook
-        .as_mut()
-        .unwrap()
-        .context_guard
-        .on_task_status(TaskStatus::Running, now() as f64 - 200_000.0);
-    let notices = |owner: &mut ShellOwner| {
-        owner.next_context_reminder_poll = Instant::now();
-        let mut events = Vec::new();
-        owner.poll_context_reminders(&mut events);
-        events
-            .into_iter()
-            .filter_map(|event| match event {
-                OwnerEvent::Domain(commit) => Some(commit.result["agentNotification"].clone()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-    };
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let notification = loop {
-        if let Some(notification) = notices(&mut fixture.owner).into_iter().next() {
-            break notification;
-        }
-        ensure!(
-            Instant::now() < deadline,
-            "no stall notification within five seconds"
-        );
-        thread::sleep(Duration::from_millis(20));
-    };
-    assert_eq!(notification["eventType"], "context-stall-detected");
-    assert_eq!(notification["sessionId"], SOURCE);
-    assert_eq!(notification["sound"], true);
-    assert_eq!(
-        notification["subtitle"],
-        "Watchdog workspace · Original card"
-    );
-    assert_eq!(
-        fixture.owner.graph(&scene, Some(WINDOW))?["nodes"][0]["contextCardAlert"],
-        "stalled"
     );
     let brief = fixture
         .owner
@@ -312,29 +390,6 @@ fn background_stall_notifies_once_and_collects_tool_paths_worktree_changes_and_l
             .iter()
             .any(|tool| tool.exit_code == Some(17) && tool.succeeded == Some(false))
     );
-    assert!(notices(&mut fixture.owner).is_empty());
-    let target = fixture
-        .owner
-        .notification_scene_id(WINDOW, SOURCE)?
-        .unwrap();
-    fixture.owner.focus_session(
-        WINDOW,
-        &target,
-        SOURCE,
-        now(),
-        "notification target missing",
-    )?;
-    assert_eq!(fixture.owner.hierarchy(WINDOW)?.scene.unwrap().id, scene);
-    assert_eq!(fixture.owner.hierarchy(WINDOW)?.session.unwrap().id, SOURCE);
-
-    fixture
-        .owner
-        .apply_output(SOURCE, "provider resumed output\r\n", &[], &mut Vec::new());
-    assert!(notices(&mut fixture.owner).is_empty());
-    let hook = fixture.owner.shells[SOURCE].hook.as_ref().unwrap();
-    assert!(hook.stall_handoff.is_none());
-    assert!(!hook.stall_notified);
-    assert!(hook.context_card_alert.is_none());
     Ok(())
 }
 
@@ -496,8 +551,7 @@ fn rescue_timeout_after_paste_fences_enter_and_replay() -> Result<()> {
 }
 
 #[test]
-fn dsh_ready_heartbeat_does_not_mask_a_stall_and_completed_compaction_resets_old_usage()
--> Result<()> {
+fn dsh_context_readings_raise_water_reminders_and_clear_on_compaction() -> Result<()> {
     let mut fixture = Fixture::new(LaunchProfile::Dsh)?;
     fixture.launch(SOURCE, LaunchProfile::Dsh)?;
     let scope = fixture.scope(SOURCE);
@@ -516,23 +570,36 @@ fn dsh_ready_heartbeat_does_not_mask_a_stall_and_completed_compaction_resets_old
     let apply = |owner: &mut ShellOwner, payload| {
         owner.apply_dsh_hook(scope.clone(), &payload, &mut Vec::new())
     };
-    apply(&mut fixture.owner, event(1, "ready", json!({}), 90));
-    fixture.owner.next_context_reminder_poll = Instant::now();
-    fixture.owner.poll_context_reminders(&mut Vec::new());
-    let hook = fixture
-        .owner
-        .shells
-        .get_mut(SOURCE)
-        .unwrap()
-        .hook
-        .as_mut()
-        .unwrap();
-    assert_eq!(hook.context_guard.context_percent(), Some(90.));
-    hook.context_guard
-        .on_task_status(TaskStatus::Running, now() as f64 - 200_000.);
+    let scene = fixture.owner.notification_scene_id(WINDOW, SOURCE)?.unwrap();
+    let water_reminders = |owner: &mut ShellOwner| {
+        owner.next_context_reminder_poll = Instant::now();
+        let mut events = Vec::new();
+        owner.poll_context_reminders(&mut events);
+        events
+            .into_iter()
+            .filter_map(|event| match event {
+                OwnerEvent::Domain(commit) => {
+                    commit.result["agentNotification"]["eventType"].as_str().map(str::to_owned)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+
+    apply(&mut fixture.owner, event(1, "ready", json!({}), 75));
+    assert_eq!(water_reminders(&mut fixture.owner), ["context-water-warning"]);
+    assert!(
+        fixture.owner.graph(&scene, Some(WINDOW))?["nodes"][0]
+            .get("contextCardAlert")
+            .is_none()
+    );
     apply(&mut fixture.owner, event(2, "ready", json!({}), 90));
-    let hook = fixture.owner.shells[SOURCE].hook.as_ref().unwrap();
-    assert!(hook.context_guard.is_stalled(now() as f64));
+    assert_eq!(water_reminders(&mut fixture.owner), ["context-water-critical"]);
+    assert_eq!(
+        fixture.owner.graph(&scene, Some(WINDOW))?["nodes"][0]["contextCardAlert"],
+        "critical"
+    );
+    assert!(water_reminders(&mut fixture.owner).is_empty());
 
     apply(
         &mut fixture.owner,
@@ -548,6 +615,12 @@ fn dsh_ready_heartbeat_does_not_mask_a_stall_and_completed_compaction_resets_old
     );
     apply(&mut fixture.owner, event(5, "ready", json!({}), 90));
     assert!(fixture.owner.agent_hud(SOURCE, &fixture.data)?["hud"]["contextPercent"].is_null());
+    assert!(water_reminders(&mut fixture.owner).is_empty());
+    assert!(
+        fixture.owner.graph(&scene, Some(WINDOW))?["nodes"][0]
+            .get("contextCardAlert")
+            .is_none()
+    );
     apply(&mut fixture.owner, event(6, "ready", json!({}), 22));
     assert_eq!(
         fixture.owner.agent_hud(SOURCE, &fixture.data)?["hud"]["contextPercent"],

@@ -138,24 +138,9 @@ impl Workspace {
         node: &Value,
         cx: &mut Context<Self>,
     ) -> Option<Div> {
-        let reason = node["contextCardAlert"].as_str()?;
-        if self.read_only.is_some() {
+        if node["contextCardAlert"].as_str() != Some("critical") || self.read_only.is_some() {
             return None;
         }
-        let stalled = reason == "stalled";
-        let (fg, bg, label) = if stalled {
-            (
-                0xb34d47,
-                0xb34d4722,
-                self.locale.text("会话疑似卡死", "Session appears stalled"),
-            )
-        } else {
-            (
-                0xb45309,
-                0xd9770622,
-                self.locale.text("上下文占用 ≥85%", "Context usage ≥85%"),
-            )
-        };
         Some(
             div()
                 .flex()
@@ -166,8 +151,8 @@ impl Workspace {
                 .gap(px(6.))
                 .px(px(10.))
                 .py(px(4.))
-                .bg(rgba(bg))
-                .text_color(rgb(fg))
+                .bg(rgba(0xd9770622))
+                .text_color(rgb(0xb45309))
                 .text_size(px(11.))
                 .child(
                     div()
@@ -175,9 +160,9 @@ impl Workspace {
                         .overflow_hidden()
                         .whitespace_nowrap()
                         .text_ellipsis()
-                        .child(label),
+                        .child(self.locale.text("上下文占用 ≥85%", "Context usage ≥85%")),
                 )
-                .child(self.context_handoff_actions(session, "card", stalled, cx)),
+                .child(self.context_handoff_actions(session, "card", true, cx)),
         )
     }
 
@@ -201,7 +186,6 @@ impl Workspace {
             .map(|hud| &hud["contextGuard"])
             .unwrap_or(result);
         let cache = &live["cache"];
-        let stall = &live["stall"];
         let hit = cache["hitRatioPercent"]
             .as_f64()
             .map(|hit| format!("{hit:.0}%"))
@@ -222,17 +206,6 @@ impl Workspace {
                 _ => locale.text("到期时间未知", "Expiry unknown").to_owned(),
             }
         };
-        let stage = match stall["severity"].as_str() {
-            Some("stalled") => locale.text("疑似卡死", "Stalled"),
-            Some("warning") => locale.text("静默观察中", "Watching silence"),
-            Some(_) => locale.text("正常", "Normal"),
-            None => locale.text("未开启", "Off"),
-        };
-        let silent = stall["silentSec"]
-            .as_u64()
-            .map_or_else(String::new, |seconds| {
-                format!(" · {seconds} {}", locale.text("秒", "s"))
-            });
         let mut body = div()
             .id("footer-context-details-scroll")
             .flex()
@@ -248,10 +221,6 @@ impl Workspace {
             .child(format!(
                 "{} {hit} · {cache_status}",
                 locale.text("缓存命中率", "Cache hit rate")
-            ))
-            .child(format!(
-                "{} {stage}{silent}",
-                locale.text("看门狗", "Watchdog")
             ));
         body = body.child(
             div()

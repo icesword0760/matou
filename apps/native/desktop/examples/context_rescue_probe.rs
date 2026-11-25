@@ -52,7 +52,7 @@ mod workspace {
             "sceneId":"main", "focusedSessionId":session_id, "workspaceSessionCount":2,
             "nodes":[
                 {"sessionId":A, "currentMode":"claude-code", "title":"后台构建会话",
-                    "workStatus":"running", "contextCardAlert":"stalled", "permissionMode":"default"},
+                    "workStatus":"running", "contextCardAlert":"critical", "permissionMode":"default"},
                 {"sessionId":B, "currentMode":"shell", "title":"新会话（离线样例）", "workStatus":"idle"}
             ]
         })
@@ -145,7 +145,6 @@ mod workspace {
                 let guard = json!({
                     "contextPressure":"critical", "savedNoiseBytes":282624,
                     "cache":{"timing":"precise","remainingSec":221,"warm":true,"hitRatioPercent":83},
-                    "stall":{"severity":"stalled","silentSec":196},
                     "handoffReady":true
                 });
                 let logs = json!([
@@ -166,7 +165,7 @@ mod workspace {
                             ),
                             Command::GetContextGuardDetails { request_id, session_id } => (
                                 "contextGuardDetailsResult", request_id, json!({
-                                    "sessionId":session_id, "cache":guard["cache"], "stall":guard["stall"], "logs":logs
+                                    "sessionId":session_id, "cache":guard["cache"], "logs":logs
                                 })
                             ),
                             Command::GetContextGuardLog { request_id, session_id, log_id } => (

@@ -2116,7 +2116,6 @@ impl Notifications {
                 "context-water-warning"
                     | "context-water-critical"
                     | "context-cache-expiry"
-                    | "context-stall-detected"
             )
         );
         let read = !context_reminder && session_id.is_some() && session_id == focused;
@@ -18189,7 +18188,6 @@ impl Workspace {
             {
                 use matou_native_desktop::context_optimizer_settings::HudPillTone;
                 let pill_colors = |tone: HudPillTone| match tone {
-                    HudPillTone::Danger => (0xb34d47, 0xb34d4722),
                     HudPillTone::Warning if dark => (0xe3b341, 0xd2992224),
                     HudPillTone::Warning => (0xb45309, 0xd9770622),
                     HudPillTone::Accent => (0x2679d8, 0x2679d81a),
@@ -18198,10 +18196,6 @@ impl Workspace {
                         if dark { 0xffffff12 } else { 0x5a677812 },
                     ),
                 };
-                if let Some(pill) = guard_view.stall_pill.as_ref() {
-                    let (fg, bg) = pill_colors(pill.tone);
-                    primary = primary.child(self.context_hud_pill(pill.label.clone(), fg, bg));
-                }
                 if let Some(session) = session {
                     if let Some((label, detail, tone)) = cache_usage {
                         let (fg, bg) = pill_colors(tone);

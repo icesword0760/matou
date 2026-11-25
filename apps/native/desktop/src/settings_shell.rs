@@ -1181,8 +1181,8 @@ impl SettingsPage {
                 "Read-only account subscription, runtime environment and controlled browser status, with a manual retention cleanup.",
             ),
             Self::ContextOptimizer => locale.text(
-                "让 AI 少读废话、少花额度，卡住了会提醒你。默认已经按推荐配置好。",
-                "Help AI read less, use less quota, and let you know when it's stuck. The recommended settings are already in place.",
+                "让 AI 少读废话、少花额度。默认已经按推荐配置好。",
+                "Help AI read less and use less quota. The recommended settings are already in place.",
             ),
         }
     }

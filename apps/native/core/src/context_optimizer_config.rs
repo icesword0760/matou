@@ -33,7 +33,6 @@ pub struct AgentOptimizerCapabilities {
     pub sync_hook_intercept: bool,
     pub cache_monitor: bool,
     pub cache_keepalive: bool,
-    pub stall_rescue: bool,
     pub cli_tools: bool,
 }
 
@@ -44,21 +43,18 @@ impl AgentOptimizerCapabilities {
                 sync_hook_intercept: true,
                 cache_monitor: true,
                 cache_keepalive: true,
-                stall_rescue: true,
                 cli_tools: true,
             },
             "dsh" => Self {
                 sync_hook_intercept: false,
                 cache_monitor: true,
                 cache_keepalive: false,
-                stall_rescue: true,
                 cli_tools: true,
             },
             _ => Self {
                 sync_hook_intercept: false,
                 cache_monitor: true,
                 cache_keepalive: false,
-                stall_rescue: true,
                 cli_tools: true,
             },
         }
@@ -86,8 +82,6 @@ pub struct AgentOptimizerSettings {
     pub cache_keepalive: bool,
     #[serde(default = "default_keepalive_max")]
     pub cache_keepalive_max_per_turn: u8,
-    #[serde(default = "default_true")]
-    pub stall_rescue: bool,
     #[serde(default = "default_true")]
     pub cli_tools: bool,
     #[serde(default = "default_true")]
@@ -118,7 +112,6 @@ impl Default for AgentOptimizerSettings {
             cache_expiry_notify: false,
             cache_keepalive: false,
             cache_keepalive_max_per_turn: DEFAULT_KEEPALIVE_MAX_PER_TURN,
-            stall_rescue: true,
             cli_tools: false,
             block_sensitive_reads: true,
             max_log_bytes: DEFAULT_MAX_LOG_BYTES,
@@ -149,7 +142,6 @@ impl AgentOptimizerSettings {
             normalized.cache_monitor = false;
             normalized.cache_expiry_notify = false;
             normalized.cache_keepalive = false;
-            normalized.stall_rescue = false;
             normalized.cli_tools = false;
             return normalized;
         }
@@ -163,9 +155,6 @@ impl AgentOptimizerSettings {
         }
         if !caps.cache_keepalive {
             normalized.cache_keepalive = false;
-        }
-        if !caps.stall_rescue {
-            normalized.stall_rescue = false;
         }
         if !caps.cli_tools {
             normalized.cli_tools = false;
@@ -200,7 +189,6 @@ pub enum OptimizerToggle {
     CacheMonitor,
     CacheExpiryNotify,
     CacheKeepalive,
-    StallRescue,
     CliTools,
     BlockSensitiveReads,
 }
@@ -214,7 +202,6 @@ impl OptimizerToggle {
             Self::CacheMonitor => settings.cache_monitor,
             Self::CacheExpiryNotify => settings.cache_expiry_notify,
             Self::CacheKeepalive => settings.cache_keepalive,
-            Self::StallRescue => settings.stall_rescue,
             Self::CliTools => settings.cli_tools,
             Self::BlockSensitiveReads => settings.block_sensitive_reads,
         }
@@ -273,7 +260,6 @@ impl AgentOptimizerEntry {
             CacheKeepalive => return Pending,
             CliTools => self.capabilities.cli_tools,
             CacheMonitor | CacheExpiryNotify => self.capabilities.cache_monitor,
-            StallRescue => self.capabilities.stall_rescue,
         };
         if available { Available } else { Unsupported }
     }
@@ -493,7 +479,6 @@ mod tests {
             let entry = snap.agents.get(id).expect("known agent present");
             assert!(entry.settings.enabled);
             assert!(entry.settings.cache_monitor);
-            assert!(entry.settings.stall_rescue);
             let availability = match id {
                 "claude-code" | "antigravity" => OptimizerAvailability::Available,
                 "codex" => OptimizerAvailability::Pending,
@@ -532,7 +517,6 @@ mod tests {
             cache_expiry_notify: true,
             cache_keepalive: true,
             cache_keepalive_max_per_turn: 99,
-            stall_rescue: true,
             cli_tools: true,
             block_sensitive_reads: true,
             max_log_bytes: 999_999,
@@ -580,6 +564,34 @@ mod tests {
     }
 
     #[test]
+    fn legacy_settings_load_without_reemitting_removed_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ContextOptimizerConfig::for_data_root(dir.path());
+        fs::write(
+            store.path(),
+            r#"{"version":1,"agents":{"claude-code":{"stallRescue": true,"cacheMonitor":false}}}"#,
+        )
+        .unwrap();
+
+        let snapshot = store.snapshot().unwrap();
+        assert!(snapshot.exists);
+        let entry = &snapshot.agents["claude-code"];
+        assert!(!entry.settings.cache_monitor);
+        let serialized = serde_json::to_value(entry).unwrap();
+        assert!(serialized["settings"].get("stallRescue").is_none());
+        assert!(serialized["capabilities"].get("stallRescue").is_none());
+
+        store
+            .set_agent_settings("claude-code", entry.settings.clone())
+            .unwrap();
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+        let settings = &persisted["agents"]["claude-code"];
+        assert_eq!(settings["cacheMonitor"], false);
+        assert!(settings.get("stallRescue").is_none());
+    }
+
+    #[test]
     fn master_switch_off_and_capabilities_mask_effective_behavior() {
         let dir = tempfile::tempdir().unwrap();
         let store = ContextOptimizerConfig::for_data_root(dir.path());
@@ -598,13 +610,11 @@ mod tests {
         assert!(!eff_dsh.read_dedup);
         assert!(!eff_dsh.cache_keepalive);
         assert!(eff_dsh.cli_tools);
-        assert!(eff_dsh.stall_rescue);
 
         let claude_off = AgentOptimizerSettings {
             enabled: false,
             noise_filter: true,
             cache_monitor: true,
-            stall_rescue: true,
             ..Default::default()
         };
         store.set_agent_settings("claude-code", claude_off).unwrap();
@@ -612,7 +622,6 @@ mod tests {
         assert!(!eff_claude.enabled);
         assert!(!eff_claude.noise_filter);
         assert!(!eff_claude.cache_monitor);
-        assert!(!eff_claude.stall_rescue);
     }
 
     #[test]

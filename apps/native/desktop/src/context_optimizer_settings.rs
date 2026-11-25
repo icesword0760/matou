@@ -157,7 +157,6 @@ impl ContextOptimizerPanelState {
                 next.cache_expiry_notify = !next.cache_expiry_notify
             }
             OptimizerToggle::CacheKeepalive => next.cache_keepalive = !next.cache_keepalive,
-            OptimizerToggle::StallRescue => next.stall_rescue = !next.stall_rescue,
             OptimizerToggle::CliTools => next.cli_tools = !next.cli_tools,
             OptimizerToggle::BlockSensitiveReads => {
                 next.block_sensitive_reads = !next.block_sensitive_reads
@@ -295,7 +294,6 @@ pub enum HudPillTone {
     Neutral,
     Accent,
     Warning,
-    Danger,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -305,13 +303,12 @@ pub struct HudPill {
 }
 
 /// Pure presentation model parsed from `live["contextGuard"]` for rendering
-/// cache countdown, saved noise, stall badge, and one-click rescue handoff in
+/// cache countdown, saved noise, and handoff actions in
 /// the workspace HUD bar.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContextGuardHudView {
     pub cache_pill: Option<HudPill>,
     pub saved_pill: Option<HudPill>,
-    pub stall_pill: Option<HudPill>,
     pub show_handoff_button: bool,
     pub handoff_urgent: bool,
 }
@@ -351,60 +348,30 @@ impl ContextGuardHudView {
             tone: HudPillTone::Neutral,
         });
 
-        let stall_obj = guard.get("stall").and_then(Value::as_object);
-        let stall_severity = stall_obj
-            .and_then(|s| s.get("severity"))
-            .and_then(Value::as_str)
-            .unwrap_or("normal");
-        let silent_sec = stall_obj
-            .and_then(|s| s.get("silentSec"))
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        let stall_pill = match stall_severity {
-            "stalled" => Some(HudPill {
-                label: locale.text("疑似卡死", "Stalled").to_owned(),
-                tone: HudPillTone::Danger,
-            }),
-            "warning" => Some(HudPill {
-                label: match locale {
-                    InterfaceLocale::Chinese => format!("静默 {}m", (silent_sec / 60).max(1)),
-                    InterfaceLocale::English => format!("Silent {}m", (silent_sec / 60).max(1)),
-                },
-                tone: HudPillTone::Warning,
-            }),
-            _ => None,
-        };
-
         let pressure = guard
             .get("contextPressure")
             .and_then(Value::as_str)
             .unwrap_or("normal");
-        let handoff_urgent = stall_severity == "stalled" || pressure == "critical";
+        let handoff_urgent = pressure == "critical";
         let show_handoff_button = handoff_urgent || pressure == "warning";
 
-        if cache_pill.is_none()
-            && saved_pill.is_none()
-            && stall_pill.is_none()
-            && !show_handoff_button
-        {
+        if cache_pill.is_none() && saved_pill.is_none() && !show_handoff_button {
             return None;
         }
         Some(Self {
             cache_pill,
             saved_pill,
-            stall_pill,
             show_handoff_button,
             handoff_urgent,
         })
     }
 }
 
-const ADVANCED_ITEMS: [OptimizerToggle; 8] = {
+const ADVANCED_ITEMS: [OptimizerToggle; 7] = {
     use OptimizerToggle::*;
     [
         CacheMonitor,
         CacheExpiryNotify,
-        StallRescue,
         NoiseFilter,
         ReadDedup,
         BlockSensitiveReads,
@@ -435,13 +402,6 @@ fn advanced_copy(field: OptimizerToggle, locale: InterfaceLocale) -> AdvancedCop
             description: t(
                 "已读缓存即将失效前发一条提醒，方便及时继续对话；不会向 AI 发送请求。",
                 "Notifies shortly before cached context expires so you can resume in time. Sends no request to the model.",
-            ),
-        },
-        StallRescue => AdvancedCopy {
-            title: t("卡住了提醒你", "Alert when a session stalls"),
-            description: t(
-                "后台会话长时间无响应时提醒，并自动准备脱敏进度摘要。已针对长构建和慢模型防误报。",
-                "Alerts when a background session stops responding and prepares a redacted progress brief. Tuned to avoid false alarms on slow builds.",
             ),
         },
         NoiseFilter => AdvancedCopy {
@@ -1138,7 +1098,6 @@ mod tests {
                 (CacheKeepalive, Pending),
                 (CacheExpiryNotify, Available),
                 (CacheMonitor, Available),
-                (StallRescue, Available),
                 (CliTools, Available),
             ] {
                 assert_eq!(entry.availability(field), availability, "{id} {field:?}");
@@ -1156,7 +1115,6 @@ mod tests {
                 "{id}"
             );
             assert!(!settings.cache_monitor, "{id}");
-            assert!(!settings.stall_rescue, "{id}");
             assert_eq!(settings.cli_tools, id != "claude-code");
             assert_eq!(settings.noise_filter, interception != Available, "{id}");
             assert_eq!(settings.read_dedup, interception != Available, "{id}");
@@ -1327,30 +1285,27 @@ mod tests {
     }
 
     #[test]
-    fn hud_handoff_requires_context_pressure_or_a_stalled_session() {
-        for (pressure, stall, ready, visible, urgent) in [
-            ("normal", "normal", true, false, false),
-            ("normal", "warning", true, false, false),
-            ("warning", "normal", false, true, false),
-            ("critical", "normal", false, true, true),
-            ("normal", "stalled", false, true, true),
+    fn hud_handoff_visibility_and_urgency_follow_context_pressure() {
+        for (pressure, ready, visible, urgent) in [
+            ("normal", true, false, false),
+            ("warning", false, true, false),
+            ("critical", false, true, true),
         ] {
             let live = serde_json::json!({
                 "contextGuard": {
                     "contextPressure": pressure,
                     "handoffReady": ready,
-                    "cache": { "remainingSec": 45, "warm": true },
-                    "stall": { "severity": stall }
+                    "cache": { "remainingSec": 45, "warm": true }
                 }
             });
             let view = ContextGuardHudView::from_live_hud(&live, InterfaceLocale::Chinese).unwrap();
-            assert_eq!(view.show_handoff_button, visible, "{pressure}/{stall}");
-            assert_eq!(view.handoff_urgent, urgent, "{pressure}/{stall}");
+            assert_eq!(view.show_handoff_button, visible, "{pressure}");
+            assert_eq!(view.handoff_urgent, urgent, "{pressure}");
         }
     }
 
     #[test]
-    fn hud_view_parses_cache_saved_noise_stall_and_handoff_readiness() {
+    fn hud_view_renders_cache_saved_noise_and_critical_handoff() {
         let live = serde_json::json!({
             "contextGuard": {
                 "contextPressure": "critical",
@@ -1361,10 +1316,6 @@ mod tests {
                     "remainingSec": 45,
                     "warm": true,
                     "expiringSoon": true
-                },
-                "stall": {
-                    "severity": "stalled",
-                    "silentSec": 210
                 }
             }
         });
@@ -1372,8 +1323,6 @@ mod tests {
         assert_eq!(view.cache_pill.as_ref().unwrap().label, "缓存 45s");
         assert_eq!(view.cache_pill.as_ref().unwrap().tone, HudPillTone::Warning);
         assert_eq!(view.saved_pill.as_ref().unwrap().label, "已省 96 KB");
-        assert_eq!(view.stall_pill.as_ref().unwrap().label, "疑似卡死");
-        assert_eq!(view.stall_pill.as_ref().unwrap().tone, HudPillTone::Danger);
         assert!(view.show_handoff_button);
         assert!(view.handoff_urgent);
 
