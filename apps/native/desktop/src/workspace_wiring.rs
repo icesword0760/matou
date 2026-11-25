@@ -2021,6 +2021,9 @@ impl Workspace {
         if self.project_instructions_open(window) {
             return self.project_instructions_key(key, window, cx);
         }
+        if key.key == "escape" && self.close_context_details(window, cx) {
+            return true;
+        }
         if self.footer_popover_key(key, window, cx) {
             return true;
         }
@@ -2737,6 +2740,8 @@ impl Workspace {
         }
         self.wiring.accounts = AccountUi::default();
         self.wiring.hud.clear();
+        self.context_details.clear();
+        self.context_rescue_requests.clear();
     }
 
     fn refresh_frozen_egress(&mut self, cx: &mut Context<Self>) {
@@ -2877,11 +2882,118 @@ impl Workspace {
         }
     }
 
-    pub(super) fn request_session_handoff(
+    pub(super) fn request_context_rescue(&mut self, session: &str, cx: &mut Context<Self>) {
+        if self.context_rescue_requests.contains_key(session) {
+            return;
+        }
+        let request_id = self.next_wiring_request();
+        if self
+            .commands
+            .send_at(
+                self.runtime_generation,
+                Command::RescueSessionWithHandoff {
+                    request_id,
+                    session_id: session.to_owned(),
+                },
+            )
+            .is_ok()
+        {
+            self.context_rescue_requests
+                .insert(session.to_owned(), request_id);
+            cx.notify();
+        } else {
+            self.show_error_toast(
+                self.locale
+                    .text("无法启动救援会话", "Could not start rescue session"),
+                cx,
+            );
+        }
+    }
+
+    pub(super) fn toggle_context_details(
         &mut self,
-        session_id: String,
+        session: &str,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let window_id = window.window_handle();
+        if self
+            .context_details
+            .get(&window_id)
+            .is_some_and(|state| state.session == session)
+        {
+            self.close_context_details(window, cx);
+            return;
+        }
+        self.dismiss_footer_popover(window, cx);
+        let request = self.next_wiring_request();
+        let session = session.to_owned();
+        let failed = self
+            .commands
+            .send_at(
+                self.runtime_generation,
+                Command::GetContextGuardDetails {
+                    request_id: request,
+                    session_id: session.clone(),
+                },
+            )
+            .is_err();
+        self.context_details.insert(
+            window_id,
+            ContextDetailsPopover {
+                session,
+                request,
+                result: None,
+                failed,
+                expanded: None,
+            },
+        );
+        cx.notify();
+    }
+
+    pub(super) fn toggle_context_log(
+        &mut self,
+        log: &str,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let window_id = window.window_handle();
+        let request = self.next_wiring_request();
+        let Some(state) = self.context_details.get_mut(&window_id) else {
+            return;
+        };
+        if state
+            .expanded
+            .as_ref()
+            .is_some_and(|preview| preview.id == log)
+        {
+            state.expanded = None;
+        } else {
+            let failed = self
+                .commands
+                .send_at(
+                    self.runtime_generation,
+                    Command::GetContextGuardLog {
+                        request_id: request,
+                        session_id: state.session.clone(),
+                        log_id: log.to_owned(),
+                    },
+                )
+                .is_err();
+            state.expanded = Some(super::context_rescue_ui::ContextLogPreview {
+                id: log.to_owned(),
+                request,
+                text: failed.then(|| {
+                    self.locale
+                        .text("无法读取日志", "Could not read log")
+                        .to_owned()
+                }),
+            });
+        }
+        cx.notify();
+    }
+
+    pub(super) fn request_session_handoff(&mut self, session_id: String, cx: &mut Context<Self>) {
         let request_id = self.next_wiring_request();
         if self
             .commands
@@ -2996,6 +3108,85 @@ impl Workspace {
             self.receive_claude_accounts(request_id, reply, cx);
         }
         self.receive_footer_diagnostics(kind, request_id, reply, cx);
+        if kind == "rescueSessionWithHandoffResult" {
+            let count = self.context_rescue_requests.len();
+            self.context_rescue_requests
+                .retain(|_, request| *request != request_id);
+            if count == self.context_rescue_requests.len() {
+                return;
+            }
+            let result = &reply["result"];
+            if let Some(error) = self.wiring_reply_error(reply) {
+                self.show_error_toast(error, cx);
+            } else if let (Some(scene_id), Some(session_id)) =
+                (result["sceneId"].as_str(), result["sessionId"].as_str())
+            {
+                if result["delivery"] == "clipboard_fallback"
+                    && let Some(markdown) = result["markdown"].as_str()
+                {
+                    cx.write_to_clipboard(ClipboardItem::new_string(markdown.to_owned()));
+                    self.show_toast(
+                        self.locale.text(
+                            "新会话已创建，交接摘要已复制到剪贴板，可直接粘贴",
+                            "New session created. Handoff brief copied and ready to paste.",
+                        ),
+                        cx,
+                    );
+                }
+                self.close_context_details(window, cx);
+                self.send(
+                    Command::FocusSession {
+                        scene_id: scene_id.to_owned(),
+                        session_id: session_id.to_owned(),
+                    },
+                    cx,
+                );
+            } else {
+                self.show_toast(
+                    self.locale.text(
+                        "当前会话暂无可交接进度",
+                        "No handoff progress recorded for this session yet",
+                    ),
+                    cx,
+                );
+            }
+            cx.notify();
+            return;
+        }
+        if kind == "contextGuardDetailsResult" {
+            if let Some(state) = self
+                .context_details
+                .values_mut()
+                .find(|state| state.request == request_id)
+            {
+                state.failed = reply["error"].is_string();
+                state.result = reply.get("result").cloned();
+                cx.notify();
+            }
+            return;
+        }
+        if kind == "contextGuardLogResult" {
+            if let Some(preview) = self
+                .context_details
+                .values_mut()
+                .filter_map(|state| state.expanded.as_mut())
+                .find(|preview| preview.request == request_id)
+            {
+                preview.text = Some(
+                    reply["result"]["preview"]
+                        .as_str()
+                        .unwrap_or_else(|| {
+                            self.locale.text(
+                                "日志已过期或无法读取",
+                                "The log expired or could not be read",
+                            )
+                        })
+                        .to_owned(),
+                );
+                cx.notify();
+            }
+            return;
+        }
         if kind == "sessionHandoffBriefResult" {
             if let Some(markdown) = reply["result"]["markdown"]
                 .as_str()
