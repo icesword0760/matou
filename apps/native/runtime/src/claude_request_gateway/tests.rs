@@ -371,11 +371,11 @@ fn hud_usage_is_scoped_to_the_authenticated_session_without_changing_forwarding(
     first.bind_usage_identity(&first_id.to_string());
     second.bind_usage_identity(&second_id.to_string());
 
-    let request = |id| {
+    let request = |id: Uuid| {
         serde_json::to_vec(&json!({
             "model": "literal-model",
             "messages": [{"role":"user","content":"synthetic prompt"}],
-            "metadata": {"user_id": json!({"session_id": id}).to_string()}
+            "metadata": {"user_id": json!({"session_id": id.to_string()}).to_string()}
         }))
         .unwrap()
     };
