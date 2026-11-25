@@ -13818,12 +13818,20 @@ impl Workspace {
                 )),
                 locale.text("Codex 会话", "Codex session"),
             ),
-            "antigravity" | "dsh" => {
-                let (letter, tooltip) = if mode == "antigravity" {
-                    ("A", locale.text("Antigravity 会话", "Antigravity session"))
-                } else {
-                    ("D", locale.text("DSH 会话", "DSH session"))
-                };
+            "antigravity" => {
+                static ICON: std::sync::OnceLock<Arc<Image>> = std::sync::OnceLock::new();
+                let image = Arc::clone(ICON.get_or_init(|| {
+                    Arc::new(Image::from_bytes(
+                        ImageFormat::Png,
+                        include_bytes!("../assets/icons/provider-antigravity.png").to_vec(),
+                    ))
+                }));
+                (
+                    mark.child(img(image).size(px(16.)).flex_none()),
+                    locale.text("Antigravity 会话", "Antigravity session"),
+                )
+            }
+            "dsh" => {
                 let color = rgb(if dark { 0x97b9e0 } else { 0x5f7898 });
                 (
                     mark.flex()
@@ -13835,8 +13843,8 @@ impl Workspace {
                         .text_size(px(9.))
                         .line_height(px(16.))
                         .font_weight(FontWeight::BOLD)
-                        .child(ui_text(letter)),
-                    tooltip,
+                        .child(ui_text("D")),
+                    locale.text("DSH 会话", "DSH session"),
                 )
             }
             "shell" => (

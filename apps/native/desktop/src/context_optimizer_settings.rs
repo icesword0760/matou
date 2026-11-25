@@ -222,10 +222,6 @@ fn unavailable_reason(
             "Codex 当前版本不支持在结果交给 AI 前替换输出，自动省日志暂不可用；已记录，待适配。",
             "Pending integration. This Codex version cannot replace tool output before it reaches the model, so automatic trimming is unavailable.",
         )),
-        (Pending, NoiseFilter | ReadDedup | BlockSensitiveReads, "antigravity") => Some(locale.text(
-            "协议适配已完成，待本机登录 Antigravity 完成端到端验证后开放。",
-            "Protocol integration is complete. This will be available after end-to-end testing in a locally signed-in Antigravity session.",
-        )),
         (Pending, BlockSensitiveReads, "codex") => Some(locale.text(
             "Codex 读文件走 Bash，.env 保护暂未覆盖，待适配。",
             "Codex reads files through Bash. Protection for .env needs an integration for that route.",
@@ -1101,7 +1097,7 @@ mod tests {
         for (id, interception) in [
             ("claude-code", Available),
             ("codex", Pending),
-            ("antigravity", Pending),
+            ("antigravity", Available),
             ("dsh", Unsupported),
         ] {
             state.select_agent(id);
@@ -1125,14 +1121,6 @@ mod tests {
                 for locale in [InterfaceLocale::Chinese, InterfaceLocale::English] {
                     let reason = unavailable_reason(field, &entry, locale);
                     assert_eq!(reason.is_none(), available, "{id} {field:?} {locale:?}");
-                }
-                if id == "antigravity"
-                    && matches!(field, NoiseFilter | ReadDedup | BlockSensitiveReads)
-                {
-                    assert_eq!(
-                        unavailable_reason(field, &entry, InterfaceLocale::Chinese),
-                        Some("协议适配已完成，待本机登录 Antigravity 完成端到端验证后开放。")
-                    );
                 }
             }
             let settings = &state.current_entry().unwrap().settings;
@@ -1163,7 +1151,7 @@ mod tests {
                 .settings
                 .block_sensitive_reads
         );
-        for id in ["codex", "antigravity", "dsh"] {
+        for id in ["codex", "dsh"] {
             reopened.select_agent(id);
             let saved = &reopened.current_entry().unwrap().settings;
             assert!(
@@ -1172,6 +1160,14 @@ mod tests {
             );
             assert!(saved.cache_keepalive && saved.cache_expiry_notify, "{id}");
         }
+        reopened.select_agent("antigravity");
+        let agy_saved = &reopened.current_entry().unwrap().settings;
+        assert!(
+            !agy_saved.noise_filter
+                && !agy_saved.read_dedup
+                && !agy_saved.block_sensitive_reads
+        );
+        assert!(agy_saved.cache_keepalive && agy_saved.cache_expiry_notify);
         reopened.select_agent("codex");
         assert!(reopened.restore_defaults());
         let saved = &config.snapshot().unwrap().agents["codex"].settings;
