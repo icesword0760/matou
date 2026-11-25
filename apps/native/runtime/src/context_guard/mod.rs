@@ -567,15 +567,12 @@ impl SessionContextGuard {
             .map(redact)
             .filter(|path| seen_files.insert(path.clone()))
             .collect();
-        let recent_tools: Vec<_> = self
+        let mut recent_tools: Vec<_> = self
             .recent_tools
             .iter()
             .map(|tool| ToolTraceEntry {
                 tool_name: redact(&tool.tool_name),
-                target: tool.target.as_deref().map(|target| {
-                    let text = redact(target);
-                    text[..text.floor_char_boundary(text.len().min(640))].to_owned()
-                }),
+                target: tool.target.as_deref().map(redact),
                 succeeded: tool.succeeded,
                 exit_code: tool.exit_code,
             })
@@ -594,6 +591,11 @@ impl SessionContextGuard {
             stall.silent_sec,
             locale,
         );
+        for tool in &mut recent_tools {
+            if let Some(target) = &mut tool.target {
+                target.truncate(target.floor_char_boundary(target.len().min(640)));
+            }
+        }
 
         if !log_ids.is_empty() {
             markdown.push_str(locale.text(
@@ -709,20 +711,38 @@ impl SessionContextGuard {
     }
 
     fn push_tool_trace(&mut self, entry: ToolTraceEntry) {
-        if entry.exit_code.is_none()
-            && self.recent_tools.back().is_some_and(|previous| {
-                previous.tool_name == entry.tool_name
-                    && previous.succeeded == entry.succeeded
-                    && previous.target == entry.target
-            })
-        {
-            return;
+        if let Some(previous) = self.recent_tools.back_mut().filter(|previous| {
+            previous.tool_name == entry.tool_name && previous.succeeded == entry.succeeded
+        }) {
+            // Only these HUD targets are shortened. File paths may literally end in `...`.
+            if matches!(entry.tool_name.as_str(), "Bash" | "run_command")
+                && let (Some(previous_target), Some(target)) = (&previous.target, &entry.target)
+            {
+                if is_truncated_target(target, previous_target) {
+                    return;
+                }
+                if is_truncated_target(previous_target, target) {
+                    let exit_code = entry.exit_code.or(previous.exit_code);
+                    *previous = ToolTraceEntry { exit_code, ..entry };
+                    return;
+                }
+            }
+            if entry.exit_code.is_none() && previous.target == entry.target {
+                return;
+            }
         }
         self.recent_tools.push_back(entry);
         while self.recent_tools.len() > MAX_RECENT_TOOLS {
             self.recent_tools.pop_front();
         }
     }
+}
+
+fn is_truncated_target(short: &str, full: &str) -> bool {
+    short.len() < full.len()
+        && short
+            .strip_suffix("...")
+            .is_some_and(|prefix| !prefix.is_empty() && full.starts_with(prefix))
 }
 
 pub fn provider_id(provider: HudProvider) -> &'static str {
@@ -884,8 +904,8 @@ fn render_handoff_markdown(
                     || status.to_owned(),
                     |code| format!("{status} (exit {code})"),
                 );
-                match step.target.as_deref() {
-                    Some(target) if !target.trim().is_empty() => {
+                match handoff_target(step, cwd) {
+                    Some(target) => {
                         lines.push(format!("- `{}` ({target}) — {status}", step.tool_name));
                     }
                     _ => lines.push(format!("- `{}` — {status}", step.tool_name)),
@@ -936,8 +956,8 @@ fn render_handoff_markdown(
                     || status.to_owned(),
                     |code| format!("{status}（退出码 {code}）"),
                 );
-                match step.target.as_deref() {
-                    Some(target) if !target.trim().is_empty() => {
+                match handoff_target(step, cwd) {
+                    Some(target) => {
                         lines.push(format!("- `{}`（{target}）— {status}", step.tool_name));
                     }
                     _ => lines.push(format!("- `{}` — {status}", step.tool_name)),
@@ -948,6 +968,58 @@ fn render_handoff_markdown(
         lines.push("请基于以上进度直接继续推进，无需重复已完成改动。".to_owned());
     }
     lines.join("\n")
+}
+
+fn handoff_target(step: &ToolTraceEntry, cwd: Option<&str>) -> Option<String> {
+    let target = step.target.as_deref()?.trim();
+    let command = matches!(
+        step.tool_name.as_str(),
+        "Bash" | "run_command" | "shell" | "exec_command"
+    );
+    let target = if command {
+        cwd.and_then(|cwd| strip_workspace_cd(target, cwd))
+            .unwrap_or(target)
+    } else {
+        target
+    };
+    let separator = if command { "; " } else { " " };
+    let mut text = target
+        .lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(separator);
+    if let Some((end, _)) = text.char_indices().nth(320) {
+        text.truncate(end);
+        text.push('…');
+    }
+    (!text.is_empty()).then_some(text)
+}
+
+fn strip_workspace_cd<'a>(target: &'a str, cwd: &str) -> Option<&'a str> {
+    let cwd = cwd.trim();
+    if cwd.is_empty() {
+        return None;
+    }
+    let after_cd = target.strip_prefix("cd")?;
+    if !after_cd.starts_with([' ', '\t']) {
+        return None;
+    }
+    let after_cd = after_cd.trim_start_matches([' ', '\t']);
+    let quoted = [format!("'{cwd}'"), format!("\"{cwd}\"")];
+    let after_path = quoted
+        .iter()
+        .map(String::as_str)
+        .chain((!cwd.contains(char::is_whitespace)).then_some(cwd))
+        .find_map(|path| after_cd.strip_prefix(path))?
+        .trim_start_matches([' ', '\t']);
+    let command = after_path
+        .strip_prefix("&&")
+        .or_else(|| after_path.strip_prefix(';'))
+        .or_else(|| after_path.strip_prefix("\r\n"))
+        .or_else(|| after_path.strip_prefix('\n'))?
+        .trim_start();
+    (!command.is_empty()).then_some(command)
 }
 
 #[cfg(test)]
@@ -1161,6 +1233,74 @@ mod tests {
             InterfaceLocale::English,
         );
         assert!(brief_en.markdown.contains("# Session Handoff Brief"));
+    }
+
+    #[test]
+    fn handoff_keeps_full_commands_when_hud_reports_truncated_targets() {
+        use crate::agent_hud_projection::{RunningTool, target_for_tool};
+
+        let mut guard = SessionContextGuard::new(HudProvider::ClaudeCode);
+        let command = "cd '/repo/long workspace name' && printf first\n\tprintf    second";
+        let hud_tool = ToolActivity {
+            tool: RunningTool {
+                name: "Bash".into(),
+                target: target_for_tool("Bash", &serde_json::json!({"command": command})),
+            },
+            status: ToolStatus::Completed,
+        };
+        for hud_first in [false, true] {
+            guard.recent_tools.clear();
+            guard.observed_last_tool = None;
+            if hud_first {
+                guard.observe_last_tool(Some(&hud_tool), 1.0);
+            }
+            guard.record_tool_result("Bash", Some(command), true, Some(0), 2.0);
+            if !hud_first {
+                guard.observe_last_tool(Some(&hud_tool), 3.0);
+            }
+
+            for locale in [InterfaceLocale::Chinese, InterfaceLocale::English] {
+                let brief =
+                    guard.build_handoff_brief(None, Some("/repo/long workspace name"), 4.0, locale);
+                assert_eq!(brief.recent_tools.len(), 1);
+                assert_eq!(brief.recent_tools[0].target.as_deref(), Some(command));
+                assert_eq!(brief.recent_tools[0].exit_code, Some(0));
+                let steps: Vec<_> = brief
+                    .markdown
+                    .lines()
+                    .filter(|line| line.starts_with("- `Bash`"))
+                    .collect();
+                assert_eq!(steps.len(), 1);
+                assert!(steps[0].contains("printf first; printf second"));
+                assert!(!steps[0].contains("cd "));
+            }
+        }
+
+        guard.record_tool_result("Bash", Some(command), false, Some(1), 5.0);
+        assert_eq!(guard.recent_tools.len(), 2);
+
+        guard.record_tool_result("Read", Some("/repo/file..."), true, None, 6.0);
+        guard.record_tool_result("Read", Some("/repo/filename"), true, None, 7.0);
+        assert_eq!(guard.recent_tools.len(), 4);
+    }
+
+    #[test]
+    fn handoff_display_preserves_other_directories_and_a_useful_command_prefix() {
+        let mut guard = SessionContextGuard::new(HudProvider::ClaudeCode);
+        let cwd = format!("/repo/{}", "x".repeat(700));
+        let command = format!("cd {cwd}\r\nprintf {}", "测试".repeat(170));
+        guard.record_tool_result("Bash", Some(&command), true, None, 1.0);
+        guard.record_tool_result("Bash", Some("cd /repo/other && pwd"), true, None, 2.0);
+        let brief = guard.build_handoff_brief(None, Some(&cwd), 3.0, InterfaceLocale::English);
+        let mut steps = brief
+            .markdown
+            .lines()
+            .filter(|line| line.starts_with("- `Bash`"));
+        let first = steps.next().unwrap();
+        assert!(first.starts_with("- `Bash` (printf 测试"));
+        let (target, _) = first.strip_prefix("- `Bash` (").unwrap().split_once('…').unwrap();
+        assert_eq!(target.chars().count(), 320);
+        assert_eq!(steps.next(), Some("- `Bash` (cd /repo/other && pwd) — ok"));
     }
 
     #[test]

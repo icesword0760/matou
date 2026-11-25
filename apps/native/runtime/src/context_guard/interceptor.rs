@@ -893,7 +893,7 @@ mod tests {
         for (profile, blocks_sensitive_reads) in [
             (LaunchProfile::ClaudeCode, true),
             (LaunchProfile::Codex, false),
-            (LaunchProfile::Antigravity, false),
+            (LaunchProfile::Antigravity, true),
         ] {
             let read_reply = read(profile, ".env").response_json;
             assert_eq!(

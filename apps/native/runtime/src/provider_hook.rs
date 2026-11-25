@@ -900,13 +900,13 @@ pub(crate) fn claude_config_counts(cwd: &Path, config: &Path) -> Value {
     let mut user_mcp = BTreeSet::new();
     let mut project_mcp = BTreeSet::new();
     let mut add_config =
-        |mcp: &mut BTreeSet<String>, settings: Value, disabled: &str, include_hooks: bool| {
+        |mcp: &mut BTreeSet<String>, settings: &Value, disabled: &[&str], include_hooks: bool| {
             if let Some(servers) = settings["mcpServers"].as_object() {
                 mcp.extend(servers.keys().cloned());
             }
-            for name in settings[disabled]
-                .as_array()
-                .into_iter()
+            for name in disabled
+                .iter()
+                .filter_map(|key| settings[*key].as_array())
                 .flatten()
                 .filter_map(Value::as_str)
             {
@@ -917,24 +917,35 @@ pub(crate) fn claude_config_counts(cwd: &Path, config: &Path) -> Value {
             }
         };
     for name in ["settings.json", "settings.local.json"] {
-        add_config(&mut user_mcp, read(config.join(name)), "", true);
+        add_config(&mut user_mcp, &read(config.join(name)), &[], true);
     }
-    if let Some(parent) = config.parent() {
-        add_config(
-            &mut user_mcp,
-            read(parent.join(".claude.json")),
-            "disabledMcpServers",
-            false,
-        );
-    }
-    add_config(&mut project_mcp, read(cwd.join(".mcp.json")), "", false);
+    let claude_json = config
+        .parent()
+        .map(|parent| read(parent.join(".claude.json")))
+        .unwrap_or_default();
+    add_config(&mut user_mcp, &claude_json, &["disabledMcpServers"], false);
+    add_config(&mut project_mcp, &read(cwd.join(".mcp.json")), &[], false);
     for name in ["settings.json", "settings.local.json"] {
         add_config(
             &mut project_mcp,
-            read(project.join(name)),
-            "disabledMcpjsonServers",
+            &read(project.join(name)),
+            &["disabledMcpjsonServers"],
             true,
         );
+    }
+    if let Some(projects) = claude_json["projects"].as_object() {
+        let project_at =
+            |path: &Path| projects.get(path.to_str()?).filter(|entry| entry.is_object());
+        let local = project_at(cwd)
+            .or_else(|| fs::canonicalize(cwd).ok().and_then(|path| project_at(&path)));
+        if let Some(local) = local {
+            add_config(
+                &mut project_mcp,
+                local,
+                &["disabledMcpServers", "disabledMcpjsonServers"],
+                false,
+            );
+        }
     }
     json!({
         "instructionFiles": instruction_files,
@@ -1389,6 +1400,50 @@ fn append_body(reader: &mut impl Read, body: &mut Vec<u8>, length: usize) -> Htt
 mod tests {
     use super::*;
 
+    #[test]
+    fn claude_config_counts_include_local_project_mcps_and_filter_disabled_servers() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let home = root.path().join("home");
+        let config = home.join(".claude");
+        let workspace = root.path().join("workspace");
+        fs::create_dir_all(&config)?;
+        fs::create_dir(&workspace)?;
+        let cwd = workspace.canonicalize()?;
+        let original = workspace.join(".");
+        let alias = workspace.join(".").join(".");
+        fs::write(
+            cwd.join(".mcp.json"),
+            r#"{"mcpServers":{"shared":{},"disabled-shared":{}}}"#,
+        )?;
+        fs::write(
+            home.join(".claude.json"),
+            json!({
+                "mcpServers": {"global": {}},
+                "projects": {
+                    (original.to_str().context("original path")?): {"mcpServers": {"exact": {}}},
+                    (cwd.to_str().context("canonical path")?): {
+                        "mcpServers": {"local": {}, "disabled-local": {}},
+                        "disabledMcpServers": ["disabled-local"],
+                        "disabledMcpjsonServers": ["disabled-shared"],
+                    },
+                },
+            })
+            .to_string(),
+        )?;
+
+        let counts = claude_config_counts(&alias, &config);
+        assert_eq!(counts["mcps"], 3);
+        assert_eq!(counts["mcpServers"], 3);
+        assert_eq!(counts["mcpServerNames"], json!(["global", "local", "shared"]));
+
+        let exact = claude_config_counts(&original, &config);
+        assert_eq!(
+            exact["mcpServerNames"],
+            json!(["global", "disabled-shared", "exact", "shared"])
+        );
+        Ok(())
+    }
+
     fn scope(run: &str) -> Scope {
         Scope {
             profile: LaunchProfile::ClaudeCode,
@@ -1672,22 +1727,42 @@ mod tests {
             )?)
         };
         let read = |path: &Path, step| json!({"toolCall":{"name":"view_file","args":{"AbsolutePath":path}}, "conversationId":"agy-host", "stepIdx":step});
+        // agy 1.5.17 sends the event and uses read_file with Path in the native CLI.
+        let native_read = |path: &Path, step: u64| {
+            json!({
+                "hookEventName": "PreToolUse",
+                "conversationId": "agy-host",
+                "stepIdx": step,
+                "cwd": root.path(),
+                "workspacePaths": [root.path()],
+                "toolCall": {"id": format!("call_{step}"), "name": "read_file", "args": {"Path": path}},
+            })
+        };
         assert_eq!(
             post("pre-tool-use", &read(&path, 19))?,
             json!({"decision":"allow"})
         );
         assert_eq!(post("post-tool-use", &read(&path, 19))?, json!({}));
-        let response = post("pre-tool-use", &read(&path, 20))?;
+        let response = post("pre-tool-use", &native_read(&path, 20))?;
         assert_eq!(response["decision"], "deny");
+        assert!(response["reason"].as_str().unwrap().contains("120s"));
         assert_eq!(server.saved_noise_bytes("session"), content.len() as u64);
         let stats = serde_json::to_value(get_saved_stats(root.path(), SystemTime::now()))?;
         assert_eq!(
             stats["agents"]["antigravity"],
             json!({"bytes7d":content.len(), "events7d":1})
         );
+        let blocked = post("pre-tool-use", &native_read(&root.path().join(".env"), 21))?;
+        assert_eq!(blocked["decision"], "deny");
+        assert!(
+            blocked["reason"]
+                .as_str()
+                .unwrap()
+                .contains("sensitive file")
+        );
         assert_eq!(
-            post("pre-tool-use", &read(&root.path().join(".env"), 21))?["decision"],
-            "deny"
+            post("pre-tool-use", &native_read(&root.path().join(".env.example"), 22))?,
+            json!({"decision":"allow"})
         );
         Ok(())
     }
