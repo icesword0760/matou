@@ -73,6 +73,8 @@ struct DocumentEditor {
     scroll: Pixels,
     follow_cursor: bool,
     read_only: bool,
+    padding: Pixels,
+    scroll_parent_at_edge: bool,
 }
 
 pub struct RenameInput {
@@ -151,6 +153,8 @@ impl RenameInput {
             scroll: px(0.),
             follow_cursor: true,
             read_only: false,
+            padding: px(18.),
+            scroll_parent_at_edge: false,
         });
         input
     }
@@ -165,6 +169,13 @@ impl RenameInput {
             document.scroll,
             (height - bounds.size.height).max(px(0.)),
         ))
+    }
+
+    pub fn set_inline_document_layout(&mut self, padding: Pixels) {
+        if let Some(document) = &mut self.document {
+            document.padding = padding;
+            document.scroll_parent_at_edge = true;
+        }
     }
 
     pub fn set_document_read_only(&mut self, read_only: bool, cx: &mut Context<Self>) {
@@ -925,7 +936,8 @@ impl EntityInputHandler for RenameInput {
 impl Render for RenameInput {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
-        let document = self.document.is_some();
+        let document_padding = self.document.as_ref().map(|document| document.padding);
+        let document = document_padding.is_some();
         let focused = self.focus.is_focused(window);
         let field = match self.dialog_dark {
             Some(dark) => crate::tab_dialog_style::rename_input_wrap(focused, dark),
@@ -941,8 +953,8 @@ impl Render for RenameInput {
             .when(!document, |el| {
                 el.h(px(if self.search_style { 28. } else { 32. }))
             })
-            .when(document, |el| {
-                el.flex_1().min_h_0().p(px(18.)).overflow_hidden()
+            .when_some(document_padding, |el, padding| {
+                el.flex_1().min_h_0().p(padding).overflow_hidden()
             })
             .w_full()
             .relative()
@@ -970,8 +982,12 @@ impl Render for RenameInput {
                             .as_ref()
                             .map_or(px(0.), |layout| layout.height);
                         let viewport = this.bounds.map_or(px(0.), |bounds| bounds.size.height);
-                        document.scroll = (document.scroll - delta.y)
+                        let scroll = (document.scroll - delta.y)
                             .clamp(px(0.), (height - viewport).max(px(0.)));
+                        if document.scroll_parent_at_edge && document.scroll == scroll {
+                            return;
+                        }
+                        document.scroll = scroll;
                         document.follow_cursor = false;
                         cx.stop_propagation();
                         cx.notify();

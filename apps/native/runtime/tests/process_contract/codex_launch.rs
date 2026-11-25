@@ -1,6 +1,17 @@
 use super::*;
-use matou_native_core::sessions::{get_session, list_runs};
+use matou_native_core::{
+    dispatch_roles::{DispatchRolesConfig, DispatchRolesStore, format_roles_markdown},
+    sessions::{get_session, list_runs},
+};
 use serde_json::{Value, json};
+
+pub(super) fn fixture_foreman_assets(root: &Path) -> Result<PathBuf> {
+    let assets = root.join("control assets");
+    let script = assets.join("providers/claude-plugin/skills/agent-foreman/scripts/foreman.mjs");
+    fs::create_dir_all(script.parent().unwrap())?;
+    fs::write(script, "// Offline Foreman fixture")?;
+    Ok(assets)
+}
 
 fn fixture(root: &Path, executable: &str, exit: Option<u8>) -> Result<(RuntimeChild, PathBuf)> {
     fixture_with_events(root, executable, exit, false)
@@ -16,6 +27,10 @@ pub(super) fn fixture_with_events(
     let codex_home = root.join("隔离 Codex home");
     fs::create_dir(&bin)?;
     fs::create_dir(&codex_home)?;
+    let assets = fixture_foreman_assets(root)?;
+    let node = bin.join("node");
+    fs::write(&node, "#!/bin/sh\nexit 0")?;
+    fs::set_permissions(&node, fs::Permissions::from_mode(0o700))?;
     let stub = bin.join(executable);
     if executable != "missing-codex" {
         fs::write(&stub, include_bytes!("../fixtures/codex-launch.sh"))?;
@@ -39,6 +54,8 @@ alias cc='claude --dangerously-skip-permissions'
         |command| {
             command
                 .env("CODEX_HOME", &codex_home)
+                .env("MATOU_CONTROL_ASSET_ROOT", &assets)
+                .env("MATOU_FOREMAN_ROLES_FILE", "/stale/dispatch-roles.json")
                 .env("MATOU_LOCALE", "zh-CN")
                 .env("MATOU_PROVIDER_HOOK_TOKEN", "old-fixture-token")
                 .env("MATOU_AGENT_STATUS_DIR", "/old-fixture/status")
@@ -159,6 +176,13 @@ fn codex_launch_promotes_exact_commands_on_the_same_card() -> Result<()> {
             codex_home.join("config.toml"),
             "sandbox_mode = 'read-only' # root choice\n[profiles.test]\nsandbox_mode = 'danger-full-access'\n",
         )?;
+        let roles = DispatchRolesStore::for_data_root(&child.data);
+        let mut config = DispatchRolesConfig {
+            default_agent: "dsh".into(),
+            ..Default::default()
+        };
+        config.agents[1].role = "离线启动职责夹具".into();
+        let saved = roles.save(config)?;
         let db = Connection::open(child.data.join("matou.sqlite"))?;
         db.busy_timeout(TIMEOUT)?;
         let before_mount = mount(&db, &child.session)?;
@@ -291,6 +315,24 @@ fn codex_launch_promotes_exact_commands_on_the_same_card() -> Result<()> {
         };
         expected.extend_from_slice(permission_flags);
         assert_hook_argv(&actual, &expected);
+        let injected: String = serde_json::from_str(
+            actual[actual.len() - 4]
+                .strip_prefix("developer_instructions=")
+                .unwrap(),
+        )?;
+        assert!(injected.ends_with(&format_roles_markdown(&saved.config)));
+        let dispatch_env = fs::read_to_string(codex_home.join("dispatch-environment"))?;
+        let mut dispatch_env = dispatch_env.lines();
+        assert_eq!(
+            Path::new(dispatch_env.next().unwrap()).canonicalize()?,
+            roles.path().canonicalize()?,
+        );
+        if executable == "codex" {
+            assert_eq!(
+                Path::new(dispatch_env.next().unwrap()).canonicalize()?,
+                root.path().join("fixture bin/node").canonicalize()?
+            );
+        }
         assert_eq!(
             fs::read_to_string(codex_home.join("cwd"))?.trim_end(),
             cwd.to_str().unwrap()

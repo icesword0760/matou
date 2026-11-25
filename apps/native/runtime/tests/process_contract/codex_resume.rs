@@ -2,7 +2,10 @@ use super::{
     codex_events::{emit, node, shutdown, transcript},
     post_claude_hook_url as post_hook, *,
 };
-use matou_native_core::sessions::{SessionRun, codex_binding, list_runs};
+use matou_native_core::{
+    dispatch_roles::{DispatchRolesStore, format_roles_markdown},
+    sessions::{SessionRun, codex_binding, list_runs},
+};
 use serde_json::{Value, json};
 
 const UUID: &str = "01a1ddc1-88fd-7fc1-8c66-ab8d38719da8";
@@ -24,6 +27,10 @@ fn spawn(root: &Path) -> Result<RuntimeChild> {
                 .env("CODEX_FIXTURE_RESUME", "1")
                 .env_remove("CODEX_FIXTURE_EXIT_CODE")
                 .env_remove("OPENAI_API_KEY");
+            let assets = root.join("control assets");
+            if assets.is_dir() {
+                command.env("MATOU_CONTROL_ASSET_ROOT", assets);
+            }
         },
     )
 }
@@ -744,10 +751,15 @@ fn codex_title_follows_the_active_index_and_preserves_manual_priority() -> Resul
 #[test]
 fn codex_resume_cold_start_preserves_card_binding_and_legacy_material() -> Result<()> {
     let root = tempfile::tempdir()?;
+    super::codex_launch::fixture_foreman_assets(root.path())?;
     let (child, home, rollout, db) = establish(root.path())?;
     let (session, scene) = (child.session.clone(), child.scene.clone());
     let binding = codex_binding(&db, &session)?.unwrap();
+    let roles = DispatchRolesStore::for_data_root(&child.data);
     let old = retire_and_check(child, &db, &session)?;
+    let mut config = roles.snapshot()?.config;
+    config.agents[0].role = "重新打开后读取最新职责".into();
+    let expected_roles = format_roles_markdown(&roles.save(config)?.config);
     // Old binding and independent rollout predate later lineage metadata.
     fs::write(
         root.path().join("数据 空间").join("provider-config.json"),
@@ -778,6 +790,18 @@ fn codex_resume_cold_start_preserves_card_binding_and_legacy_material() -> Resul
     child.connect()?;
     assert_eq!((&child.session, &child.scene), (&session, &scene));
     first_screen(&mut child, &home, Some(UUID), true)?;
+    let argv = fs::read_to_string(home.join("argv"))?;
+    let instructions: String = serde_json::from_str(
+        argv.split_terminator('\0')
+            .find_map(|arg| arg.strip_prefix("developer_instructions="))
+            .context("resumed Codex instructions")?,
+    )?;
+    assert!(instructions.ends_with(&expected_roles));
+    let environment = fs::read_to_string(home.join("dispatch-environment"))?;
+    assert_eq!(
+        Path::new(environment.lines().next().unwrap()).canonicalize()?,
+        roles.path().canonicalize()?,
+    );
     let raw = fs::read_to_string(home.join("argv"))?;
     let argv: Vec<_> = raw.split_terminator('\0').collect();
     assert!(

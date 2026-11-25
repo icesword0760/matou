@@ -328,6 +328,37 @@ mod mac {
     }
 
     #[test]
+    fn codex_child_keeps_only_the_current_dispatch_roles_path() -> Result<()> {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir()?;
+        let mut launch = launch(temp.path(), "/bin/sh")?;
+        launch.profile = LaunchProfile::Codex;
+        launch.argv = vec![
+            "-c".into(),
+            r#"printf 'ROLES=<%s>\n' "${MATOU_FOREMAN_ROLES_FILE-unset}""#.into(),
+        ];
+        let current = launch
+            .data_root
+            .join(matou_native_core::dispatch_roles::ROLES_FILENAME);
+        let expected = format!("ROLES=<{}>", current.display());
+        for (path, expected) in [
+            (current, expected.as_str()),
+            (temp.path().join("old/dispatch-roles.json"), "ROLES=<unset>"),
+        ] {
+            launch
+                .env
+                .insert("MATOU_FOREMAN_ROLES_FILE".into(), path.into_os_string());
+            let (mut process, reader) = PtyProcess::spawn(&launch)?;
+            let (receive, worker) = start_reader(reader);
+            collect_until(&receive, expected.as_bytes())?;
+            finish(&mut process)?;
+            drop(process);
+            drain_and_join(receive, worker)?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn real_isolated_zsh_input_markers_resize_exit_and_failed_launch() -> Result<()> {
         let _guard = TEST_LOCK.lock().unwrap();
         let temp = tempfile::tempdir()?;

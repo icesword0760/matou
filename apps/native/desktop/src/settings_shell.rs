@@ -28,15 +28,10 @@ use matou_native_core::claude_role_budget::{
     CLAUDE_ROLE_LABELS as ROLE_LABELS, CLAUDE_ROLES as ROLES,
 };
 use matou_native_core::context_optimizer_config::ContextOptimizerConfig;
-use matou_native_core::dispatch_config::{
-    DispatchConfig,
-    form::{DispatchForm, LOAD_FAILED, RETRY_LABEL},
-};
 use matou_native_core::dispatch_roles::DispatchRolesStore;
 use matou_native_core::sessions::{InterfaceLocale, LocalePreference};
 use matou_native_desktop::context_optimizer_settings::ContextOptimizerSettingsPanel;
 use matou_native_desktop::dispatch_roles_panel::DispatchRolesPanel;
-use matou_native_desktop::dispatch_settings::DispatchSettingsPanel;
 use matou_native_desktop::provider_context_editor::{
     ACTIVE_PROVIDER_BOTTOM_EDGE_RGB, context_mode_subtitle, context_mode_title,
     context_mode_tokens, context_multi_model_hint, context_unknown_hint, context_window_badge_view,
@@ -2049,10 +2044,8 @@ pub struct SettingsShell {
     _assignment_subscriptions: [Subscription; 2],
     page: SettingsPage,
     editor: Option<Editor>,
-    dispatch_config: Option<Rc<DispatchConfig>>,
-    dispatch_panel: Option<Result<Entity<DispatchSettingsPanel>, String>>,
+    dispatch_panel: Option<Result<Entity<DispatchRolesPanel>, String>>,
     dispatch_roles_store: Option<Rc<DispatchRolesStore>>,
-    dispatch_roles_panel: Option<Entity<DispatchRolesPanel>>,
     context_optimizer_config: Option<Rc<ContextOptimizerConfig>>,
     context_optimizer_panel: Option<Result<Entity<ContextOptimizerSettingsPanel>, String>>,
     theme: ThemeState,
@@ -2108,11 +2101,8 @@ impl SettingsShell {
             _assignment_subscriptions: [assignment_actions, assignment_updates],
             page: SettingsPage::ClaudeCode,
             editor: None,
-            dispatch_config: std::env::home_dir()
-                .map(|home| Rc::new(DispatchConfig::for_home(home))),
             dispatch_panel: None,
             dispatch_roles_store: None,
-            dispatch_roles_panel: None,
             context_optimizer_config: std::env::var_os("MATOU_DATA_ROOT")
                 .map(std::path::PathBuf::from)
                 .map(|root| Rc::new(ContextOptimizerConfig::for_data_root(root))),
@@ -3623,51 +3613,34 @@ impl SettingsShell {
     }
 
     fn load_dispatch(&mut self, cx: &mut Context<Self>) {
+        let locale = self.locale;
+        let theme = self.theme.effective();
         self.dispatch_panel = Some(
-            self.dispatch_config
+            self.dispatch_roles_store
                 .clone()
-                .ok_or_else(|| LOAD_FAILED.to_owned())
-                .and_then(|config| {
-                    let snapshot = config.snapshot().map_err(|error| {
-                        eprintln!("Read dispatch defaults: {error}");
-                        LOAD_FAILED.to_owned()
-                    })?;
-                    let form = DispatchForm::new(snapshot).map_err(str::to_owned)?;
-                    Ok(cx.new(|cx| {
-                        DispatchSettingsPanel::new(
-                            form,
-                            move |defaults| {
-                                config
-                                    .save_defaults(defaults)
-                                    .map_err(|error| error.to_string())
-                            },
-                            cx,
-                        )
-                    }))
+                .ok_or_else(|| {
+                    locale
+                        .text("未能定位数据目录", "Data root unavailable")
+                        .to_owned()
+                })
+                .and_then(|store| {
+                    let snapshot = store.snapshot().map_err(|error| error.to_string())?;
+                    Ok(cx.new(|cx| DispatchRolesPanel::new(store, snapshot, locale, theme, cx)))
                 }),
         );
-        self.dispatch_roles_panel = self.dispatch_roles_store.clone().and_then(|store| {
-            match store.snapshot() {
-                Ok(snapshot) => Some(cx.new(|cx| {
-                    DispatchRolesPanel::new(
-                        snapshot,
-                        move |config| store.save(config).map_err(|error| error.to_string()),
-                        cx,
-                    )
-                })),
-                Err(error) => {
-                    eprintln!("Read dispatch roles: {error}");
-                    None
-                }
-            }
-        });
         cx.notify();
     }
 
     pub(crate) fn configure_data_root(&mut self, data_root: Option<std::path::PathBuf>) {
-        self.dispatch_roles_store = data_root
+        let dispatch_store = data_root
             .as_ref()
             .map(|root| Rc::new(DispatchRolesStore::for_data_root(root)));
+        if self.dispatch_roles_store.as_ref().map(|store| store.path())
+            != dispatch_store.as_ref().map(|store| store.path())
+        {
+            self.dispatch_roles_store = dispatch_store;
+            self.dispatch_panel = None;
+        }
         self.context_optimizer_config =
             data_root.map(|root| Rc::new(ContextOptimizerConfig::for_data_root(root)));
         self.context_optimizer_panel = None;
@@ -3974,6 +3947,9 @@ impl SettingsShell {
     }
 
     pub fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dismiss_dispatch_menu(window, cx) {
+            return;
+        }
         if self.dismiss_time_zone_menu(cx) {
             window.focus(&self.language_zone_focus.time_zone_trigger);
             return;
@@ -4026,6 +4002,24 @@ impl SettingsShell {
             return;
         }
         cx.emit(SettingsShellEvent::Close);
+    }
+
+    pub(crate) fn dispatch_ime_composing(&self, cx: &App) -> bool {
+        self.dispatch_panel
+            .as_ref()
+            .and_then(|panel| panel.as_ref().ok())
+            .is_some_and(|panel| panel.read(cx).composing(cx))
+    }
+
+    pub(crate) fn dismiss_dispatch_menu(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.dispatch_panel
+            .as_ref()
+            .and_then(|panel| panel.as_ref().ok())
+            .is_some_and(|panel| panel.update(cx, |panel, cx| panel.close_menu(window, cx)))
     }
 
     pub(crate) fn dismiss_time_zone_menu(&mut self, cx: &mut Context<Self>) -> bool {
@@ -4657,9 +4651,7 @@ impl SettingsShell {
                 .update(cx, |view, cx| view.close_menu(window, cx));
         }
         if self.page == SettingsPage::Dispatch {
-            // Drop both drafts so returning reads the persisted settings again.
             self.dispatch_panel = None;
-            self.dispatch_roles_panel = None;
         }
         self.page = page;
         self.scroll.set_offset(point(px(0.), px(0.)));
@@ -4677,7 +4669,7 @@ impl SettingsShell {
                 }
             }
             SettingsPage::Dispatch => {
-                if self.dispatch_panel.is_none() || self.dispatch_roles_panel.is_none() {
+                if self.dispatch_panel.is_none() {
                     self.load_dispatch(cx);
                 }
             }
@@ -4777,8 +4769,40 @@ impl SettingsShell {
 
     #[cfg(debug_assertions)]
     #[allow(dead_code)]
-    pub(crate) fn probe_dispatch_config(&mut self, config: DispatchConfig) {
-        self.dispatch_config = Some(Rc::new(config));
+    pub(crate) fn probe_dispatch_agent_scroll(&self, cx: &App) -> (Bounds<Pixels>, Pixels) {
+        self.dispatch_panel
+            .as_ref()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .read(cx)
+            .probe_agent_scroll()
+    }
+
+    #[cfg(debug_assertions)]
+    #[allow(dead_code)]
+    pub(crate) fn probe_dispatch_model_focus(&self, index: usize, window: &mut Window, cx: &App) {
+        self.dispatch_panel
+            .as_ref()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .read(cx)
+            .probe_focus_model(index, window);
+    }
+
+    #[cfg(debug_assertions)]
+    #[allow(dead_code)]
+    pub(crate) fn probe_dispatch_number_focused(
+        &self,
+        index: usize,
+        window: &Window,
+        cx: &App,
+    ) -> bool {
+        self.dispatch_panel
+            .as_ref()
+            .and_then(|panel| panel.as_ref().ok())
+            .is_some_and(|panel| panel.read(cx).probe_number_focused(index, window, cx))
     }
 
     #[cfg(debug_assertions)]
@@ -5338,15 +5362,8 @@ impl SettingsShell {
                 cx,
             );
         }
-        // The dispatch panel already renders its own title and heading; keep
-        // only the close control so the page never shows the same title twice.
-        if page == SettingsPage::Dispatch {
-            return div()
-                .flex()
-                .items_start()
-                .justify_end()
-                .w_full()
-                .child(close);
+        if page == SettingsPage::Dispatch && matches!(self.dispatch_panel, Some(Ok(_))) {
+            return div().absolute().top_0().right_0().child(close);
         }
         let mut heading = div().flex().flex_col().min_w_0().child(
             div()
@@ -5379,6 +5396,30 @@ impl SettingsShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
+        if page == SettingsPage::Dispatch {
+            if self.dispatch_panel.is_none() {
+                self.load_dispatch(cx);
+            }
+            let header = self.page_header(page, cx);
+            return match self.dispatch_panel.clone() {
+                Some(Ok(panel)) => {
+                    panel.update(cx, |panel, cx| {
+                        panel.configure(self.locale, self.theme.effective(), cx)
+                    });
+                    div()
+                        .relative()
+                        .w_full()
+                        .h_full()
+                        .min_h_0()
+                        .child(panel)
+                        .child(header)
+                }
+                _ => div()
+                    .w_full()
+                    .child(header)
+                    .child(self.dispatch_error_block(cx)),
+            };
+        }
         let header = self.page_header(page, cx);
         let mut body = div().flex().flex_col().w_full();
         match page {
@@ -5392,10 +5433,7 @@ impl SettingsShell {
                     .child(self.legacy_surface(content))
                     .child(self.render_theme_section(cx));
             }
-            SettingsPage::Dispatch => {
-                let content = self.dispatch_content(cx);
-                body = body.child(content);
-            }
+            SettingsPage::Dispatch => unreachable!("dispatch renders its own page"),
             SettingsPage::Diagnostics => {
                 let content = self.diagnostics_content(cx);
                 body = body.child(content);
@@ -5819,35 +5857,6 @@ impl SettingsShell {
         }
     }
 
-    fn dispatch_content(&mut self, cx: &mut Context<Self>) -> Div {
-        let palette = *self.theme.effective().palette();
-        let state = self.dispatch_panel.clone();
-        let content = div().flex().flex_col().w_full();
-        match state {
-            None => content.child(
-                div()
-                    .mt(px(22.))
-                    .p(px(14.))
-                    .rounded(px(9.))
-                    .border_1()
-                    .border_color(rgba(palette.workspace.line))
-                    .bg(rgba(palette.workspace.panel))
-                    .text_size(px(10.))
-                    .text_color(rgba(palette.workspace.muted))
-                    .child(
-                        self.locale
-                            .text("正在载入派活默认值…", "Loading dispatch defaults…"),
-                    ),
-            ),
-            Some(Ok(panel)) => content
-                .child(panel)
-                .children(self.dispatch_roles_panel.clone()),
-            Some(Err(_)) => content
-                .child(self.dispatch_error_block(cx))
-                .children(self.dispatch_roles_panel.clone()),
-        }
-    }
-
     fn dispatch_error_block(&self, cx: &mut Context<Self>) -> Div {
         let palette = self.theme.effective().palette();
         let dark = self.is_dark();
@@ -5877,7 +5886,7 @@ impl SettingsShell {
                 .font_weight(FontWeight(600.))
                 .text_color(rgba(colors.error_text))
                 .hover(move |style| style.bg(rgba(retry_hover)))
-                .child(RETRY_LABEL),
+                .child(self.locale.text("重试", "Retry")),
             &self.dispatch_retry_focus,
             6.,
             true,
@@ -5897,7 +5906,16 @@ impl SettingsShell {
             .text_size(px(11.))
             .line_height(px(17.6))
             .text_color(rgba(colors.error_text))
-            .child(div().flex_1().whitespace_normal().child(LOAD_FAILED))
+            .child(div().flex_1().whitespace_normal().child(format!(
+                    "{} {}",
+                    self.locale
+                        .text("读取派活配置失败。", "Could not read dispatch settings."),
+                    self.dispatch_panel
+                        .as_ref()
+                        .and_then(|panel| panel.as_ref().err())
+                        .map(String::as_str)
+                        .unwrap_or_default()
+                )))
             .child(retry)
     }
 
@@ -10931,8 +10949,9 @@ impl Render for SettingsShell {
             .px(px(pad_x))
             .pt(px(pad_top))
             .pb(px(28.))
-            .overflow_y_scroll()
-            .track_scroll(&self.scroll)
+            .when(self.page != SettingsPage::Dispatch, |main| {
+                main.overflow_y_scroll().track_scroll(&self.scroll)
+            })
             .child(page);
         let mut surface = div().relative().w_full().h_full().flex().bg(background);
         if let Some(nav) = nav {

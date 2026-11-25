@@ -249,7 +249,10 @@ fn read_retries(value: &Value) -> Option<u8> {
         .and_then(|n| ((0.0..=5.0).contains(&n) && n.fract() == 0.0).then_some(n as u8))
 }
 
-fn serialize_minutes<S: Serializer>(number: &f64, serializer: S) -> Result<S::Ok, S::Error> {
+pub(crate) fn serialize_minutes<S: Serializer>(
+    number: &f64,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
     if (0.0..=600.0).contains(number) && number.fract() == 0.0 {
         serializer.serialize_u16(*number as u16)
     } else {

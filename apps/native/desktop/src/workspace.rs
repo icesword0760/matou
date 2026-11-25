@@ -1291,7 +1291,7 @@ pub(crate) fn workspace_theme_dark(cx: &App) -> bool {
         .is_some_and(|theme| theme.dark)
 }
 
-struct CardTooltip(SharedString);
+pub(crate) struct CardTooltip(pub(crate) SharedString);
 
 #[derive(Clone, Copy)]
 struct RemoveNodeTooltip {
@@ -11338,6 +11338,11 @@ impl Workspace {
         if let Some((settings, _)) = &self.settings
             && self.dialog.is_none()
         {
+            if matches!(stroke.key.as_str(), "escape" | "tab")
+                && settings.read(cx).dispatch_ime_composing(cx)
+            {
+                return;
+            }
             if stroke.key == "escape" && self.workspace_menu.is_none() && self.task_menu.is_none() {
                 settings
                     .clone()
@@ -11355,7 +11360,10 @@ impl Workspace {
                     && !settings.read(cx).modal_open()
                 {
                     self.keyboard_focus = true;
-                    settings.update(cx, |settings, cx| settings.dismiss_time_zone_menu(cx));
+                    settings.update(cx, |settings, cx| {
+                        settings.dismiss_time_zone_menu(cx);
+                        settings.dismiss_dispatch_menu(window, cx);
+                    });
                     if mods.shift {
                         window.focus_prev();
                     } else {

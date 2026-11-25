@@ -2842,8 +2842,11 @@ pub fn resolve_claude_executable(
     let resolved = if resolved.is_err()
         && command.file_name() == Some(command.as_os_str())
         && get_var(environment, "MATOU_DISABLE_LOGIN_PATH_PROBE") != Some(OsStr::new("1"))
-        && let Some(path) = login_shell_path(environment)
-    {
+        && let Some(path) = login_shell_path(
+            environment,
+            get_var(environment, "SHELL").unwrap_or(OsStr::new("/bin/zsh")),
+            std::time::Duration::from_secs(10),
+        ) {
         set_var(environment, "PATH".into(), path.into());
         search_command(command, &cwd, environment).or(resolved)
     } else {
@@ -2861,7 +2864,7 @@ pub fn resolve_claude_executable(
     }
 }
 
-fn search_command(
+pub(crate) fn search_command(
     command: &Path,
     cwd: &Path,
     environment: &BTreeMap<OsString, OsString>,
@@ -2926,7 +2929,11 @@ fn check_execute_access(path: &Path) -> io::Result<()> {
 }
 
 #[cfg(unix)]
-fn login_shell_path(environment: &BTreeMap<OsString, OsString>) -> Option<String> {
+pub(crate) fn login_shell_path(
+    environment: &BTreeMap<OsString, OsString>,
+    shell: &OsStr,
+    timeout: std::time::Duration,
+) -> Option<String> {
     use std::{
         io::Read,
         os::{fd::AsRawFd, unix::process::CommandExt},
@@ -2937,7 +2944,6 @@ fn login_shell_path(environment: &BTreeMap<OsString, OsString>) -> Option<String
 
     const MARKER: &str = "__MATOU_LOGIN_PATH__=";
     const LIMIT: usize = 256 * 1024;
-    let shell = get_var(environment, "SHELL").unwrap_or(OsStr::new("/bin/zsh"));
     let mut child = Command::new(shell)
         .args(["-ilc", "printf '__MATOU_LOGIN_PATH__=%s\\n' \"$PATH\""])
         .env_clear()
@@ -2952,7 +2958,7 @@ fn login_shell_path(environment: &BTreeMap<OsString, OsString>) -> Option<String
     let fd = stdout.as_raw_fd();
     let mut data = Vec::new();
     let mut eof = false;
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + timeout;
     if unsafe { libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK) } == 0 {
         loop {
             if !eof {
