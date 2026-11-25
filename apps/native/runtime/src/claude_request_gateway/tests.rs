@@ -1687,8 +1687,9 @@ fn deepseek_tool_conversion_matrix_matches_upstream_bytes() -> Result<()> {
     removed_result["content"][0]["content"][1] = missing_text.clone();
     let mut restored_result = result.clone();
     restored_result["content"][0]["content"][1] = missing_text;
-    let old_call = json!({"role":"assistant","content":[{"type":"tool_use","id":"old-call","name":"lookup",
-        "input":{"pattern":r"\0"}}]});
+    let old_call = json!({"role":"assistant","content":[
+        {"type":"thinking","thinking":"","signature":""},
+        {"type":"tool_use","id":"old-call","name":"lookup","input":{"pattern":r"\0"}}]});
     let mut lookup_eager = lookup.clone();
     lookup_eager["defer_loading"] = json!(false);
     let replacement = json!({"name":"lookup","input_schema":{"type":"string"}, "type":"custom"});
@@ -1952,6 +1953,121 @@ fn deepseek_tool_errors_stop_before_upstream_and_next_request_recovers() -> Resu
     assert_eq!(body, reference_only);
     assert_eq!(headers["digest"], "untouched");
     eprintln!("PASS reference-only addition leaves original bytes and digest");
+    for task in tasks {
+        task.join().unwrap()?;
+    }
+    Ok(())
+}
+
+#[test]
+fn deepseek_thinking_history_carries_thinking_on_every_assistant_turn() -> Result<()> {
+    let server = listener()?;
+    let gateway = deepseek_fixture(server.local_addr()?)?;
+    let request =
+        |messages: Value| json!({"model": "literal", "max_tokens": 9000, "messages": messages});
+    let user = |text: &str| json!({"role": "user", "content": [{"type": "text", "text": text}]});
+    let reply =
+        |text: &str| json!({"role": "assistant", "content": [{"type": "text", "text": text}]});
+    let foreign =
+        json!({"type": "thinking", "thinking": "", "signature": "cpa-gemini-carrier-v1:fixture"});
+    let filled = json!({"type": "thinking", "thinking": "", "signature": ""});
+    let reasoned = |thinking: &Value, text: &str| json!({"role": "assistant", "content": [thinking, {"type": "text", "text": text}]});
+    let tool_call = json!({"role": "assistant", "content": [foreign,
+        {"type": "tool_use", "id": "call-1", "name": "Read", "input": {}}]});
+    let tool_result = json!({"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "call-1", "content": "ok"}]});
+    let cases = [
+        (
+            "mixed history fills only the thinking-less turns",
+            MESSAGES,
+            request(json!([
+                user("start"),
+                reasoned(&foreign, "a"),
+                user("go"),
+                reply("b")
+            ])),
+            Some(request(json!([
+                user("start"),
+                reasoned(&foreign, "a"),
+                user("go"),
+                reasoned(&filled, "b")
+            ]))),
+        ),
+        (
+            "thinking-less run head is filled",
+            MESSAGES,
+            request(json!([user("start"), reply("a"), tool_call, tool_result])),
+            Some(request(json!([
+                user("start"),
+                reasoned(&filled, "a"),
+                tool_call,
+                tool_result
+            ]))),
+        ),
+        (
+            "uniform thinking history keeps original bytes",
+            MESSAGES,
+            request(json!([
+                user("start"),
+                reasoned(&foreign, "a"),
+                tool_call,
+                tool_result
+            ])),
+            None,
+        ),
+        (
+            "lone thinking-less assistant is filled",
+            MESSAGES,
+            request(json!([user("start"), reply("a")])),
+            Some(request(json!([user("start"), reasoned(&filled, "a")]))),
+        ),
+        (
+            "thinking-less tool rounds are filled",
+            MESSAGES,
+            request(json!([
+                user("start"),
+                {"role": "assistant", "content": [{"type": "tool_use", "id": "call-1", "name": "Read", "input": {}}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call-1", "content": "ok"}]},
+                user("go"),
+                {"role": "assistant", "content": [{"type": "tool_use", "id": "call-2", "name": "Read", "input": {}}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call-2", "content": "ok"}]}
+            ])),
+            Some(request(json!([
+                user("start"),
+                {"role": "assistant", "content": [filled, {"type": "tool_use", "id": "call-1", "name": "Read", "input": {}}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call-1", "content": "ok"}]},
+                user("go"),
+                {"role": "assistant", "content": [filled, {"type": "tool_use", "id": "call-2", "name": "Read", "input": {}}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call-2", "content": "ok"}]}
+            ]))),
+        ),
+        (
+            "count_tokens forwards the same normal form",
+            COUNT,
+            request(json!([user("start"), reply("a"), reasoned(&foreign, "b")])),
+            Some(request(json!([
+                user("start"),
+                reasoned(&filled, "a"),
+                reasoned(&foreign, "b")
+            ]))),
+        ),
+    ];
+    let (upstream, tasks) = record(server, cases.len(), "200 OK", "", b"ok");
+    for (label, path, input, expected) in cases {
+        let original = serde_json::to_vec_pretty(&input)?;
+        let response = exchange(&gateway, path, &original, "")?;
+        assert_eq!(response.0, 200, "{label}");
+        let (line, headers, bytes) = upstream.recv_timeout(TIMEOUT)?;
+        assert_eq!(
+            line,
+            format!("POST /anthropic{path}?tenant=fixture HTTP/1.1\r\n"),
+            "{label}"
+        );
+        assert_eq!(headers["host"], "api.deepseek.com", "{label}");
+        let expected = expected.map_or(original, |value| value.to_string().into_bytes());
+        assert_eq!(bytes, expected, "{label}");
+        eprintln!("PASS {label}");
+    }
     for task in tasks {
         task.join().unwrap()?;
     }

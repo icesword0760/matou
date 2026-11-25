@@ -55,6 +55,21 @@ fn forward(
     Ok(serde_json::from_slice(&delivered)?)
 }
 
+fn with_thinking(messages: &Value) -> Value {
+    let mut messages = messages.clone();
+    for entry in messages.as_array_mut().into_iter().flatten() {
+        if entry["role"] != "assistant" {
+            continue;
+        }
+        if let Some(content) = entry["content"].as_array_mut()
+            && !content.iter().any(|block| block["type"] == "thinking")
+        {
+            content.insert(0, json!({"type":"thinking","thinking":"","signature":""}));
+        }
+    }
+    messages
+}
+
 fn reminder(used: u64, total: u64) -> Value {
     let remaining = total.saturating_sub(used);
     json!({
@@ -133,7 +148,10 @@ fn deepseek_observes_actual_tokens_across_routes_and_honors_request_boundaries()
             &continuation,
             ("200 OK", JSON, TEXT_REPLY),
         )?;
-        assert_eq!(skipped["messages"], continuation["messages"]);
+        assert_eq!(
+            skipped["messages"],
+            with_thinking(&continuation["messages"])
+        );
     }
 
     let stop = json!({
@@ -146,7 +164,7 @@ fn deepseek_observes_actual_tokens_across_routes_and_honors_request_boundaries()
     });
     assert_eq!(
         forward(&gateway, &deepseek, MESSAGES, "", &stop, UNUSED_REPLY)?["messages"],
-        stop["messages"]
+        with_thinking(&stop["messages"])
     );
     assert_eq!(
         forward(
@@ -157,7 +175,7 @@ fn deepseek_observes_actual_tokens_across_routes_and_honors_request_boundaries()
             &stop,
             ("502 Bad Gateway", JSON, TEXT_REPLY)
         )?["messages"],
-        stop["messages"]
+        with_thinking(&stop["messages"])
     );
     continuation["model"] = json!("matou-role/opus");
     let switched = forward(
@@ -194,7 +212,7 @@ fn deepseek_observes_actual_tokens_across_routes_and_honors_request_boundaries()
     let replacement = main_delta_gateway(ordinary.local_addr()?, deepseek.local_addr()?)?;
     assert_eq!(
         forward(&replacement, &deepseek, MESSAGES, "", &stop, UNUSED_REPLY)?["messages"],
-        stop["messages"]
+        with_thinking(&stop["messages"])
     );
     Ok(())
 }

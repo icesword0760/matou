@@ -1064,6 +1064,7 @@ impl State {
             destination(connection, path, query).ok_or(Fault::bad_gateway(CONNECTION_ERROR))?;
         if let Some(message) = message.as_mut() {
             if deepseek_tools::matches(&destination) {
+                rewritten |= deepseek_thinking::normalize(message);
                 rewritten |= deepseek_tools::convert(message)
                     .map_err(|message| Fault::new(StatusCode::BAD_REQUEST, message))?;
                 if is_message && !marked {
@@ -2216,6 +2217,60 @@ mod deepseek_tools {
         }
         normalized.push_str(&pattern[copied..]);
         Some(normalized)
+    }
+}
+
+/// DeepSeek validates the assistant history of a reasoning request before it
+/// answers, and rejects histories where assistant turns disagree about carrying
+/// a `thinking` block with "The `content[].thinking` in the thinking mode must be
+/// passed back to the API". Observed rejections include two tool rounds where one
+/// assistant turn has no thinking, a `tool_use` turn without thinking next to a
+/// turn that has one, and consecutive assistant turns whose first has none;
+/// uniform histories pass either way. Sessions that switched providers
+/// mid-conversation carry exactly those mixed histories, because turns written
+/// through another supplier kept their own thinking blocks or none at all.
+/// Filling the gaps with empty thinking blocks makes every assistant turn carry
+/// one without rewriting any reasoning text that was actually produced, and the
+/// upstream accepts both empty and non-empty thinking blocks side by side.
+mod deepseek_thinking {
+    use super::{Map, Value, json};
+
+    pub(super) fn normalize(message: &mut Map<String, Value>) -> bool {
+        let Some(messages) = message.get_mut("messages").and_then(Value::as_array_mut) else {
+            return false;
+        };
+        let mut changed = false;
+        for entry in messages.iter_mut() {
+            if entry.get("role").and_then(Value::as_str) != Some("assistant")
+                || carries_thinking(entry)
+            {
+                continue;
+            }
+            let Some(content) = entry
+                .as_object_mut()
+                .and_then(|entry| entry.get_mut("content"))
+                .and_then(Value::as_array_mut)
+            else {
+                continue;
+            };
+            content.insert(
+                0,
+                json!({"type": "thinking", "thinking": "", "signature": ""}),
+            );
+            changed = true;
+        }
+        changed
+    }
+
+    fn carries_thinking(entry: &Value) -> bool {
+        entry
+            .get("content")
+            .and_then(Value::as_array)
+            .is_some_and(|blocks| {
+                blocks
+                    .iter()
+                    .any(|block| block.get("type").and_then(Value::as_str) == Some("thinking"))
+            })
     }
 }
 
