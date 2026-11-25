@@ -22,13 +22,11 @@ use matou_native_core::{
 use regex::Regex;
 use std::path::Path;
 use serde::Serialize;
+use serde_json::{Value, json};
 use std::sync::LazyLock;
 
-use crate::agent_hud_projection::{ContextTokens, HudProvider, TaskStatus};
+use crate::agent_hud_projection::{ContextUsageSample, HudProvider, TaskStatus};
 
-const DEFAULT_CLAUDE_CACHE_TTL_SEC: u64 = 300;
-const DEFAULT_LONG_CACHE_TTL_SEC: u64 = 900;
-const MAX_CALIBRATED_TTL_SEC: u64 = 3_600;
 const CACHE_EXPIRING_SOON_SEC: u64 = 60;
 const KEEPALIVE_TRIGGER_WINDOW_SEC: u64 = 45;
 
@@ -144,9 +142,18 @@ pub enum ContextPressure {
     Critical,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CacheTiming {
+    Precise,
+    Estimate,
+    Unknown,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CacheHudStatus {
+    pub timing: CacheTiming,
     pub ttl_sec: u64,
     pub remaining_sec: u64,
     pub warm: bool,
@@ -211,10 +218,9 @@ struct ActiveToolLease {
 #[derive(Clone, Debug)]
 pub struct SessionContextGuard {
     provider: HudProvider,
-    ttl_sec: u64,
-    last_cache_activity_ms: Option<f64>,
-    last_hit_ratio_percent: Option<f64>,
-    last_tokens: Option<ContextTokens>,
+    usage: Option<ContextUsageSample>,
+    warned_pressure: ContextPressure,
+    warned_cache_deadline_ms: Option<f64>,
     last_activity_ms: Option<f64>,
     last_wall_tick_ms: Option<f64>,
     last_mono_tick_ms: Option<f64>,
@@ -229,18 +235,11 @@ pub struct SessionContextGuard {
 
 impl SessionContextGuard {
     pub fn new(provider: HudProvider) -> Self {
-        let ttl_sec = match provider {
-            HudProvider::Antigravity => DEFAULT_LONG_CACHE_TTL_SEC,
-            HudProvider::ClaudeCode | HudProvider::Codex | HudProvider::Dsh => {
-                DEFAULT_CLAUDE_CACHE_TTL_SEC
-            }
-        };
         Self {
             provider,
-            ttl_sec,
-            last_cache_activity_ms: None,
-            last_hit_ratio_percent: None,
-            last_tokens: None,
+            usage: None,
+            warned_pressure: ContextPressure::Normal,
+            warned_cache_deadline_ms: None,
             last_activity_ms: None,
             last_wall_tick_ms: None,
             last_mono_tick_ms: None,
@@ -281,7 +280,6 @@ impl SessionContextGuard {
         &mut self,
         status: TaskStatus,
         context_percent: Option<f64>,
-        tokens: Option<ContextTokens>,
         active_tool: Option<(&str, Option<&str>)>,
         now_ms: f64,
     ) {
@@ -290,12 +288,6 @@ impl SessionContextGuard {
         }
         if context_percent != self.context_percent {
             self.on_context_percent(context_percent, now_ms);
-        }
-        if let Some(tok) = tokens
-            && self.last_tokens != Some(tok)
-        {
-            self.last_tokens = Some(tok);
-            self.on_token_usage(tok, now_ms);
         }
         match active_tool {
             Some((name, target)) => {
@@ -319,6 +311,10 @@ impl SessionContextGuard {
         }
     }
 
+    pub(crate) fn context_percent(&self) -> Option<f64> {
+        self.context_percent
+    }
+
     pub fn on_context_percent(&mut self, percent: Option<f64>, now_ms: f64) {
         self.context_percent = percent;
         if percent.is_some() {
@@ -326,31 +322,61 @@ impl SessionContextGuard {
         }
     }
 
-    /// Observe token usage from either the request gateway or transcript tail.
-    /// Calibrates TTL upward if a cache hit is observed after a gap longer than
-    /// the current default TTL.
-    pub fn on_token_usage(&mut self, tokens: ContextTokens, now_ms: f64) {
-        let input = tokens.input.unwrap_or(0.0).max(0.0);
-        let creation = tokens.cache_creation_input.unwrap_or(0.0).max(0.0);
-        let read = tokens.cache_read_input.unwrap_or(0.0).max(0.0);
-        let total_prompt = input + creation + read;
+    pub(crate) fn observe_usage(&mut self, usage: Option<ContextUsageSample>) {
+        if let Some(at) = usage.and_then(|sample| sample.observed_at_ms)
+            && self.last_activity_ms.is_none_or(|last| at > last)
+        {
+            self.last_activity_ms = Some(at);
+        }
+        self.usage = usage;
+    }
 
-        if read > 0.0 {
-            if let Some(prev_ms) = self.last_cache_activity_ms {
-                let gap_sec = ((now_ms - prev_ms).max(0.0) / 1000.0).floor() as u64;
-                if gap_sec > self.ttl_sec && gap_sec <= MAX_CALIBRATED_TTL_SEC {
-                    self.ttl_sec = gap_sec;
-                }
+    pub(crate) fn on_compaction(&mut self) {
+        self.context_percent = None;
+        self.usage = None;
+        self.warned_pressure = ContextPressure::Normal;
+        self.warned_cache_deadline_ms = None;
+    }
+
+    pub(crate) fn pending_reminders(
+        &self,
+        now_ms: f64,
+        settings: &AgentOptimizerSettings,
+    ) -> impl Iterator<Item = ContextReminder> {
+        let pressure = classify_context_pressure(self.context_percent);
+        let water = settings.enabled
+            && settings.cache_monitor
+            && match pressure {
+                ContextPressure::Normal => false,
+                ContextPressure::Warning => self.warned_pressure == ContextPressure::Normal,
+                ContextPressure::Critical => self.warned_pressure != ContextPressure::Critical,
+            };
+        let cache = (settings.enabled && settings.cache_monitor && settings.cache_expiry_notify)
+            .then(|| self.cache_deadline())
+            .flatten()
+            .filter(|(deadline, _, _)| {
+                let remaining = *deadline - now_ms;
+                remaining > 0.0
+                    && remaining <= CACHE_EXPIRING_SOON_SEC as f64 * 1000.0
+                    && self.warned_cache_deadline_ms != Some(*deadline)
+            });
+        water
+            .then_some(ContextReminder::Pressure(pressure))
+            .into_iter()
+            .chain(
+                cache.map(|(deadline_ms, timing, _)| ContextReminder::CacheExpiry {
+                    deadline_ms,
+                    timing,
+                }),
+            )
+    }
+
+    pub(crate) fn mark_reminded(&mut self, reminder: ContextReminder) {
+        match reminder {
+            ContextReminder::Pressure(pressure) => self.warned_pressure = pressure,
+            ContextReminder::CacheExpiry { deadline_ms, .. } => {
+                self.warned_cache_deadline_ms = Some(deadline_ms);
             }
-        }
-
-        if total_prompt > 0.0 {
-            self.last_hit_ratio_percent = Some(((read / total_prompt) * 100.0).clamp(0.0, 100.0));
-        }
-
-        if read > 0.0 || creation > 0.0 || total_prompt > 0.0 {
-            self.last_cache_activity_ms = Some(now_ms);
-            self.last_activity_ms = Some(now_ms);
         }
     }
 
@@ -425,9 +451,17 @@ impl SessionContextGuard {
             return None;
         }
 
-        let cache = settings.cache_monitor.then(|| self.compute_cache_status(now_ms)).flatten();
-        let stall = settings.stall_rescue.then(|| self.compute_stall_status(now_ms));
-        let context_pressure = classify_context_pressure(self.context_percent);
+        let cache = settings
+            .cache_monitor
+            .then(|| self.compute_cache_status(now_ms));
+        let stall = settings
+            .stall_rescue
+            .then(|| self.compute_stall_status(now_ms));
+        let context_pressure = if settings.cache_monitor {
+            classify_context_pressure(self.context_percent)
+        } else {
+            ContextPressure::Normal
+        };
         let handoff_ready = settings.stall_rescue
             && (!self.modified_files.is_empty()
                 || !self.recent_tools.is_empty()
@@ -485,19 +519,43 @@ impl SessionContextGuard {
         }
     }
 
-    fn compute_cache_status(&self, now_ms: f64) -> Option<CacheHudStatus> {
-        let last_ms = self.last_cache_activity_ms?;
-        let elapsed_sec = ((now_ms - last_ms).max(0.0) / 1000.0).floor() as u64;
-        let remaining_sec = self.ttl_sec.saturating_sub(elapsed_sec);
+    fn cache_deadline(&self) -> Option<(f64, CacheTiming, u64)> {
+        let usage = self.usage?;
+        if let Some(expires_at) = usage.cache_expires_at_ms {
+            let ttl = usage
+                .observed_at_ms
+                .map_or(0, |at| ((expires_at - at).max(0.0) / 1000.0).ceil() as u64);
+            return Some((expires_at, CacheTiming::Precise, ttl));
+        }
+        let at = usage.observed_at_ms?;
+        let ttl = usage.estimated_cache_ttl_sec?;
+        usage.tokens.has_cache_activity().then_some((
+            at + ttl as f64 * 1000.0,
+            CacheTiming::Estimate,
+            ttl,
+        ))
+    }
+
+    fn compute_cache_status(&self, now_ms: f64) -> CacheHudStatus {
+        let (remaining_sec, timing, ttl_sec) = self.cache_deadline().map_or(
+            (0, CacheTiming::Unknown, 0),
+            |(deadline, timing, ttl)| {
+                (
+                    ((deadline - now_ms).max(0.0) / 1000.0).ceil() as u64,
+                    timing,
+                    ttl,
+                )
+            },
+        );
         let warm = remaining_sec > 0;
-        let expiring_soon = warm && remaining_sec <= CACHE_EXPIRING_SOON_SEC;
-        Some(CacheHudStatus {
-            ttl_sec: self.ttl_sec,
+        CacheHudStatus {
+            timing,
+            ttl_sec,
             remaining_sec,
             warm,
-            expiring_soon,
-            hit_ratio_percent: self.last_hit_ratio_percent,
-        })
+            expiring_soon: warm && remaining_sec <= CACHE_EXPIRING_SOON_SEC,
+            hit_ratio_percent: self.usage.and_then(|usage| usage.tokens.cache_hit_ratio()),
+        }
     }
 
     fn compute_stall_status(&self, now_ms: f64) -> StallHudStatus {
@@ -571,6 +629,54 @@ pub fn redact_secrets(input: &str) -> String {
         out = re.replace_all(&out, "[REDACTED]").into_owned();
     }
     out
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum ContextReminder {
+    Pressure(ContextPressure),
+    CacheExpiry {
+        deadline_ms: f64,
+        timing: CacheTiming,
+    },
+}
+
+impl ContextReminder {
+    pub(crate) fn notification(self, locale: InterfaceLocale) -> Value {
+        let open = locale.text("点击查看这张卡片。", "Click to open the card.");
+        let (kind, title, body, sound) = match self {
+            Self::Pressure(ContextPressure::Warning) => (
+                "context-water-warning",
+                locale.text("上下文占用达到 75%", "Context usage reached 75%"),
+                open,
+                false,
+            ),
+            Self::Pressure(_) => (
+                "context-water-critical",
+                locale.text("上下文占用达到 85%", "Context usage reached 85%"),
+                open,
+                true,
+            ),
+            Self::CacheExpiry { timing: CacheTiming::Estimate, .. } => (
+                "context-cache-expiry",
+                locale.text("缓存预计即将过期", "Cache estimated to expire soon"),
+                locale.text(
+                    "按该路由的默认时长估算，剩余不超过 60 秒。点击查看这张卡片。",
+                    "About 60 seconds or less based on the route’s default lifetime. Click to open the card.",
+                ),
+                true,
+            ),
+            Self::CacheExpiry { .. } => (
+                "context-cache-expiry",
+                locale.text("缓存即将过期", "Cache expiring soon"),
+                locale.text(
+                    "路由报告的到期时间距现在不超过 60 秒。点击查看这张卡片。",
+                    "The route reports an expiry within 60 seconds. Click to open the card.",
+                ),
+                true,
+            ),
+        };
+        json!({"eventType": kind, "title": title, "body": body, "sound": sound})
+    }
 }
 
 fn classify_context_pressure(percent: Option<f64>) -> ContextPressure {
@@ -722,43 +828,140 @@ fn render_handoff_markdown(
 mod tests {
     use super::*;
 
+    use crate::agent_hud_projection::ContextTokens;
+
+    fn cache_sample(at: f64, expires_at: Option<f64>) -> ContextUsageSample {
+        ContextUsageSample {
+            tokens: ContextTokens {
+                input: Some(10_000.),
+                output: Some(2_000.),
+                cache_creation_input: Some(20_000.),
+                cache_read_input: Some(40_000.),
+                total: None,
+            },
+            observed_at_ms: Some(at),
+            cache_expires_at_ms: expires_at,
+            estimated_cache_ttl_sec: Some(300),
+            window: Some(200_000),
+        }
+    }
+
     #[test]
-    fn cache_countdown_and_ttl_calibration_work() {
+    fn cache_timing_uses_request_timestamp_and_distinguishes_all_three_levels() {
         let mut guard = SessionContextGuard::new(HudProvider::ClaudeCode);
         let settings = AgentOptimizerSettings::default();
-        let t0 = 1_000_000.0;
-
-        guard.on_token_usage(
-            ContextTokens {
-                input: Some(10_000.0),
-                cache_creation_input: Some(40_000.0),
-                cache_read_input: Some(0.0),
-                ..Default::default()
-            },
-            t0,
-        );
-        let hud = guard.project_hud(t0 + 250_000.0, &settings).unwrap();
-        let cache = hud.cache.unwrap();
-        assert_eq!(cache.ttl_sec, 300);
+        let at = 1_000_000.;
+        let sample = cache_sample(at, None);
+        guard.observe_usage(Some(sample));
+        let cache = guard
+            .project_hud(at + 250_000., &settings)
+            .unwrap()
+            .cache
+            .unwrap();
+        assert_eq!(cache.timing, CacheTiming::Estimate);
         assert_eq!(cache.remaining_sec, 50);
-        assert!(cache.warm);
         assert!(cache.expiring_soon);
+        assert!((cache.hit_ratio_percent.unwrap() - 57.142857).abs() < 0.001);
 
-        // Observing a cache hit after 420s calibrates TTL upward.
-        guard.on_token_usage(
-            ContextTokens {
-                input: Some(2_000.0),
-                cache_creation_input: Some(0.0),
-                cache_read_input: Some(48_000.0),
-                ..Default::default()
+        guard.observe_usage(Some(cache_sample(at, Some(at + 310_500.))));
+        let cache = guard
+            .project_hud(at + 250_000., &settings)
+            .unwrap()
+            .cache
+            .unwrap();
+        assert_eq!(cache.timing, CacheTiming::Precise);
+        assert_eq!(cache.remaining_sec, 61);
+        assert!(!cache.expiring_soon);
+
+        for sample in [
+            ContextUsageSample {
+                observed_at_ms: None,
+                ..sample
             },
-            t0 + 420_000.0,
+            ContextUsageSample {
+                estimated_cache_ttl_sec: None,
+                ..sample
+            },
+            ContextUsageSample {
+                tokens: ContextTokens {
+                    input: Some(10_000.),
+                    ..Default::default()
+                },
+                ..sample
+            },
+        ] {
+            guard.observe_usage(Some(sample));
+            let cache = guard
+                .project_hud(at + 250_000., &settings)
+                .unwrap()
+                .cache
+                .unwrap();
+            assert_eq!(cache.timing, CacheTiming::Unknown);
+            assert!(!cache.warm);
+        }
+    }
+
+    #[test]
+    fn reminders_fire_once_per_water_level_and_deadline_until_compaction() {
+        let mut guard = SessionContextGuard::new(HudProvider::ClaudeCode);
+        let at = 1_000_000.;
+        let settings = AgentOptimizerSettings {
+            cache_expiry_notify: true,
+            ..Default::default()
+        };
+        let due = at + 240_000.;
+        guard.observe_usage(Some(cache_sample(at, None)));
+        guard.on_context_percent(Some(74.99), at);
+        assert_eq!(guard.pending_reminders(due - 1., &settings).count(), 0);
+        guard.on_context_percent(Some(75.), at);
+        let reminders: Vec<_> = guard.pending_reminders(due, &settings).collect();
+        assert_eq!(
+            reminders,
+            [
+                ContextReminder::Pressure(ContextPressure::Warning),
+                ContextReminder::CacheExpiry {
+                    deadline_ms: at + 300_000.,
+                    timing: CacheTiming::Estimate,
+                }
+            ]
         );
-        let hud2 = guard.project_hud(t0 + 430_000.0, &settings).unwrap();
-        let cache2 = hud2.cache.unwrap();
-        assert_eq!(cache2.ttl_sec, 420);
-        assert_eq!(cache2.remaining_sec, 410);
-        assert!((cache2.hit_ratio_percent.unwrap() - 96.0).abs() < 0.01);
+        for reminder in reminders {
+            guard.mark_reminded(reminder);
+        }
+        assert_eq!(guard.pending_reminders(due + 1., &settings).count(), 0);
+        guard.on_context_percent(Some(85.), at);
+        let critical = ContextReminder::Pressure(ContextPressure::Critical);
+        assert_eq!(
+            guard.pending_reminders(due, &settings).collect::<Vec<_>>(),
+            [critical]
+        );
+        guard.mark_reminded(critical);
+        guard.on_context_percent(Some(80.), at);
+        assert_eq!(guard.pending_reminders(due, &settings).count(), 0);
+
+        guard.on_compaction();
+        assert_eq!(guard.pending_reminders(due, &settings).count(), 0);
+        guard.on_context_percent(Some(85.), due);
+        guard.observe_usage(Some(cache_sample(at, None)));
+        for disabled in [
+            AgentOptimizerSettings {
+                enabled: false,
+                ..settings.clone()
+            },
+            AgentOptimizerSettings {
+                cache_monitor: false,
+                ..settings.clone()
+            },
+        ] {
+            assert_eq!(guard.pending_reminders(due, &disabled).count(), 0);
+        }
+        assert_eq!(
+            guard
+                .pending_reminders(due, &AgentOptimizerSettings::default())
+                .collect::<Vec<_>>(),
+            [critical]
+        );
+        assert_eq!(guard.pending_reminders(due, &settings).count(), 2);
     }
 
     #[test]
@@ -869,6 +1072,7 @@ mod tests {
     fn keepalive_controller_respects_opt_in_cap_subagents_and_turn_reset() {
         let mut ctrl = KeepaliveController::new();
         let expiring = CacheHudStatus {
+            timing: CacheTiming::Estimate,
             ttl_sec: 300,
             remaining_sec: 30,
             warm: true,

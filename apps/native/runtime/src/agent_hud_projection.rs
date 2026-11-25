@@ -50,6 +50,76 @@ pub struct ContextTokens {
     pub total: Option<f64>,
 }
 
+impl ContextTokens {
+    pub(crate) fn from_usage(usage: &Value) -> Option<Self> {
+        let count = |keys: &[&str]| {
+            first_value(usage, keys, Value::as_f64)
+                .filter(|count| (0.0..=u64::MAX as f64).contains(count))
+        };
+        let tokens = Self {
+            input: count(&["input_tokens", "inputTokens"]),
+            output: count(&["output_tokens", "outputTokens"]),
+            cache_creation_input: count(&[
+                "cache_creation_input_tokens",
+                "cacheCreationInputTokens",
+            ]),
+            cache_read_input: count(&["cache_read_input_tokens", "cacheReadInputTokens"]),
+            total: None,
+        };
+        (tokens != Self::default()).then_some(tokens)
+    }
+
+    pub(crate) fn used_tokens(self) -> Option<f64> {
+        self.total.or_else(|| {
+            Some(
+                self.input?
+                    + self.output.unwrap_or_default()
+                    + self.cache_creation_input.unwrap_or_default()
+                    + self.cache_read_input.unwrap_or_default(),
+            )
+        })
+    }
+
+    pub(crate) fn has_cache_activity(self) -> bool {
+        self.cache_read_input.unwrap_or_default() > 0.
+            || self.cache_creation_input.unwrap_or_default() > 0.
+    }
+
+    pub(crate) fn cache_hit_ratio(self) -> Option<f64> {
+        let read = self.cache_read_input?;
+        let prompt = self.input? + self.cache_creation_input.unwrap_or_default() + read;
+        (prompt > 0.).then(|| read / prompt * 100.)
+    }
+
+    fn same_prompt(self, other: Self) -> bool {
+        self.input == other.input
+            && self.cache_read_input == other.cache_read_input
+            && self.cache_creation_input == other.cache_creation_input
+    }
+}
+
+/// One request's usage and the time evidence supplied by its source.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ContextUsageSample {
+    pub tokens: ContextTokens,
+    pub observed_at_ms: Option<f64>,
+    pub cache_expires_at_ms: Option<f64>,
+    pub estimated_cache_ttl_sec: Option<u64>,
+    pub window: Option<u64>,
+}
+
+impl ContextUsageSample {
+    fn from_log(tokens: ContextTokens, observed_at_ms: Option<f64>) -> Self {
+        Self {
+            tokens,
+            observed_at_ms,
+            cache_expires_at_ms: None,
+            estimated_cache_ttl_sec: None,
+            window: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct RunningTool {
     pub name: String,
@@ -225,6 +295,10 @@ pub struct AgentHudProjection {
     context_tokens: Option<ContextTokens>,
     context_used_tokens: Option<u64>,
     status_context_at: Option<f64>,
+    status_usage_at: Option<f64>,
+    compacted_at: Option<f64>,
+    last_compaction_prompt: Option<String>,
+    pre_compaction_tokens: Option<ContextTokens>,
     usage_resets: Vec<(String, f64)>,
     quota_model_id: Option<String>,
     provider_tool_history: ClaudeTranscript,
@@ -284,6 +358,10 @@ impl AgentHudProjection {
             context_tokens: None,
             context_used_tokens: None,
             status_context_at: None,
+            status_usage_at: None,
+            compacted_at: None,
+            last_compaction_prompt: None,
+            pre_compaction_tokens: None,
             usage_resets: Vec::new(),
             quota_model_id: None,
             provider_tool_history: ClaudeTranscript::default(),
@@ -357,6 +435,106 @@ impl AgentHudProjection {
             self.context_used_tokens,
             self.hud.context_window_size.map(|size| size as u64),
         )
+    }
+
+    fn status_usage_after_compaction(&self) -> bool {
+        self.compacted_at.is_none_or(|compact| {
+            self.status_usage_at.map_or_else(
+                || {
+                    self.status_context_at.is_some_and(|at| at > compact)
+                        && self.context_tokens.is_some_and(|tokens| {
+                            self.pre_compaction_tokens.is_none_or(|previous| !previous.same_prompt(tokens))
+                        })
+                },
+                |at| at > compact,
+            )
+        })
+    }
+
+    pub(crate) fn usage_sample(&self) -> Option<ContextUsageSample> {
+        let history = match self.hud.provider {
+            HudProvider::ClaudeCode => self.live_claude.as_ref(),
+            HudProvider::Antigravity => Some(&self.provider_tool_history),
+            _ => None,
+        };
+        let log_sample = history
+            .and_then(|history| history.usage_sample)
+            .filter(|sample| {
+                self.compacted_at
+                    .is_none_or(|compact| sample.observed_at_ms.is_some_and(|at| at > compact))
+            });
+        let Some(tokens) = self.context_tokens.filter(|_| self.status_usage_after_compaction()) else {
+            return log_sample;
+        };
+        if let Some(log_sample) = log_sample.filter(|sample| {
+            sample.tokens.same_prompt(tokens)
+                || sample
+                    .observed_at_ms
+                    .zip(self.status_context_at)
+                    .is_some_and(|(at, status_at)| at >= status_at)
+        }) {
+            return Some(log_sample);
+        }
+        Some(ContextUsageSample::from_log(tokens, self.status_usage_at))
+    }
+
+    pub(crate) fn context_metrics(
+        &self,
+        request: Option<ContextUsageSample>,
+    ) -> (Option<f64>, Option<u64>, Option<u64>) {
+        let request_used = request.and_then(|sample| sample.tokens.used_tokens());
+        let window = request
+            .filter(|_| request_used.is_some())
+            .and_then(|sample| sample.window)
+            .or_else(|| self.hud.context_window_size.map(|size| size as u64));
+        let fallback_used = self
+            .usage_sample()
+            .and_then(|sample| sample.tokens.used_tokens())
+            .or_else(|| {
+                // With no statusline override this count came straight from the transcript.
+                (self.status_context_at.is_none() && self.compacted_at.is_none())
+                    .then_some(self.context_used_tokens)
+                    .flatten()
+                    .map(|used| used as f64)
+            });
+        let used = request_used.or(fallback_used).map(|used| used as u64);
+        let measured = used
+            .zip(window)
+            .filter(|(_, window)| *window > 0)
+            .map(|(used, size)| 100. * used as f64 / size as f64);
+        let percent = measured.or_else(|| {
+            self.status_usage_after_compaction().then_some(self.hud.context_percent).flatten()
+        });
+        (percent, used, window)
+    }
+
+    pub(crate) fn accepts_request_usage(&self, at: f64) -> bool {
+        self.compacted_at.is_none_or(|compact| at > compact)
+    }
+
+    pub(crate) fn complete_claude_compaction(&mut self, payload: &Value, at: f64) -> bool {
+        if self.hud.provider != HudProvider::ClaudeCode
+            || first_text(payload, &["hook_event_name", "hookEventName"]) != Some("SessionStart")
+            || payload["source"] != "compact"
+        {
+            return false;
+        }
+        let prompt = first_text(payload, &["prompt_id", "promptId"]);
+        let duplicate = match prompt {
+            Some(prompt) => self.last_compaction_prompt.as_deref() == Some(prompt),
+            None => {
+                self.compacted_at.is_some()
+                    && self.last_compaction_prompt.is_none()
+                    && self.usage_sample().is_none()
+            }
+        };
+        if duplicate {
+            return false;
+        }
+        self.pre_compaction_tokens = self.context_tokens;
+        self.compacted_at = Some(at);
+        self.last_compaction_prompt = prompt.map(str::to_owned);
+        true
     }
 
     pub(crate) fn set_config(&mut self, counts: ConfigCounts, hook_names: Vec<String>) {
@@ -697,23 +875,8 @@ impl AgentHudProjection {
             let usage = first_value(window, &["current_usage", "currentUsage"], |value| {
                 value.is_object().then_some(value)
             });
-            let tokens = usage
-                .filter(|usage| sum_usage_tokens(usage).is_some())
-                .map(|usage| ContextTokens {
-                    input: first_value(usage, &["input_tokens", "inputTokens"], Value::as_f64),
-                    output: first_value(usage, &["output_tokens", "outputTokens"], Value::as_f64),
-                    cache_creation_input: first_value(
-                        usage,
-                        &["cache_creation_input_tokens", "cacheCreationInputTokens"],
-                        Value::as_f64,
-                    ),
-                    cache_read_input: first_value(
-                        usage,
-                        &["cache_read_input_tokens", "cacheReadInputTokens"],
-                        Value::as_f64,
-                    ),
-                    total: None,
-                });
+            let tokens = usage.and_then(ContextTokens::from_usage);
+            let usage_at = timestamp_ms(&payload["timestamp"]);
             let null_usage = [
                 "used_percentage",
                 "usedPercentage",
@@ -724,6 +887,7 @@ impl AgentHudProjection {
             .any(|key| window.get(*key).is_some_and(Value::is_null));
             if tokens.is_some() || null_usage {
                 self.context_tokens = tokens;
+                self.status_usage_at = usage_at;
             }
             let reported_percent = first_value(
                 window,
@@ -1696,6 +1860,7 @@ struct ClaudeTranscript {
     todos: Vec<Todo>,
     todos_observed: bool,
     context_used_tokens: Option<u64>,
+    usage_sample: Option<ContextUsageSample>,
     observed_agents: Vec<(String, AgentActivity)>,
     agents: Vec<(String, (AgentActivity, Option<f64>))>,
     agent_ids: Vec<(String, String)>,
@@ -1714,6 +1879,9 @@ impl ClaudeTranscript {
             timestamp_ms(&row["timestamp"]).or_else(|| timestamp_ms(&row["created_at"]));
         if let Some(usage) = transcript_context(row) {
             self.context_used_tokens = usage;
+            self.usage_sample = ContextTokens::from_usage(&row["message"]["usage"])
+                .filter(|_| usage.is_some())
+                .map(|tokens| ContextUsageSample::from_log(tokens, timestamp));
         }
         if row["isSidechain"] == true || row["is_sidechain"] == true {
             return;
@@ -1724,6 +1892,8 @@ impl ClaudeTranscript {
             }
             if let Some(used) = sum_usage_tokens(&row["usage"]) {
                 self.context_used_tokens = Some(used);
+                self.usage_sample = ContextTokens::from_usage(&row["usage"])
+                    .map(|tokens| ContextUsageSample::from_log(tokens, timestamp));
             }
             for tool in row["tool_calls"].as_array().into_iter().flatten() {
                 let Some(id) = first_text(tool, &["id", "call_id", "tool_call_id"]) else {
@@ -2247,6 +2417,43 @@ mod tests {
             observe(json!({"context_window": {"used_percentage": 0, "current_usage": null}})),
             (Some(0.), size, None)
         );
+    }
+
+    #[test]
+    fn request_usage_overrides_hud_counts_and_compact_rejects_old_samples_once() {
+        let mut hud = AgentHudProjection::new("session", HudProvider::ClaudeCode, 1_000.);
+        let status = json!({"context_window":{"context_window_size":200000,
+            "current_usage":{"input_tokens":150000, "cache_read_input_tokens":0}}});
+        hud.ingest_provider(&status, 2_000.);
+        assert_eq!(
+            hud.context_metrics(None),
+            (Some(75.), Some(150_000), Some(200_000))
+        );
+        let sample = ContextUsageSample {
+            tokens: ContextTokens::from_usage(&json!({
+                "input_tokens":10000, "output_tokens":2000,
+                "cache_creation_input_tokens":20000, "cache_read_input_tokens":40000
+            }))
+            .unwrap(),
+            observed_at_ms: Some(3_000.),
+            cache_expires_at_ms: Some(250_000.),
+            estimated_cache_ttl_sec: None,
+            window: Some(200_000),
+        };
+        assert_eq!(
+            hud.context_metrics(Some(sample)),
+            (Some(36.), Some(72_000), Some(200_000))
+        );
+        let resume = json!({"hook_event_name":"SessionStart","source":"resume"});
+        assert!(!hud.complete_claude_compaction(&resume, 4_000.));
+        let compact =
+            json!({"hook_event_name":"SessionStart","source":"compact","prompt_id":"turn-1"});
+        assert!(hud.complete_claude_compaction(&compact, 4_000.));
+        assert!(!hud.accepts_request_usage(sample.observed_at_ms.unwrap()));
+        hud.ingest_provider(&status, 5_000.);
+        assert_eq!(hud.context_metrics(None), (None, None, Some(200_000)));
+        assert!(!hud.complete_claude_compaction(&compact, 6_000.));
+        assert!(hud.accepts_request_usage(5_000.));
     }
 
     #[test]

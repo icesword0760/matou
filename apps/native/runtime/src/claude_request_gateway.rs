@@ -16,7 +16,7 @@ use std::{
     },
     task::{Context as TaskContext, Poll},
     thread,
-    time::Duration,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, anyhow};
@@ -43,8 +43,10 @@ use tokio::{
     sync::{Mutex as AsyncMutex, OnceCell, oneshot},
 };
 use tower_service::Service;
+use uuid::Uuid;
 
 use crate::{
+    agent_hud_projection::ContextUsageSample,
     egress_probe::Family,
     http_proxy::{AbortOnDrop, connect_http1, direct_https, http_connector},
     model_router::RouterConnection,
@@ -80,6 +82,7 @@ pub(crate) type ReadContextUsage =
 
 pub(crate) struct Gateway {
     base_url: String,
+    token_usage: Arc<Mutex<deepseek_token_usage::Tracker>>,
     stopped: Arc<AtomicBool>,
     stop: Option<(oneshot::Sender<()>, thread::JoinHandle<()>)>,
 }
@@ -163,13 +166,14 @@ impl Gateway {
             write!(prefix, "{byte:02x}").expect("writing to String");
         }
         let stopped = Arc::new(AtomicBool::new(false));
+        let token_usage = Arc::default();
         let state = Arc::new(State {
             prefix,
             projection,
             lazy_compaction: OnceCell::new(),
             lazy_subscription: AsyncMutex::default(),
             stopped: Arc::clone(&stopped),
-            token_usage: Arc::default(),
+            token_usage: Arc::clone(&token_usage),
             read_context_usage,
             subscriptions,
             locale,
@@ -218,6 +222,7 @@ impl Gateway {
             .context("Claude request gateway listener stopped")??;
         Ok(Self {
             base_url,
+            token_usage,
             stopped,
             stop: Some((stop, serving_thread)),
         })
@@ -225,6 +230,17 @@ impl Gateway {
 
     pub(crate) fn base_url(&self) -> &str {
         &self.base_url
+    }
+
+    pub(crate) fn bind_usage_identity(&self, id: &str) {
+        self.token_usage
+            .lock()
+            .unwrap()
+            .bind_usage_identity(id.parse().ok());
+    }
+
+    pub(crate) fn context_usage(&self) -> Option<ContextUsageSample> {
+        self.token_usage.lock().unwrap().context_usage()
     }
 }
 
@@ -266,9 +282,48 @@ struct FixtureUpstream {
 #[derive(Default)]
 struct MessageResponse {
     track_usage: bool,
+    hud_scope: Option<HudUsageScope>,
     gemini_stream: bool,
     lazy_compaction: bool,
     authentication_label: Option<&'static str>,
+}
+
+#[derive(Clone, Copy)]
+struct HudUsageScope {
+    identity: Uuid,
+    started: Instant,
+    at_ms: f64,
+    window: Option<u64>,
+    estimated_ttl_sec: Option<u64>,
+}
+
+fn request_session_id(message: &Map<String, Value>) -> Option<Uuid> {
+    let metadata = message.get("metadata")?;
+    let user = metadata["user_id"].as_str()?;
+    let user: Value = serde_json::from_str(user).ok()?;
+    // Requests from a sidechain may share a gateway. Only accept requests
+    // naming the bound conversation, without an explicit child identity.
+    for key in ["agent_id", "subagent_id", "parent_session_id"] {
+        if !metadata[key].is_null() || !user[key].is_null() {
+            return None;
+        }
+    }
+    user["session_id"].as_str()?.parse().ok()
+}
+
+fn estimated_cache_ttl(connection: &ClaudeGatewayConnection, destination: &Uri) -> Option<u64> {
+    if let Some(subscription) = &connection.subscription {
+        return match subscription.provider {
+            "codex" => Some(300),
+            "antigravity" => Some(900),
+            _ => None,
+        };
+    }
+    match destination.host()?.to_ascii_lowercase().as_str() {
+        "api.anthropic.com" | "api.openai.com" | "generativelanguage.googleapis.com" => Some(300),
+        "api.deepseek.com" => Some(600),
+        _ => None,
+    }
 }
 
 async fn serve(listener: TcpListener, state: Arc<State>) {
@@ -512,17 +567,30 @@ impl State {
             }
             (response, body)
         };
+        if response.status.is_success()
+            && let Some(scope) = message_response.hud_scope
+        {
+            // An unobservable response supersedes older request evidence. A
+            // completed observer fills in this same request if usage is present.
+            self.token_usage
+                .lock()
+                .unwrap()
+                .publish_context_usage(scope, None);
+        }
         if (message_response.track_usage || message_response.gemini_stream)
             && response.status.is_success()
             && let Some(media) = observable_media(&response.headers)
             && let Some(encoding) = observable_encoding(&response.headers)
         {
             if message_response.track_usage {
-                body.usage = Some(deepseek_token_usage::ResponseObserver::new(
-                    media,
-                    encoding,
-                    Arc::clone(&self.token_usage),
-                ));
+                body.usage = Some(
+                    deepseek_token_usage::ResponseObserver::new(
+                        media,
+                        encoding,
+                        Arc::clone(&self.token_usage),
+                    )
+                    .with_hud_scope(message_response.hud_scope),
+                );
             }
             if message_response.gemini_stream
                 && media == ObservableMedia::Sse
@@ -742,6 +810,9 @@ impl State {
     ) -> Result<(Bytes, &ClaudeGatewayConnection, Uri, bool, MessageResponse), Fault> {
         let is_message = path == "/v1/messages";
         let mut message = serde_json::from_slice::<Map<String, Value>>(&body).ok();
+        let request_identity = is_message
+            .then(|| message.as_ref().and_then(request_session_id))
+            .flatten();
         let model = message
             .as_ref()
             .and_then(|object| object.get("model"))
@@ -930,6 +1001,18 @@ impl State {
         }
         let message_response = MessageResponse {
             track_usage: is_message && !marked,
+            hud_scope: request_identity
+                .filter(|_| !marked && search.is_none())
+                .map(|identity| HudUsageScope {
+                    identity,
+                    started: Instant::now(),
+                    at_ms: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as f64,
+                    window: target_window.or(self.projection.context_window),
+                    estimated_ttl_sec: estimated_cache_ttl(connection, &destination),
+                }),
             lazy_compaction: matches!(compaction, Some(ClaudeGatewayCompaction::OnFirstRequest(_))),
             authentication_label,
             gemini_stream: is_message

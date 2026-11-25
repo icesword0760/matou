@@ -1853,7 +1853,11 @@ impl Notifications {
         let scene_id = text("sceneId");
         let task_id = text("taskId");
         let workspace_id = text("workspaceId");
-        let read = session_id.is_some() && session_id == focused;
+        let context_reminder = matches!(
+            text("eventType"),
+            Some("context-water-warning" | "context-water-critical" | "context-cache-expiry")
+        );
+        let read = !context_reminder && session_id.is_some() && session_id == focused;
         let (id, cooldown_key) = if let Some(index) = replacement {
             // A replacement takes precedence over cooldown and keeps the row's identity.
             let current = self.entries.remove(index);
@@ -17236,6 +17240,18 @@ impl Workspace {
                     .or(fields.codex.as_ref());
                 if let Some(percent) = context.and_then(|hud| hud.context_percent()) {
                     primary = primary.child(codex_hud::context_ring(percent));
+                    if let Some((used, window)) = live["contextUsedTokens"]
+                        .as_u64()
+                        .zip(live["contextWindowSize"].as_u64())
+                    {
+                        let used = footer_token_count(used);
+                        let window = footer_token_count(window);
+                        primary = primary.child(
+                            div()
+                                .flex_none()
+                                .child(footer_text("context-usage", format!("{used}/{window}"))),
+                        );
+                    }
                 } else if codex_hud::supports_details(fields.mode)
                     && context.is_some_and(|hud| hud.has_context_window())
                 {
@@ -17305,7 +17321,6 @@ impl Workspace {
                 };
                 for pill in [
                     guard_view.stall_pill.as_ref(),
-                    guard_view.cache_pill.as_ref(),
                     guard_view.saved_pill.as_ref(),
                 ]
                 .into_iter()
@@ -17324,6 +17339,24 @@ impl Workspace {
                             .text_color(rgb(fg))
                             .whitespace_nowrap()
                             .child(pill.label.clone()),
+                    );
+                }
+                if let Some((label, detail, tone)) = footer_cache_usage(live, locale) {
+                    let (fg, bg) = pill_colors(tone);
+                    primary = primary.child(
+                        div()
+                            .id("footer-cache-countdown")
+                            .flex_none()
+                            .px(px(6.))
+                            .py(px(1.5))
+                            .rounded(px(5.))
+                            .bg(rgba(bg))
+                            .text_size(px(10.))
+                            .font_weight(FontWeight(600.))
+                            .text_color(rgb(fg))
+                            .whitespace_nowrap()
+                            .child(label)
+                            .tooltip(move |_, cx| cx.new(|_| CardTooltip(detail.into())).into()),
                     );
                 }
                 if guard_view.show_handoff_button
@@ -20170,6 +20203,79 @@ struct FooterReadings {
 thread_local! {
     static FOOTER_READINGS: std::cell::RefCell<Option<FooterReadings>> =
         const { std::cell::RefCell::new(None) };
+}
+
+fn footer_token_count(count: u64) -> String {
+    if count >= 1_000_000 {
+        format!("{}M", (count as f64 / 100_000.0).round() / 10.0)
+    } else if count >= 1_000 {
+        format!("{}k", (count as f64 / 1000.0).round())
+    } else {
+        count.to_string()
+    }
+}
+
+fn footer_cache_usage(
+    live: &Value,
+    locale: InterfaceLocale,
+) -> Option<(
+    String,
+    &'static str,
+    matou_native_desktop::context_optimizer_settings::HudPillTone,
+)> {
+    use matou_native_desktop::context_optimizer_settings::{HudPillTone, format_cache_countdown};
+
+    let cache = live.get("contextGuard")?.get("cache")?.as_object()?;
+    let remaining = cache
+        .get("remainingSec")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let (mut label, detail) = match cache.get("timing").and_then(Value::as_str) {
+        Some("precise") => (
+            format_cache_countdown(remaining, remaining > 0, locale),
+            locale.text(
+                "剩余时间来自该路由报告的缓存到期时间。",
+                "Countdown based on the cache expiry reported by this route.",
+            ),
+        ),
+        Some("estimate") => {
+            let label = if remaining > 0 {
+                format!(
+                    "{} · {}",
+                    format_cache_countdown(remaining, true, locale),
+                    locale.text("估算", "est.")
+                )
+            } else {
+                locale
+                    .text("缓存预计已过期", "Cache estimated expired")
+                    .to_owned()
+            };
+            (
+                label,
+                locale.text("按最近一次缓存活动时间和该路由的默认时长估算，实际到期时间可能不同。", "Estimated from the last cache activity and the route’s default lifetime. Actual expiry may differ."),
+            )
+        }
+        _ => (
+            locale
+                .text("缓存时间未知", "Cache timing unknown")
+                .to_owned(),
+            locale.text(
+                "该会话缺少到期时间或可用于估算的缓存活动记录。",
+                "This session has no reported expiry or cache activity timestamp to estimate from.",
+            ),
+        ),
+    };
+    if let Some(hit) = cache.get("hitRatioPercent").and_then(Value::as_f64) {
+        label.push_str(&format!(" · {} {hit:.0}%", locale.text("命中", "hit")));
+    }
+    let tone = if remaining == 0 {
+        HudPillTone::Neutral
+    } else if cache.get("expiringSoon").and_then(Value::as_bool) == Some(true) {
+        HudPillTone::Warning
+    } else {
+        HudPillTone::Accent
+    };
+    Some((label, detail, tone))
 }
 
 fn footer_text(key: &'static str, text: impl Into<SharedString>) -> UiText {
