@@ -886,26 +886,39 @@ impl State {
         }
         let destination =
             destination(connection, path, query).ok_or(Fault::bad_gateway(CONNECTION_ERROR))?;
-        if deepseek_tools::matches(&destination)
-            && let Some(message) = message.as_mut()
-        {
-            rewritten |= deepseek_tools::convert(message)
-                .map_err(|message| Fault::new(StatusCode::BAD_REQUEST, message))?;
-            if is_message && !marked {
-                let (hud_tokens, hud_window) = self
-                    .read_context_usage
-                    .as_ref()
-                    .and_then(|read| read())
-                    .unwrap_or_default();
-                rewritten |= self.token_usage.lock().unwrap().attach(
-                    message,
-                    deepseek_token_usage::ContextUsage {
-                        session_window: self.projection.context_window,
-                        hud_tokens,
-                        hud_window,
-                        target_window,
-                    },
-                );
+        if let Some(message) = message.as_mut() {
+            if deepseek_tools::matches(&destination) {
+                rewritten |= deepseek_tools::convert(message)
+                    .map_err(|message| Fault::new(StatusCode::BAD_REQUEST, message))?;
+                if is_message && !marked {
+                    let (hud_tokens, hud_window) = self
+                        .read_context_usage
+                        .as_ref()
+                        .and_then(|read| read())
+                        .unwrap_or_default();
+                    rewritten |= self.token_usage.lock().unwrap().attach(
+                        message,
+                        deepseek_token_usage::ContextUsage {
+                            session_window: self.projection.context_window,
+                            hud_tokens,
+                            hud_window,
+                            target_window,
+                        },
+                    );
+                }
+            } else if connection.official_oauth.is_none()
+                && destination
+                    .host()
+                    .is_none_or(|host| !host.eq_ignore_ascii_case("api.anthropic.com"))
+                && (connection.subscription.is_some()
+                    || message
+                        .get("model")
+                        .and_then(Value::as_str)
+                        .is_some_and(|model| {
+                            !model.trim().to_ascii_lowercase().starts_with("claude")
+                        }))
+            {
+                rewritten |= strip_unsupported_deferred_tools(message);
             }
         }
         let message_response = MessageResponse {
@@ -957,6 +970,54 @@ impl State {
         }
         Some((path, uri.query()))
     }
+}
+
+fn strip_unsupported_deferred_tools(message: &mut Map<String, Value>) -> bool {
+    let choice = message.get("tool_choice");
+    let choice_type = choice
+        .and_then(|choice| choice.get("type"))
+        .and_then(Value::as_str);
+    let forced_choice = matches!(choice_type, Some("any" | "tool"));
+    let forced_tool = choice
+        .filter(|_| choice_type == Some("tool"))
+        .and_then(|choice| choice.get("name"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let Some(tools) = message
+        .get_mut("tools")
+        .and_then(Value::as_array_mut)
+        .filter(|tools| !tools.is_empty())
+    else {
+        return false;
+    };
+
+    let mut rewritten = false;
+    let mut removed_forced_tool = false;
+    tools.retain_mut(|tool| {
+        let Some(tool) = tool.as_object_mut() else {
+            return true;
+        };
+        let name = tool.get("name").and_then(Value::as_str);
+        if matches!(
+            name,
+            Some("DeferredToolPlaceholder" | "tool_search_deferred_anchor")
+        ) && tool.get("defer_loading").and_then(Value::as_bool) == Some(true)
+        {
+            rewritten = true;
+            removed_forced_tool |= name == forced_tool.as_deref();
+            return false;
+        }
+        rewritten |= tool.shift_remove("defer_loading").is_some();
+        true
+    });
+
+    if tools.is_empty() && (!forced_choice || removed_forced_tool) {
+        message.shift_remove("tools");
+    }
+    if removed_forced_tool {
+        message.shift_remove("tool_choice");
+    }
+    rewritten
 }
 
 fn pure_web_search(message: &Map<String, Value>) -> bool {
