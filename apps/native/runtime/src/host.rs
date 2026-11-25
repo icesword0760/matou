@@ -8929,7 +8929,7 @@ impl PermissionChange {
                         &binding.id,
                         Some(&json!(self.mode)),
                     )?;
-                } else {
+                } else if self.profile == LaunchProfile::ClaudeCode {
                     owner.change_claude_restore(session_id, ClaudeRestore::PermissionFresh)?;
                 }
                 // Record that the metadata was written before scheduling fallible preparation.
@@ -8956,27 +8956,37 @@ impl PermissionChange {
                         return Err(error).context("prepare the AI Session permission respawn");
                     }
                 };
-                if let PreparedLaunch::Codex(plan, Some(mut resume)) = launch {
+                if let PreparedLaunch::Codex(plan, mut resume) = launch {
                     ensure!(
-                        self.profile == LaunchProfile::Codex
-                            && plan.permission_mode == self.mode
-                            && self.binding.as_ref().is_some_and(|binding| {
+                        self.profile == LaunchProfile::Codex && plan.permission_mode == self.mode,
+                        "AI Session permission respawn lost its binding"
+                    );
+                    if let Some(resume) = &mut resume {
+                        ensure!(
+                            self.binding.as_ref().is_some_and(|binding| {
                                 resume.binding_id == binding.id
                                     && resume.provider_session_id == binding.provider_session_id
-                            })
-                            && owner.codex_binding(session_id)?.is_some_and(|binding| {
+                            }) && owner.codex_binding(session_id)?.is_some_and(|binding| {
                                 binding.id == resume.binding_id
                                     && binding.resumable
                                     && binding.restore_state == "none"
                             }),
-                        "AI Session permission respawn lost its binding"
-                    );
-                    resume.permission_respawn = true;
-                    let run_id =
-                        owner.launch_codex(session_id, terminal, plan, Some(resume), false)?;
+                            "AI Session permission respawn lost its binding"
+                        );
+                        resume.permission_respawn = true;
+                    } else {
+                        ensure!(
+                            self.binding.is_none(),
+                            "AI Session permission respawn lost its binding"
+                        );
+                    }
+                    let run_id = owner.launch_codex(session_id, terminal, plan, resume, false)?;
                     self.phase = PermissionPhase::AwaitingIdentity {
                         run_id,
-                        startup_until: None,
+                        startup_until: self
+                            .binding
+                            .is_none()
+                            .then(|| Instant::now() + *PERMISSION_STARTUP_WINDOW),
                         consent_shown: false,
                         outcome: None,
                     };
@@ -8985,15 +8995,21 @@ impl PermissionChange {
                 if let PreparedLaunch::Antigravity(plan, permission) = launch {
                     ensure!(
                         self.profile == LaunchProfile::Antigravity
-                            && permission.as_str() == self.mode
-                            && matches!(&plan.mode, AntigravityMode::Resume(identity)
-                                if self.binding.as_ref().is_some_and(|binding| binding.provider_session_id == *identity))
-                            && owner.antigravity_binding(session_id)?.as_ref().is_some_and(
-                                |current| self
-                                    .binding
-                                    .as_ref()
-                                    .is_some_and(|binding| binding.id == current.id)
-                            ),
+                            && permission.as_str() == self.mode,
+                        "AI Session permission respawn lost its binding"
+                    );
+                    let mode_matches = match &self.binding {
+                        Some(binding) => {
+                            matches!(&plan.mode, AntigravityMode::Resume(identity)
+                                if binding.provider_session_id == *identity)
+                                && owner
+                                    .antigravity_binding(session_id)?
+                                    .is_some_and(|current| binding.id == current.id)
+                        }
+                        None => matches!(&plan.mode, AntigravityMode::Fresh),
+                    };
+                    ensure!(
+                        mode_matches,
                         "AI Session permission respawn lost its binding"
                     );
                     let run_id = owner.launch_antigravity_permission(
@@ -9005,7 +9021,10 @@ impl PermissionChange {
                     )?;
                     self.phase = PermissionPhase::AwaitingIdentity {
                         run_id,
-                        startup_until: None,
+                        startup_until: self
+                            .binding
+                            .is_none()
+                            .then(|| Instant::now() + *PERMISSION_STARTUP_WINDOW),
                         consent_shown: false,
                         outcome: None,
                     };
@@ -9057,12 +9076,23 @@ impl PermissionChange {
                     return Ok(PermissionProgress::RestoreFailed(std::mem::take(error)));
                 }
                 if self.profile != LaunchProfile::ClaudeCode {
-                    // The owner settles the restore on the matching hook, exit or timeout.
-                    return Ok(if outcome.is_some() {
-                        PermissionProgress::Confirmed
-                    } else {
-                        PermissionProgress::Pending
-                    });
+                    if outcome.is_some() {
+                        return Ok(PermissionProgress::Confirmed);
+                    }
+                    // Resumes settle on a matching hook. Fresh runs can be ready
+                    // before the CLI assigns a conversation ID.
+                    if let Some(until) = *startup_until {
+                        if Instant::now() >= until {
+                            owner
+                                .finish_provider_startup(session_id, run_id)
+                                .context("AI Session permission respawn failed")?;
+                            return Ok(PermissionProgress::Confirmed);
+                        }
+                        owner
+                            .check_provider_startup(session_id, run_id)
+                            .context("AI Session permission respawn failed")?;
+                    }
+                    return Ok(PermissionProgress::Pending);
                 }
                 if let Some(until) = *startup_until {
                     if Instant::now() < until {
@@ -10139,6 +10169,18 @@ fn prepare_launch(
                     AntigravityMode::Fresh,
                     json!({"permissionMode": launch.mode}),
                 )
+            } else if let LaunchIntent::PermissionRestart {
+                fresh_mode: Some(mode),
+                ..
+            } = intent
+            {
+                let model = owner
+                    .antigravity_binding(session_id)?
+                    .and_then(|binding| binding.metadata.get("model").cloned());
+                (
+                    AntigravityMode::Fresh,
+                    json!({"permissionMode": mode, "model": model}),
+                )
             } else if let Some(fork) = owner.pending_antigravity_fork(session_id)? {
                 (AntigravityMode::Fork(fork.source_id), fork.metadata)
             } else {
@@ -10221,11 +10263,15 @@ fn prepare_launch(
             }
             let env = owner.launch_environment();
             let data_root = options.data_root.clone();
-            let promotion = match intent {
+            let fresh_mode = match intent {
                 LaunchIntent::ShellPromotion(InteractiveLaunch {
                     profile: LaunchProfile::Codex,
                     mode,
                 }) => Some(mode),
+                LaunchIntent::PermissionRestart {
+                    fresh_mode: Some(mode),
+                    ..
+                } => Some(mode),
                 LaunchIntent::Start
                 | LaunchIntent::Environment
                 | LaunchIntent::FreshCodex
@@ -10234,7 +10280,8 @@ fn prepare_launch(
                 } => None,
                 _ => bail!("unsupported Codex launch intent"),
             };
-            let binding = if promotion.is_none() {
+            let fresh_mode = fresh_mode.map(str::to_owned);
+            let binding = if fresh_mode.is_none() {
                 owner.codex_binding(session_id)?
             } else {
                 None
@@ -10247,7 +10294,7 @@ fn prepare_launch(
                 .spawn(move || {
                     let terminal = default_terminal_options();
                     let cwd = Path::new(&session.cwd);
-                    let result = if let Some(mode) = promotion {
+                    let result = if let Some(mode) = fresh_mode {
                         codex_launch::prepare(
                             &data_root,
                             cwd,
@@ -10414,12 +10461,22 @@ fn active_graph(
                         continue;
                     };
                     let codex = profile == "codex";
+                    let supports_fresh_permission = codex || profile == "antigravity";
                     // History stays readable even when the bound conversation cannot resume.
-                    let provider_session_id = owner
-                        .environment_provider_binding(id, profile)?
+                    let binding = owner.environment_provider_binding(id, profile)?;
+                    let resumable = binding.as_ref().is_some_and(|binding| binding.resumable);
+                    let provider_session_id = binding
                         .filter(|binding| !binding.provider_session_id.is_empty())
                         .map(|binding| binding.provider_session_id);
                     node["historyProviderSessionId"] = json!(provider_session_id);
+                    if supports_fresh_permission {
+                        node["resumable"] = json!(resumable);
+                        if !resumable
+                            && let Some(mode) = owner.fresh_provider_permission(&session.id)
+                        {
+                            node["permissionMode"] = json!(mode);
+                        }
+                    }
                     if codex && let Some(hud) = owner.codex_hud(&session.id) {
                         node["codexHud"] = hud;
                     }

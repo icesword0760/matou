@@ -1298,6 +1298,41 @@ fn assert_permission_argv(home: &Path, expected: &[&str]) -> Result<()> {
 }
 
 #[test]
+fn codex_fresh_permission_restart_confirms_without_a_session_start() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let home = root.path().join("isolated Codex home");
+    fs::create_dir(&home)?;
+    let fixture = root.path().join("fixture Codex");
+    fs::write(&fixture, include_bytes!("../fixtures/codex-launch.sh"))?;
+    fs::set_permissions(&fixture, fs::Permissions::from_mode(0o700))?;
+    let mut child = spawn(root.path())?;
+    child.hello()?;
+    child.input("codex")?;
+    first_screen(&mut child, &home, None, false)?;
+    child.send(Command::Refresh)?;
+    graph(&mut child, "fresh Codex with no identity", |_, card| {
+        card["workStatus"] == "starting" && card["resumable"] == false
+    })?;
+    let db = open_data(&child)?;
+    let session = child.session.clone();
+    assert!(codex_binding(&db, &session)?.is_none());
+    let old = list_runs(&db, &session)?.pop().context("initial run")?;
+
+    let mode = "bypassPermissions";
+    set_permission(&mut child, mode)?;
+    assert_fresh_permission_confirmed(&mut child, mode)?;
+    let argv = fs::read_to_string(home.join("argv"))?;
+    let argv: Vec<_> = argv.split_terminator('\0').collect();
+    assert!(argv.contains(&"--dangerously-bypass-approvals-and-sandbox"));
+    assert!(!argv.contains(&"resume"));
+    replacement(&db, &session, &old)?;
+    assert!(codex_binding(&db, &session)?.is_none());
+    child.input("noise")?;
+    child.frame(|_, screen, _| screen_has_line(screen, "model error: Server timed out"))?;
+    shutdown(child)
+}
+
+#[test]
 fn codex_permission_switches_keep_card_uuid_and_retire_each_replaced_run() -> Result<()> {
     let root = tempfile::tempdir()?;
     let (mut child, home, rollout, db) = establish(root.path())?;
