@@ -1,20 +1,19 @@
 //! Synchronous PreToolUse / PostToolUse hook decision engine for
 //! `ProviderHookServer`.
 //!
-//! Enforces per-agent settings from `ContextOptimizerConfig` with strict
-//! fail-open semantics: whenever switches are off, the agent lacks sync-hook
-//! capability, or anything errors, it returns `"{}"` (allow) with zero side
-//! effects.
+//! Tool decisions respect per-agent settings from `ContextOptimizerConfig`
+//! and fail open on errors. Compaction also expires cached reads so that
+//! enabling read deduplication again cannot reuse pre-compaction results.
 
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Mutex,
-    time::{Instant, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
 use matou_native_core::{context_optimizer_config::ContextOptimizerConfig, pty::LaunchProfile};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::context_guard::{
     claude_output::ClaudeOutput,
@@ -34,6 +33,8 @@ pub struct HookEvaluation {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum SavedEvent {
     Read(String),
+    AntigravityStep(String, u64),
+    UnidentifiedRead,
     Replacement(String),
 }
 
@@ -50,6 +51,7 @@ impl HookEvaluation {
 #[derive(Default)]
 pub struct HookInterceptor {
     dedup: Mutex<ReadDedupGuard>,
+    compact_resets: Mutex<HashMap<String, CompactReset>>,
     saved_by_session: Mutex<HashMap<String, SavedNoise>>,
     replacement_sources: Mutex<HashMap<(String, String, String), String>>,
 }
@@ -58,6 +60,18 @@ pub struct HookInterceptor {
 struct SavedNoise {
     bytes: u64,
     counted_events: HashSet<(&'static str, SavedEvent)>,
+}
+
+const COMPACT_PAIR_WINDOW: Duration = Duration::from_secs(2);
+
+struct CompactReset {
+    profile: LaunchProfile,
+    host_session: Option<String>,
+    id: Option<String>,
+    saw_session_start: bool,
+    saw_post_compact: bool,
+    reset_pending: bool,
+    at: Instant,
 }
 
 impl HookInterceptor {
@@ -74,6 +88,87 @@ impl HookInterceptor {
             .unwrap_or(0)
     }
 
+    pub fn reset_session(&self, session_id: &str) {
+        if let Ok(mut dedup) = self.dedup.lock() {
+            dedup.reset_session(session_id);
+        }
+    }
+
+    fn reset_after_compact(
+        &self,
+        profile: LaunchProfile,
+        session_id: &str,
+        payload: &Value,
+        session_start: bool,
+        deadline: Instant,
+    ) {
+        let Ok(mut resets) = self.compact_resets.lock() else {
+            return;
+        };
+        let now = Instant::now();
+        let host_session = text_field(payload, &["session_id", "sessionId"]);
+        let compaction_id = text_field(payload, &["compaction_id", "compactionId"]);
+        let id = compaction_id.or_else(|| text_field(payload, &["prompt_id", "turn_id"]));
+        if let Some(last) = resets.get_mut(session_id)
+            && last.profile == profile
+            && last.host_session.as_deref() == host_session
+            && now < deadline
+        {
+            let within_window = now.saturating_duration_since(last.at) <= COMPACT_PAIR_WINDOW;
+            let new_signal = if session_start {
+                !last.saw_session_start
+            } else {
+                !last.saw_post_compact
+            };
+            let same_round = match (last.id.as_deref(), id) {
+                (Some(previous), Some(current)) => {
+                    // A single prompt or turn can trigger multiple compactions.
+                    previous == current && (compaction_id.is_some() || new_signal || within_window)
+                }
+                // Codex can defer its ID-less SessionStart until the next prompt.
+                _ => {
+                    within_window
+                        || (profile == LaunchProfile::Codex && session_start && new_signal)
+                }
+            };
+            if same_round {
+                if last.id.is_none() {
+                    last.id = id.map(str::to_owned);
+                }
+                if new_signal {
+                    last.at = now;
+                }
+                last.saw_session_start |= session_start;
+                last.saw_post_compact |= !session_start;
+                return;
+            }
+        }
+        if Instant::now() >= deadline {
+            return;
+        }
+        // Another card can hold the read lock during filesystem I/O. Apply
+        // the reset before this card's next read if the lock is busy now.
+        let reset_pending = match self.dedup.try_lock() {
+            Ok(mut dedup) => {
+                dedup.reset_session(session_id);
+                false
+            }
+            Err(_) => true,
+        };
+        resets.insert(
+            session_id.to_owned(),
+            CompactReset {
+                profile,
+                host_session: host_session.map(str::to_owned),
+                id: id.map(str::to_owned),
+                saw_session_start: session_start,
+                saw_post_compact: !session_start,
+                reset_pending,
+                at: now,
+            },
+        );
+    }
+
     pub fn evaluate_hook(
         &self,
         data_root: &Path,
@@ -82,6 +177,28 @@ impl HookInterceptor {
         payload: &Value,
         deadline: Instant,
     ) -> HookEvaluation {
+        let now = Instant::now();
+        if now >= deadline {
+            return HookEvaluation::allow();
+        }
+        let event = extract_event_name(payload);
+        if matches!(profile, LaunchProfile::ClaudeCode | LaunchProfile::Codex)
+            && (event == "PostCompact"
+                || (event == "SessionStart"
+                    && payload.get("source").and_then(Value::as_str) == Some("compact")))
+        {
+            self.reset_after_compact(
+                profile,
+                session_id,
+                payload,
+                event == "SessionStart",
+                deadline,
+            );
+            return HookEvaluation::allow();
+        }
+        if !matches!(event, "PreToolUse" | "PostToolUse") {
+            return HookEvaluation::allow();
+        }
         let Some(agent_id) = agent_id_for_profile(profile) else {
             return HookEvaluation::allow();
         };
@@ -101,53 +218,47 @@ impl HookInterceptor {
             return HookEvaluation::allow();
         }
         let settings = entry.settings.effective_for(agent_id);
-        let sensitive_reads = settings.block_sensitive_reads;
-        if !settings.enabled || !(settings.noise_filter || settings.read_dedup || sensitive_reads) {
+        if Instant::now() >= deadline || !settings.enabled {
             return HookEvaluation::allow();
         }
 
-        let event = extract_event_name(payload);
         match event {
-            "PreCompact" | "SessionStart" => {
-                if let Ok(mut dedup) = self.dedup.lock() {
-                    dedup.reset_session(session_id);
-                }
-                HookEvaluation::allow()
+            "PreToolUse"
+                if profile == LaunchProfile::Antigravity
+                    && settings.noise_filter
+                    && extract_tool_name(payload) == "run_command" =>
+            {
+                wrap_antigravity_command(data_root, session_id, payload)
+                    .unwrap_or_else(HookEvaluation::allow)
             }
-            "PreToolUse" => self.evaluate_pre_tool_use(
-                agent_id,
-                session_id,
-                payload,
-                &settings,
-                sensitive_reads,
-            ),
+            "PreToolUse" => {
+                self.evaluate_pre_tool_use(profile, agent_id, session_id, payload, &settings)
+            }
             "PostToolUse" if profile == LaunchProfile::ClaudeCode => self
                 .replace_claude_tool_output(
                     data_root, agent_id, session_id, payload, &settings, deadline,
                 )
                 .unwrap_or_else(HookEvaluation::allow),
-            "PostToolUse" => self.evaluate_post_tool_use(data_root, session_id, payload, &settings),
+            "PostToolUse" if profile != LaunchProfile::Antigravity => {
+                self.evaluate_post_tool_use(data_root, session_id, payload, &settings)
+            }
             _ => HookEvaluation::allow(),
         }
     }
 
     fn evaluate_pre_tool_use(
         &self,
+        profile: LaunchProfile,
         agent_id: &'static str,
         session_id: &str,
         payload: &Value,
         settings: &matou_native_core::context_optimizer_config::AgentOptimizerSettings,
-        sensitive_reads: bool,
     ) -> HookEvaluation {
         let tool_name = extract_tool_name(payload);
         if !is_read_tool(tool_name) {
             return HookEvaluation::allow();
         }
-        let Some(input) = payload
-            .get("tool_input")
-            .or_else(|| payload.get("toolInput"))
-            .and_then(Value::as_object)
-        else {
+        let Some(input) = extract_tool_input(payload) else {
             return HookEvaluation::allow();
         };
         let Some(raw_path) = input
@@ -162,13 +273,13 @@ impl HookInterceptor {
         };
         let path = PathBuf::from(raw_path);
 
-        if sensitive_reads && is_sensitive_path(&path) {
+        if settings.block_sensitive_reads && is_sensitive_path(&path) {
             let reason = format!(
                 "[matou context-guard] Blocked direct read of sensitive file `{}`. Disable sensitive-file protection in Matou Settings if you intentionally need to inspect it.",
                 path.display()
             );
             return HookEvaluation {
-                response_json: deny_pre_tool_json(&reason),
+                response_json: deny_pre_tool_json(profile, &reason),
                 saved_noise_bytes: 0,
                 savings: None,
             };
@@ -179,8 +290,19 @@ impl HookInterceptor {
         }
 
         let (start_line, end_line) = extract_line_range(input);
-        let decision = match self.dedup.lock() {
+        let decision = match self.dedup.try_lock() {
             Ok(mut dedup) => {
+                let Ok(mut resets) = self.compact_resets.lock() else {
+                    return HookEvaluation::allow();
+                };
+                if let Some(reset) = resets
+                    .get_mut(session_id)
+                    .filter(|reset| reset.reset_pending)
+                {
+                    dedup.reset_session(session_id);
+                    reset.reset_pending = false;
+                }
+                drop(resets);
                 dedup.evaluate_read(session_id, &path, start_line, end_line, Instant::now())
             }
             Err(_) => return HookEvaluation::allow(),
@@ -196,19 +318,17 @@ impl HookInterceptor {
                 diff: reason,
                 saved_bytes,
             } => {
-                self.add_saved_bytes(session_id, saved_bytes as u64);
+                if profile != LaunchProfile::Antigravity {
+                    self.add_saved_bytes(session_id, saved_bytes as u64);
+                }
                 HookEvaluation {
-                    response_json: deny_pre_tool_json(&reason),
+                    response_json: deny_pre_tool_json(profile, &reason),
                     saved_noise_bytes: saved_bytes as u64,
-                    savings: payload
-                        .get("tool_use_id")
-                        .and_then(Value::as_str)
-                        .filter(|id| !id.trim().is_empty())
-                        .map(|id| (agent_id, SavedEvent::Read(id.to_owned()))),
+                    savings: read_savings_event(profile, payload).map(|event| (agent_id, event)),
                 }
             }
             ReadDecision::BlockOversized { reason, .. } => HookEvaluation {
-                response_json: deny_pre_tool_json(&reason),
+                response_json: deny_pre_tool_json(profile, &reason),
                 saved_noise_bytes: 0,
                 savings: None,
             },
@@ -236,9 +356,7 @@ impl HookInterceptor {
             return HookEvaluation::allow();
         }
 
-        let command = payload
-            .get("tool_input")
-            .or_else(|| payload.get("toolInput"))
+        let command = extract_tool_input(payload)
             .and_then(|v| {
                 v.get("command")
                     .or_else(|| v.get("CommandLine"))
@@ -352,11 +470,13 @@ impl HookInterceptor {
         let Some((agent_id, event)) = decision.savings else {
             return;
         };
-        let is_replacement = matches!(event, SavedEvent::Replacement(_));
+        let count_session_total =
+            agent_id == "antigravity" || matches!(event, SavedEvent::Replacement(_));
         let first_delivery = self.saved_by_session.lock().is_ok_and(|mut map| {
             let saved = map.entry(session_id.to_owned()).or_default();
-            let first_delivery = saved.counted_events.insert((agent_id, event));
-            if first_delivery && is_replacement {
+            let first_delivery = event == SavedEvent::UnidentifiedRead
+                || saved.counted_events.insert((agent_id, event));
+            if first_delivery && count_session_total {
                 saved.bytes = saved.bytes.saturating_add(decision.saved_noise_bytes);
             }
             first_delivery
@@ -397,11 +517,242 @@ fn extract_event_name(payload: &Value) -> &str {
 }
 
 fn extract_tool_name(payload: &Value) -> &str {
-    payload
-        .get("tool_name")
-        .or_else(|| payload.get("toolName"))
-        .and_then(Value::as_str)
+    text_field(payload, &["tool_name", "toolName"])
+        .or_else(|| text_field(payload.get("toolCall")?, &["name"]))
         .unwrap_or_default()
+}
+
+fn text_field<'a>(payload: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter().find_map(|key| {
+        payload
+            .get(*key)?
+            .as_str()
+            .filter(|text| !text.trim().is_empty())
+    })
+}
+
+fn extract_tool_input(payload: &Value) -> Option<&Map<String, Value>> {
+    payload
+        .get("tool_input")
+        .and_then(Value::as_object)
+        .or_else(|| payload.get("toolInput")?.as_object())
+        .or_else(|| payload.get("toolCall")?.get("args")?.as_object())
+}
+
+fn read_savings_event(profile: LaunchProfile, payload: &Value) -> Option<SavedEvent> {
+    if let Some(id) = text_field(payload, &["tool_use_id", "toolUseId"])
+        .or_else(|| text_field(payload.get("toolCall")?, &["id"]))
+    {
+        return Some(SavedEvent::Read(id.to_owned()));
+    }
+    if profile == LaunchProfile::Antigravity {
+        if let Some(conversation) = text_field(payload, &["conversationId", "conversation_id"])
+            && let Some(step) = payload.get("stepIdx").and_then(Value::as_u64)
+        {
+            return Some(SavedEvent::AntigravityStep(conversation.to_owned(), step));
+        }
+        return Some(SavedEvent::UnidentifiedRead);
+    }
+    None
+}
+
+fn wrap_antigravity_command(
+    data_root: &Path,
+    session_id: &str,
+    payload: &Value,
+) -> Option<HookEvaluation> {
+    let input = extract_tool_input(payload)?;
+    if !matches!(input.get("RunPersistent"), None | Some(Value::Bool(false)))
+        || input
+            .get("RequestedTerminalID")
+            .is_some_and(|id| id.as_str() != Some(""))
+        || input.get("WaitMsBeforeAsync")?.as_u64()? == 0
+    {
+        return None;
+    }
+
+    let command = input.get("CommandLine")?.as_str()?;
+    if !is_foreground_command(command) {
+        return None;
+    }
+    let mt = resolve_mt(data_root)?;
+    let command_line = format!(
+        "{} ctx exec --session {} --data-root {} -- {}",
+        bash_arg(mt.to_str()?)?,
+        bash_arg(session_id)?,
+        bash_arg(data_root.to_str()?)?,
+        bash_arg(command)?,
+    );
+    Some(HookEvaluation {
+        response_json: json!({"decision":"allow", "overwrite":{"CommandLine":command_line}})
+            .to_string(),
+        ..HookEvaluation::allow()
+    })
+}
+
+fn resolve_mt(data_root: &Path) -> Option<PathBuf> {
+    let executable_name = if cfg!(windows) { "mt.exe" } else { "mt" };
+    let sibling = std::env::current_exe()
+        .ok()
+        .map(|path| path.with_file_name(executable_name));
+    let valid = |path: &Path| {
+        path.is_absolute()
+            && path
+                .to_str()
+                .is_some_and(|path| !path.chars().any(char::is_control))
+            && std::fs::metadata(path).is_ok_and(|metadata| {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if metadata.permissions().mode() & 0o111 == 0 {
+                        return false;
+                    }
+                }
+                metadata.is_file()
+            })
+    };
+    if let Some(sibling) = sibling.filter(|path| valid(path)) {
+        return Some(sibling);
+    }
+    // Native macOS/Linux installs generate this private shim; a shell-wide PATH
+    // lookup would resolve against the runtime, not the agent's terminal.
+    let shim = data_root.join("control/bin/mt");
+    (cfg!(unix) && valid(&shim)).then_some(shim)
+}
+
+fn bash_arg(value: &str) -> Option<String> {
+    (!value.is_empty() && !value.chars().any(char::is_control))
+        .then(|| format!("'{}'", value.replace('\'', "'\\''")))
+}
+
+fn is_foreground_command(command: &str) -> bool {
+    // Only accept plain words. Shell expansion, quoting, redirects, pipelines,
+    // command substitution and compound commands all retain their original path.
+    if !command
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || b" \t-._/:=,+@".contains(&byte))
+    {
+        return false;
+    }
+    let mut words = command.split_ascii_whitespace();
+    let (flags, valued_flags): (&[&str], &[&str]) = match (words.next(), words.next()) {
+        (Some("cargo"), Some("test" | "check" | "build" | "clippy")) => (
+            &[
+                "-q",
+                "-v",
+                "--quiet",
+                "--verbose",
+                "--locked",
+                "--offline",
+                "--release",
+                "--workspace",
+                "--all-targets",
+                "--all-features",
+                "--no-default-features",
+                "--no-run",
+                "--doc",
+                "--lib",
+                "--tests",
+                "--nocapture",
+                "--exact",
+                "--test",
+                "--bin",
+                "--package",
+                "-p",
+                "--features",
+                "--manifest-path",
+                "--test-threads",
+            ],
+            &[
+                "--features",
+                "--manifest-path",
+                "--test-threads",
+                "--target",
+            ],
+        ),
+        (Some("pnpm" | "npm" | "yarn" | "bun"), Some(task)) => {
+            let task = if task == "run" {
+                words.next().unwrap_or_default()
+            } else {
+                task
+            };
+            if !matches!(task, "test" | "build" | "lint" | "typecheck") {
+                return false;
+            }
+            (&["--ci", "--run", "--runInBand", "--passWithNoTests"], &[])
+        }
+        (Some("git"), Some("diff" | "log" | "show" | "status")) => (
+            &[
+                "-p",
+                "-s",
+                "-v",
+                "--short",
+                "--porcelain",
+                "--stat",
+                "--name-only",
+                "--name-status",
+                "--oneline",
+                "--cached",
+                "--staged",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-color",
+                "--max-count",
+                "-n",
+            ],
+            &["--max-count"],
+        ),
+        (Some("go"), Some("test")) => (
+            &[
+                "-v",
+                "-race",
+                "-short",
+                "-failfast",
+                "-cover",
+                "-count",
+                "-run",
+                "-timeout",
+            ],
+            &["-count", "-run", "-timeout"],
+        ),
+        (Some("pytest"), first) => {
+            return first.into_iter().chain(words).all(|word| {
+                is_foreground_arg(
+                    word,
+                    &[
+                        "-q",
+                        "-v",
+                        "-vv",
+                        "-x",
+                        "-s",
+                        "-k",
+                        "-m",
+                        "--collect-only",
+                        "--maxfail",
+                        "--disable-warnings",
+                    ],
+                    &["--maxfail"],
+                )
+            });
+        }
+        _ => return false,
+    };
+    words.all(|word| is_foreground_arg(word, flags, valued_flags))
+}
+
+fn is_foreground_arg(word: &str, flags: &[&str], valued_flags: &[&str]) -> bool {
+    if word.starts_with('-') {
+        return word == "--"
+            || flags.contains(&word)
+            || word
+                .split_once('=')
+                .is_some_and(|(flag, value)| !value.is_empty() && valued_flags.contains(&flag));
+    }
+    let word = word.to_ascii_lowercase();
+    !matches!(
+        word.as_str(),
+        "watch" | "interactive" | "repl" | "dev" | "serve" | "start"
+    ) && !word.starts_with("watch:")
 }
 
 fn is_read_tool(name: &str) -> bool {
@@ -412,7 +763,7 @@ fn is_shell_tool(name: &str) -> bool {
     matches!(name, "Bash" | "run_command" | "shell" | "exec_command")
 }
 
-fn extract_line_range(input: &serde_json::Map<String, Value>) -> (Option<usize>, Option<usize>) {
+fn extract_line_range(input: &Map<String, Value>) -> (Option<usize>, Option<usize>) {
     let start = input
         .get("StartLine")
         .or_else(|| input.get("start_line"))
@@ -451,7 +802,10 @@ fn extract_tool_output(payload: &Value) -> Option<String> {
     None
 }
 
-fn deny_pre_tool_json(reason: &str) -> String {
+fn deny_pre_tool_json(profile: LaunchProfile, reason: &str) -> String {
+    if profile == LaunchProfile::Antigravity {
+        return json!({"decision": "deny", "reason": reason}).to_string();
+    }
     json!({
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
@@ -541,10 +895,10 @@ mod tests {
             (LaunchProfile::Codex, false),
             (LaunchProfile::Antigravity, false),
         ] {
+            let read_reply = read(profile, ".env").response_json;
             assert_eq!(
-                read(profile, ".env")
-                    .response_json
-                    .contains("\"permissionDecision\":\"deny\""),
+                read_reply.contains("\"permissionDecision\":\"deny\"")
+                    || read_reply.contains("\"decision\":\"deny\""),
                 blocks_sensitive_reads,
             );
             assert_eq!(read(profile, ".env.example"), HookEvaluation::allow());
@@ -568,6 +922,267 @@ mod tests {
             read(LaunchProfile::ClaudeCode, ".env"),
             HookEvaluation::allow()
         );
+    }
+
+    #[test]
+    fn antigravity_nested_reads_apply_native_denial_and_allow_a_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.txt");
+        fs::write(&path, "a sufficiently long source line\n".repeat(400)).unwrap();
+        ContextOptimizerConfig::for_data_root(dir.path())
+            .set_agent_settings(
+                "antigravity",
+                AgentOptimizerSettings {
+                    read_dedup: true,
+                    block_sensitive_reads: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let interceptor = HookInterceptor::new();
+        let read = |path: &Path, start: usize, end: usize| {
+            interceptor.evaluate_hook(
+            dir.path(), LaunchProfile::Antigravity, "card", &json!({
+                "hookEventName": "PreToolUse",
+                "toolCall": {"name":"view_file", "args": {"AbsolutePath":path, "StartLine":start, "EndLine":end}}
+            }), deadline(),
+        )
+        };
+        assert_eq!(read(&path, 1, 200), HookEvaluation::allow());
+        assert_eq!(read(&path, 201, 400), HookEvaluation::allow());
+        let blocked = read(&path, 1, 200);
+        let response: Value = serde_json::from_str(&blocked.response_json).unwrap();
+        assert_eq!(response["decision"], "deny");
+        assert!(response["reason"].as_str().unwrap().contains("120s"));
+        assert!(blocked.saved_noise_bytes > 0);
+        assert_eq!(read(&path, 1, 200), HookEvaluation::allow());
+        let secret = read(&dir.path().join(".env"), 1, 10);
+        assert_eq!(
+            serde_json::from_str::<Value>(&secret.response_json).unwrap()["decision"],
+            "deny"
+        );
+        assert_eq!(
+            read(&dir.path().join(".env.example"), 1, 10),
+            HookEvaluation::allow()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn antigravity_rewrites_only_known_foreground_commands_as_one_shell_argument() {
+        use std::{os::unix::fs::PermissionsExt, process::Command};
+
+        let dir = tempfile::tempdir().unwrap();
+        let data_root = dir.path().join("data's root");
+        let shim = data_root.join("control/bin/mt");
+        fs::create_dir_all(shim.parent().unwrap()).unwrap();
+        fs::write(&shim, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n").unwrap();
+        let config = ContextOptimizerConfig::for_data_root(&data_root);
+        config
+            .set_agent_settings(
+                "antigravity",
+                AgentOptimizerSettings {
+                    noise_filter: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let interceptor = HookInterceptor::new();
+        let payload = |args: Value| json!({"hookEventName":"PreToolUse", "toolCall":{"name":"run_command", "args":args}});
+        let evaluate = |profile, args| {
+            interceptor.evaluate_hook(&data_root, profile, "card's id", &payload(args), deadline())
+        };
+        let args = |command| json!({"CommandLine":command, "WaitMsBeforeAsync":5000, "Cwd":"/workspace/project"});
+        assert_eq!(
+            evaluate(LaunchProfile::Antigravity, args("cargo test")),
+            HookEvaluation::allow()
+        );
+        fs::set_permissions(&shim, fs::Permissions::from_mode(0o700)).unwrap();
+        for command in [
+            "cargo test -- --test-threads=1",
+            "cargo check --locked",
+            "cargo build",
+            "cargo clippy",
+            "pnpm run typecheck",
+            "npm test -- --runInBand",
+            "yarn lint",
+            "bun run build",
+            "pytest -q",
+            "go test ./...",
+            "git diff --stat",
+            "git log",
+            "git show",
+            "git status --short",
+        ] {
+            let result = evaluate(LaunchProfile::Antigravity, args(command));
+            let reply: Value = serde_json::from_str(&result.response_json).unwrap();
+            assert_eq!(reply["decision"], "allow", "{command}");
+            assert!(reply["overwrite"].get("Cwd").is_none());
+            let wrapped = reply["overwrite"]["CommandLine"].as_str().unwrap();
+            let output = Command::new("/bin/sh")
+                .args(["-c", wrapped])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            assert_eq!(
+                String::from_utf8(output.stdout)
+                    .unwrap()
+                    .lines()
+                    .collect::<Vec<_>>(),
+                [
+                    "ctx",
+                    "exec",
+                    "--session",
+                    "card's id",
+                    "--data-root",
+                    data_root.to_str().unwrap(),
+                    "--",
+                    command
+                ]
+            );
+        }
+        for command in [
+            "cargo test &",
+            "cargo test && git status",
+            "cargo test | cat",
+            "cargo test > result",
+            "cargo test\ngit status",
+            "npm test -i",
+            "npm run test -- --interactive",
+            "pnpm test --watch",
+            "pnpm run watch",
+            "git diff --ext-diff",
+            "cargo test $(ls)",
+            "cargo test *",
+            "mt ctx exec -- cargo test",
+            "vim",
+            "sudo cargo test",
+            "git push",
+        ] {
+            assert_eq!(
+                evaluate(LaunchProfile::Antigravity, args(command)),
+                HookEvaluation::allow(),
+                "{command}"
+            );
+        }
+        for (field, value) in [
+            ("RunPersistent", json!(true)),
+            ("RequestedTerminalID", json!("terminal-1")),
+            ("WaitMsBeforeAsync", json!(0)),
+            ("WaitMsBeforeAsync", json!("5000")),
+        ] {
+            let mut input = args("cargo test");
+            input[field] = value;
+            assert_eq!(
+                evaluate(LaunchProfile::Antigravity, input),
+                HookEvaluation::allow(),
+                "{field}"
+            );
+        }
+        assert_eq!(
+            evaluate(LaunchProfile::Codex, args("cargo test")),
+            HookEvaluation::allow()
+        );
+        config
+            .set_agent_settings("antigravity", AgentOptimizerSettings::default())
+            .unwrap();
+        assert_eq!(
+            evaluate(LaunchProfile::Antigravity, args("cargo test")),
+            HookEvaluation::allow()
+        );
+    }
+
+    #[test]
+    fn only_completed_compaction_clears_read_dedup_once_per_round() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.txt");
+        fs::write(&path, "same source content\n".repeat(400)).unwrap();
+        let config = ContextOptimizerConfig::for_data_root(dir.path());
+        let interceptor = HookInterceptor::new();
+        for (profile, id_field) in [
+            (LaunchProfile::ClaudeCode, "prompt_id"),
+            (LaunchProfile::Codex, "turn_id"),
+        ] {
+            let card = profile.kind();
+            config
+                .set_agent_settings(
+                    card,
+                    AgentOptimizerSettings {
+                        read_dedup: true,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            let evaluate = |payload| {
+                interceptor.evaluate_hook(dir.path(), profile, card, &payload, deadline())
+            };
+            let read = || {
+                evaluate(
+                    json!({"hook_event_name":"PreToolUse", "tool_name":"Read", "tool_input":{"file_path":path}}),
+                )
+            };
+            let mut start = json!({"hook_event_name":"SessionStart", "session_id":"provider", "source":"compact"});
+            let mut post = json!({"hook_event_name":"PostCompact", "session_id":"provider"});
+            post[id_field] = json!("first-compaction");
+
+            assert_eq!(read(), HookEvaluation::allow());
+            for event in [
+                json!({"hook_event_name":"SessionStart", "source":"startup"}),
+                json!({"hook_event_name":"SessionStart", "source":"resume"}),
+                json!({"hook_event_name":"PreCompact"}),
+            ] {
+                assert_eq!(evaluate(event), HookEvaluation::allow());
+                assert!(
+                    read()
+                        .response_json
+                        .contains("\"permissionDecision\":\"deny\"")
+                );
+                assert_eq!(read(), HookEvaluation::allow()); // 120s retry passthrough
+            }
+            let (first, follow_up) = if profile == LaunchProfile::ClaudeCode {
+                start[id_field] = json!("first-compaction");
+                (&start, &post)
+            } else {
+                (&post, &start)
+            };
+            evaluate(first.clone());
+            assert_eq!(read(), HookEvaluation::allow());
+            // Codex's next prompt may arrive much later than a time-only window.
+            interceptor
+                .compact_resets
+                .lock()
+                .unwrap()
+                .get_mut(card)
+                .unwrap()
+                .at -= Duration::from_secs(60);
+            evaluate(follow_up.clone());
+            assert!(
+                read()
+                    .response_json
+                    .contains("\"permissionDecision\":\"deny\"")
+            );
+            assert_eq!(read(), HookEvaluation::allow());
+            evaluate(post.clone());
+            assert!(
+                read()
+                    .response_json
+                    .contains("\"permissionDecision\":\"deny\"")
+            );
+            post[id_field] = json!("next-compaction");
+            assert_eq!(read(), HookEvaluation::allow()); // consume retry passthrough
+            let active_read = interceptor.dedup.lock().unwrap();
+            evaluate(post);
+            drop(active_read);
+            assert_eq!(read(), HookEvaluation::allow());
+            assert!(
+                read()
+                    .response_json
+                    .contains("\"permissionDecision\":\"deny\"")
+            );
+            assert_eq!(read(), HookEvaluation::allow());
+            interceptor.reset_session(card);
+            assert_eq!(read(), HookEvaluation::allow());
+        }
     }
 
     #[test]

@@ -24,12 +24,13 @@ use crate::{
     provider_hook::{nonempty, one_line, transcript_uuid},
 };
 
-pub(crate) const EVENTS: [(&str, u8); 7] = [
+pub(crate) const EVENTS: [(&str, u8); 8] = [
     ("SessionStart", 5),
     ("UserPromptSubmit", 5),
     ("PreToolUse", 10),
     ("PermissionRequest", 10),
     ("PostToolUse", 10),
+    ("PostCompact", 5),
     ("Stop", 5),
     ("SessionEnd", 3),
 ];

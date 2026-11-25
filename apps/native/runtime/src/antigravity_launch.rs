@@ -467,7 +467,7 @@ fn write_atomic(path: &Path, contents: &str, _mode: u32) -> Result<()> {
     Ok(())
 }
 
-// Keep these bytes and the fingerprint identical to the frozen plugin installer.
+// The stamp fingerprints the native plugin files, including their modes.
 const PLUGIN_MANIFEST: &str = r#"{
   "name": "matou",
   "version": "1.0.0",
@@ -496,7 +496,7 @@ const HOOKS: &str = r#"{
       {
         "hooks": [
           {
-            "command": "./hooks/matou-hook.sh"
+            "command": "./hooks/matou-hook.sh pre-tool-use"
           }
         ]
       }
@@ -505,7 +505,7 @@ const HOOKS: &str = r#"{
       {
         "hooks": [
           {
-            "command": "./hooks/matou-hook.sh"
+            "command": "./hooks/matou-hook.sh post-tool-use"
           }
         ]
       }
@@ -522,24 +522,31 @@ const HOOKS: &str = r#"{
 const MATOU_HOOK: &str = r#"#!/bin/sh
 [ -n "${MATOU_PROVIDER_HOOK_URL:-}" ] || exit 0
 [ -n "${MATOU_PROVIDER_HOOK_TOKEN:-}" ] || exit 0
-payload=$(cat)
-case "$payload" in
-  *'"hookEventName":"PreToolUse"'*|*'"hookEventName": "PreToolUse"'*)
-    case "$MATOU_PROVIDER_HOOK_URL" in
-      *\?*) decision_url="${MATOU_PROVIDER_HOOK_URL}&kind=pre-tool-use" ;;
-      *) decision_url="${MATOU_PROVIDER_HOOK_URL}?kind=pre-tool-use" ;;
-    esac
-    decision=$(printf '%s' "$payload" | /usr/bin/curl --silent --fail --max-time 1 \
-      --request POST --header 'content-type: application/json' \
-      --data-binary @- "$decision_url" 2>/dev/null) || exit 0
-    [ -n "$decision" ] && printf '%s' "$decision"
-    exit 0
-    ;;
+payload=$(cat; printf '.')
+payload=${payload%.}
+event=${1:-}
+if [ -z "$event" ] && printf '%s' "$payload" | grep -Eq '"hookEventName"[[:space:]]*:[[:space:]]*"PreToolUse"'; then
+  event=pre-tool-use
+fi
+url=$MATOU_PROVIDER_HOOK_URL
+case "$event" in
+  pre-tool-use|post-tool-use)
+    case "$url" in
+      *\?*) url="$url&kind=$event" ;;
+      *) url="$url?kind=$event" ;;
+    esac ;;
 esac
-(
-  printf '%s' "$payload" | /usr/bin/curl --silent --show-error --max-time 2 \
+if [ "$event" = pre-tool-use ]; then
+  decision=$(printf '%s' "$payload" | /usr/bin/curl --disable --noproxy '*' --silent --fail --max-time 1 \
     --request POST --header 'content-type: application/json' \
-    --data-binary @- "${MATOU_PROVIDER_HOOK_URL}" >/dev/null 2>&1
+    --data-binary @- "$url" 2>/dev/null && printf '.') || exit 0
+  printf '%s' "${decision%.}"
+  exit 0
+fi
+(
+  printf '%s' "$payload" | /usr/bin/curl --disable --noproxy '*' --silent --max-time 2 \
+    --request POST --header 'content-type: application/json' \
+    --data-binary @- "$url" >/dev/null 2>&1
 ) </dev/null >/dev/null 2>&1 &
 exit 0
 "#;
@@ -566,7 +573,7 @@ const PLUGIN_FILES: [(&str, &str, u32); 4] = [
     ("hooks/session-start.sh", SESSION_START, 0o755),
 ];
 const PLUGIN_STAMP: &str =
-    "1.0.0:ffadb274f2e822a844ef7f70cc133ae02a9b7ab7eeb62107c3df7d6e1d40e79a\n";
+    "1.0.0:5ece83e5428063a43b3c3d52c4afed7a0bb6a55d263b9afa4e73386f86399dd6\n";
 
 #[cfg(test)]
 mod tests {

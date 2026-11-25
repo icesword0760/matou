@@ -13,6 +13,13 @@ const idOf = agent => text(agent?.session?.id) ?? text(agent?.id)
 /** Never send prompts, tool arguments/results, credentials, or the full log. */
 export function observationData(type, value) {
   const data = record(value)
+  if (type === 'compaction/summary' || type === 'compaction/end') {
+    const compactionId = text(data.compactionId) || text(data.id)
+    return {
+      ...(compactionId ? { compactionId } : {}),
+      ...(type === 'compaction/end' ? { completed: data.completed === true } : {})
+    }
+  }
   const reason = record(data.reason)
   const error = record(reason.error)
   return {
@@ -60,6 +67,7 @@ export function apply(ctx, config) {
   const url = new URL(config.hookUrl)
   if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1') throw new Error('Matou observer requires its local run hook')
   const agents = new Map(), requests = new Map(), states = new Map(), hudStates = new Map()
+  const compactionSummaries = new Map()
   let current, generation = 0, sequence = 0, disposed = false, sending = false, polling = false, requestNumber = 0, lastSnapshot = 0, mtEnvironmentReady = false
   const queue = [], controller = new AbortController()
   const disposers = [], instructedAgents = new WeakSet()
@@ -129,14 +137,31 @@ export function apply(ctx, config) {
     trackAgent(agent)
     // This serial listener must not await the HTTP endpoint or native UI.
   }))
-  own(ctx.on('agent/disposed', ({ agent }) => { agents.delete(idOf(agent)); states.delete(idOf(agent)); hudStates.delete(idOf(agent)) }))
+  own(ctx.on('agent/disposed', ({ agent }) => {
+    const id = idOf(agent)
+    agents.delete(id); states.delete(id); hudStates.delete(id); compactionSummaries.delete(id)
+  }))
   own(ctx.on('agent/status', ({ agent, status }) => {
     if (idOf(agent) === current && isTopLevelAgent(agent)) emit('agent/status', {}, { agent_status: text(status) })
   }))
-  const observedTypes = new Set(['turn/start', 'turn/end', 'approval/asked', 'approval/decided', 'tool/call', 'tool/result', 'session/title', 'model/selection', 'request/header', 'request/context', 'permission/preset', 'sandbox/mode', 'approval/policy', 'plan/mode', 'working-directory/change'])
+  const observedTypes = new Set(['turn/start', 'turn/end', 'approval/asked', 'approval/decided', 'tool/call', 'tool/result', 'session/title', 'model/selection', 'request/header', 'request/context', 'permission/preset', 'sandbox/mode', 'approval/policy', 'plan/mode', 'working-directory/change', 'compaction/summary', 'compaction/end'])
   own(ctx.on('session/event', (session, event) => {
     const id = String(session.id)
     if (!agents.has(id) || !observedTypes.has(event.type)) return
+    if (event.type === 'compaction/summary' || event.type === 'compaction/end') {
+      const data = record(event.data)
+      const compactionId = text(data.compactionId) || text(data.id)
+      if (event.type === 'compaction/summary') {
+        if (compactionId) compactionSummaries.set(id, compactionId)
+        else compactionSummaries.delete(id)
+        if (id === current) emit(event.type, { compactionId })
+      } else {
+        const hasSummary = Boolean(compactionId && compactionSummaries.get(id) === compactionId)
+        if (hasSummary) compactionSummaries.delete(id)
+        if (id === current) emit(event.type, { compactionId, completed: hasSummary && data.error === undefined })
+      }
+      return
+    }
     foldHudEvent(hudStates.get(id) ?? createHudState(), event)
     if (event.type === 'turn/start') states.set(id, { error: false })
     if (event.type === 'turn/end' && record(event.data?.reason).kind === 'error') states.set(id, { error: true })
