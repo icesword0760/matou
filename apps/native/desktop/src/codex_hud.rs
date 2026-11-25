@@ -762,13 +762,14 @@ pub(super) fn stats_title(locale: InterfaceLocale) -> &'static str {
     locale.text("会话统计", "Session stats")
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq)]
 pub(super) struct StatsSummary {
     pub(super) tools: Option<u64>,
     pub(super) hooks: Option<u64>,
     pub(super) mcp: Option<(u64, usize)>,
     pub(super) todos: Option<(usize, usize)>,
     pub(super) context: Option<(u64, u64)>,
+    pub(super) cache_hit_percent: Option<f64>,
 }
 
 impl StatsSummary {
@@ -831,6 +832,10 @@ pub(super) fn stats_summary(hud: &Value, node: &Value, _locale: InterfaceLocale)
         context: hud["contextUsedTokens"]
             .as_u64()
             .zip(hud["contextWindowSize"].as_u64()),
+        cache_hit_percent: hud["contextGuard"]["cache"]["hitRatioPercent"]
+            .as_f64()
+            .filter(|percent| percent.is_finite())
+            .map(|percent| percent.clamp(0., 100.)),
     }
 }
 
@@ -923,6 +928,14 @@ pub(super) fn stats_panel(summary: &StatsSummary, locale: InterfaceLocale, dark:
                     footer_token_count(used),
                     footer_token_count(window)
                 ),
+                body,
+            )
+        }),
+        summary.cache_hit_percent.map(|percent| {
+            cell(
+                "stats-cache-hit",
+                locale.text("命中", "Cache hit"),
+                format!("{percent:.0}%"),
                 body,
             )
         }),
@@ -1226,6 +1239,7 @@ mod tests {
     fn all_interactive_providers_read_the_same_optional_statistics() {
         let hud = json!({
             "model": "Claude Sonnet", "contextUsedTokens": 136_000, "contextWindowSize": 200_000,
+            "contextGuard": {"cache": {"hitRatioPercent": 91.0}},
             "runningTools": [{"id":"r1","name":"Read","target":"notes.md"}],
             "toolCounts": [{"name":"Find","count":2}, {"name":"Zero","count":0}],
             "agents": [
@@ -1258,6 +1272,7 @@ mod tests {
                         mcp: Some((2, 2)),
                         todos: Some((1, 2)),
                         context: Some((136_000, 200_000)),
+                        cache_hit_percent: Some(91.),
                     }
                 );
             }
@@ -1327,6 +1342,24 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    #[::core::prelude::v1::test]
+    fn footer_stats_cache_hit_percent_is_optional_and_clamped() {
+        let locale = InterfaceLocale::English;
+        for (value, expected) in [
+            (json!(91.4), Some(91.4)),
+            (json!(-3.5), Some(0.)),
+            (json!(125.5), Some(100.)),
+            (json!("91"), None),
+            (json!(f64::NAN), None),
+            (Value::Null, None),
+        ] {
+            let hud = json!({"contextGuard": {"cache": {"hitRatioPercent": value}}});
+            let summary = stats_summary(&hud, &Value::Null, locale);
+            assert_eq!(summary.cache_hit_percent, expected);
+            assert_eq!(summary.is_empty(), expected.is_none());
+        }
     }
 
     #[::core::prelude::v1::test]

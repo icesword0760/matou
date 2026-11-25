@@ -3130,7 +3130,8 @@ mod workspace {
             "agents":[{"name":"Reader","status":"running","detail":"Indexing","startedAt":1700000000000_f64}],
             "configCounts":{"mcps":2,"hooks":1},"hookNames":["PostToolUse"],"mcpErrors":["server offline"],
             "todos":[{"content":"Check results","status":"in_progress"}],
-            "gitBranch":"review/live","gitDirty":true
+            "gitBranch":"review/live","gitDirty":true,
+            "contextGuard":{"cache":{"hitRatioPercent":90.6}}
         });
         window
             .update(cx, |view, window, cx| {
@@ -3183,7 +3184,14 @@ mod workspace {
             );
         }
         assert!(!bounds.contains_key("account"));
-        for key in ["mcps", "tools", "hooks", "todos", "stats-context"] {
+        for key in [
+            "mcps",
+            "tools",
+            "hooks",
+            "todos",
+            "stats-context",
+            "stats-cache-hit",
+        ] {
             assert!(
                 hud_text(window.into(), cx, key).is_none(),
                 "{key} stayed in the footer"
@@ -3210,6 +3218,7 @@ mod workspace {
             ("hooks", "1"),
             ("todos", "0 / 1"),
             ("stats-context", "136k / 200k"),
+            ("stats-cache-hit", "91%"),
         ] {
             assert_eq!(hud_text(window.into(), cx, key).as_deref(), Some(text));
         }
@@ -3794,6 +3803,7 @@ mod workspace {
             "contextGuard":{"cache":{"timing":"precise","remainingSec":cache_remaining_sec}},
         });
         if with_stats {
+            hud["contextGuard"]["cache"]["hitRatioPercent"] = json!(91.0);
             hud["contextUsedTokens"] = json!(percent * 2000);
             hud["configCounts"] = json!({"mcps":4,"hooks":11});
             if mode != "claude-code" {
@@ -3935,12 +3945,17 @@ mod workspace {
         );
         let (tools, hooks) = (bounds["tools"], bounds["hooks"]);
         let (mcps, todos) = (bounds["mcps"], bounds["todos"]);
-        let context = bounds["stats-context"];
+        let (context, cache_hit) = (bounds["stats-context"], bounds["stats-cache-hit"]);
         assert_eq!(tools.top(), hooks.top());
         assert_eq!(mcps.top(), todos.top());
+        assert_eq!(context.top(), cache_hit.top());
         assert_eq!((tools.left(), tools.right()), (mcps.left(), mcps.right()));
         assert_eq!((tools.left(), tools.right()), (context.left(), context.right()));
         assert_eq!((hooks.left(), hooks.right()), (todos.left(), todos.right()));
+        assert_eq!(
+            (hooks.left(), hooks.right()),
+            (cache_hit.left(), cache_hit.right())
+        );
         assert_eq!(hooks.left() - tools.right(), px(18.));
         assert!((mcps.top() - tools.bottom() - px(7.)).abs() <= px(0.5));
         assert!((context.top() - mcps.bottom() - px(7.)).abs() <= px(0.5));
@@ -3950,49 +3965,44 @@ mod workspace {
         use cocoa::base::nil;
         use objc::{msg_send, sel, sel_impl};
 
-        let (window, sink) = open_probe_window(cx, 970., Some("Matou · 会话统计"));
-        load_footer_fixture(window, cx, &sink, "claude-code", root, 2, 2, true, 1018);
-        let handle: AnyWindowHandle = window.into();
-        let draw_preview = |cx: &mut AsyncApp| {
-            capture_hud(|| {
-                handle
-                    .update(cx, |_, window, cx| {
-                        window.refresh();
-                        window.draw(cx).clear();
-                    })
-                    .unwrap();
-            })
-        };
-        window
-            .update(cx, |view, _, cx| {
-                view.locale = InterfaceLocale::Chinese;
-                view.graph["nodes"][0]["title"] = json!("根会话");
-                view.graph["nodes"][0]["cwd"] = Value::Null;
-                view.theme.set_preference(ThemePreference::Dark);
-                view.apply_theme_palette(cx);
-            })
-            .unwrap();
-        let (native_view, _) = native_view(window.into(), cx);
-        let window_number: isize = unsafe {
-            let native_window: cocoa::base::id = msg_send![native_view, window];
-            msg_send![native_window, windowNumber]
-        };
-        assert!(window_number > 0);
-        draw_preview(cx);
-        let bounds = draw_preview(cx);
-        assert!(!bounds.contains_key("cache") && !bounds.contains_key("handoff"));
-        click(window.into(), cx, MouseButton::Left, bounds["stats"].center());
+        // A fresh window per theme prevents a stale compositor frame from
+        // being exported under the other theme's filename.
         for (preference, variant) in [
             (ThemePreference::Dark, "dark"),
             (ThemePreference::Light, "light"),
         ] {
+            let (window, sink) = open_probe_window(cx, 970., Some("Matou · 会话统计"));
+            load_footer_fixture(window, cx, &sink, "claude-code", root, 2, 2, true, 1018);
+            let handle: AnyWindowHandle = window.into();
+            let draw_preview = |cx: &mut AsyncApp| {
+                capture_hud(|| {
+                    handle
+                        .update(cx, |_, window, cx| {
+                            window.refresh();
+                            window.draw(cx).clear();
+                        })
+                        .unwrap();
+                })
+            };
             window
                 .update(cx, |view, _, cx| {
-                    if view.theme.set_preference(preference) {
-                        view.apply_theme_palette(cx);
-                    }
+                    view.locale = InterfaceLocale::Chinese;
+                    view.graph["nodes"][0]["title"] = json!("根会话");
+                    view.graph["nodes"][0]["cwd"] = Value::Null;
+                    view.theme.set_preference(preference);
+                    view.apply_theme_palette(cx);
                 })
                 .unwrap();
+            let (native_view, _) = native_view(window.into(), cx);
+            let window_number: isize = unsafe {
+                let native_window: cocoa::base::id = msg_send![native_view, window];
+                msg_send![native_window, windowNumber]
+            };
+            assert!(window_number > 0);
+            draw_preview(cx);
+            let bounds = draw_preview(cx);
+            assert!(!bounds.contains_key("cache") && !bounds.contains_key("handoff"));
+            click(window.into(), cx, MouseButton::Left, bounds["stats"].center());
             assert_stats_grid(&draw_preview(cx));
             // The layout probe draws the frame. Ask AppKit to present it even
             // when another window has interrupted the probe's display link.
@@ -4015,6 +4025,9 @@ mod workspace {
             );
             assert!(path.metadata().unwrap().len() > 0);
             println!("Saved {}", path.display());
+            window
+                .update(cx, |_, window, _| window.remove_window())
+                .unwrap();
         }
     }
 
@@ -4140,7 +4153,14 @@ mod workspace {
                 );
                 assert_full_hud_text(handle, cx, "agents", &agents);
                 assert_eq!(hud_text(handle, cx, "context-usage"), None);
-                for stat in ["tools", "hooks", "mcps", "todos", "stats-context"] {
+                for stat in [
+                    "tools",
+                    "hooks",
+                    "mcps",
+                    "todos",
+                    "stats-context",
+                    "stats-cache-hit",
+                ] {
                     assert_eq!(hud_text(handle, cx, stat), None);
                 }
                 click(handle, cx, MouseButton::Left, bounds["quota"].center());
@@ -4174,6 +4194,7 @@ mod workspace {
                         "codex" => 82,
                         _ => 36,
                     })),
+                    ("stats-cache-hit", "91%".into()),
                 ] {
                     assert_full_hud_text(handle, cx, key, &expected);
                 }
