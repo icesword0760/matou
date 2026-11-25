@@ -395,7 +395,7 @@ pub fn format_roles_markdown(config: &DispatchRolesConfig) -> String {
             .char_indices()
             .nth(ROLE_MAX_CHARS)
             .map_or(role.len(), |(index, _)| index);
-        let role = &role[..end];
+        let role = role[..end].replace('\n', "\n  ");
         lines.push(format!(
             "- **{label}**（{tag} | {}）：{role}",
             specs.join(" · ")
@@ -745,6 +745,23 @@ mod tests {
         let markdown = format_roles_markdown(&config);
         assert!(markdown.contains("模型: gemini-pro-orchestrator-neon · 无推理档位"));
         assert!(markdown.contains("Orchestrator 模型内部自带的并行子代理不受影响"));
+    }
+
+    #[test]
+    fn markdown_indents_every_role_continuation_like_foreman() {
+        let mut config = DispatchRolesConfig::default();
+        config.agents[0].role = "阅读源码\r\n验证行为\n\n记录结果".into();
+
+        let markdown = format_roles_markdown(&config);
+        let (codex, _) = markdown
+            .strip_prefix("## 用户自定义 Agent 生态位与默认配置（以本节为准）\n\n")
+            .unwrap()
+            .split_once("\n- **DSH**")
+            .unwrap();
+        assert_eq!(
+            codex,
+            "- **Codex**（默认兜底主力 | 模型: sol · 推理: 高）：阅读源码\n  验证行为\n  \n  记录结果"
+        );
     }
 
     #[test]
