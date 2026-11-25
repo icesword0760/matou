@@ -383,12 +383,8 @@ impl ContextGuardHudView {
             .get("contextPressure")
             .and_then(Value::as_str)
             .unwrap_or("normal");
-        let handoff_ready = guard
-            .get("handoffReady")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
         let handoff_urgent = stall_severity == "stalled" || pressure == "critical";
-        let show_handoff_button = handoff_ready || handoff_urgent || pressure == "warning";
+        let show_handoff_button = handoff_urgent || pressure == "warning";
 
         if cache_pill.is_none()
             && saved_pill.is_none()
@@ -425,10 +421,6 @@ const AGENT_TABS: [&str; 4] = ["antigravity", "claude-code", "codex", "dsh"];
 struct AdvancedCopy {
     title: &'static str,
     description: &'static str,
-    recommendation: &'static str,
-    benefit: &'static str,
-    cost: &'static str,
-    when_off: &'static str,
 }
 
 fn advanced_copy(field: OptimizerToggle, locale: InterfaceLocale) -> AdvancedCopy {
@@ -436,151 +428,59 @@ fn advanced_copy(field: OptimizerToggle, locale: InterfaceLocale) -> AdvancedCop
     let t = |zh, en| locale.text(zh, en);
     match field {
         CacheMonitor => AdvancedCopy {
-            title: t("快满了提前告诉你", "Warn me when context is nearly full"),
+            title: t("快满了提前告诉你", "Warn when context is nearly full"),
             description: t(
-                "底栏显示 AI 还记得多少、已读内容还能复用多久，接近上限时提醒你。只读状态，不改变 AI 的行为。",
-                "See context usage and remaining cache time in the bottom bar. Get an alert near the limit. This only reads session status.",
-            ),
-            recommendation: t("推荐开启", "Recommended on"),
-            benefit: t(
-                "知道什么时候该压缩或换会话",
-                "Know when to compact or start a new session",
-            ),
-            cost: t("没有代价", "None"),
-            when_off: t(
-                "不想被打扰可以关",
-                "Turn it off if you prefer fewer alerts.",
+                "底栏显示上下文占用与缓存剩余时间，接近上限时提醒。只读状态，不改变 AI 行为。",
+                "Shows context usage and remaining cache time in the footer, alerting near the limit. Read-only.",
             ),
         },
         CacheExpiryNotify => AdvancedCopy {
-            title: t("缓存快过期时提醒", "Remind me before the cache expires"),
+            title: t("缓存快过期时提醒", "Alert before cache expires"),
             description: t(
-                "已读内容快不能复用时提醒你，不会向 AI 发送请求。",
-                "Get an alert when the AI is about to lose the ability to reuse what it has read. This sends no request to the AI.",
-            ),
-            recommendation: t("默认关闭", "Off by default"),
-            benefit: t(
-                "想继续时可以赶在缓存过期前回来",
-                "Return in time to reuse the cache",
-            ),
-            cost: t("多一条提醒", "An extra alert"),
-            when_off: t(
-                "不想被缓存提醒打扰时保持关闭",
-                "Leave it off if you prefer fewer alerts.",
+                "已读缓存即将失效前发一条提醒，方便及时继续对话；不会向 AI 发送请求。",
+                "Notifies shortly before cached context expires so you can resume in time. Sends no request to the model.",
             ),
         },
         StallRescue => AdvancedCopy {
-            title: t("卡住了提醒你", "Tell me when a session is stuck"),
+            title: t("卡住了提醒你", "Alert when a session stalls"),
             description: t(
-                "后台会话长时间没有任何动静时提醒，并准备一份脱敏进度摘要，点一下就能带着摘要开新会话。",
-                "Flag long-running sessions that go quiet and prepare a summary with sensitive details removed. Start a new session with that summary in one click.",
-            ),
-            recommendation: t("推荐开启", "Recommended on"),
-            benefit: t(
-                "不用切回去才发现白等半小时",
-                "Spot a stalled session while working elsewhere",
-            ),
-            cost: t("极少数情况会多一条提醒", "An occasional extra alert"),
-            when_off: t(
-                "长构建、慢模型已做过防误报，一般不用关",
-                "Usually safe to leave on. Long builds and slow models are accounted for.",
+                "后台会话长时间无响应时提醒，并自动准备脱敏进度摘要。已针对长构建和慢模型防误报。",
+                "Alerts when a background session stops responding and prepares a redacted progress brief. Tuned to avoid false alarms on slow builds.",
             ),
         },
         NoiseFilter => AdvancedCopy {
-            title: t("长日志自动压缩", "Summarize long logs automatically"),
+            title: t("长日志自动压缩", "Compress verbose logs"),
             description: t(
-                "跑测试、构建时，AI 只读报错和摘要，不被几千行日志淹没。完整原文留在本地，随时能查回。",
-                "Give the AI errors and a summary from long test and build logs. The full log stays available locally.",
-            ),
-            recommendation: t("经常跑测试的人推荐开", "Recommended for frequent testing"),
-            benefit: t(
-                "少占上下文，回复更快、更省额度",
-                "Less context to read, faster replies, less quota used",
-            ),
-            cost: t(
-                "AI 看不到全文，需要时你点开原文",
-                "Open the original when you need the full log",
-            ),
-            when_off: t(
-                "需要 AI 逐行看完整原始输出时先关掉",
-                "Turn it off when the AI needs to inspect the entire raw output.",
+                "跑测试、构建时只把报错和摘要交给 AI，完整原文留本地随时可查；需要 AI 逐行看全量输出时可临时关掉。",
+                "Passes errors and summaries to the model while keeping full logs locally. Turn off temporarily when the model needs every raw line.",
             ),
         },
         ReadDedup => AdvancedCopy {
-            title: t(
-                "别让 AI 反复读同一个文件",
-                "Skip repeat reads of unchanged files",
-            ),
+            title: t("别让 AI 反复读同一个文件", "Skip duplicate file reads"),
             description: t(
-                "同一个文件没改过，第二次读会被提醒复用已有内容；120 秒内再试一次会自动放行。",
-                "When the AI rereads an unchanged file, ask it to reuse what it already has. A retry within 120 seconds goes through.",
-            ),
-            recommendation: t("推荐开启", "Recommended on"),
-            benefit: t(
-                "省额度，也减少重复思考",
-                "Use less quota and avoid repeated work",
-            ),
-            cost: t("偶尔会被拦一下，重试即可", "A repeat read can take a retry"),
-            when_off: t(
-                "正在逐行对照同一文件时可临时关",
-                "Turn it off temporarily for line-by-line comparisons of the same file.",
+                "文件未改动时二次读取会提醒复用已有内容，120 秒内再试自动放行。",
+                "Prompts the model to reuse unchanged files on repeat reads, and automatically allows retries within 120 seconds.",
             ),
         },
         BlockSensitiveReads => AdvancedCopy {
-            title: t("拦住直接读 .env", "Block direct reads of .env"),
+            title: t("拦住直接读 .env", "Block direct .env reads"),
             description: t(
-                "AI 想直接读 .env 里的密钥时会被拦下；.env.example 这类样板文件照常放行。",
-                "Block direct reads of secrets in .env files. Templates such as .env.example are still readable.",
-            ),
-            recommendation: t("推荐开启", "Recommended on"),
-            benefit: t("避免密钥被带进对话", "Keep secrets out of the conversation"),
-            cost: t(
-                "读取真实配置时需要先关闭",
-                "Accessing real configuration requires turning it off",
-            ),
-            when_off: t(
-                "你明确要让 AI 读真实配置时再关",
-                "Turn it off only when you want the AI to read the real configuration.",
+                "阻止 AI 直接读取 .env 里的密钥，.env.example 等样板文件照常放行；确需读取真实配置时可临时关掉。",
+                "Blocks direct reads of secret .env files while allowing samples like .env.example. Turn off temporarily when real config access is needed.",
             ),
         },
         CliTools => AdvancedCopy {
-            title: t("更省 token 的查找工具", "Search with fewer tokens"),
+            title: t("更省 token 的查找工具", "Token-saving lookup tools"),
             description: t(
-                "引导 AI 查看大文件大纲、批量搜索和查找被截断的日志。对新启动的会话生效。",
-                "Guides the AI to outline large files, run batch searches, and find trimmed logs. Applies to newly started sessions.",
-            ),
-            recommendation: t("重度使用推荐开", "Recommended for heavy use"),
-            benefit: t(
-                "大文件和大日志处理更快",
-                "Process large files and logs faster",
-            ),
-            cost: t(
-                "会在新会话启动提示里加 4 行固定说明",
-                "Adds four fixed lines of guidance to the startup prompt for new sessions",
-            ),
-            when_off: t(
-                "只做简短问答时可以关",
-                "Leave it off if you only ask brief questions.",
+                "在新会话启动提示里加入 4 行指引，让 AI 优先用大纲、批量检索和日志回查工具处理大文件。",
+                "Adds 4 lines to new session prompts guiding the model to use outline, batch search, and log lookup tools on large files.",
             ),
         },
         CacheKeepalive => AdvancedCopy {
-            title: t("自动续命", "Keep the cache warm automatically"),
+            title: t("自动续命", "Auto keep-alive"),
             description: t(
-                "缓存快过期前自动发一次极短请求，让缓存别冷掉。",
-                "Send a short request before the cache expires to keep it warm.",
-            ),
-            recommendation: t("暂不可用", "Unavailable"),
-            benefit: t(
-                "离开几分钟回来不用重新计算",
-                "Reuse cached work after stepping away",
-            ),
-            cost: t(
-                "自动发送会进入对话并消耗额度",
-                "An automatic message appears in the chat and uses quota",
-            ),
-            when_off: t(
-                "目前没有可靠的静默发送方式，先只做到期提醒",
-                "Use the expiry reminder until silent refresh is available.",
+                "缓存快过期前尝试静默保活，减少缓存变冷后的重复计费。",
+                "Attempts to keep prompt cache warm before expiry to reduce cold-cache re-billing.",
             ),
         },
         MasterEnabled => unreachable!("the master switch is outside advanced settings"),
@@ -640,6 +540,25 @@ impl ContextOptimizerSettingsPanel {
         cx.notify();
     }
 
+    #[cfg(debug_assertions)]
+    pub fn probe_focus(&self, agent: Option<&str>, window: &mut Window) {
+        let focus = match agent {
+            Some(agent) => {
+                &self.agent_focus[AGENT_TABS.iter().position(|&id| id == agent).unwrap()]
+            }
+            None => &self.advanced_focus,
+        };
+        window.focus(focus);
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn probe_agent_focused_with_advanced_open(&self, agent: &str, window: &Window) -> bool {
+        let index = AGENT_TABS.iter().position(|&id| id == agent).unwrap();
+        self.advanced_open
+            && self.state.selected_agent() == agent
+            && self.agent_focus[index].is_focused(window)
+    }
+
     fn switch(
         &self,
         field: OptimizerToggle,
@@ -674,10 +593,10 @@ impl ContextOptimizerSettingsPanel {
                     .bg(rgb(0xffffff)),
             );
         if interactive {
-            let accent = rgba(self.palette.workspace.accent);
+            let focus_ring = rgba(self.palette.workspace.accent_line);
             switch
                 .track_focus(&self.toggle_focus[field as usize])
-                .focus(|style| style.shadow(vec![outline_shadow(accent)]))
+                .focus(|style| style.shadow(vec![outline_shadow(focus_ring)]))
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.state.toggle(field);
@@ -726,17 +645,16 @@ impl ContextOptimizerSettingsPanel {
         } else {
             (0x187351ff, 0xe7f5eeff, 0x8c4d00ff, 0xfff4e2ff)
         };
-        let recommendation = if entry.availability(field) == OptimizerAvailability::Available {
-            copy.recommendation
+        let badge = if reason.is_some() {
+            Some(self.pill(
+                locale.text("暂不可用", "Unavailable"),
+                palette.muted,
+                palette.panel_muted,
+            ))
+        } else if field.checked(&AgentOptimizerSettings::recommended_for(&entry.agent_id)) {
+            Some(self.pill(locale.text("推荐", "Recommended"), good, good_bg))
         } else {
-            locale.text("暂不可用", "Unavailable")
-        };
-        let recommendation_color = if reason.is_some() {
-            (palette.muted, palette.panel_muted)
-        } else if field == OptimizerToggle::CacheExpiryNotify {
-            (palette.text, palette.panel_muted)
-        } else {
-            (good, good_bg)
+            None
         };
         let mut text = div()
             .w_full()
@@ -744,61 +662,31 @@ impl ContextOptimizerSettingsPanel {
             .pr(px(60.))
             .child(
                 div()
-                    .text_size(px(14.))
-                    .font_weight(FontWeight(650.))
-                    .text_color(rgba(if reason.is_some() {
-                        palette.muted
-                    } else {
-                        palette.text
-                    }))
-                    .child(copy.title),
-            )
-            .child(self.label(copy.description).mt(px(4.)))
-            .child(
-                div()
-                    .mt(px(6.))
                     .flex()
                     .flex_wrap()
+                    .items_center()
                     .gap(px(6.))
-                    .child(self.pill(
-                        recommendation,
-                        recommendation_color.0,
-                        recommendation_color.1,
-                    ))
-                    .child(self.pill(
-                        format!("{} {}", locale.text("好处", "Benefit"), copy.benefit),
-                        palette.text,
-                        palette.panel_muted,
-                    ))
-                    .child(self.pill(
-                        format!("{} {}", locale.text("代价", "Trade-off"), copy.cost),
-                        if reason.is_some() {
-                            palette.muted
-                        } else {
-                            warning
-                        },
-                        if reason.is_some() {
-                            palette.panel_muted
-                        } else {
-                            warning_bg
-                        },
-                    )),
+                    .child(
+                        div()
+                            .text_size(px(14.))
+                            .font_weight(FontWeight(650.))
+                            .text_color(rgba(if reason.is_some() {
+                                palette.muted
+                            } else {
+                                palette.text
+                            }))
+                            .child(copy.title),
+                    )
+                    .children(badge),
             )
-            .child(
-                self.label(format!(
-                    "{} {}",
-                    locale.text("什么时候别开", "When to leave it off"),
-                    copy.when_off
-                ))
-                .mt(px(4.)),
-            );
+            .child(self.label(copy.description).mt(px(4.)));
         if let Some(reason) = reason {
-            let accent = rgba(palette.accent);
+            let focus_ring = rgba(palette.accent_line);
             text = text.child(
                 self.label(reason)
                     .id(("ctx-opt-reason", field as usize))
                     .track_focus(focus)
-                    .focus(|style| style.shadow(vec![outline_shadow(accent)]))
+                    .focus(|style| style.shadow(vec![outline_shadow(focus_ring)]))
                     .mt(px(4.))
                     .px(px(8.))
                     .py(px(4.))
@@ -983,7 +871,7 @@ impl Render for ContextOptimizerSettingsPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let locale = self.state.locale;
         let palette = self.palette.workspace;
-        let accent = rgba(palette.accent);
+        let focus_ring = rgba(palette.accent_line);
         let previous_focus = std::mem::replace(&mut self.last_focus, window.focused(cx));
         let reveal_focus = self
             .last_focus
@@ -997,17 +885,19 @@ impl Render for ContextOptimizerSettingsPanel {
                 reveal_on_focus(div(), &self.scroll, reveal_focus == Some(focus))
                     .id(SharedString::from(format!("ctx-opt-agent-{id}")))
                     .track_focus(focus)
-                    .focus(|style| style.shadow(vec![outline_shadow(accent)]))
+                    .focus(|style| style.shadow(vec![outline_shadow(focus_ring)]))
                     .px(px(16.))
                     .py(px(7.))
                     .rounded(px(10.))
                     .cursor_pointer()
                     .text_size(px(13.))
                     .font_weight(FontWeight(600.))
-                    .bg(rgba(if active {
-                        palette.accent_soft
-                    } else {
+                    .bg(rgba(if !active {
                         palette.panel
+                    } else if self.dark {
+                        0x1b2e47ff
+                    } else {
+                        0xe8f1fcff
                     }))
                     .border_1()
                     .border_color(rgba(if active { palette.accent } else { palette.line }))
@@ -1068,7 +958,9 @@ impl Render for ContextOptimizerSettingsPanel {
             div()
                 .id("ctx-opt-advanced")
                 .track_focus(&self.advanced_focus)
-                .focus(|style| style.shadow(vec![outline_shadow(accent)]))
+                .border_1()
+                .border_color(transparent_black())
+                .focus(|style| style.border_color(focus_ring))
                 .flex()
                 .items_center()
                 .gap(px(7.))
@@ -1128,7 +1020,7 @@ impl Render for ContextOptimizerSettingsPanel {
             div()
                 .id("ctx-opt-restore-defaults")
                 .track_focus(&self.restore_focus)
-                .focus(|style| style.shadow(vec![outline_shadow(accent)]))
+                .focus(|style| style.shadow(vec![outline_shadow(focus_ring)]))
                 .px(px(11.))
                 .py(px(6.))
                 .rounded(px(7.))
@@ -1289,14 +1181,18 @@ mod tests {
         assert_eq!(saved.cache_keepalive_max_per_turn, 3);
         assert_eq!(saved.max_log_bytes, 32_768);
 
-        let copy = advanced_copy(CliTools, InterfaceLocale::Chinese);
-        assert_eq!(copy.recommendation, "重度使用推荐开");
-        assert_eq!(copy.benefit, "大文件和大日志处理更快");
-        assert_eq!(copy.cost, "会在新会话启动提示里加 4 行固定说明");
-        assert_eq!(copy.when_off, "只做简短问答时可以关");
-        assert!(copy.description.contains("对新启动的会话生效"));
-
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn advanced_copy_keeps_new_session_scope_in_both_languages() {
+        let zh = advanced_copy(OptimizerToggle::CliTools, InterfaceLocale::Chinese);
+        let en = advanced_copy(OptimizerToggle::CliTools, InterfaceLocale::English);
+        assert!(zh.description.contains("新会话启动提示里加入 4 行指引"));
+        assert!(
+            en.description
+                .contains("Adds 4 lines to new session prompts")
+        );
     }
 
     #[test]
@@ -1405,6 +1301,29 @@ mod tests {
             format_saved_noise_bytes(2_097_152, InterfaceLocale::English),
             "Saved 2.0 MB"
         );
+    }
+
+    #[test]
+    fn hud_handoff_requires_context_pressure_or_a_stalled_session() {
+        for (pressure, stall, ready, visible, urgent) in [
+            ("normal", "normal", true, false, false),
+            ("normal", "warning", true, false, false),
+            ("warning", "normal", false, true, false),
+            ("critical", "normal", false, true, true),
+            ("normal", "stalled", false, true, true),
+        ] {
+            let live = serde_json::json!({
+                "contextGuard": {
+                    "contextPressure": pressure,
+                    "handoffReady": ready,
+                    "cache": { "remainingSec": 45, "warm": true },
+                    "stall": { "severity": stall }
+                }
+            });
+            let view = ContextGuardHudView::from_live_hud(&live, InterfaceLocale::Chinese).unwrap();
+            assert_eq!(view.show_handoff_button, visible, "{pressure}/{stall}");
+            assert_eq!(view.handoff_urgent, urgent, "{pressure}/{stall}");
+        }
     }
 
     #[test]

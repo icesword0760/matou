@@ -70,6 +70,29 @@ mod workspace {
             self.data_root = Some(root);
         }
 
+        pub(super) fn load_capture_fixture(&mut self, root: PathBuf, window: &Window) {
+            self.load_theme_fixture(root, window);
+            self.locale = InterfaceLocale::Chinese;
+            self.locale_preference = LocalePreference::Chinese;
+        }
+
+        pub(super) fn claude_preview_card_header() -> Div {
+            Self::session_card_header_themed(
+                ui_text("Claude Code"),
+                div(),
+                &matou_native_desktop::theme_tokens::LIGHT,
+                Self::session_provider_mark(
+                    "preview",
+                    Some("claude-code"),
+                    InterfaceLocale::Chinese,
+                    false,
+                ),
+                None,
+                None,
+                None,
+            )
+        }
+
         pub(super) fn arm_theme_terminal(&mut self, cx: &mut Context<Self>) {
             self.terminals.insert(
                 "settings-theme-terminal".into(),
@@ -234,6 +257,7 @@ mod probe {
     };
     use matou_native_runtime::subscription_launch::SubscriptionProvider;
     use serde_json::{Value, json};
+    use std::{path::PathBuf, time::Duration};
 
     use crate::{
         assets::NativeAssets,
@@ -645,9 +669,17 @@ mod probe {
         width: f32,
         cx: &mut App,
     ) -> (WindowHandle<Workspace>, ProbeReceiver) {
+        open_window_sized(visible_state, size(px(width), px(780.)), cx)
+    }
+
+    fn open_window_sized(
+        visible_state: Option<&str>,
+        dimensions: Size<Pixels>,
+        cx: &mut App,
+    ) -> (WindowHandle<Workspace>, ProbeReceiver) {
         let (commands, sink) = runtime_bridge::probe_channel();
         let (_events, incoming) = async_channel::unbounded();
-        let bounds = Bounds::centered(None, size(px(width), px(780.)), cx);
+        let bounds = Bounds::centered(None, dimensions, cx);
         let window = cx
             .open_window(
                 WindowOptions {
@@ -2516,7 +2548,27 @@ mod probe {
         }
         action(cx, AssignmentAction::RetryCatalog(0));
         let successful = catalog_request();
+        update_shell(window, cx, |shell, window, cx| {
+            shell.probe_open_provider_value(official.clone(), window, cx);
+        });
+        draw(window, cx);
+        update_shell(window, cx, |shell, window, _| {
+            shell.probe_provider_editor_focus("mapping-0", window);
+        });
+        press(window, "enter", cx);
+        let pending = probe_provider_editor(|| draw(window, cx));
+        assert!(pending.enabled["mapping-option-manual"]);
+        assert!(!pending.labels.contains_key("mapping-option-opus"));
         reply(cx, successful, rows.clone());
+        let received = probe_provider_editor(|| draw(window, cx));
+        assert!(received.enabled["mapping-option-opus"]);
+        assert!(received.labels["mapping-option-opus"].contains("Opus alias"));
+        assert!(received.labels["model-source"].contains("官方模型目录"));
+        press(window, "escape", cx);
+        press(window, "escape", cx);
+        check_shell(window, cx, |shell, _| {
+            assert!(shell.diagnostics_dialog().is_none())
+        });
         assert_eq!(
             (badge(cx), context_labels(cx, official.clone())),
             (
@@ -2962,6 +3014,262 @@ mod probe {
         );
     }
 
+    fn verify_late_subscription_metadata(cx: &mut AsyncApp) {
+        let (window, sink) = cx.update(|cx| open_window(None, cx)).unwrap();
+        window
+            .update(cx, |view, window, cx| view.open_settings(window, cx))
+            .unwrap();
+        let mut read = None;
+        let mut subscription_settings = None;
+        for command in std::iter::from_fn(|| sink.try_recv().ok()) {
+            match command {
+                Command::GetProviderSettings { request_id } => read = Some(request_id),
+                Command::OpenSubscriptionSettings { request_id, .. } => {
+                    subscription_settings = Some(request_id)
+                }
+                _ => {}
+            }
+        }
+        let mut provider = json!({
+            "id": "subscription", "name": "Probe subscription", "cli": "claude-code",
+            "kind": "subscription", "modelMapping": {"opus": "late-model"},
+            "subscription": {"provider": "codex"},
+        });
+        let reply = |cx: &mut AsyncApp, request, response| {
+            window
+                .update(cx, |view, window, cx| {
+                    view.provider_reply(result(request, response), window, cx)
+                })
+                .unwrap();
+        };
+        reply(
+            cx,
+            read.unwrap(),
+            snapshot(vec![provider.clone()], "subscription"),
+        );
+        draw(window, cx);
+        update_shell(window, cx, |shell, window, _| {
+            shell.diagnostics_focus_provider_edit("subscription", window);
+        });
+        press(window, "enter", cx);
+        let pending = probe_provider_editor(|| draw(window, cx));
+        assert!(!pending.labels.contains_key("mapping-0"));
+        provider["subscription"]["modelMetadata"] =
+            json!([{"id": "late-model", "displayName": "Late model", "contextWindow": 200_000}]);
+        let ProviderSettingsResult::Snapshot(snapshot) = snapshot(vec![provider], "subscription")
+        else {
+            unreachable!();
+        };
+        reply(
+            cx,
+            subscription_settings.unwrap(),
+            ProviderSettingsResult::SubscriptionSettings(SubscriptionSettingsView {
+                snapshot,
+                accounts: Default::default(),
+                antigravity_risk_accepted: false,
+            }),
+        );
+        let received = probe_provider_editor(|| draw(window, cx));
+        assert_eq!(received.labels["mapping-0"], "Late model");
+        press(window, "escape", cx);
+        check_shell(window, cx, |shell, _| {
+            assert!(shell.diagnostics_dialog().is_none())
+        });
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        println!(
+            "Hidden GPUI: subscription metadata refreshed the open editor without marking it dirty"
+        );
+    }
+
+    async fn capture_visible_window(window: AnyWindowHandle, name: &str, cx: &mut AsyncApp) {
+        use cocoa::{base::id, foundation::NSInteger};
+        use objc::{msg_send, sel, sel_impl};
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+        let Some(destination) = std::env::var_os("MATOU_SETTINGS_CAPTURE_DIR").map(PathBuf::from)
+        else {
+            return;
+        };
+        let window_number: NSInteger = window
+            .update(cx, |_, window, _| {
+                let RawWindowHandle::AppKit(handle) =
+                    HasWindowHandle::window_handle(window).unwrap().as_raw()
+                else {
+                    unreachable!("macOS window");
+                };
+                unsafe {
+                    let view = handle.ns_view.as_ptr() as id;
+                    let native: id = msg_send![view, window];
+                    msg_send![native, windowNumber]
+                }
+            })
+            .unwrap();
+        cx.background_executor()
+            .timer(Duration::from_millis(350))
+            .await;
+        let output = destination.join(format!("{name}.png"));
+        let status = std::process::Command::new("/usr/sbin/screencapture")
+            .args(["-x", "-o", "-l"])
+            .arg(window_number.to_string())
+            .arg(&output)
+            .status()
+            .unwrap();
+        assert!(
+            status.success() && output.metadata().unwrap().len() > 0,
+            "{output:?}"
+        );
+        println!(
+            "Captured GPUI window {window_number} at {}",
+            output.display()
+        );
+        cx.update(|cx| cx.quit()).unwrap();
+    }
+
+    fn open_focused_context_optimizer(window: WindowHandle<Workspace>, cx: &mut AsyncApp) {
+        use cocoa::{
+            appkit::{NSEvent, NSEventModifierFlags, NSEventType},
+            base::{id, nil},
+            foundation::{NSInteger, NSPoint, NSString},
+        };
+        use objc::{msg_send, sel, sel_impl};
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+        let focus_and_press = |cx: &mut AsyncApp, agent| {
+            let view = window
+                .update(cx, |view, window, cx| {
+                    view.settings_entity()
+                        .unwrap()
+                        .read(cx)
+                        .probe_context_optimizer(cx)
+                        .probe_focus(agent, window);
+                    let RawWindowHandle::AppKit(handle) =
+                        HasWindowHandle::window_handle(window).unwrap().as_raw()
+                    else {
+                        unreachable!("macOS window");
+                    };
+                    handle.ns_view.as_ptr() as id
+                })
+                .unwrap();
+            draw(window, cx);
+            // Route the key through the probe's own AppKit view.
+            unsafe {
+                let native: id = msg_send![view, window];
+                let number: NSInteger = msg_send![native, windowNumber];
+                let enter = NSString::alloc(nil).init_str("\r");
+                let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode_(
+                    nil, NSEventType::NSKeyUp, NSPoint::new(0., 0.), NSEventModifierFlags::empty(),
+                    0., number, nil, enter, enter, false, 36,
+                );
+                let _: () = msg_send![view, keyUp: event];
+                let _: () = msg_send![enter, release];
+            }
+            draw(window, cx);
+        };
+        focus_and_press(cx, None);
+        focus_and_press(cx, Some("antigravity"));
+        window
+            .update(cx, |view, window, cx| {
+                assert!(
+                    view.settings_entity()
+                        .unwrap()
+                        .read(cx)
+                        .probe_context_optimizer(cx)
+                        .probe_agent_focused_with_advanced_open("antigravity", window)
+                );
+            })
+            .unwrap();
+    }
+
+    fn open_official_editor(
+        window: WindowHandle<Workspace>,
+        sink: &ProbeReceiver,
+        cx: &mut AsyncApp,
+    ) {
+        let read = request_id(sink);
+        assignment_request_id(sink);
+        let official = json!({
+            "id": "anthropic-official", "name": "Anthropic 官方", "cli": "claude-code",
+            "builtIn": true, "endpoint": "https://api.anthropic.com",
+            "modelMapping": {"opus": "opus", "fable": "fable", "sonnet": "sonnet", "haiku": "haiku"},
+        });
+        window
+            .update(cx, |view, window, cx| {
+                view.provider_reply(
+                    result(read, snapshot(vec![official], "anthropic-official")),
+                    window,
+                    cx,
+                );
+            })
+            .unwrap();
+        let Command::GetClaudeModelCatalog { request_id } = business(sink).unwrap() else {
+            panic!("expected a native model catalog request");
+        };
+        draw(window, cx);
+        check_shell(window, cx, |shell, _| {
+            assert!(shell.diagnostics_dialog().is_none())
+        });
+        update_shell(window, cx, |shell, window, _| {
+            shell.diagnostics_focus_provider_edit("anthropic-official", window);
+        });
+        press(window, "enter", cx);
+        window
+            .update(cx, |view, window, cx| {
+                view.model_catalog_reply(
+                    json!({"requestId": request_id, "models": [
+                        {"id": "opus", "displayName": "Claude Opus", "contextWindow": 1_000_000},
+                        {"id": "fable", "displayName": "Claude Fable", "contextWindow": 1_000_000},
+                        {"id": "sonnet", "displayName": "Claude Sonnet", "contextWindow": 1_000_000},
+                        {"id": "haiku", "displayName": "Claude Haiku", "contextWindow": 200_000},
+                    ]}),
+                    window,
+                    cx,
+                );
+            })
+            .unwrap();
+        let frame = probe_provider_editor(|| draw(window, cx));
+        assert!(frame.labels["model-source"].contains("官方模型目录"));
+        update_shell(window, cx, |shell, window, _| {
+            shell.probe_provider_editor_focus("mapping-0", window);
+        });
+        press(window, "enter", cx);
+        let frame = probe_provider_editor(|| draw(window, cx));
+        for id in ["opus", "fable", "sonnet", "haiku"] {
+            assert!(frame.enabled[&format!("mapping-option-{id}")], "{id}");
+        }
+        println!(
+            "First official editor: catalog arrived while open, all four models in the first Opus menu"
+        );
+    }
+
+    struct ClaudeIconPreview;
+
+    impl Render for ClaudeIconPreview {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(px(20.))
+                .bg(rgb(0xf4f6fa))
+                .text_color(rgb(0x20242a))
+                .child(
+                    svg()
+                        .path("icons/provider-claude.svg")
+                        .size(px(88.))
+                        .text_color(rgb(0xd97757)),
+                )
+                .child(
+                    div()
+                        .w(px(208.))
+                        .child(Workspace::claude_preview_card_header()),
+                )
+        }
+    }
+
     pub(super) fn run() {
         let args = std::env::args().skip(1).collect::<Vec<_>>();
         let state = match args.as_slice() {
@@ -2976,25 +3284,43 @@ mod probe {
                             | "dispatch-dark"
                             | "dispatch-narrow"
                             | "context-optimizer"
+                            | "ctx-opt-focused-light"
+                            | "ctx-opt-focused-dark"
+                            | "provider-editor-official-light"
+                            | "claude-icon-preview"
                     ) =>
             {
                 Some(state.clone())
             }
             _ => panic!(
-                "usage: settings_shell_probe [--visible-state loading|empty|dispatch-light|dispatch-dark|dispatch-narrow|context-optimizer]"
+                "usage: settings_shell_probe [--visible-state loading|empty|dispatch-light|dispatch-dark|dispatch-narrow|context-optimizer|ctx-opt-focused-light|ctx-opt-focused-dark|provider-editor-official-light|claude-icon-preview]"
             ),
         };
         Application::new().with_assets(NativeAssets).run(move |cx| {
-            if state.as_deref() == Some("context-optimizer") {
-                let root = probe_root("context-optimizer");
-                let (window, sink) = open_window_at(state.as_deref(), 1000., cx);
+            if let Some(state @ ("context-optimizer" | "ctx-opt-focused-light" | "ctx-opt-focused-dark")) = state.as_deref() {
+                let focused = state != "context-optimizer";
+                let root = probe_root(state);
+                if focused {
+                    let theme = if state == "ctx-opt-focused-dark" { ThemePreference::Dark } else { ThemePreference::Light };
+                    write_theme_preference(&root, theme).unwrap();
+                }
+                let (window, sink) = open_window_sized(
+                    Some(state),
+                    if focused { size(px(1240.), px(1000.)) } else { size(px(1000.), px(780.)) },
+                    cx,
+                );
                 window
                     .update(cx, |view, window, cx| {
-                        view.set_locale_data_root(root);
+                        if focused {
+                            view.load_capture_fixture(root, window);
+                        } else {
+                            view.set_locale_data_root(root);
+                        }
                         view.open_settings(window, cx);
                     })
                     .unwrap();
                 cx.activate(true);
+                let capture_name = state.to_owned();
                 cx.spawn(async move |cx| {
                     request_id(&sink);
                     assignment_request_id(&sink);
@@ -3034,8 +3360,46 @@ mod probe {
                         })
                         .unwrap();
                     println!("Context optimizer probe: one request, injected 131072 bytes for Claude Code");
+                    if focused {
+                        open_focused_context_optimizer(window, cx);
+                        capture_visible_window(window.into(), &capture_name, cx).await;
+                    }
                 })
                 .detach();
+            } else if state.as_deref() == Some("provider-editor-official-light") {
+                let root = probe_root("provider-editor-official-light");
+                write_theme_preference(&root, ThemePreference::Light).unwrap();
+                let (window, sink) = open_window_sized(
+                    state.as_deref(),
+                    size(px(1180.), px(940.)),
+                    cx,
+                );
+                window.update(cx, |view, window, cx| {
+                    view.load_capture_fixture(root, window);
+                    view.open_settings(window, cx);
+                }).unwrap();
+                cx.activate(true);
+                cx.spawn(async move |cx| {
+                    open_official_editor(window, &sink, cx);
+                    capture_visible_window(window.into(), "provider-editor-official-light", cx).await;
+                }).detach();
+            } else if state.as_deref() == Some("claude-icon-preview") {
+                let window = cx.open_window(
+                    WindowOptions {
+                        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                            None,
+                            size(px(300.), px(224.)),
+                            cx,
+                        ))),
+                        titlebar: None,
+                        ..Default::default()
+                    },
+                    |_, cx| cx.new(|_| ClaudeIconPreview),
+                ).unwrap();
+                cx.activate(true);
+                cx.spawn(async move |cx| {
+                    capture_visible_window(window.into(), "claude-icon-preview", cx).await;
+                }).detach();
             } else if let Some(state @ ("dispatch-light" | "dispatch-dark" | "dispatch-narrow")) =
                 state.as_deref()
             {
@@ -3102,6 +3466,7 @@ mod probe {
                     verify_delete_window(cx);
                     verify_assignments_window(cx);
                     verify_model_catalog_window(cx);
+                    verify_late_subscription_metadata(cx);
                     verify_retention_receipt(cx);
                     for width in [720., 900., 1200.] {
                         verify_language_zone_window(cx, width).await;
