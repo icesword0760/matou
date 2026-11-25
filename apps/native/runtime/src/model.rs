@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::{path::PathBuf, time::Instant};
 
 use matou_native_core::{
     journal::{JournalOptions, checkpoint::CheckpointCandidate},
@@ -26,6 +26,9 @@ pub struct ScreenRecoveryOptions {
     pub initial_grid: Option<(u16, u16)>,
     /// Valid SQLite candidates, newest generation first, read by the owner.
     pub checkpoints: Vec<CheckpointCandidate>,
+    /// Optional Claude Code JSONL transcript used to backfill scrollback when
+    /// a resumed session has almost no primary-screen history.
+    pub transcript_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -128,6 +128,10 @@ mod probe_model;
 #[path = "../src/search.rs"]
 #[allow(dead_code)]
 mod search;
+#[cfg(target_os = "macos")]
+#[path = "../src/transcript_backfill.rs"]
+#[allow(dead_code)]
+mod transcript_backfill;
 
 /// Enter immediately after decoding and batching so credit sees fixed frames.
 #[cfg(target_os = "macos")]
@@ -633,6 +637,7 @@ mod gate {
         options.screen_recovery = Some(ScreenRecoveryOptions {
             initial_grid: Some((initial.cols, initial.rows)),
             checkpoints,
+            transcript_path: None,
         });
         let mut session = RuntimeSession::launch(options)?;
         let launch_screen = session.screen()?;
@@ -815,6 +820,7 @@ mod gate {
         options.screen_recovery = Some(ScreenRecoveryOptions {
             initial_grid: Some((RESTART_GRID.cols, RESTART_GRID.rows)),
             checkpoints: vec![candidate],
+            transcript_path: None,
         });
         let mut session = RuntimeSession::launch(options)?;
         assert_eq!(
@@ -930,6 +936,7 @@ mod gate {
             options.screen_recovery = Some(ScreenRecoveryOptions {
                 initial_grid: Some((24, 5)),
                 checkpoints,
+                transcript_path: None,
             });
             let mut session = RuntimeSession::launch(options)?;
             assert_eq!(session.last_sequence(), 4, "only the boundary was appended");
@@ -981,6 +988,7 @@ mod gate {
         options.screen_recovery = Some(ScreenRecoveryOptions {
             initial_grid: Some((20, 5)),
             checkpoints: vec![without_grid, older],
+            transcript_path: None,
         });
 
         let mut session = RuntimeSession::launch(options)?;

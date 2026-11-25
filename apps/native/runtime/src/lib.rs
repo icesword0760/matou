@@ -45,6 +45,7 @@ pub mod session;
 mod shell_input;
 pub mod subscription_launch;
 mod subscription_service;
+mod transcript_backfill;
 pub mod worker;
 
 pub use model::{ScreenRecoveryOptions, SessionEvent, SessionOptions, StorageFaultCode};

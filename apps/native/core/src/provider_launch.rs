@@ -1014,6 +1014,9 @@ pub fn attach_claude_settings(launch: &mut ShellLaunch, path: &Path) -> Result<(
         .to_str()
         .context("provider settings path is not UTF-8")?;
     launch.argv.splice(..0, ["--settings".into(), path.into()]);
+    // CLAUDE_CODE_NO_FLICKER=1 overrides --settings {"tui":"default"} in Claude Code.
+    // Force it off inside Matou so Claude stays on the primary scrollback buffer.
+    set_var(&mut launch.env, "CLAUDE_CODE_NO_FLICKER".into(), "0".into());
     // Claude treats bearer and API-key authentication as mutually exclusive.
     if get_var(&launch.env, "ANTHROPIC_AUTH_TOKEN").is_some_and(|token| !token.is_empty()) {
         remove_var(&mut launch.env, OsStr::new("ANTHROPIC_API_KEY"));

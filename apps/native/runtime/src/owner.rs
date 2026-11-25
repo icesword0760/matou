@@ -3012,6 +3012,7 @@ impl ShellOwner {
         Ok(ScreenRecoveryOptions {
             initial_grid,
             checkpoints,
+            transcript_path: None,
         })
     }
 
@@ -3164,6 +3165,16 @@ impl ShellOwner {
             let claude_projects = (profile == LaunchProfile::ClaudeCode)
                 .then(|| claude_projects(&options.launch))
                 .flatten();
+            if profile == LaunchProfile::ClaudeCode
+                && let (Some(root), Some(identity), Some(recovery)) = (
+                    claude_projects.as_deref(),
+                    expected_id.as_deref(),
+                    options.screen_recovery.as_mut(),
+                )
+            {
+                recovery.transcript_path =
+                    crate::provider_catalog::resume_transcript(root, &options.launch.cwd, identity);
+            }
             let hud_provider = match profile {
                 LaunchProfile::ClaudeCode => HudProvider::ClaudeCode,
                 LaunchProfile::Codex => HudProvider::Codex,

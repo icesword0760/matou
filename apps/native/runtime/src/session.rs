@@ -288,11 +288,27 @@ impl Session {
         let mut recovery_diagnostic = None;
         let mut screen_epoch = 0;
         let [protocol_terminal, mut display_terminal] =
-            if options.launch.profile != LaunchProfile::Shell && journal.last_sequence() > 0 {
-                let mut recovered = recover_screen(&options, &journal)?;
-                recovery_diagnostic = recovered.diagnostic;
-                screen_epoch = recovered.screen_epoch;
-                if recovered.resized {
+            if options.launch.profile != LaunchProfile::Shell {
+                let (mut terminals, mut has_history, resized) = if journal.last_sequence() > 0 {
+                    let recovered = recover_screen(&options, &journal)?;
+                    recovery_diagnostic = recovered.diagnostic;
+                    screen_epoch = recovered.screen_epoch;
+                    (
+                        recovered.terminals,
+                        recovered.has_history,
+                        recovered.resized,
+                    )
+                } else {
+                    (
+                        [
+                            Terminal::new(options.terminal)?,
+                            Terminal::new(options.terminal)?,
+                        ],
+                        false,
+                        false,
+                    )
+                };
+                if resized {
                     journal
                         .append(&Record {
                             timestamp: unix_millis(),
@@ -304,9 +320,37 @@ impl Session {
                         })
                         .context("persist terminal startup resize")?;
                 }
-                if recovered.has_history {
+                let needs_backfill = options.launch.profile == LaunchProfile::ClaudeCode
+                    && terminals[1]
+                        .screen()
+                        .map(|screen| {
+                            screen.history_lines
+                                < crate::transcript_backfill::MIN_EXISTING_HISTORY_LINES
+                        })
+                        .unwrap_or(false);
+                if needs_backfill
+                    && let Some(path) = options
+                        .screen_recovery
+                        .as_ref()
+                        .and_then(|recovery| recovery.transcript_path.as_deref())
+                    && let Some(backfill) =
+                        crate::transcript_backfill::format_claude_transcript(path)
+                {
+                    feed_recovered(&mut terminals, &backfill);
+                    journal
+                        .append(&Record {
+                            timestamp: unix_millis(),
+                            frame: Frame::Output {
+                                sequence: journal.last_sequence() + 1,
+                                data: backfill,
+                            },
+                        })
+                        .context("persist transcript history backfill")?;
+                    has_history = true;
+                }
+                if has_history {
                     let data = terminal_run_boundary(geometry.1);
-                    feed_recovered(&mut recovered.terminals, &data);
+                    feed_recovered(&mut terminals, &data);
                     journal
                         .append(&Record {
                             timestamp: unix_millis(),
@@ -317,10 +361,10 @@ impl Session {
                         })
                         .context("persist terminal run boundary")?;
                 }
-                if recovered.resized || recovered.has_history {
+                if resized || has_history {
                     journal.flush().context("flush terminal startup frames")?;
                 }
-                recovered.terminals
+                terminals
             } else {
                 let mut terminals = [
                     Terminal::new(options.terminal)?,
