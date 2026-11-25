@@ -40,7 +40,7 @@ use crate::{
     ScreenRecoveryOptions, SessionEvent, SessionOptions,
     agent_hud_projection::{
         AgentHudProjection, AgentState, ConfigCounts, HudProvider, RunningTool, TaskStatus,
-        ToolActivity, ToolStatus, project_teammates,
+        ToolActivity, ToolStatus, project_teammates, timestamp_ms,
     },
     agent_hud_sources::{self, ExternalAgents},
     antigravity_catalog::Catalog as AntigravityCatalog,
@@ -69,8 +69,8 @@ use crate::{
     host_control::{RunControl, clear_control_environment},
     provider_catalog::LiveTranscript,
     provider_hook::{
-        HOOK_QUEUE_CAPACITY, HookMessage, HookSetup, IDENTITY_TIMEOUT, Observation,
-        ProviderHookServer, Registration, Scope,
+        HOOK_QUEUE_CAPACITY, HookMessage, HookSetup, IDENTITY_TIMEOUT, NotificationKind,
+        Observation, ProviderHookServer, Registration, Scope,
     },
     provider_resume::{
         self, FORK_REBUILD_FAILED, IDENTITY_MISMATCH, ResumeMonitor, SESSION_NOT_FOUND,
@@ -183,7 +183,7 @@ struct RunHook {
     resume: Option<ResumeMonitor>,
     claude_fork_rebuild: Option<ClaudeForkRebuild>,
     reported_missing: bool,
-    pending_startup_observations: Vec<(Scope, Observation)>,
+    pending_startup_observations: Vec<(Scope, Observation, Instant)>,
     hud: AgentHudProjection,
     context_guard: SessionContextGuard,
     stall_handoff: Option<HandoffBrief>,
@@ -212,6 +212,8 @@ struct RunHook {
     claude_projects: Option<PathBuf>,
     claude_transcript: Option<PathBuf>,
     claude_live: LiveTranscript,
+    claude_waiting_since_ms: Option<f64>,
+    claude_transcript_activity_at_ms: Option<f64>,
     claude_transcript_poll: Option<Instant>,
     claude_observed_title: Option<String>,
     permission_identity_error: Option<String>,
@@ -434,10 +436,19 @@ impl RunHook {
         {
             self.claude_transcript = Some(path.to_owned());
             self.claude_live = LiveTranscript::default();
+            self.claude_transcript_activity_at_ms = None;
             self.hud.ingest_live_claude_history(None);
             self.hud.publish_transcript_context();
             self.claude_transcript_poll = Some(Instant::now());
         }
+    }
+
+    fn claude_transcript_resumed(&self) -> bool {
+        !self.context_session_ended
+            && self
+                .claude_waiting_since_ms
+                .zip(self.claude_transcript_activity_at_ms)
+                .is_some_and(|(waiting, activity)| activity > waiting)
     }
 }
 
@@ -2597,7 +2608,7 @@ impl ShellOwner {
 
     pub(crate) fn mark_shell_promotion_interrupted(&mut self, session_id: &str) -> Result<()> {
         let mut events = Vec::new();
-        self.set_work_status(session_id, &mut events, |_| "interrupted")
+        self.set_work_status(session_id, &mut events, |_| Some("interrupted"))
     }
 
     pub(crate) fn stop_for_permission_change(
@@ -2825,8 +2836,8 @@ impl ShellOwner {
                 .as_mut()
                 .map(|run| std::mem::take(&mut run.startup))
                 .unwrap_or_default();
-            for (scope, observation) in observations {
-                self.apply_hook(scope, observation, events);
+            for (scope, observation, received_at) in observations {
+                self.apply_hook_at(scope, observation, received_at, events);
             }
             for (scope, payload) in dsh {
                 self.apply_dsh_hook(scope, &payload, events);
@@ -3986,6 +3997,8 @@ impl ShellOwner {
                 claude_transcript_poll: seeded_transcript.as_ref().map(|_| Instant::now()),
                 claude_transcript: seeded_transcript,
                 claude_live: LiveTranscript::default(),
+                claude_waiting_since_ms: None,
+                claude_transcript_activity_at_ms: None,
                 claude_observed_title: None,
                 dsh,
                 antigravity,
@@ -4540,11 +4553,12 @@ impl ShellOwner {
         events: &mut Vec<OwnerEvent>,
         limit: usize,
         accepts: impl Fn(&Self, &Scope, Instant) -> bool,
-    ) {
+    ) -> bool {
         let Some(server) = &self.hook_server else {
-            return;
+            return true;
         };
         let hooks: Vec<_> = server.messages().take(limit).collect();
+        let drained = hooks.len() < limit;
         for hook in hooks {
             match hook {
                 HookMessage::Observed(scope, observation, received_at) => {
@@ -4568,7 +4582,7 @@ impl ShellOwner {
                                     .is_some_and(|deadline| received_at >= deadline)
                         });
                     if !late_identity {
-                        self.apply_hook(scope, observation, events);
+                        self.apply_hook_at(scope, observation, received_at, events);
                     }
                 }
                 HookMessage::DshObserved(scope, payload, received_at) => {
@@ -4586,10 +4600,11 @@ impl ShellOwner {
                 HookMessage::Retired(scope) => reject_identity(events, &scope, "retired-run"),
             }
         }
+        drained
     }
 
     fn poll_provider_hooks(&mut self, events: &mut Vec<OwnerEvent>) {
-        self.poll_provider_hook_messages(events, 64, |_, _, _| true);
+        let hooks_drained = self.poll_provider_hook_messages(events, 64, |_, _, _| true);
         let antigravity_timeouts: Vec<_> = self
             .shells
             .iter_mut()
@@ -4668,7 +4683,8 @@ impl ShellOwner {
         for (id, run_id, effect) in codex_effects {
             self.apply_codex_effect(&id, &run_id, effect, None, events);
         }
-        self.poll_claude_transcripts(events);
+        // Transcript reads can see output from hooks still queued in the next batch.
+        self.poll_claude_transcripts(events, hooks_drained);
         self.poll_codex_titles(events);
         self.poll_antigravity_titles(events);
         self.poll_antigravity_transcripts();
@@ -5063,7 +5079,7 @@ impl ShellOwner {
                 WorkStatus::NeedsInput => "needs-input",
                 WorkStatus::Error => "error",
             };
-            if let Err(error) = self.set_work_status(&scope.session_id, events, |_| status) {
+            if let Err(error) = self.set_work_status(&scope.session_id, events, |_| Some(status)) {
                 diagnostic(events, &scope.session_id, format!("{error:#}"));
             }
         }
@@ -5427,7 +5443,7 @@ impl ShellOwner {
         self.retire_sessions(&[session_id.to_owned()]);
     }
 
-    fn poll_claude_transcripts(&mut self, events: &mut Vec<OwnerEvent>) {
+    fn poll_claude_transcripts(&mut self, events: &mut Vec<OwnerEvent>, hooks_drained: bool) {
         if self.closing {
             return;
         }
@@ -5437,14 +5453,23 @@ impl ShellOwner {
             .iter()
             .filter_map(|(id, shell)| {
                 let hook = shell.hook.as_ref()?;
-                (!shell.ended
-                    && !shell.retiring
-                    && hook.claude_transcript_poll.is_some_and(|due| due <= at))
-                .then(|| id.clone())
+                let due = hook.claude_transcript_poll.is_some_and(|due| due <= at);
+                let resumed = hooks_drained && hook.claude_transcript_resumed();
+                (!shell.ended && !shell.retiring && (due || resumed)).then(|| (id.clone(), due))
             })
             .collect();
-        for id in ready {
-            self.observe_claude_transcript(&id, events);
+        for (id, due) in ready {
+            if due {
+                self.observe_claude_transcript(&id, events);
+            }
+            if hooks_drained
+                && self.shells[&id]
+                    .hook
+                    .as_ref()
+                    .is_some_and(RunHook::claude_transcript_resumed)
+            {
+                self.recover_claude_work(&id, events);
+            }
         }
     }
 
@@ -5479,8 +5504,25 @@ impl ShellOwner {
             return;
         };
         let backlog = hook.claude_live.poll(root, path, identity, |row| {
-            if row.is_some() {
+            if let Some(row) = row {
                 hook.context_guard.note_activity(now() as f64);
+                let content = &row["message"]["content"];
+                if row["type"] == "assistant"
+                    && row["isSidechain"] != true
+                    && row["is_sidechain"] != true
+                    && row["isApiErrorMessage"] != true
+                    && row["message"]["model"] != "<synthetic>"
+                    && (content.as_array().is_some_and(|content| !content.is_empty())
+                        || crate::provider_hook::nonempty(content).is_some())
+                    && let Some(at) = timestamp_ms(&row["timestamp"])
+                    && hook
+                        .claude_transcript_activity_at_ms
+                        .is_none_or(|last| at > last)
+                {
+                    hook.claude_transcript_activity_at_ms = Some(at);
+                }
+            } else {
+                hook.claude_transcript_activity_at_ms = None;
             }
             hook.hud.ingest_live_claude_history(row)
         });
@@ -5529,10 +5571,16 @@ impl ShellOwner {
         }
     }
 
-    fn apply_hook(
+    #[cfg(all(test, target_os = "macos"))]
+    fn apply_hook(&mut self, scope: Scope, observation: Observation, events: &mut Vec<OwnerEvent>) {
+        self.apply_hook_at(scope, observation, Instant::now(), events);
+    }
+
+    fn apply_hook_at(
         &mut self,
         scope: Scope,
         mut observation: Observation,
+        received_at: Instant,
         events: &mut Vec<OwnerEvent>,
     ) {
         let Some(shell) = self.shells.get_mut(&scope.session_id).filter(|shell| {
@@ -5550,7 +5598,7 @@ impl ShellOwner {
             return;
         };
         if hook.codex.is_some() {
-            self.apply_codex_hook(scope, observation, events);
+            self.apply_codex_hook(scope, observation, received_at, events);
             return;
         }
         if hook.permission_identity_error.is_some() {
@@ -5630,7 +5678,8 @@ impl ShellOwner {
                     .is_some_and(ResumeMonitor::tracks_restore))
         {
             // A newly launched child can send a hook and then immediately exit.
-            hook.pending_startup_observations.push((scope, observation));
+            hook.pending_startup_observations
+                .push((scope, observation, received_at));
             return;
         }
         if first_fresh_identity {
@@ -5763,6 +5812,8 @@ impl ShellOwner {
                 hook.claude_transcript_poll = None;
                 hook.claude_observed_title = None;
                 hook.claude_live = LiveTranscript::default();
+                hook.claude_waiting_since_ms = None;
+                hook.claude_transcript_activity_at_ms = None;
                 hook.hud.ingest_live_claude_history(None);
                 hook.hud.publish_transcript_context();
                 let mut payload = commit.result.clone();
@@ -5791,13 +5842,23 @@ impl ShellOwner {
                 .resume
                 .as_ref()
                 .is_some_and(|resume| resume.permission_respawn);
-        let update_work_status = notification.as_ref().is_some_and(|(_, received_at)| {
-            !confirms
-                && hook
-                    .last_submission
-                    .is_none_or(|submitted| submitted <= *received_at)
-        });
-        if let Some((notification, _)) = notification {
+        // Worker events and HTTP hooks arrive on separate queues. A queued
+        // hook must not overwrite a newer submission already applied above it.
+        let after_submission = hook
+            .last_submission
+            .is_none_or(|submitted| submitted <= received_at);
+        if let Some(notification) = notification {
+            let update_work_status = !confirms && after_submission;
+            if update_work_status {
+                // Transcript polling can catch up on old rows after a wait starts.
+                // Compare provider message timestamps to the notice's receipt time.
+                hook.claude_waiting_since_ms = notification
+                    .received_at
+                    .duration_since(UNIX_EPOCH)
+                    .ok()
+                    .filter(|_| notification.kind != NotificationKind::Completed)
+                    .map(|at| at.as_millis() as f64);
+            }
             let time = now();
             let id = (self.next_id)();
             let commit = sessions::publish_claude_notification(
@@ -5824,11 +5885,9 @@ impl ShellOwner {
                     format!("persist provider hook notification: {error:#}"),
                 ),
             }
-            // Worker events and HTTP hooks arrive on separate queues. A queued
-            // hook must not overwrite a newer submission already applied above it.
             if update_work_status
                 && let Err(error) = self.set_work_status(&scope.session_id, events, |current| {
-                    notification.kind.work_status(current)
+                    Some(notification.kind.work_status(current))
                 })
             {
                 diagnostic(
@@ -5837,18 +5896,47 @@ impl ShellOwner {
                     format!("persist provider hook work status: {error:#}"),
                 );
             }
+        } else if after_submission
+            && !permission_confirmed
+            && matches!(
+                hook_event,
+                "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "PostToolUseFailure"
+            )
+        {
+            self.recover_claude_work(&scope.session_id, events);
         }
         if confirms || matches!(hook_event, "UserPromptSubmit" | "Stop") {
             self.observe_claude_transcript(&scope.session_id, events);
         }
         if permission_confirmed
-            && let Err(error) = self.set_work_status(&scope.session_id, events, |_| "idle")
+            && let Err(error) = self.set_work_status(&scope.session_id, events, |_| Some("idle"))
         {
             diagnostic(
                 events,
                 &scope.session_id,
                 format!("persist permission respawn work status: {error:#}"),
             );
+        }
+    }
+
+    fn recover_claude_work(&mut self, session_id: &str, events: &mut Vec<OwnerEvent>) {
+        match self.set_work_status(session_id, events, |current| {
+            (current == "needs-input").then_some("running")
+        }) {
+            Ok(()) => {
+                if let Some(hook) = self
+                    .shells
+                    .get_mut(session_id)
+                    .and_then(|s| s.hook.as_mut())
+                {
+                    hook.claude_waiting_since_ms = None;
+                }
+            }
+            Err(error) => diagnostic(
+                events,
+                session_id,
+                format!("persist resumed provider work status: {error:#}"),
+            ),
         }
     }
 
@@ -5870,6 +5958,7 @@ impl ShellOwner {
         &mut self,
         scope: Scope,
         mut observation: Observation,
+        received_at: Instant,
         events: &mut Vec<OwnerEvent>,
     ) {
         let shell = self
@@ -5883,7 +5972,8 @@ impl ShellOwner {
         if shell.provider_startup_pending {
             // Keep the same early-exit fence as a Shell-to-Claude promotion.
             if hook.pending_startup_observations.len() < HOOK_QUEUE_CAPACITY {
-                hook.pending_startup_observations.push((scope, observation));
+                hook.pending_startup_observations
+                    .push((scope, observation, received_at));
             }
             return;
         }
@@ -5946,7 +6036,7 @@ impl ShellOwner {
                 hook.observe_rescue_tool(observation.event, &raw, &shell.cwd, time);
                 hook.hud.ingest_provider(&raw, time);
             }
-            let notification = observation.notification.map(|(notice, _)| notice.payload());
+            let notification = observation.notification.map(|notice| notice.payload());
             self.apply_codex_effect(
                 &scope.session_id,
                 &scope.run_id,
@@ -6319,7 +6409,7 @@ impl ShellOwner {
         hook_notification: Option<Value>,
         events: &mut Vec<OwnerEvent>,
     ) {
-        if let Err(error) = self.set_work_status(session_id, events, |_| effect.status) {
+        if let Err(error) = self.set_work_status(session_id, events, |_| Some(effect.status)) {
             diagnostic(
                 events,
                 session_id,
@@ -6551,9 +6641,12 @@ impl ShellOwner {
                 }
                 if let Some(hook) = &mut shell.hook {
                     hook.last_submission = Some(*submitted_at);
+                    hook.claude_waiting_since_ms = None;
                     hook.context_guard.note_activity(now() as f64);
                 }
-                if let Err(error) = self.set_work_status(&event.session_id, events, |_| "running") {
+                if let Err(error) =
+                    self.set_work_status(&event.session_id, events, |_| Some("running"))
+                {
                     diagnostic(
                         events,
                         &event.session_id,
@@ -6755,7 +6848,7 @@ impl ShellOwner {
             if status == "error" {
                 self.flush_summary(id, events);
             }
-            if let Err(error) = self.set_work_status(id, events, |_| &status) {
+            if let Err(error) = self.set_work_status(id, events, |_| Some(&status)) {
                 diagnostic(events, id, format!("persist Shell work status: {error:#}"));
             }
         }
@@ -6797,7 +6890,7 @@ impl ShellOwner {
         &mut self,
         id: &str,
         events: &mut Vec<OwnerEvent>,
-        next_status: impl FnOnce(&str) -> &'a str,
+        next_status: impl FnOnce(&str) -> Option<&'a str>,
     ) -> Result<()> {
         let Some(current): Option<String> = self
             .connection
@@ -6810,7 +6903,9 @@ impl ShellOwner {
         else {
             return Ok(());
         };
-        let status = next_status(&current);
+        let Some(status) = next_status(&current) else {
+            return Ok(());
+        };
         if current == status {
             return Ok(());
         }
@@ -6971,7 +7066,7 @@ impl ShellOwner {
         )?;
         events.push(OwnerEvent::Domain(commit));
         if storage_ended {
-            self.set_work_status(id, events, |_| "exited")?;
+            self.set_work_status(id, events, |_| Some("exited"))?;
             self.shells
                 .get_mut(id)
                 .expect("registered Shell exit")
@@ -7072,7 +7167,7 @@ impl ShellOwner {
                 );
             }
         } else if startup_failed {
-            self.set_work_status(id, events, |_| "error")?;
+            self.set_work_status(id, events, |_| Some("error"))?;
         }
         Ok(())
     }
@@ -7821,6 +7916,14 @@ mod provider_tests {
     fn assert_provider_work_status(owner: &mut ShellOwner, scope: &Scope) -> Result<()> {
         let session = &scope.session_id;
         let mut events = Vec::new();
+        let status_write_count = |owner: &ShellOwner| -> Result<i64> {
+            Ok(owner.connection.query_row(
+                "SELECT COUNT(*) FROM command_deduplication WHERE command_type='session.work-status'",
+                [],
+                |row| row.get(0),
+            )?)
+        };
+        let initial_status_writes = status_write_count(owner)?;
         let hook = |event, message| {
             let payload =
                 json!({"hook_event_name": event, "message": message, "session_id": "first-id"});
@@ -7841,10 +7944,9 @@ mod provider_tests {
         assert_eq!(running.0, "running");
         submit(owner, &mut events);
         assert_eq!(work_state(owner, session)?, running);
-        let mut stale_stop = hook("Stop", "");
-        stale_stop.notification.as_mut().unwrap().1 -= Duration::from_millis(1);
+        let stale_at = Instant::now() - Duration::from_millis(1);
         submit(owner, &mut events);
-        owner.apply_hook(scope.clone(), stale_stop, &mut events);
+        owner.apply_hook_at(scope.clone(), hook("Stop", ""), stale_at, &mut events);
         assert_eq!(work_state(owner, session)?, running);
 
         owner.apply_hook(scope.clone(), hook("Stop", ""), &mut events);
@@ -7854,6 +7956,7 @@ mod provider_tests {
         let idle = work_state(owner, session)?;
         assert_eq!(idle.0, "idle");
         owner.apply_hook(scope.clone(), hook("Stop", ""), &mut events);
+        owner.apply_hook(scope.clone(), hook("PostToolUse", ""), &mut events);
         assert_eq!(work_state(owner, session)?, idle);
         owner.apply_hook(scope.clone(), hook("PermissionRequest", ""), &mut events);
         assert_eq!(work_state(owner, session)?.0, "needs-input");
@@ -7864,7 +7967,15 @@ mod provider_tests {
             hook("Notification", "Awaiting input"),
             &mut events,
         );
-        assert_eq!(work_state(owner, session)?.0, "needs-input");
+        let waiting = work_state(owner, session)?;
+        assert_eq!(waiting.0, "needs-input");
+        owner.apply_hook_at(
+            scope.clone(),
+            hook("PostToolUse", ""),
+            stale_at,
+            &mut events,
+        );
+        assert_eq!(work_state(owner, session)?, waiting);
 
         owner
             .connection
@@ -7884,6 +7995,8 @@ mod provider_tests {
             ("Notification", "Done"),
             ("Notification", "Waiting"),
             ("PermissionRequest", ""),
+            ("PreToolUse", ""),
+            ("PostToolUse", ""),
         ] {
             owner.apply_hook(scope.clone(), hook(event, message), &mut events);
             assert_eq!(work_state(owner, session)?, error);
@@ -7910,12 +8023,10 @@ mod provider_tests {
                 "running",
             ]
         );
-        let writes: i64 = owner.connection.query_row(
-            "SELECT COUNT(*) FROM command_deduplication WHERE command_type='session.work-status'",
-            [],
-            |row| row.get(0),
-        )?;
-        assert_eq!(writes, committed_statuses.len() as i64);
+        assert_eq!(
+            status_write_count(owner)? - initial_status_writes,
+            committed_statuses.len() as i64
+        );
 
         let (reply, result) = mpsc::channel();
         owner.send(
@@ -7934,8 +8045,79 @@ mod provider_tests {
         assert_eq!(exited.0, "exited");
         let before_exit_hook = notification_count(owner)?;
         owner.apply_hook(scope.clone(), hook("Stop", ""), &mut events);
+        owner.apply_hook(scope.clone(), hook("PostToolUse", ""), &mut events);
         assert_eq!(work_state(owner, session)?, exited);
         assert_eq!(notification_count(owner)?, before_exit_hook);
+        Ok(())
+    }
+
+    fn assert_claude_waiting_recovery(
+        owner: &mut ShellOwner,
+        session: &str,
+        post: impl Fn(&str, &str) -> Result<()>,
+        append: impl Fn(Value) -> Result<()>,
+    ) -> Result<()> {
+        let mut events = Vec::new();
+        post("Notification", "Awaiting input")?;
+        owner.poll_provider_hooks(&mut events);
+        let waiting = work_state(owner, session)?;
+        assert_eq!(waiting.0, "needs-input");
+        owner.poll_provider_hooks(&mut events);
+        assert_eq!(work_state(owner, session)?, waiting);
+
+        // The fixture only posts a provider hook. No PTY input is submitted.
+        post("PostToolUse", "")?;
+        owner.poll_provider_hooks(&mut events);
+        assert_eq!(work_state(owner, session)?.0, "running");
+
+        events.clear();
+        post("Notification", "Awaiting input")?;
+        post("PreToolUse", "")?;
+        owner.poll_provider_hooks(&mut events);
+        assert_eq!(work_state(owner, session)?.0, "running");
+        assert_eq!(
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    OwnerEvent::Domain(commit) => commit.result["workStatus"].as_str(),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            ["needs-input", "running"]
+        );
+
+        post("PostToolUse", "")?;
+        post("PermissionRequest", "")?;
+        owner.poll_provider_hooks(&mut events);
+        let permission = work_state(owner, session)?;
+        assert_eq!(permission.0, "needs-input");
+        let waiting_since = owner.shells[session]
+            .hook
+            .as_ref()
+            .unwrap()
+            .claude_waiting_since_ms
+            .context("permission notice time")?;
+        let assistant = |timestamp, sidechain| {
+            json!({
+                "type": "assistant", "sessionId": "first-id", "timestamp": timestamp,
+                "isSidechain": sidechain,
+                "message": {"role": "assistant", "content": [{"type": "text", "text": "Continuing"}]}
+            })
+        };
+        append(assistant(waiting_since - 1.0, false))?;
+        append(assistant(waiting_since + 1.0, true))?;
+        owner.observe_claude_transcript(session, &mut events);
+        owner.poll_provider_hooks(&mut events);
+        assert_eq!(work_state(owner, session)?, permission);
+
+        append(assistant(waiting_since + 1.0, false))?;
+        owner.observe_claude_transcript(session, &mut events);
+        owner.poll_provider_hooks(&mut events);
+        assert_eq!(work_state(owner, session)?.0, "running");
+
+        post("Stop", "")?;
+        owner.poll_provider_hooks(&mut events);
+        assert_eq!(work_state(owner, session)?.0, "idle");
         Ok(())
     }
 
@@ -8607,24 +8789,26 @@ mod provider_tests {
                 .as_str()
                 .unwrap(),
         )?;
+        let post = |event: &str, message: &str| -> Result<()> {
+            let mut socket = TcpStream::connect(("127.0.0.1", url.port().unwrap()))?;
+            socket.set_read_timeout(Some(Duration::from_secs(3)))?;
+            let body =
+                json!({"hook_event_name": event, "session_id": "first-id", "message": message})
+                    .to_string();
+            write!(
+                socket,
+                "POST {} HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}",
+                url.path(),
+                body.len()
+            )?;
+            let mut response = String::new();
+            socket.read_to_string(&mut response)?;
+            assert!(response.starts_with("HTTP/1.1 200"));
+            Ok(())
+        };
         thread::scope(|threads| -> Result<()> {
-            let post = || -> Result<()> {
-                let mut socket = TcpStream::connect(("127.0.0.1", url.port().unwrap()))?;
-                socket.set_read_timeout(Some(Duration::from_secs(3)))?;
-                let body = r#"{"hook_event_name":"UserPromptSubmit","session_id":"first-id"}"#;
-                write!(
-                    socket,
-                    "POST {} HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}",
-                    url.path(),
-                    body.len()
-                )?;
-                let mut response = String::new();
-                socket.read_to_string(&mut response)?;
-                assert!(response.starts_with("HTTP/1.1 200"));
-                Ok(())
-            };
-            let first = threads.spawn(post);
-            let second = threads.spawn(post);
+            let first = threads.spawn(|| post("UserPromptSubmit", ""));
+            let second = threads.spawn(|| post("UserPromptSubmit", ""));
             first.join().unwrap()?;
             second.join().unwrap()?;
             Ok(())
@@ -8697,7 +8881,7 @@ mod provider_tests {
             .as_mut()
             .unwrap()
             .claude_transcript_poll = Some(Instant::now());
-        owner.poll_claude_transcripts(&mut events);
+        owner.poll_claude_transcripts(&mut events, true);
         assert_eq!(owner.session(session)?.unwrap().title, "Transcript summary");
         append(json!({"type":"ai-title","aiTitle":"Native migration"}))?;
         append(json!({"type":"assistant","message":{"content":[
@@ -8732,6 +8916,7 @@ mod provider_tests {
         assert_eq!(card.title, "My card");
         assert_eq!(card.provider_title.as_deref(), Some("New provider title"));
 
+        assert_claude_waiting_recovery(&mut owner, session, post, append)?;
         assert_provider_work_status(&mut owner, &scope)?;
         owner.retire_sessions(&[session.into()]);
         let deadline = Instant::now() + Duration::from_secs(5);

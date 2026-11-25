@@ -4317,6 +4317,12 @@ exec /bin/sleep 60
         )?;
         let result = permission_mode_result(&mut child, "plan")?;
         assert!(result.get("error").is_none(), "{result}");
+        assert_eq!(
+            db.query_row("SELECT work_status FROM sessions WHERE id=?", [&session], |row| {
+                row.get::<_, String>(0)
+            })?,
+            "idle"
+        );
         let binding = claude_binding(&db, &session)?.context("new binding")?;
         assert_eq!(binding.provider_session_id, "fresh-id");
         assert_eq!(binding.metadata["permissionMode"], "plan");
@@ -4809,6 +4815,12 @@ done
         permission_mode_result(&mut child, "plan")?
             .get("error")
             .is_none()
+    );
+    assert_eq!(
+        db.query_row("SELECT work_status FROM sessions WHERE id=?", [&session], |row| {
+            row.get::<_, String>(0)
+        })?,
+        "idle"
     );
     let runs = list_runs(&db, &session)?;
     assert_eq!(runs.len(), 3);

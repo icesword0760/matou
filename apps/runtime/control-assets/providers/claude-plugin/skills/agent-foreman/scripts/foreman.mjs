@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 
 const SCRIPT = fileURLToPath(import.meta.url);
 const RUNS = path.resolve(process.env.FOREMAN_RUN_DIR || path.join(os.homedir(), '.claude', 'agent-foreman', 'runs'));
@@ -278,6 +279,7 @@ const loadState = (task) => JSON.parse(fs.readFileSync(statePath(task), 'utf8'))
 const now = () => new Date().toISOString();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const log = (msg) => console.log(`[foreman ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}] ${msg}`);
+const execFileAsync = promisify(execFile);
 
 let publishAgentStatus = false;
 let crashHandler;
@@ -411,6 +413,7 @@ function pidAlive(pid) {
 
 const terminal = (s) => ['completed', 'failed', 'timeout', 'stopped'].includes(s.status);
 const short = (text, n) => Array.from(String(text ?? '').split(/\r?\n/)[0]).slice(0, n).join('');
+const terminalLine = (text) => text.replace(/[\p{Cc}\u2028\u2029]/gu, ' ');
 const clock = (at = now()) => new Date(at).toLocaleTimeString('zh-CN', { hour12: false });
 function duration(ms) {
   const sec = Math.max(0, Math.floor(ms / 1000));
@@ -432,6 +435,95 @@ function appendFeed(state, text) {
 function feed(state, text) {
   return appendFeed(state, `${clock()} ${text}\n`);
 }
+function identifyMatouSession() {
+  try {
+    const output = execFileSync('mt', ['identify', '--json'], {
+      encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 6000, killSignal: 'SIGKILL',
+    });
+    const { target } = JSON.parse(output);
+    if (typeof target?.ref === 'string' && target.ref && typeof target.title === 'string') {
+      return { ref: target.ref, title: target.title };
+    }
+  } catch { /* mt may be unavailable outside a Matou session. */ }
+  return null;
+}
+
+function recordExternalSend(state, { caller, at }, round) {
+  if (!caller) {
+    feed(state, '✉ 外部 send（调用者未知）');
+    return;
+  }
+  state.lastExternalSend = { caller, at };
+  feed(state, `✉ 外部 send by ${terminalLine(caller.title)}`);
+  saveState(state);
+  if (!state.ownerSession?.ref) return;
+  const payload = JSON.stringify({ ownerRef: state.ownerSession.ref, caller, at, round });
+  // The retry window can outlast the worker and must not keep a new send from starting.
+  try {
+    const notifier = spawn(process.execPath, [SCRIPT, '_notify-owner', state.task], {
+      detached: true, stdio: ['pipe', 'inherit', 'inherit'],
+    });
+    notifier.once('error', (err) => logOwnerNoticeFailure(state.task, round, err));
+    notifier.stdin.on('error', () => { /* reported by the child on launch failure */ });
+    notifier.stdin.end(payload);
+    notifier.unref();
+  } catch (err) {
+    logOwnerNoticeFailure(state.task, round, err);
+  }
+}
+
+function logOwnerNoticeFailure(task, round, err) {
+  log(`⚠ ${task} 第 ${round} 轮通知发起会话失败：${short(err.stderr || err.message, 240)}`);
+}
+
+async function ownerWorkStatus(ownerRef) {
+  try {
+    const { stdout } = await execFileAsync('mt', ['list', '--all', '--json'], {
+      encoding: 'utf8', timeout: 11_000, killSignal: 'SIGKILL', maxBuffer: 4 * 1024 * 1024,
+    });
+    const { targets } = JSON.parse(stdout);
+    const owner = targets.find((target) => target.ref === ownerRef);
+    if (!owner) return 'not-found';
+    return ['running', 'idle', 'needs-input', 'starting', 'exited', 'error'].includes(owner.workStatus) ? owner.workStatus : null;
+  } catch {
+    return null;
+  }
+}
+
+async function notifyOwner(task, { ownerRef, caller, at, round }) {
+  let workStatus = await ownerWorkStatus(ownerRef);
+  for (let retry = 0; retry < 6 && [null, 'needs-input', 'starting'].includes(workStatus); retry++) {
+    await sleep(20_000);
+    workStatus = await ownerWorkStatus(ownerRef);
+  }
+  if (workStatus === 'running' || workStatus === 'idle') {
+    const message = terminalLine(`任务 ${task} 被 ${caller.title} 用 send 重新拉起一轮（第 ${round} 轮）`);
+    try {
+      await execFileAsync('mt', ['send', ownerRef, message, '--enter'], { timeout: 15_000, killSignal: 'SIGKILL' });
+    } catch (err) {
+      logOwnerNoticeFailure(task, round, err);
+    }
+    return;
+  }
+
+  const reason = {
+    'needs-input': '所有者处于等待输入',
+    starting: '所有者处于等待输入',
+    exited: '所有者会话已退出',
+    error: '所有者会话异常',
+    'not-found': '找不到所有者会话',
+  }[workStatus] ?? '所有者状态无法确认';
+  try {
+    atomicJSON(mailPath(task, 'outcomes', `owner-notification-${round}`), { round, caller, at, ownerWorkStatus: workStatus, reason });
+  } catch (err) {
+    logOwnerNoticeFailure(task, round, err);
+  }
+  // Append one line even if the supervisor has already published the worker's result.
+  if (!feed({ task }, `✉ 外部 send（${reason}，未注入）`)) {
+    logOwnerNoticeFailure(task, round, new Error('未能写入 feed.log'));
+  }
+}
+
 function activity(state, value) {
   if (!value) return;
   if (state.waitingQuestions?.length) value = `等待回答 #${state.waitingQuestions[0]}`;
@@ -567,6 +659,11 @@ async function watch(task, offset, watchMin = 29) {
     console.log(`${clock()} ❌ ${task} 监督进程意外退出，详见 ${path.join(runDir(task), 'supervisor.log')}`);
     return 6;
   };
+  if (offset == null) {
+    for (const { at, round, caller, reason } of pendingOwnerNotifications(task)) {
+      console.log(`${clock(at)} ✉ 第 ${round} 轮由 ${terminalLine(caller.title)} 拉起（${reason}，未注入）`);
+    }
+  }
   if (heal(state) || (state.status === 'failed' && state.exitCode === 6)) return unexpectedExit();
   if (offset == null && terminal(state)) {
     process.stdout.write(finalText(state));
@@ -1023,7 +1120,7 @@ function outOfScope(before, after, state) {
 }
 
 // One codex invocation. Resolves to { status: completed|stalled|timeout|retryable|fatal, error }.
-function runTurn(state, prompt) {
+function runTurn(state, prompt, externalSend) {
   const isDsh = state.agent === 'dsh';
   const isAgy = state.agent === 'agy';
   const n = state.turns.length + 1;
@@ -1068,6 +1165,7 @@ function runTurn(state, prompt) {
     state.status = 'running';
     saveState(state);
     log(`turn ${n} started (pid ${child.pid}, ${resume ? `resume ${state.threadId}` : 'new thread'})`);
+    if (externalSend) child.once('spawn', () => recordExternalSend(state, externalSend, n));
     child.stdin.on('error', () => { /* reported via the child 'error' event */ });
     child.stdin.end(isAgy ? undefined : fullPrompt);
 
@@ -1305,12 +1403,12 @@ function runTurn(state, prompt) {
   });
 }
 
-async function runWithRetries(state, prompt) {
+async function runWithRetries(state, prompt, externalSend) {
   const o = state.options;
   for (let attempt = 0; ; attempt++) {
     const turnPrompt = attempt === 0 ? prompt
       : `上一轮因连接中断或超时没有完成。请先检查工作目录和 progress.log 的现状，不要重做已经完成的部分，然后继续完成下面这条要求：\n\n${prompt}`;
-    const result = await runTurn(state, turnPrompt);
+    const result = await runTurn(state, turnPrompt, attempt === 0 ? externalSend : null);
     if (result.status === 'completed') return finish(state, 'completed', 0);
     if (result.status === 'fatal') return finish(state, 'failed', 2, result.error);
     if (result.status === 'timeout') return finish(state, 'timeout', 4, result.error);
@@ -1362,9 +1460,10 @@ async function finish(state, status, code, error) {
 // questions/q-N.json: immutable question, number, turn, pid, waitMin, createdAt, noWait.
 // answers/a-N.json, notes/n-N.json: immutable text and createdAt; notes have their own sequence.
 // heartbeats/q-N.json: refreshed every 5 seconds; outcomes/q-N.json: answered/timedout.
+// outcomes/owner-notification-N.json: external send notice that could not be submitted safely.
 // read/answer-N.json and read/note-N.json: delivery receipts shared by ask and inbox.
 // .mailbox-lock/ serializes allocation, answers and delivery; owner.json permits dead-owner recovery.
-// Only the supervisor reads these into state.mailboxSeen and publishes state/feed events.
+// Only the supervisor reads questions, answers and notes into state.mailboxSeen.
 const mailPath = (task, kind, name) => path.join(runDir(task), kind, `${name}.json`);
 function atomicJSON(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -1377,6 +1476,11 @@ function mailFiles(task, kind) {
   const dir = path.join(runDir(task), kind);
   try { return fs.readdirSync(dir).filter((f) => f.endsWith('.json')).sort((a, b) => a.localeCompare(b, undefined, { numeric: true })).map((f) => path.join(dir, f)); }
   catch { return []; }
+}
+function pendingOwnerNotifications(task) {
+  return mailFiles(task, 'outcomes')
+    .filter((file) => /^owner-notification-\d+\.json$/.test(path.basename(file)))
+    .map(readJSON).filter(Boolean);
 }
 async function mailLock(task, fn) {
   const dir = path.join(runDir(task), '.mailbox-lock');
@@ -1609,13 +1713,17 @@ async function main() {
     process.stdout.write(content);
     return 0;
   }
-  if (!['start', 'send', 'resume', 'watch', 'status', 'stop', 'ask', 'answer', 'note', 'inbox', '_supervise', '_detach'].includes(cmd) || task == null) throw new Error(usage);
+  if (!['start', 'send', 'resume', 'watch', 'status', 'stop', 'ask', 'answer', 'note', 'inbox', '_supervise', '_detach', '_notify-owner'].includes(cmd) || task == null) throw new Error(usage);
   if (!task || task.startsWith('.') || /[\s\p{White_Space}'"`/\\\0]/u.test(task) || Array.from(task).length > 40) {
     throw new Error('任务名不能包含空格、引号或斜杠，最长 40 个字');
   }
   if (['ask', 'answer', 'note', 'inbox'].includes(cmd)) return mailboxCommand(cmd, task, opts);
   if (cmd === 'watch') return watch(task, undefined, opts.watchMin);
   if (cmd === '_detach') return detachSupervisor(task);
+  if (cmd === '_notify-owner') {
+    await notifyOwner(task, JSON.parse(await readPrompt()));
+    return 0;
+  }
   if (cmd === '_supervise') {
     publishAgentStatus = true;
     // The launcher owns the initial PID publication; never overwrite it with a stale snapshot.
@@ -1628,8 +1736,10 @@ async function main() {
     while (state.supervisorPid !== process.pid) { await sleep(20); state = loadState(task); }
     registerCrashHandlers(state);
     state.options = { ...DEFAULTS, ...state.options };
+    const externalSend = state.pendingExternalSend;
+    delete state.pendingExternalSend;
     saveState(state);
-    return runWithRetries(state, fs.readFileSync(state.pendingPrompt, 'utf8'));
+    return runWithRetries(state, fs.readFileSync(state.pendingPrompt, 'utf8'), externalSend);
   }
 
   if (cmd === 'status') {
@@ -1639,7 +1749,14 @@ async function main() {
     const last = s.turns.at(-1);
     let lastMsg = '';
     try { lastMsg = fs.readFileSync(last.files.last, 'utf8').slice(0, 2000); } catch { /* none yet */ }
-    console.log(JSON.stringify({ task, agent: s.agent || 'codex', model: s.options.model, effort: displayEffort(s), status: s.status, alive: pidAlive(s.pid), idleSeconds: idle, threadId: s.threadId, turns: s.turns.map((t) => ({ n: t.n, result: t.result ?? 'running', error: t.error })), error: s.error }, null, 2));
+    console.log(JSON.stringify({
+      task, agent: s.agent || 'codex', model: s.options.model, effort: displayEffort(s),
+      status: s.status, alive: pidAlive(s.pid), idleSeconds: idle, threadId: s.threadId,
+      turns: s.turns.map((t) => ({ n: t.n, result: t.result ?? 'running', error: t.error })),
+      error: s.error,
+      lastExternalSend: s.lastExternalSend ?? null,
+      pendingOwnerNotifications: pendingOwnerNotifications(task),
+    }, null, 2));
     if (lastMsg) console.log(`\n--- last message ---\n${lastMsg}`);
     return 0;
   }
@@ -1664,7 +1781,26 @@ async function main() {
     return 0;
   }
 
-  const previousState = cmd === 'start' ? null : loadState(task);
+  let offset;
+  if (cmd === 'start') {
+    offset = await launchRun(cmd, task, opts);
+  } else {
+    loadResumableState(task);
+    const prompt = await readPrompt(opts.message);
+    offset = await mailLock(task, () => launchRun(cmd, task, opts, prompt));
+  }
+  return opts.noWatch ? 0 : watch(task, offset, opts.watchMin);
+}
+
+function loadResumableState(task) {
+  const state = loadState(task);
+  if (pidAlive(state.supervisorPid) || pidAlive(state.pid)) throw new Error(`Task ${task} 仍在运行 (still running).`);
+  if (!state.threadId) throw new Error(`Task ${task} has no thread id yet; start it again under a new name.`);
+  return state;
+}
+
+async function launchRun(cmd, task, opts, prompt) {
+  const previousState = cmd === 'start' ? null : loadResumableState(task);
   if (previousState) heal(previousState);
   const configDefaults = cmd === 'start' ? readDefaultsConfig().defaults : {};
   const roles = readMatouRolesConfig(configDefaults.agent);
@@ -1686,7 +1822,6 @@ async function main() {
   if (opts.agent && opts.agent !== agent) throw new Error(`Task ${task} uses --agent ${agent}; cannot switch agents on resume.`);
   if (agent === 'codex') checkUserConfig(task);
   let state;
-  let prompt;
   if (cmd === 'start') {
     if (!opts.cd) throw new Error(usage);
     if (!fs.existsSync(opts.cd) || !fs.statSync(opts.cd).isDirectory()) throw new Error(`Work dir does not exist: ${opts.cd}`);
@@ -1699,10 +1834,8 @@ async function main() {
     if (agent === 'codex' && speed != null) state.options.speedOverride = speed;
     try { state.options.gitRoot = execFileSync('git', ['-C', opts.cd, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { state.options.gitRoot = null; }
     prompt = await readPrompt(brief);
-  } else if (cmd === 'resume' || cmd === 'send') {
+  } else {
     state = previousState;
-    if (pidAlive(state.supervisorPid) || pidAlive(state.pid)) throw new Error(`Task ${task} 仍在运行 (still running).`);
-    if (!state.threadId) throw new Error(`Task ${task} has no thread id yet; start it again under a new name.`);
     if (roles) {
       for (const key of SUPERVISION_FIELDS) if (roles[key] != null) state.options[key] = roles[key];
     }
@@ -1713,9 +1846,6 @@ async function main() {
     }
     if (opts.model != null) delete state.options.modelRequest;
     if (opts.fullAccess != null) state.options.fullAccess = opts.fullAccess;
-    prompt = await readPrompt(opts.message);
-  } else {
-    throw new Error(usage);
   }
   state.agent = agent;
   if (roles) state.options.subDispatchPeers = configuredSubDispatchPeers(roles, agent);
@@ -1771,6 +1901,15 @@ async function main() {
   state.activity = '启动中';
   state.status = 'new';
   state.supervisorPid = null;
+  const caller = identifyMatouSession();
+  if (cmd === 'start') {
+    state.ownerSession = caller;
+  } else {
+    delete state.pendingExternalSend;
+    if (!caller || caller.ref !== state.ownerSession?.ref) {
+      state.pendingExternalSend = { caller, at: now() };
+    }
+  }
   state.pendingPrompt = path.join(runDir(task), `run-${state.turns.length + 1}.prompt.md`);
   fs.writeFileSync(state.pendingPrompt, prompt);
   saveState(state);
@@ -1786,10 +1925,11 @@ async function main() {
     failed.endedAt = now();
     failed.supervisorPid = null;
     failed.pid = null;
+    delete failed.pendingExternalSend;
     saveState(failed);
     throw err;
   }
-  return opts.noWatch ? 0 : watch(task, offset, opts.watchMin);
+  return offset;
 }
 
 async function readPrompt(file) {
