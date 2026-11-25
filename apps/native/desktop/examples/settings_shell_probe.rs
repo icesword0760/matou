@@ -1685,8 +1685,9 @@ mod probe {
             shell.probe_compaction_set_model("probe-fable", cx);
             shell.probe_compaction_set_effort("low", cx);
             assert!(shell.probe_compaction_validation().is_none());
-            shell.probe_compaction_save(cx);
         });
+        let save_before = frame(cx).bounds["compaction-save"];
+        update_shell(window, cx, |shell, _, cx| shell.probe_compaction_save(cx));
         let Command::SetClaudeModelPreferences {
             request_id,
             assignments,
@@ -1705,6 +1706,12 @@ mod probe {
         check_shell(window, cx, |shell, _| {
             assert!(shell.probe_compaction_state().unwrap().5)
         });
+        let save_after = frame(cx).bounds["compaction-save"];
+        assert_eq!(
+            save_after.right(),
+            save_before.right(),
+            "the save button must keep its right edge once the saved confirmation appears"
+        );
         update_shell(window, cx, |shell, _, cx| {
             let actions = [
                 AssignmentAction::Provider(1, "codex".into()),

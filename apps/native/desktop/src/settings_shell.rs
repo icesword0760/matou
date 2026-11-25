@@ -3421,6 +3421,7 @@ impl SettingsShell {
                 .mt(px(2.));
             let mut save = div()
                 .id("compaction-save")
+                .flex_none()
                 .h(px(32.))
                 .flex()
                 .items_center()
@@ -3453,15 +3454,14 @@ impl SettingsShell {
             } else {
                 save = save.opacity(0.55).cursor(CursorStyle::OperationNotAllowed);
             }
-            actions = actions.child(mark_provider(
-                save,
-                "compaction-save",
-                self.locale.text("保存", "Save"),
-                can_save || (draft.mode == "follow" && dirty && !saving),
-            ));
+            // The confirmation sits before the right-aligned button, so the
+            // button keeps its right edge whether or not the text is visible.
             if self.compaction.saved && draft.mode == "custom" {
                 actions = actions.child(
                     div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_align(TextAlign::Right)
                         .text_size(px(10.))
                         .line_height(relative(1.5))
                         .text_color(rgb(0x16794b))
@@ -3472,6 +3472,12 @@ impl SettingsShell {
                         )),
                 );
             }
+            actions = actions.child(mark_provider(
+                save,
+                "compaction-save",
+                self.locale.text("保存", "Save"),
+                can_save || (draft.mode == "follow" && dirty && !saving),
+            ));
             card = card.child(actions);
         }
         section = section.child(card);
