@@ -135,6 +135,7 @@ pub(super) struct WorkspaceWiring {
     card_menu_index: Option<usize>,
     split: Option<SplitTree>,
     pending_split: Option<PendingSplit>,
+    pending_shell_focus: Option<PendingShellFocus>,
     link_opener: Rc<LinkOpener>,
     copy_link: Rc<LinkCopier>,
     link_in_progress: bool,
@@ -248,6 +249,11 @@ struct PendingSplit {
     existing: HashSet<String>,
 }
 
+struct PendingShellFocus {
+    owner: String,
+    existing: Vec<String>,
+}
+
 impl WorkspaceWiring {
     pub(super) fn new(window: &Window, cx: &mut Context<Workspace>) -> Self {
         let main = window.window_handle();
@@ -280,6 +286,7 @@ impl WorkspaceWiring {
             card_menu_index: None,
             split: None,
             pending_split: None,
+            pending_shell_focus: None,
             link_opener: Rc::new(launch_link),
             copy_link: Rc::new(|url, cx| {
                 cx.write_to_clipboard(ClipboardItem::new_string(url.to_owned()))
@@ -703,6 +710,53 @@ impl Workspace {
             }
             cx.notify();
         }
+    }
+
+    pub(super) fn record_pending_shell_focus(&mut self) {
+        self.wiring.pending_shell_focus =
+            self.carousel_owner.clone().map(|owner| PendingShellFocus {
+                owner,
+                existing: self.order.clone(),
+            });
+    }
+
+    pub(super) fn clear_pending_shell_focus(&mut self) {
+        self.wiring.pending_shell_focus = None;
+    }
+
+    pub(super) fn finish_pending_shell_focus(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(request) = &self.wiring.pending_shell_focus else {
+            return;
+        };
+        if self.carousel_owner.as_ref() != Some(&request.owner) {
+            self.clear_pending_shell_focus();
+            return;
+        }
+        let Some(new) = self.focused.as_ref().filter(|id| {
+            !request.existing.contains(id)
+                && self.order.contains(id)
+                && self
+                    .graph_node(id)
+                    .is_some_and(|node| node["currentMode"] == "shell")
+        }) else {
+            return;
+        };
+        self.wiring.pending_shell_focus = None;
+        // Mounting the new card can leave focus on the previous UI. Reassert
+        // the create intent after the authoritative graph update so either
+        // entry point leaves the new shell ready for keyboard input.
+        if self.wiring_available()
+            && !self.wiring.board_open
+            && !self.provider_restore_hides_terminal(new)
+            && let Some(terminal) = self.terminals.get(new)
+        {
+            terminal.read(cx).focus.focus(window);
+        }
+        cx.notify();
     }
 
     fn focus_split_pane(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {

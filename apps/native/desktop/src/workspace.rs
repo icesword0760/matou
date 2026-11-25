@@ -5193,6 +5193,7 @@ impl Workspace {
             }
             Event::StorageCommandRejected { message, .. } => {
                 self.clear_pending_split();
+                self.clear_pending_shell_focus();
                 self.fail_pending_forks(&message);
                 self.fail_pending_permission_modes(&message, cx);
                 self.fail_pending_loader_commands(message);
@@ -5486,8 +5487,10 @@ impl Workspace {
                 }
                 if fresh_ready {
                     self.clear_pending_split();
+                    self.clear_pending_shell_focus();
                 } else {
                     self.finish_pane_split(window, cx);
+                    self.finish_pending_shell_focus(window, cx);
                 }
                 if fresh_ready {
                     self.session_frames.clear();
@@ -6165,6 +6168,7 @@ impl Workspace {
             }
             Event::Diagnostic(message) => {
                 self.clear_pending_split();
+                self.clear_pending_shell_focus();
                 if !self.domain_ready && message == INVALID_RECOVERY_MARKER_DIAGNOSTIC {
                     // Keep the error visible across automatic startup attempts.
                     self.invalid_recovery_marker = true;
@@ -9283,7 +9287,10 @@ impl Workspace {
             .is_ok()
         {
             self.clear_pending_split();
+            self.record_pending_shell_focus();
             cx.notify();
+        } else {
+            self.clear_pending_shell_focus();
         }
     }
 

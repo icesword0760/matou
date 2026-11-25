@@ -2107,6 +2107,61 @@ mod workspace {
         println!("carousel narrow: compact width, no hover elevation or follow");
     }
 
+    fn verify_shell_creation_focus(cx: &mut AsyncApp) {
+        let (window, sink) = open_probe_at(cx, 1260.);
+        let assert_terminal_focused = |cx: &mut AsyncApp, id: &str| {
+            window
+                .update(cx, |view, window, cx| {
+                    assert!(view.terminals[id].read(cx).focus.is_focused(window), "{id}");
+                })
+                .unwrap();
+        };
+        window
+            .update(cx, |view, window, _| {
+                assert!(view.control_focus["sidebar-board"].is_focused(window));
+            })
+            .unwrap();
+        let toolbar = draw(window.into(), cx)["create-shell"].center();
+        click(window.into(), cx, MouseButton::Left, toolbar);
+        assert!(std::iter::from_fn(|| sink.try_recv().ok()).any(|command|
+            matches!(command, Command::CreateShellSibling { scene_id, source_session_id, parent_session_id: None }
+                if scene_id == "main" && source_session_id == A)));
+        publish_shell(window, cx, "new-float");
+        let bounds = draw(window.into(), cx);
+        assert!(!bounds.contains_key("split-canvas"));
+        assert_terminal_focused(cx, "new-float");
+        press(window, cx, "enter");
+        let commands: Vec<_> = std::iter::from_fn(|| sink.try_recv().ok()).collect();
+        assert!(
+            commands
+                .iter()
+                .all(|command| !matches!(command, Command::CreateShellSibling { .. }))
+        );
+        assert!(commands.iter().any(|command| matches!(command,
+            Command::Input { session_id, bytes, .. } if session_id == "new-float" && bytes == b"\r"
+        )));
+        println!(
+            "shell creation: toolbar focuses the new floating terminal and Enter sends input without creating another card"
+        );
+
+        window
+            .update(cx, |view, window, _| {
+                window.focus(&view.control_focus["sidebar-board"]);
+            })
+            .unwrap();
+        press(window, cx, "cmd-d");
+        assert!(std::iter::from_fn(|| sink.try_recv().ok()).any(|command|
+            matches!(command, Command::CreateShellSibling { scene_id, source_session_id, parent_session_id: None }
+                if scene_id == "main" && source_session_id == "new-float")));
+        publish_shell(window, cx, "new-keyboard");
+        draw(window.into(), cx);
+        assert_terminal_focused(cx, "new-keyboard");
+        println!("shell creation: Cmd+D focuses the new terminal");
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+    }
+
     async fn verify_carousel_and_zoom(cx: &mut AsyncApp, root: &std::path::Path) {
         let (window, sink) = open_probe_at(cx, 1260.);
         let toolbar = draw(window.into(), cx)["create-shell"].center();
@@ -4121,6 +4176,7 @@ mod workspace {
                     }
                     return;
                 }
+                verify_shell_creation_focus(cx);
                 verify_sidebar_return(cx);
                 verify(cx, &fixture_root).await;
                 verify_card_headers(cx);
