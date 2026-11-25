@@ -11,7 +11,7 @@ use std::{
         mpsc::{self, Receiver, SyncSender, TrySendError},
     },
     thread::{self, JoinHandle},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use anyhow::{Context, Result, ensure};
@@ -673,6 +673,7 @@ impl ProviderHookServer {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(listener) = self.listener.take() {
             let _ = listener.join();
+            crate::context_guard::store::flush_saved_stats();
         }
     }
 }
@@ -1040,8 +1041,9 @@ fn evaluate_hook_fail_open(
     profile: LaunchProfile,
     session_id: &str,
     payload: &Value,
+    budget: Duration,
 ) -> HookEvaluation {
-    let deadline = Instant::now() + HOOK_DECISION_BUDGET;
+    let deadline = Instant::now() + budget;
     let (tx, rx) = mpsc::sync_channel(1);
     let interceptor = Arc::clone(interceptor);
     let data_root = data_root.to_path_buf();
@@ -1062,7 +1064,7 @@ fn evaluate_hook_fail_open(
     let wait = if profile == LaunchProfile::ClaudeCode {
         deadline.saturating_duration_since(Instant::now())
     } else {
-        HOOK_DECISION_BUDGET
+        budget
     };
     rx.recv_timeout(wait)
         .unwrap_or_else(|_| HookEvaluation::allow())
@@ -1091,8 +1093,8 @@ fn handle_request(
         "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     ).is_ok() {
-        if let Ok((decision, Some(session_id))) = result {
-            interceptor.record_claude_replacement(&session_id, &decision);
+        if let Ok((decision, Some((data_root, session_id)))) = result {
+            interceptor.record_delivered_savings(data_root, &session_id, decision, SystemTime::now());
         }
     }
 }
@@ -1108,7 +1110,7 @@ fn read_request(
     interceptor: &Arc<HookInterceptor>,
     send: &SyncSender<HookMessage>,
     deadline: Instant,
-) -> HttpResult<(HookEvaluation, Option<String>)> {
+) -> HttpResult<(HookEvaluation, Option<(PathBuf, String)>)> {
     let mut reader = BufReader::new(DeadlineRead { socket, deadline });
     let mut header_budget = MAX_HEADERS;
     let first = read_line(&mut reader, &mut header_budget)?;
@@ -1255,10 +1257,12 @@ fn read_request(
                 profile,
                 &session_id,
                 &payload_val,
+                HOOK_DECISION_BUDGET,
             );
             Ok((
                 decision,
-                (profile == LaunchProfile::ClaudeCode).then_some(session_id),
+                // Only the Claude route currently consumes these response shapes.
+                (profile == LaunchProfile::ClaudeCode).then_some((data_root, session_id)),
             ))
         }
         Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
@@ -1373,7 +1377,7 @@ mod tests {
     #[test]
     fn claude_http_replacement_counts_the_persisted_preview_once_and_keeps_the_full_log()
     -> Result<()> {
-        use crate::context_guard::store::ContextGuardStore;
+        use crate::context_guard::store::{ContextGuardStore, get_saved_stats};
         use matou_native_core::context_optimizer_config::{
             AgentOptimizerSettings, ContextOptimizerConfig,
         };
@@ -1423,6 +1427,11 @@ mod tests {
         assert_eq!(server.saved_noise_bytes("session"), saved);
         assert_eq!(claude_hook_reply(&server, &run, &payload)?, response);
         assert_eq!(server.saved_noise_bytes("session"), saved);
+        let stats = serde_json::to_value(get_saved_stats(root.path(), SystemTime::now()))?;
+        assert_eq!(
+            stats["agents"]["claude-code"],
+            json!({"bytes7d": saved, "events7d": 1})
+        );
         let store = ContextGuardStore::open(root.path())?;
         assert_eq!(store.list_session_logs("session", 10)?.len(), 1);
         assert_eq!(store.get_full_log("log_0001")?, Some(full_log));
@@ -1438,6 +1447,187 @@ mod tests {
             store.get_full_log("log_0002")?.as_deref(),
             Some("L".repeat(30_000).as_str())
         );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stats_command_counts_delivered_replacement_and_read_dedup_once() -> Result<()> {
+        use crate::host::{Command, Event, LaunchOptions, OfflineFixtures, RuntimeHost};
+        use matou_native_core::context_optimizer_config::{
+            AgentOptimizerSettings, ContextOptimizerConfig,
+        };
+
+        let root = tempfile::tempdir()?;
+        let data_root = root.path().join("data");
+        let mut runtime = RuntimeHost::start_with_offline_fixtures(
+            LaunchOptions {
+                data_root: data_root.clone(),
+                workspace: root.path().to_owned(),
+                shell_home: root.path().to_owned(),
+                shell: "/bin/sh".into(),
+            },
+            OfflineFixtures::default(),
+        )?;
+        let read_stats = |request_id| -> Result<Value> {
+            runtime
+                .commands
+                .send(Command::GetContextOptimizerStats { request_id })
+                .map_err(|_| anyhow::anyhow!("runtime closed before the stats command"))?;
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                match runtime.events.try_recv() {
+                    Ok(Event::Graph(value))
+                        if value["type"] == "contextOptimizerStatsResult"
+                            && value["requestId"] == request_id =>
+                    {
+                        return Ok(value["result"].clone());
+                    }
+                    Ok(Event::Diagnostic(message)) => anyhow::bail!("{message}"),
+                    Ok(_) => {}
+                    Err(async_channel::TryRecvError::Empty) if Instant::now() < deadline => {
+                        thread::sleep(Duration::from_millis(2));
+                    }
+                    Err(error) => return Err(error).context("waiting for stats command"),
+                }
+            }
+        };
+        let server = ProviderHookServer::start()?;
+        let run = server.register(&data_root, scope("stats"))?;
+        let config = ContextOptimizerConfig::for_data_root(&data_root);
+        let settings = AgentOptimizerSettings {
+            read_dedup: true,
+            noise_filter: true,
+            ..Default::default()
+        };
+        config.set_agent_settings("claude-code", settings.clone())?;
+        let empty = json!({"agents": {
+            "claude-code": {"bytes7d": 0, "events7d": 0},
+            "antigravity": {"bytes7d": 0, "events7d": 0},
+            "codex": {"bytes7d": 0, "events7d": 0},
+            "dsh": {"bytes7d": 0, "events7d": 0},
+        }});
+        assert_eq!(read_stats(1)?, empty);
+
+        let stdout = format!("\n  {}\n", "O".repeat(24_000));
+        let output = |id| {
+            json!({
+                "hook_event_name": "PostToolUse", "session_id": "provider-session", "tool_use_id": id,
+                "tool_name": "Bash", "tool_input": {"command": "fixture"},
+                "tool_response": {"stdout": stdout, "stderr": "", "isImage": false, "interrupted": false},
+            })
+        };
+        // An expired decision returns the allow response. An evaluated result
+        // dropped before delivery may store its log, but must not add savings.
+        let timed_out = evaluate_hook_fail_open(
+            &server.interceptor,
+            &data_root,
+            LaunchProfile::ClaudeCode,
+            "session",
+            &output("timeout"),
+            Duration::ZERO,
+        );
+        assert_eq!(timed_out, HookEvaluation::allow());
+        server.interceptor.record_delivered_savings(
+            data_root.clone(),
+            "session",
+            timed_out,
+            SystemTime::now(),
+        );
+        let discarded = server.interceptor.evaluate_hook(
+            &data_root,
+            LaunchProfile::ClaudeCode,
+            "session",
+            &output("discarded"),
+            Instant::now() + Duration::from_secs(2),
+        );
+        assert!(discarded.saved_noise_bytes > 0);
+        drop(discarded);
+        assert_eq!(claude_hook_reply(&server, &run, "{")?, "{}");
+        assert_eq!(read_stats(2)?, empty);
+
+        let text = "plain é line\n".repeat(600);
+        let read_path = root.path().join("fixture.txt");
+        fs::write(&read_path, &text)?;
+        let read = |id| {
+            json!({
+                "hook_event_name": "PreToolUse", "tool_name": "Read", "tool_use_id": id,
+                "tool_input": {"file_path": read_path},
+            })
+            .to_string()
+        };
+        assert_eq!(claude_hook_reply(&server, &run, &read("first"))?, "{}");
+        let repeated = read("repeated");
+        assert!(
+            claude_hook_reply(&server, &run, &repeated)?
+                .contains("\"permissionDecision\":\"deny\"")
+        );
+        assert_eq!(claude_hook_reply(&server, &run, &repeated)?, "{}");
+        assert!(
+            claude_hook_reply(&server, &run, &repeated)?
+                .contains("\"permissionDecision\":\"deny\"")
+        );
+
+        let mut expected = empty.clone();
+        // Read dedup uses the disk slice estimate, without the host's line labels.
+        expected["agents"]["claude-code"] = json!({"bytes7d": text.len(), "events7d": 1});
+        assert_eq!(read_stats(3)?, expected);
+
+        let delivered = output("delivered").to_string();
+        let response = claude_hook_reply(&server, &run, &delivered)?;
+        let decision: Value = serde_json::from_str(&response)?;
+        let summary = decision["hookSpecificOutput"]["updatedToolOutput"]["stdout"]
+            .as_str()
+            .context("replacement for Bash")?;
+        // Output replacement measures the rendered body after host whitespace handling.
+        let actual_saved = stdout.trim().len() - summary.trim().len();
+        assert_ne!(actual_saved, stdout.len() - summary.len());
+        assert_eq!(claude_hook_reply(&server, &run, &delivered)?, response);
+        expected["agents"]["claude-code"] =
+            json!({"bytes7d": text.len() + actual_saved, "events7d": 2});
+        assert_eq!(read_stats(4)?, expected);
+
+        config.set_agent_settings("codex", settings.clone())?;
+        let codex = server.register(
+            &data_root,
+            Scope {
+                profile: LaunchProfile::Codex,
+                ..scope("stats-codex")
+            },
+        )?;
+        let appended = claude_hook_reply(&server, &codex, &output("appended").to_string())?;
+        assert!(appended.contains("\"additionalContext\""));
+        assert_eq!(read_stats(5)?, expected);
+
+        config.set_agent_settings(
+            "claude-code",
+            AgentOptimizerSettings {
+                enabled: false,
+                ..settings.clone()
+            },
+        )?;
+        assert_eq!(claude_hook_reply(&server, &run, &read("disabled"))?, "{}");
+        assert_eq!(
+            claude_hook_reply(&server, &run, &output("disabled").to_string())?,
+            "{}"
+        );
+        assert_eq!(read_stats(6)?, expected);
+
+        config.set_agent_settings("claude-code", settings)?;
+        assert_eq!(
+            claude_hook_reply(&server, &run, &read("before-lock"))?,
+            "{}"
+        );
+        let conn = rusqlite::Connection::open(data_root.join("context_guard.sqlite"))?;
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let response = claude_hook_reply(&server, &run, &read("locked-write"))?;
+        assert!(response.contains("\"permissionDecision\":\"deny\""));
+        // Keep the DB locked until the worker has attempted the queued write.
+        assert_eq!(read_stats(7)?, empty);
+        conn.execute_batch("ROLLBACK")?;
+        assert_eq!(read_stats(8)?, empty);
+        drop(server);
+        runtime.shutdown()?;
         Ok(())
     }
 
