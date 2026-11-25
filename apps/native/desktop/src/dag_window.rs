@@ -24,6 +24,15 @@ const CLOSE_WIDTH: f32 = 28.;
 #[cfg(not(target_os = "windows"))]
 const CLOSE_INSET: f32 = 16.;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GraphRefresh {
+    Idle,
+    Reconnecting,
+    Failed,
+    Retrying,
+    Dismissed,
+}
+
 pub(super) struct DagWindow {
     graph: Value,
     owner: WindowHandle<Workspace>,
@@ -36,6 +45,10 @@ pub(super) struct DagWindow {
     locale: InterfaceLocale,
     dark: bool,
     content_focus: FocusHandle,
+    refresh_state: GraphRefresh,
+    refresh_timeout: Option<Task<()>>,
+    retry_focus: FocusHandle,
+    dismiss_focus: FocusHandle,
     #[cfg(not(target_os = "windows"))]
     close_focus: FocusHandle,
 }
@@ -121,6 +134,10 @@ impl DagWindow {
                         locale,
                         dark,
                         content_focus,
+                        refresh_state: GraphRefresh::Idle,
+                        refresh_timeout: None,
+                        retry_focus: cx.focus_handle().tab_stop(true),
+                        dismiss_focus: cx.focus_handle().tab_stop(true),
                         #[cfg(not(target_os = "windows"))]
                         close_focus: cx.focus_handle().tab_stop(true),
                     }
@@ -182,6 +199,7 @@ impl DagWindow {
                     self.canvas = canvas;
                     self.viewport = viewport;
                     self.graph = graph.clone();
+                    self.set_refresh_state(GraphRefresh::Idle, cx);
                 }
                 Err(error) => {
                     eprintln!("Retarget native session graph: {error}");
@@ -196,30 +214,42 @@ impl DagWindow {
             }
         }
         self.target = target.to_owned();
+        self.set_locale(locale, window, cx);
+        cx.notify();
+        previous_viewport
+    }
+
+    pub(super) fn set_locale(
+        &mut self,
+        locale: InterfaceLocale,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.locale != locale {
             self.locale = locale;
             window.set_window_title(Self::title(locale));
             self.canvas
                 .update(cx, |canvas, cx| canvas.set_locale(locale, cx));
+            cx.notify();
         }
-        cx.notify();
-        previous_viewport
     }
 
     pub(super) fn refresh(&mut self, graph: &Value, cx: &mut Context<Self>) {
         // Another main-window scene takes over only on an explicit open.
-        if graph["sceneId"] != self.graph["sceneId"]
-            || ![
-                "nodes",
-                "edges",
-                "focusedSessionId",
-                "layoutRevision",
-                "runtimeGeneration",
-                "eventSequence",
-            ]
-            .iter()
-            .any(|field| graph[*field] != self.graph[*field])
-        {
+        if graph["sceneId"] != self.graph["sceneId"] {
+            return;
+        }
+        let changed = [
+            "nodes",
+            "edges",
+            "focusedSessionId",
+            "layoutRevision",
+            "runtimeGeneration",
+            "eventSequence",
+        ]
+        .iter()
+        .any(|field| graph[*field] != self.graph[*field]);
+        if !changed && self.refresh_state == GraphRefresh::Idle {
             return;
         }
         let updated = DagGraph::from_snapshot(graph).and_then(|graph| {
@@ -232,10 +262,182 @@ impl DagWindow {
             })
         });
         match updated {
-            Ok(true) => self.graph = graph.clone(),
+            Ok(true) => {
+                self.graph = graph.clone();
+                self.set_refresh_state(GraphRefresh::Idle, cx);
+            }
+            Ok(false) if !changed => self.set_refresh_state(GraphRefresh::Idle, cx),
             Ok(false) => {}
-            Err(error) => eprintln!("Refresh native session graph: {error}"),
+            Err(error) => self.refresh_failed(error, cx),
         }
+    }
+
+    fn set_refresh_state(&mut self, state: GraphRefresh, cx: &mut Context<Self>) {
+        if !matches!(state, GraphRefresh::Retrying | GraphRefresh::Reconnecting) {
+            self.refresh_timeout = None;
+        }
+        if self.refresh_state != state {
+            self.refresh_state = state;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn reconnecting(&mut self, cx: &mut Context<Self>) {
+        self.refresh_timeout = None;
+        self.canvas
+            .update(cx, |view, _| view.canvas_mut().begin_reconnect());
+        self.set_refresh_state(GraphRefresh::Reconnecting, cx);
+    }
+
+    pub(super) fn refresh_failed(&mut self, error: impl std::fmt::Display, cx: &mut Context<Self>) {
+        if !matches!(
+            self.refresh_state,
+            GraphRefresh::Failed | GraphRefresh::Dismissed
+        ) {
+            eprintln!("Refresh native session graph: {error}");
+            self.set_refresh_state(GraphRefresh::Failed, cx);
+        }
+    }
+
+    pub(super) fn reconnect_refresh_needed(&self) -> bool {
+        self.refresh_state == GraphRefresh::Reconnecting
+    }
+
+    pub(super) fn requested_refresh(&self, scene: &str) -> bool {
+        self.refresh_timeout.is_some() && self.graph["sceneId"].as_str() == Some(scene)
+    }
+
+    pub(super) fn start_refresh(&mut self, cx: &mut Context<Self>) -> Option<String> {
+        if self.refresh_timeout.is_some() {
+            return None;
+        }
+        let scene = self.graph["sceneId"].as_str()?.to_owned();
+        if self.refresh_state != GraphRefresh::Reconnecting {
+            self.set_refresh_state(GraphRefresh::Retrying, cx);
+        }
+        self.refresh_timeout = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(5)).await;
+            let _ = this.update(cx, |this, cx| {
+                this.refresh_failed("Timed out waiting for the scene snapshot", cx);
+            });
+        }));
+        Some(scene)
+    }
+
+    fn retry_refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.refresh_state != GraphRefresh::Failed {
+            return;
+        }
+        window.focus(&self.canvas.read(cx).canvas_focus());
+        let owner = self.owner;
+        let child = window.window_handle().downcast::<Self>().unwrap();
+        cx.defer(move |cx| {
+            let _ = owner.update(cx, |workspace, _, cx| {
+                workspace.request_dag_refresh(child, cx)
+            });
+        });
+    }
+
+    fn dismiss_refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.refresh_state == GraphRefresh::Failed {
+            self.set_refresh_state(GraphRefresh::Dismissed, cx);
+            window.focus(&self.canvas.read(cx).canvas_focus());
+        }
+    }
+
+    fn refresh_label(&self) -> Option<&'static str> {
+        match self.refresh_state {
+            GraphRefresh::Reconnecting => Some(self.locale.text("正在重新连接…", "Reconnecting…")),
+            GraphRefresh::Failed | GraphRefresh::Retrying => {
+                Some(self.locale.text("图刷新失败", "Couldn't refresh the graph"))
+            }
+            GraphRefresh::Idle | GraphRefresh::Dismissed => None,
+        }
+    }
+
+    fn render_refresh(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let label = self.refresh_label()?;
+        let dark = self.dark;
+        let failure = matches!(
+            self.refresh_state,
+            GraphRefresh::Failed | GraphRefresh::Retrying
+        );
+        let colors = if failure {
+            if dark {
+                (0x2b1919, 0x76453f, 0xf2b7b3)
+            } else {
+                (DAG_FAILURE_BACKGROUND, DAG_FAILURE_BORDER, DAG_FAILURE_TEXT)
+            }
+        } else if dark {
+            (0x282b32, 0x464d58, 0xe4e8ee)
+        } else {
+            (0xf2f5fa, 0xcbd5e2, 0x323d4e)
+        };
+        let retrying = self.refresh_state == GraphRefresh::Retrying;
+        let actions = failure.then(|| {
+            let button = |id, label| {
+                failure_button(id)
+                    .relative()
+                    .children(super::workspace_wiring::wiring_probe_bounds(id.to_owned()))
+                    .border_color(rgb(colors.2))
+                    .text_color(rgb(colors.2))
+                    .child(ui_text(label))
+            };
+            let retry = button("dag-refresh-retry", self.locale.text("重试", "Retry"));
+            let dismiss = button("dag-refresh-dismiss", self.locale.text("关闭", "Dismiss"));
+            if retrying {
+                [retry.opacity(0.55), dismiss.opacity(0.55)]
+            } else {
+                [
+                    retry
+                        .track_focus(&self.retry_focus)
+                        .cursor_pointer()
+                        .focus(|style| style.bg(rgba(0x88888830)))
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.retry_refresh(window, cx)),
+                        ),
+                    dismiss
+                        .track_focus(&self.dismiss_focus)
+                        .cursor_pointer()
+                        .focus(|style| style.bg(rgba(0x88888830)))
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.dismiss_refresh(window, cx)),
+                        ),
+                ]
+            }
+        });
+        let (left_inset, top_inset) = if cfg!(target_os = "windows") {
+            (16., 14.)
+        } else {
+            (80., 6.)
+        };
+        Some(
+            div()
+                .debug_selector(|| "dag-refresh-banner".to_owned())
+                .relative()
+                .ml(px(left_inset))
+                .mr(px(dag_toolbar_right_inset()))
+                .mt(px(top_inset))
+                .flex_none()
+                .occlude()
+                .flex()
+                .items_center()
+                .min_h(px(34.))
+                .gap(px(8.))
+                .px(px(10.))
+                .py(px(6.))
+                .border_1()
+                .rounded(px(6.))
+                .bg(rgb(colors.0))
+                .border_color(rgb(colors.1))
+                .text_color(rgb(colors.2))
+                .text_size(px(11.))
+                .children(super::workspace_wiring::wiring_probe_bounds(
+                    "dag-refresh-banner".into(),
+                ))
+                .child(div().flex_1().min_w_0().child(ui_text(label)))
+                .children(actions.into_iter().flatten()),
+        )
     }
 
     pub(super) fn set_notifications(&mut self, sessions: &[String], cx: &mut Context<Self>) {
@@ -339,8 +541,8 @@ impl DagWindow {
     fn flush_viewport(&mut self, cx: &mut Context<Self>) {
         let read_only = self.owner.read(cx).is_ok_and(Workspace::is_read_only);
         if let Some(update) = self.take_viewport_update(read_only, cx) {
-            let _ = self.owner.update(cx, |workspace, _, cx| {
-                workspace.save_dag_viewport(update, cx);
+            let _ = self.owner.update(cx, |workspace, _, _| {
+                workspace.save_dag_viewport(update);
             });
         }
     }
@@ -348,6 +550,16 @@ impl DagWindow {
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.flush_viewport(cx);
         window.remove_window();
+    }
+
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    pub(super) fn probe_refresh_label(&self) -> Option<&'static str> {
+        self.refresh_label()
+    }
+
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    pub(super) fn probe_retry_in_flight(&self) -> bool {
+        self.refresh_state == GraphRefresh::Retrying
     }
 
     #[cfg(all(target_os = "macos", debug_assertions))]
@@ -364,6 +576,9 @@ impl Render for DagWindow {
         let root = div()
             .size_full()
             .relative()
+            .flex()
+            .flex_col()
+            .bg(self.canvas.read(cx).background())
             .track_focus(&self.content_focus)
             .capture_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                 if is_child_window_close_shortcut(&event.keystroke) {
@@ -388,6 +603,14 @@ impl Render for DagWindow {
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let modifiers = event.keystroke.modifiers;
                 match event.keystroke.key.as_str() {
+                    "enter" | "space" if this.retry_focus.is_focused(window) => {
+                        cx.stop_propagation();
+                        this.retry_refresh(window, cx);
+                    }
+                    "enter" | "space" if this.dismiss_focus.is_focused(window) => {
+                        cx.stop_propagation();
+                        this.dismiss_refresh(window, cx);
+                    }
                     "escape" => {
                         cx.stop_propagation();
                         this.close(window, cx);
@@ -403,7 +626,14 @@ impl Render for DagWindow {
                     _ => {}
                 }
             }))
-            .child(self.canvas.clone());
+            .children(self.render_refresh(cx))
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .child(self.canvas.clone()),
+            );
         #[cfg(target_os = "windows")]
         let root = root
             .child(

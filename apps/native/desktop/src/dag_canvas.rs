@@ -68,6 +68,29 @@ mod windows_toolbar_tests {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
+const MAC_TOOLBAR_LEFT: f32 = 80.;
+
+#[cfg(any(target_os = "macos", test))]
+fn mac_toolbar_widths(viewport: f32, right_inset: f32) -> (f32, f32) {
+    // Leave room for the zoom controls and both gaps. The legend can stack its
+    // entries in a narrow window while the search input stays large enough to use.
+    let available = (viewport - MAC_TOOLBAR_LEFT - right_inset - 164. - 24.).max(0.);
+    let search = (viewport * 0.44)
+        .clamp(180., 380.)
+        .min((available - 134.).max(0.));
+    (search, available - search)
+}
+
+#[cfg(test)]
+#[test]
+fn mac_toolbar_reserves_search_space_at_narrow_viewports() {
+    assert_eq!(mac_toolbar_widths(680., 56.).0, 222.);
+    assert_eq!(mac_toolbar_widths(720., 56.), (262., 134.));
+    assert_eq!(mac_toolbar_widths(900., 56.).0, 380.);
+    assert_eq!(mac_toolbar_widths(1200., 56.).0, 380.);
+}
+
 const NODE_WIDTH: f64 = 260.;
 const BASE_HEIGHT: f64 = 174.;
 const X_GAP: f64 = 110.;
@@ -1801,6 +1824,10 @@ mod view {
 
         /// Focus the canvas itself. Returns the handle so hosts can route Tab or
         /// menu-driven focus without reaching into private state.
+        pub fn background(&self) -> Rgba {
+            rgb(Palette::new(self.dark).canvas)
+        }
+
         pub fn canvas_focus(&self) -> FocusHandle {
             self.focus.clone()
         }
@@ -2122,8 +2149,13 @@ mod view {
                 windows_toolbar_widths(f32::from(window.viewport_size().width));
             #[cfg(target_os = "windows")]
             let compact_legend = legend_max_width < 320.;
-            #[cfg(not(target_os = "windows"))]
-            let search_width = (self.canvas.viewport.width * 0.44).clamp(180., 380.) as f32;
+            #[cfg(target_os = "macos")]
+            let (search_width, legend_max_width) = mac_toolbar_widths(
+                f32::from(window.viewport_size().width),
+                f32::from(self.toolbar_right_inset),
+            );
+            #[cfg(target_os = "macos")]
+            let compact_legend = legend_max_width < 395.;
             let search_focused = self.search_input.read(cx).focus.is_focused(window);
             let query = self.canvas.search.query.clone();
             let selected = self.canvas.search.selected;
@@ -2133,6 +2165,7 @@ mod view {
             let search = div()
                 .relative()
                 .min_w_0()
+                .flex_none()
                 .w(px(search_width))
                 .child(
                     div()
@@ -2140,7 +2173,11 @@ mod view {
                         .items_center()
                         .w_full()
                         .h(px(38.))
-                        .px(px(14.))
+                        .px(px(if cfg!(target_os = "macos") && search_width < 280. {
+                            8.
+                        } else {
+                            14.
+                        }))
                         .rounded(px(10.))
                         .border_1()
                         .border_color(rgb(if search_focused {
@@ -2256,9 +2293,7 @@ mod view {
                 });
 
             #[cfg(target_os = "windows")]
-            let search = search
-                .flex_none()
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+            let search = search.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
 
             let zoom_label = format!("{}%", (scale * 100.).round() as i32);
             let tooltip = |text| TooltipText::builder(text, cx.weak_entity());
@@ -2368,7 +2403,6 @@ mod view {
                         .text("Fork：继承对话", "Fork: inherits the conversation"),
                     FORK_EDGE,
                     false,
-                    #[cfg(target_os = "windows")]
                     compact_legend,
                 ))
                 .child(legend_item(
@@ -2378,10 +2412,8 @@ mod view {
                     ),
                     p.legend_derived,
                     true,
-                    #[cfg(target_os = "windows")]
                     compact_legend,
                 ));
-            #[cfg(target_os = "windows")]
             let legend = legend
                 .max_w(px(legend_max_width))
                 .when(compact_legend, |legend| {
@@ -2391,6 +2423,12 @@ mod view {
                         .items_start()
                         .gap(px(6.))
                         .w(px(legend_max_width))
+                        .when(cfg!(target_os = "macos"), |legend| {
+                            // The labels wrap at the allocated width. Reserve that height
+                            // before laying them out so their last lines stay on the surface.
+                            let height = if legend_max_width < 160. { 92. } else { 68. };
+                            legend.min_h(px(height)).line_height(px(13.))
+                        })
                 });
 
             let right = div()
@@ -2423,7 +2461,7 @@ mod view {
                 .child(right.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()));
             #[cfg(not(target_os = "windows"))]
             let toolbar = toolbar
-                .left(px(80.))
+                .left(px(MAC_TOOLBAR_LEFT))
                 .gap(px(12.))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(search)
@@ -3068,12 +3106,7 @@ mod view {
             .bg(rgb(color))
     }
 
-    fn legend_item(
-        label: &'static str,
-        color: u32,
-        dashed: bool,
-        #[cfg(target_os = "windows")] compact: bool,
-    ) -> Div {
+    fn legend_item(label: &'static str, color: u32, dashed: bool, compact: bool) -> Div {
         let item = div().flex().items_center().gap(px(5.)).child(
             canvas(
                 |_, _, _| (),
@@ -3094,12 +3127,12 @@ mod view {
             .h(px(4.))
             .flex_none(),
         );
-        #[cfg(target_os = "windows")]
         if compact {
             return item
                 .w_full()
                 .min_w_0()
-                .child(div().min_w_0().child(ui_text(label)));
+                .flex_none()
+                .child(div().flex_1().min_w_0().child(ui_text(label)));
         }
         item.child(ui_text(label))
     }

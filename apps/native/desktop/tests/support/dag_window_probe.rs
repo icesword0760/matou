@@ -23,11 +23,560 @@ impl Workspace {
         self.dag_probe = Some(OpenProbe::default());
         let main = window.window_handle().downcast::<Workspace>().unwrap();
         cx.spawn(async move |_, cx| {
-            run(main, cx).await;
+            match std::env::var("MATOU_SPLIT_DAG_I18N_PROBE").as_deref() {
+                Ok("record") => record_split(main, cx).await,
+                Ok("restore") => restore_split_and_refresh_dag(main, cx).await,
+                _ => run(main, cx).await,
+            }
             cx.update(|cx| cx.quit()).unwrap();
         })
         .detach();
     }
+}
+
+async fn wait_until(cx: &mut AsyncApp, condition: impl Fn(&mut AsyncApp) -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !condition(cx) {
+        assert!(Instant::now() < deadline, "Probe condition timed out");
+        cx.background_executor()
+            .timer(Duration::from_millis(20))
+            .await;
+    }
+}
+
+fn fixture_path(main: WindowHandle<Workspace>, cx: &AsyncApp) -> PathBuf {
+    main.read_with(cx, |view, _| {
+        view.data_root
+            .as_ref()
+            .unwrap()
+            .join("split-layout-expected.json")
+    })
+    .unwrap()
+}
+
+fn render_bounds(
+    handle: AnyWindowHandle,
+    cx: &mut AsyncApp,
+) -> (Size<Pixels>, HashMap<String, Bounds<Pixels>>) {
+    handle
+        .update(cx, |_, window, cx| {
+            window.refresh();
+            let bounds = workspace_wiring::capture_wiring_bounds(|| window.draw(cx).clear());
+            (window.viewport_size(), bounds)
+        })
+        .unwrap()
+}
+
+async fn resize_probe(handle: AnyWindowHandle, width: f32, cx: &mut AsyncApp) {
+    handle
+        .update(cx, |_, window, _| window.resize(size(px(width), px(650.))))
+        .unwrap();
+    wait_until(cx, |cx| {
+        handle
+            .update(cx, |_, window, _| window.viewport_size().width == px(width))
+            .unwrap()
+    })
+    .await;
+}
+
+async fn capture_probe(handle: AnyWindowHandle, name: &str, cx: &mut AsyncApp) {
+    let Some(dir) = std::env::var_os("MATOU_SPLIT_DAG_I18N_CAPTURE") else {
+        return;
+    };
+    let (view, native) = handle
+        .update(cx, |_, window, _| {
+            let view = appkit_view(window);
+            let native: id = unsafe { msg_send![view, window] };
+            (view, native)
+        })
+        .unwrap();
+    let window_id: NSInteger = unsafe {
+        let _: () = msg_send![native, orderFrontRegardless];
+        let _: () = msg_send![view, displayLayer: nil];
+        msg_send![native, windowNumber]
+    };
+    eprintln!("[split-dag-capture] {name} {window_id}");
+    let png = PathBuf::from(dir).join(format!("{name}.png"));
+    wait_until(cx, |_| png.is_file()).await;
+    unsafe {
+        let _: () = msg_send![native, orderOut: nil];
+    }
+}
+
+fn probe_drag_divider(main: WindowHandle<Workspace>, index: usize, ratio: f64, cx: &mut AsyncApp) {
+    let (size, bounds) = render_bounds(main.into(), cx);
+    let stage = bounds["split-canvas"];
+    let (direction, rect, position) = main
+        .read_with(cx, |view, _| {
+            let tree = view.active_split_tree().unwrap();
+            let layout = tree.layout(SplitRect {
+                x: f64::from(stage.left()),
+                y: f64::from(stage.top() + px(1.)),
+                width: f64::from(stage.size.width),
+                height: f64::from(stage.size.height - px(1.)),
+            });
+            let divider = &layout.dividers[index];
+            (divider.direction, divider.parent_bounds, divider.position)
+        })
+        .unwrap();
+    let width = f64::from(size.width);
+    let (from, to) = match direction {
+        SplitDirection::Horizontal => (
+            (width - position, rect.y + rect.height * 0.25),
+            (
+                width - (rect.x + rect.width * ratio),
+                rect.y + rect.height * 0.25,
+            ),
+        ),
+        SplitDirection::Vertical => (
+            (width - (rect.x + rect.width * 0.5), position),
+            (
+                width - (rect.x + rect.width * 0.5),
+                rect.y + rect.height * ratio,
+            ),
+        ),
+    };
+    matou_native_desktop::split_tree::with_split_drag_button_for_probe(Some(1), || {
+        pointer(main.into(), cx, from, Some(to));
+    });
+}
+
+async fn wait_for_shell(main: WindowHandle<Workspace>, cx: &mut AsyncApp) -> String {
+    let id = wait_graph(main, cx, |view| {
+        let id = view.active_level_focus()?;
+        (view.domain_ready && view.terminals.contains_key(id)).then(|| id.to_owned())
+    })
+    .await;
+    wait_until(cx, |cx| {
+        let native = AnyWindowHandle::from(main)
+            .update(cx, |_, window, cx| {
+                window.refresh();
+                window.draw(cx).clear();
+                appkit_view(window)
+            })
+            .unwrap();
+        // Hidden windows do not receive a display link from AppKit.
+        unsafe {
+            let _: () = msg_send![native, displayLayer: nil];
+        }
+        main.read_with(cx, |view, _| !view.recovery_blocked(&id))
+            .unwrap()
+    })
+    .await;
+    id
+}
+
+async fn record_split(main: WindowHandle<Workspace>, cx: &mut AsyncApp) {
+    let mut source = wait_for_shell(main, cx).await;
+    let scene = main
+        .read_with(cx, |view, _| view.active_scene_id().unwrap().to_owned())
+        .unwrap();
+    for (count, direction) in [
+        (2, SplitDirection::Horizontal),
+        (3, SplitDirection::Vertical),
+    ] {
+        main.update(cx, |view, _, cx| view.split_pane(&source, direction, cx))
+            .unwrap();
+        wait_graph(main, cx, |view| {
+            (view.active_split_tree()?.ordered_sessions().len() == count).then_some(())
+        })
+        .await;
+        source = wait_for_shell(main, cx).await;
+        eprintln!("[split-dag-i18n-probe] created splits panes={count}");
+    }
+    probe_drag_divider(main, 0, 0.63, cx);
+    probe_drag_divider(main, 1, 0.38, cx);
+    let expected = wait_graph(main, cx, |view| {
+        let owner = view.carousel_owner.as_ref()?;
+        let tree = view.active_split_tree()?;
+        let saved = view.geometry.get(owner)?;
+        let layout = tree.canvas_layout();
+        let ratio = |index: usize| {
+            layout
+                .get(index)
+                .and_then(|node: &Value| node["ratio"].as_f64())
+        };
+        (ratio(0).is_some_and(|r| (r - 0.63).abs() < 0.015)
+            && ratio(2).is_some_and(|r| (r - 0.38).abs() < 0.015)
+            && saved.geometry["splitLayout"] == layout
+            && !view.geometry_dirty.contains(owner))
+        .then_some(layout)
+    })
+    .await;
+    assert_eq!(expected[0]["direction"], "horizontal");
+    assert_eq!(expected[2]["direction"], "vertical");
+    eprintln!("[split-dag-i18n-probe] split-drag-saved {expected}");
+    std::fs::write(
+        fixture_path(main, cx),
+        serde_json::to_vec(&expected).unwrap(),
+    )
+    .unwrap();
+
+    main.update(cx, |view, _, cx| view.create_canvas(cx))
+        .unwrap();
+    wait_graph(main, cx, |view| {
+        (view.active_scene_id().is_some_and(|id| id != scene) && view.active_split_tree().is_none())
+            .then_some(())
+    })
+    .await;
+    navigate(main, cx, Command::SelectScene { scene_id: scene });
+    wait_graph(main, cx, |view| {
+        (view.active_split_tree()?.canvas_layout() == expected).then_some(())
+    })
+    .await;
+    eprintln!("[split-dag-i18n-probe] split-restored-on-canvas-return");
+}
+
+async fn restore_split_and_refresh_dag(main: WindowHandle<Workspace>, cx: &mut AsyncApp) {
+    let expected: Value =
+        serde_json::from_slice(&std::fs::read(fixture_path(main, cx)).unwrap()).unwrap();
+    let (scene, panes) = wait_graph(main, cx, |view| {
+        let tree = view.active_split_tree()?;
+        (view.domain_ready && tree.canvas_layout() == expected).then(|| {
+            (
+                view.active_scene_id().unwrap().to_owned(),
+                tree.ordered_sessions()
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>(),
+            )
+        })
+    })
+    .await;
+    assert_eq!(panes.len(), 3);
+    eprintln!("[split-dag-i18n-probe] split-restored-on-process-restart");
+    for width in [720., 900., 1200.] {
+        resize_probe(main.into(), width, cx).await;
+        let (_, bounds) = render_bounds(main.into(), cx);
+        let stage = bounds["split-canvas"];
+        let [left, top, bottom] =
+            std::array::from_fn(|index| bounds[&format!("split-pane-{}", panes[index])]);
+        assert!(
+            [left, top, bottom]
+                .iter()
+                .all(|pane| pane.is_contained_within(&stage))
+        );
+        let horizontal = f64::from(left.size.width) / f64::from(stage.size.width);
+        let vertical = f64::from(top.size.height) / f64::from(top.size.height + bottom.size.height);
+        assert!((horizontal - expected[0]["ratio"].as_f64().unwrap()).abs() < 0.01);
+        assert!((vertical - expected[2]["ratio"].as_f64().unwrap()).abs() < 0.01);
+        eprintln!(
+            "[split-dag-i18n-probe] split-viewport width={width} ratios={horizontal:.3}/{vertical:.3}"
+        );
+        capture_probe(main.into(), &format!("split-{width}"), cx).await;
+    }
+
+    main.update(cx, |view, window, cx| view.open_dag_window(window, cx))
+        .unwrap();
+    let child = child_window(main, cx);
+    frame(child, cx);
+    let good = child
+        .read_with(cx, |view, _| view.probe_canvas().0.clone())
+        .unwrap();
+    let transform = read_canvas(child, cx, |canvas| canvas.transform);
+    // The child stays scoped to its first scene even after the main window switches.
+    main.update(cx, |view, _, cx| view.create_canvas(cx))
+        .unwrap();
+    let other = wait_graph(main, cx, |view| {
+        view.active_scene_id()
+            .filter(|id| *id != scene)
+            .map(str::to_owned)
+    })
+    .await;
+    let mut invalid = good.clone();
+    invalid["edges"] = json!("fixture invalid");
+    let inject_failure = |cx: &mut AsyncApp| {
+        child
+            .update(cx, |view, _, cx| {
+                view.refresh(&invalid, cx);
+                view.refresh(&invalid, cx);
+                assert_eq!(view.probe_canvas().0, &good);
+                assert_eq!(
+                    view.probe_refresh_label(),
+                    Some("Couldn't refresh the graph")
+                );
+            })
+            .unwrap();
+    };
+    inject_failure(cx);
+    for width in [720., 900., 1200.] {
+        resize_probe(child.into(), width, cx).await;
+        let (size, bounds) = render_bounds(child.into(), cx);
+        let banner = bounds["dag-refresh-banner"];
+        let retry = bounds["dag-refresh-retry"];
+        let dismiss = bounds["dag-refresh-dismiss"];
+        assert!(banner.is_contained_within(&Bounds::new(point(px(0.), px(0.)), size)));
+        assert!(retry.is_contained_within(&banner) && dismiss.is_contained_within(&banner));
+        assert!(retry.right() < dismiss.left());
+        eprintln!(
+            "[split-dag-i18n-probe] dag-viewport width={width} banner={banner:?} controls={retry:?},{dismiss:?}"
+        );
+        capture_probe(child.into(), &format!("dag-failed-{width}"), cx).await;
+        if width == 720. {
+            search(child, cx, "shell");
+            assert!(read_canvas(child, cx, |canvas| !canvas
+                .search
+                .results
+                .is_empty()));
+            key(child.into(), cx, "cmd-a");
+            key(child.into(), cx, "backspace");
+            eprintln!(
+                "[split-dag-i18n-probe] dag-search-width=720 query returned results under failure banner"
+            );
+        }
+    }
+    let click_action = |id: &str, cx: &mut AsyncApp| {
+        let (size, bounds) = render_bounds(child.into(), cx);
+        let center = bounds[id].center();
+        click(
+            child.into(),
+            cx,
+            f64::from(size.width - center.x),
+            f64::from(center.y),
+        );
+    };
+    child
+        .update(cx, |view, window, cx| {
+            view.set_locale(InterfaceLocale::Chinese, window, cx);
+            assert_eq!(view.probe_refresh_label(), Some("图刷新失败"));
+            view.set_locale(InterfaceLocale::English, window, cx);
+        })
+        .unwrap();
+    click_action("dag-refresh-dismiss", cx);
+    assert!(
+        child
+            .read_with(cx, |view, _| view.probe_refresh_label().is_none()
+                && view.probe_canvas().0 == &good)
+            .unwrap()
+    );
+    child
+        .update(cx, |view, _, cx| view.refresh(&good, cx))
+        .unwrap();
+    inject_failure(cx);
+
+    click_action("dag-refresh-retry", cx);
+    assert!(
+        child
+            .read_with(cx, |view, _| view.probe_retry_in_flight())
+            .unwrap()
+    );
+    assert!(
+        child
+            .update(cx, |view, _, cx| view.start_refresh(cx).is_none())
+            .unwrap()
+    );
+    wait_until(cx, |cx| {
+        child
+            .read_with(cx, |view, _| view.probe_refresh_label().is_none())
+            .unwrap()
+    })
+    .await;
+    assert_eq!(read_canvas(child, cx, |canvas| canvas.transform), transform);
+    assert_eq!(
+        main.read_with(cx, |view, _| view.active_scene_id().unwrap().to_owned())
+            .unwrap(),
+        other
+    );
+    eprintln!(
+        "[split-dag-i18n-probe] dag-repeat-dismiss-retry last-graph-preserved scene-unchanged pending-duplicate-blocked"
+    );
+
+    let generation = main
+        .read_with(cx, |view, _| view.runtime_generation)
+        .unwrap();
+    crash_fixture_runtime(main, cx);
+    wait_until(cx, |cx| {
+        child
+            .read_with(cx, |view, _| {
+                view.probe_refresh_label() == Some("Reconnecting…")
+            })
+            .unwrap()
+    })
+    .await;
+    eprintln!("[split-dag-i18n-probe] dag-reconnecting observed");
+    capture_probe(child.into(), "dag-reconnecting", cx).await;
+    wait_graph(main, cx, |view| {
+        (view.domain_ready && view.runtime_generation > generation).then_some(())
+    })
+    .await;
+    wait_until(cx, |cx| {
+        child
+            .read_with(cx, |view, _| {
+                view.probe_refresh_label().is_none() && view.probe_canvas().0["sceneId"] == scene
+            })
+            .unwrap()
+    })
+    .await;
+    key(child.into(), cx, "escape");
+    assert!(
+        !cx.update(|cx| cx.windows().contains(&child.into()))
+            .unwrap()
+    );
+    main.update(cx, |view, window, cx| view.open_dag_window(window, cx))
+        .unwrap();
+    let reopened = child_window(main, cx);
+    assert_ne!(reopened.window_id(), child.window_id());
+    assert!(
+        reopened
+            .read_with(cx, |view, _| view.probe_refresh_label().is_none())
+            .unwrap()
+    );
+    key(reopened.into(), cx, "escape");
+    eprintln!(
+        "[split-dag-i18n-probe] dag-runtime-recovered background-scene-auto-refreshed clean-reopen"
+    );
+
+    let shell = wait_for_shell(main, cx).await;
+    main.update(cx, |view, window, cx| {
+        view.apply(
+            BridgeEvent::Runtime {
+                generation: view.runtime_generation,
+                event: Event::Recovery {
+                    session_id: shell.clone(),
+                    state: RecoveryState::StartFailed(String::new()),
+                    history_gap: None,
+                },
+            },
+            window,
+            cx,
+        );
+        let node = view.graph_node(&shell).unwrap();
+        let card = view.start_failure_card(&shell, node).unwrap();
+        assert_eq!(
+            (card.title, card.reason.as_ref(), card.retry, card.remove),
+            (
+                "Could not start session",
+                "The terminal process could not start",
+                "Retry launch",
+                "Remove failed session",
+            )
+        );
+        view.locale = InterfaceLocale::Chinese;
+        let card = view
+            .start_failure_card(&shell, view.graph_node(&shell).unwrap())
+            .unwrap();
+        assert_eq!(
+            (card.title, card.reason.as_ref(), card.retry, card.remove),
+            (
+                "会话启动失败",
+                "终端进程未能启动",
+                "重试启动",
+                "移除失败会话",
+            )
+        );
+        view.locale = InterfaceLocale::English;
+        cx.notify();
+    })
+    .unwrap();
+    for width in [720., 900., 1200.] {
+        resize_probe(main.into(), width, cx).await;
+        let (size, bounds) = render_bounds(main.into(), cx);
+        let failure = bounds["session-start-failure"];
+        assert!(failure.is_contained_within(&Bounds::new(point(px(0.), px(0.)), size)));
+        eprintln!("[split-dag-i18n-probe] english-start-failure width={width} banner={failure:?}");
+        capture_probe(main.into(), &format!("english-start-failed-{width}"), cx).await;
+    }
+    let order = main
+        .update(cx, |view, _, cx| {
+            cx.notify();
+            std::mem::take(&mut view.order)
+        })
+        .unwrap();
+    assert!(
+        render_bounds(main.into(), cx)
+            .1
+            .contains_key("canvas-no-sessions")
+    );
+    capture_probe(main.into(), "english-empty-canvas", cx).await;
+    main.update(cx, |view, _, cx| {
+        view.order = order;
+        cx.notify();
+    })
+    .unwrap();
+    eprintln!("[split-dag-i18n-probe] english-empty-canvas rendered");
+
+    navigate(
+        main,
+        cx,
+        Command::SelectScene {
+            scene_id: scene.clone(),
+        },
+    );
+    wait_graph(main, cx, |view| {
+        (view.active_split_tree()?.canvas_layout() == expected).then_some(())
+    })
+    .await;
+    navigate(
+        main,
+        cx,
+        Command::RemoveSessionBranch {
+            scene_id: scene.clone(),
+            session_id: panes[2].clone(),
+            scope: Default::default(),
+        },
+    );
+    wait_graph(main, cx, |view| {
+        let tree = view.active_split_tree()?;
+        (tree.ordered_sessions() == [panes[0].as_str(), panes[1].as_str()]
+            && tree.canvas_layout()[0]["ratio"] == expected[0]["ratio"])
+            .then_some(())
+    })
+    .await;
+    navigate(
+        main,
+        cx,
+        Command::RemoveSessionBranch {
+            scene_id: scene,
+            session_id: panes[1].clone(),
+            scope: Default::default(),
+        },
+    );
+    wait_graph(main, cx, |view| {
+        (view.order == [panes[0].clone()] && view.active_split_tree().is_none()).then_some(())
+    })
+    .await;
+    eprintln!(
+        "[split-dag-i18n-probe] split-pruned-missing nested-branch-collapsed remaining-ratio-preserved single-card-fallback"
+    );
+}
+
+fn crash_fixture_runtime(main: WindowHandle<Workspace>, cx: &AsyncApp) {
+    let root = main
+        .read_with(cx, |view, _| view.data_root.clone().unwrap())
+        .unwrap();
+    assert!(root.join("dag-window-probe.fixture").is_file());
+    let output = std::process::Command::new("/bin/ps")
+        .args(["-ax", "-o", "pid=,ppid=,command="])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let parent = std::process::id().to_string();
+    let listing = String::from_utf8(output.stdout).unwrap();
+    let runtimes: Vec<_> = listing
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid = fields.next()?;
+            let ppid = fields.next()?;
+            let binary = fields.next()?;
+            (ppid == parent
+                && binary.ends_with("/matou-native-runtime")
+                && line.contains(root.to_str().unwrap()))
+            .then_some(pid)
+        })
+        .collect();
+    assert_eq!(
+        runtimes.len(),
+        1,
+        "expected exactly one isolated runtime child"
+    );
+    assert!(
+        std::process::Command::new("/bin/kill")
+            .args(["-KILL", runtimes[0]])
+            .status()
+            .unwrap()
+            .success()
+    );
 }
 
 async fn run(main: WindowHandle<Workspace>, cx: &mut AsyncApp) {

@@ -1083,9 +1083,40 @@ fn loader_load_error(error: String, locale: InterfaceLocale) -> String {
     error
 }
 
+fn start_failure_reason(error: &str, locale: InterfaceLocale) -> std::borrow::Cow<'_, str> {
+    if error.is_empty() || (locale == InterfaceLocale::English && error == "终端进程未能启动")
+    {
+        return locale
+            .text("终端进程未能启动", "The terminal process could not start")
+            .into();
+    }
+    if locale == InterfaceLocale::English {
+        for (chinese, english) in [
+            ("启动准备失败：", "Launch preparation failed: "),
+            ("Codex 启动失败：", "Codex failed to start: "),
+        ] {
+            if let Some(reason) = error.strip_prefix(chinese) {
+                return format!("{english}{reason}").into();
+            }
+        }
+        for agent in ["Claude Code", "Codex", "Antigravity CLI", "DSH"] {
+            if let Some(command) = error
+                .strip_prefix("未检测到 ")
+                .and_then(|message| message.strip_prefix(agent))
+                .and_then(|message| message.strip_prefix("（命令："))
+                .and_then(|message| message.split_once('）'))
+                .map(|(command, _)| command)
+            {
+                return format!("{agent} ({command}) was not found. Install it and make sure `{command}` is in PATH.").into();
+            }
+        }
+    }
+    error.into()
+}
+
 struct StartFailureCard<'a> {
     title: &'static str,
-    reason: &'a str,
+    reason: std::borrow::Cow<'a, str>,
     retry: &'static str,
     remove: &'static str,
     blocked: Option<&'static str>,
@@ -2429,6 +2460,7 @@ pub struct Workspace {
     geometry_writes: HashMap<String, (u64, u8)>,
     graph: Value,
     dag_window: Option<WindowHandle<DagWindow>>,
+    dag_read_only_request: Option<(u64, WindowHandle<DagWindow>)>,
     dag_open_error: bool,
     #[cfg(all(target_os = "macos", debug_assertions))]
     dag_probe: Option<dag_window_probe::OpenProbe>,
@@ -3546,6 +3578,7 @@ impl Workspace {
             geometry_writes: HashMap::new(),
             graph: Value::Null,
             dag_window: None,
+            dag_read_only_request: None,
             dag_open_error: false,
             #[cfg(all(target_os = "macos", debug_assertions))]
             dag_probe: None,
@@ -3846,6 +3879,11 @@ impl Workspace {
                         Ok(locale) => {
                             this.locale_preference = preference;
                             this.locale = locale;
+                            if let Some(child) = this.dag_window {
+                                let _ = child.update(cx, |view, window, cx| {
+                                    view.set_locale(locale, window, cx)
+                                });
+                            }
                             if let Some(history) = &this.history_view {
                                 history.update(cx, |view, cx| view.set_offline_locale(locale, cx));
                             }
@@ -4467,6 +4505,10 @@ impl Workspace {
         self.environment_actions.clear();
         self.transport_connected = false;
         self.domain_ready = false;
+        if let Some(child) = self.dag_window {
+            let _ = child.update(cx, |view, _, cx| view.reconnecting(cx));
+        }
+        self.dag_read_only_request = None;
         self.session_frames.clear();
         self.first_frame_content.clear();
         self.restoring_sessions.clear();
@@ -4555,11 +4597,7 @@ impl Workspace {
             self.run_search(false, cx);
         }
     }
-    fn reconcile_transport_geometry(
-        &mut self,
-        authority: &[GeometryUpdate],
-        cx: &mut Context<Self>,
-    ) {
+    fn reconcile_transport_geometry(&mut self, authority: &[GeometryUpdate]) {
         let desired = self
             .reconnect_geometry
             .iter()
@@ -4613,16 +4651,12 @@ impl Workspace {
             } else {
                 scene.layout_revision as f64
             };
-            update.layout_revision = if dag_viewport {
-                authority
-                    .iter()
-                    .find(|saved| saved.owner_key == update.owner_key)
-                    .map_or(update.layout_revision, |saved| saved.layout_revision)
-                    .max(update.layout_revision)
-                    .max(revision)
-            } else {
-                revision
-            };
+            update.layout_revision = authority
+                .iter()
+                .find(|saved| saved.owner_key == update.owner_key)
+                .map_or(update.layout_revision, |saved| saved.layout_revision)
+                .max(update.layout_revision)
+                .max(revision);
             update.now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -4630,7 +4664,7 @@ impl Workspace {
             self.geometry
                 .insert(update.owner_key.clone(), update.clone());
             self.reconnect_geometry.remove(&update.owner_key);
-            self.write_geometry(update, 0, cx);
+            self.write_geometry(update, 0);
         }
     }
     fn close_invalid_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -4773,6 +4807,15 @@ impl Workspace {
                 return;
             }
             BridgeEvent::Connection { phase, .. } => {
+                if let Some(child) = self.dag_window {
+                    let _ = child.update(cx, |view, _, cx| match &phase {
+                        ConnectionPhase::Reconnecting => view.reconnecting(cx),
+                        ConnectionPhase::Blocked(_) | ConnectionPhase::Stopped => {
+                            view.refresh_failed("The runtime connection is unavailable", cx)
+                        }
+                        _ => {}
+                    });
+                }
                 match &phase {
                     ConnectionPhase::DatabaseRecovery { details, .. } => {
                         self.invalid_recovery_marker = false;
@@ -4937,6 +4980,18 @@ impl Workspace {
                 }
             }
             Event::ReadOnlyQueryResult { request_id, result } => {
+                if self
+                    .dag_read_only_request
+                    .as_ref()
+                    .is_some_and(|(pending, _)| *pending == request_id)
+                {
+                    let (_, child) = self.dag_read_only_request.take().unwrap();
+                    let _ = child.update(cx, |view, _, cx| match result {
+                        Ok(snapshot) => view.refresh(&snapshot.graph, cx),
+                        Err(error) => view.refresh_failed(error, cx),
+                    });
+                    return;
+                }
                 let Some(state) = self
                     .read_only
                     .as_mut()
@@ -5291,6 +5346,13 @@ impl Workspace {
                 self.refresh_terminals(window, cx);
                 self.sync_wiring_graph(window, cx);
                 if fresh_ready || fresh_read_only {
+                    if let Some(child) = self.dag_window
+                        && child
+                            .read_with(cx, |view, _| view.reconnect_refresh_needed())
+                            .unwrap_or(false)
+                    {
+                        self.request_dag_refresh(child, cx);
+                    }
                     self.refresh_egress_status(cx);
                 }
                 if fresh_ready {
@@ -5330,7 +5392,15 @@ impl Workspace {
                             .or_insert(saved);
                     }
                 } else {
-                    self.reconcile_transport_geometry(&geometry, cx);
+                    self.reconcile_transport_geometry(&geometry);
+                }
+                self.sync_split_layout();
+                if (initializing || scene_changed || fresh_ready)
+                    && self.pending_focus.is_none()
+                    && !focus_confirmed
+                    && level_focus_request.is_none()
+                {
+                    self.restore_split_focus(cx);
                 }
                 if fresh_ready && self.level_focus_request == Some(LevelFocusRequest::CardOnReady) {
                     self.level_focus_request = None;
@@ -5463,6 +5533,13 @@ impl Workspace {
                 graph,
                 is_last,
             } => {
+                if let Some(child) = self.dag_window {
+                    let _ = child.update(cx, |view, _, cx| {
+                        if view.requested_refresh(&scene_id) {
+                            view.refresh(&graph, cx);
+                        }
+                    });
+                }
                 if self.pending_close.as_ref() == Some(&scene_id) {
                     self.pending_close = None;
                     self.dialog_controls = (0..if is_last { 2 } else { 3 })
@@ -5503,12 +5580,13 @@ impl Workspace {
                         .is_some_and(|pending| pending.owner_key == update.owner_key);
                 if desired && current_attempt.is_some() && error.is_none() {
                     self.geometry_dirty.remove(&update.owner_key);
+                    self.reconnect_geometry.remove(&update.owner_key);
                 } else if desired && let Some(attempt @ 0..=2) = current_attempt {
                     let generation = self.runtime_generation;
                     let timer = cx.background_executor().timer(Duration::from_millis(120));
                     cx.spawn(async move |this, cx| {
                         timer.await;
-                        let _ = this.update(cx, |this, cx| {
+                        let _ = this.update(cx, |this, _| {
                             if this.runtime_generation == generation
                                 && this
                                     .geometry_writes
@@ -5531,16 +5609,10 @@ impl Workspace {
                                     .is_some_and(|s| s.id == retry.scene_id)
                                 {
                                     if let Some(revision) = this.graph["layoutRevision"].as_f64() {
-                                        retry.layout_revision = if retry.owner_key
-                                            == dag_window::viewport_owner_key(&retry.scene_id)
-                                        {
-                                            revision.max(retry.layout_revision)
-                                        } else {
-                                            revision
-                                        };
+                                        retry.layout_revision = revision.max(retry.layout_revision);
                                     }
                                 }
-                                this.write_geometry(retry, attempt + 1, cx);
+                                this.write_geometry(retry, attempt + 1);
                             }
                         });
                     })
@@ -6312,27 +6384,28 @@ impl Workspace {
                 update.owner_key.clone(),
                 self.motion_clock.elapsed().as_secs_f64() * 1000.,
             );
-            self.write_geometry(update, 0, cx);
+            self.write_geometry(update, 0);
         }
         let read_only = self.is_read_only();
         if let Some(child) = self.dag_window
             && let Ok(Some(update)) =
                 child.update(cx, |view, _, cx| view.take_viewport_update(read_only, cx))
         {
-            self.save_dag_viewport(update, cx);
+            self.save_dag_viewport(update);
         }
     }
 
-    fn save_dag_viewport(&mut self, update: GeometryUpdate, cx: &mut Context<Self>) {
+    fn save_dag_viewport(&mut self, update: GeometryUpdate) {
         if self.is_read_only() {
             return;
         }
         self.geometry_dirty.insert(update.owner_key.clone());
-        self.geometry.insert(update.owner_key.clone(), update.clone());
-        self.write_geometry(update, 0, cx);
+        self.geometry
+            .insert(update.owner_key.clone(), update.clone());
+        self.write_geometry(update, 0);
     }
 
-    fn write_geometry(&mut self, update: GeometryUpdate, attempt: u8, cx: &mut Context<Self>) {
+    fn write_geometry(&mut self, mut update: GeometryUpdate, attempt: u8) {
         if self.is_read_only() {
             return;
         }
@@ -6341,15 +6414,41 @@ impl Workspace {
                 .as_str()
                 .is_some_and(|id| self.is_stopped_session(id))
         {
-            self.geometry_dirty.remove(&update.owner_key);
-            self.reconnect_geometry.remove(&update.owner_key);
-            return;
+            if update.geometry.get("splitLayout").is_none() {
+                self.geometry_dirty.remove(&update.owner_key);
+                self.reconnect_geometry.remove(&update.owner_key);
+                return;
+            }
+            let mut cleaned = update.geometry.as_object().unwrap().clone();
+            for key in [
+                "focusedSessionId",
+                "anchorSessionId",
+                "anchorViewportOffset",
+            ] {
+                cleaned.remove(key);
+            }
+            if let Some(cached) = self.geometry.get_mut(&update.owner_key)
+                && cached.geometry == update.geometry
+            {
+                cached.geometry = Value::Object(cleaned.clone());
+            }
+            update.geometry = Value::Object(cleaned);
         }
         self.geometry_sequence += 1;
         let sequence = self.geometry_sequence;
         self.geometry_writes
             .insert(update.owner_key.clone(), (sequence, attempt));
-        self.send(Command::PutGeometry { sequence, update }, cx);
+        let owner = update.owner_key.clone();
+        if self
+            .commands
+            .send_at(
+                self.runtime_generation,
+                Command::PutGeometry { sequence, update },
+            )
+            .is_err()
+        {
+            self.reconnect_geometry.insert(owner);
+        }
     }
 
     fn geometry_focus(&self) -> Option<&str> {
@@ -6540,6 +6639,26 @@ impl Workspace {
                 geometry["anchorViewportOffset"] = (left - scroll).into();
             }
         }
+        if let Some(layout) = self
+            .geometry
+            .get(&owner_key)
+            .and_then(|saved| saved.geometry.get("splitLayout"))
+        {
+            geometry["splitLayout"] = layout.clone();
+        }
+        self.queue_canvas_geometry(owner_key, geometry, continuous, cx);
+    }
+
+    fn queue_canvas_geometry(
+        &mut self,
+        owner_key: String,
+        geometry: Value,
+        continuous: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(scene) = self.hierarchy.as_ref().and_then(|h| h.scene.as_ref()) else {
+            return;
+        };
         if self
             .geometry
             .get(&owner_key)
@@ -6552,7 +6671,12 @@ impl Workspace {
             owner_key: owner_key.clone(),
             layout_revision: self.graph["layoutRevision"]
                 .as_f64()
-                .unwrap_or(scene.layout_revision as f64),
+                .unwrap_or(scene.layout_revision as f64)
+                .max(
+                    self.geometry
+                        .get(&owner_key)
+                        .map_or(0., |saved| saved.layout_revision),
+                ),
             geometry,
             now: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -9036,6 +9160,29 @@ impl Workspace {
             .map(|scene| scene.id.as_str())
     }
 
+    fn request_dag_refresh(&mut self, child: WindowHandle<DagWindow>, cx: &mut Context<Self>) {
+        let Ok(Some(scene_id)) = child.update(cx, |view, _, cx| view.start_refresh(cx)) else {
+            return;
+        };
+        let command = if let Some(state) = &mut self.read_only {
+            state.navigation_sequence += 1;
+            let request_id = state.navigation_sequence;
+            self.dag_read_only_request = Some((request_id, child));
+            Command::ReadOnlyQuery {
+                request_id,
+                query: ReadOnlyQuery::Scene { scene_id },
+            }
+        } else {
+            // The existing close preview is a read-only, scene-scoped snapshot.
+            // Its graph can be used here without changing the main window's scene.
+            Command::PreviewSceneClose { scene_id }
+        };
+        if let Err(error) = self.commands.send_at(self.runtime_generation, command) {
+            self.dag_read_only_request = None;
+            let _ = child.update(cx, |view, _, cx| view.refresh_failed(error, cx));
+        }
+    }
+
     fn open_dag_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(scene) = self.active_scene_id() else {
             return;
@@ -9089,7 +9236,7 @@ impl Workspace {
             })
         {
             if let Some(update) = previous_viewport {
-                self.save_dag_viewport(update, cx);
+                self.save_dag_viewport(update);
             }
             Ok(child)
         } else {
@@ -11507,14 +11654,10 @@ impl Workspace {
             return None;
         };
         Some(StartFailureCard {
-            title: "会话启动失败",
-            reason: if error.is_empty() {
-                "终端进程未能启动"
-            } else {
-                error
-            },
-            retry: "重试启动",
-            remove: "移除失败会话",
+            title: self.locale.text("会话启动失败", "Could not start session"),
+            reason: start_failure_reason(error, self.locale),
+            retry: self.locale.text("重试启动", "Retry launch"),
+            remove: self.locale.text("移除失败会话", "Remove failed session"),
             blocked: self.launch_action_blocked_reason(id, node),
         })
     }
@@ -12054,7 +12197,8 @@ impl Workspace {
             .filter_map(|node| node["sessionId"].as_str().map(str::to_owned))
             .collect();
         let now = self.motion_clock.elapsed().as_secs_f64() * 1000.;
-        if self.carousel_owner != owner {
+        let owner_changed = self.carousel_owner != owner;
+        if owner_changed {
             self.flush_geometry(cx);
             self.carousel_owner = owner;
             self.restore_geometry = true;
@@ -12070,6 +12214,9 @@ impl Workspace {
             self.hover_baseline = None;
             self.hover_restore_at = None;
             self.carousel_scroll.set_offset(point(px(0.), px(0.)));
+        }
+        if self.sync_split_layout() && !owner_changed && self.pending_focus.is_none() {
+            self.restore_split_focus(cx);
         }
         let focus = self.level_focus().map(str::to_owned);
         for id in &self.order {
@@ -14101,7 +14248,7 @@ impl Workspace {
         let controls = &self.start_failure_controls[id];
         let dark = self.wiring_dark();
         let narrow = width - 20. <= 520.;
-        let reason = SharedString::from(card.reason.to_owned());
+        let reason = SharedString::from(card.reason.into_owned());
         let reason_tooltip = reason.clone();
         let action = |name: &str, label| {
             div()
@@ -14153,7 +14300,11 @@ impl Workspace {
             )
         };
         div()
+            .relative()
             .w_full()
+            .children(workspace_wiring::wiring_probe_bounds(
+                "session-start-failure".into(),
+            ))
             .flex_none()
             .flex()
             .flex_wrap()
@@ -14207,6 +14358,9 @@ impl Workspace {
                 div()
                     .flex_none()
                     .flex()
+                    .flex_wrap()
+                    .max_w_full()
+                    .justify_end()
                     .ml_auto()
                     .gap(px(8.))
                     .child(retry)

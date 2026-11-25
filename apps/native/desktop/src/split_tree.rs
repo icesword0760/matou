@@ -315,6 +315,87 @@ impl SplitTree {
         })
     }
 
+    /// Store a pre-order list so deeply nested splits do not increase JSON nesting.
+    pub fn canvas_layout(&self) -> Value {
+        let mut layout = Vec::new();
+        let mut pending = vec![&self.root];
+        while let Some(node) = pending.pop() {
+            match node {
+                SplitNode::Mount { session_id, .. } => layout.push(json!(session_id)),
+                SplitNode::Split {
+                    id,
+                    direction,
+                    children,
+                } => {
+                    layout.push(json!({
+                        "id": id,
+                        "direction": match direction {
+                            SplitDirection::Horizontal => "horizontal",
+                            SplitDirection::Vertical => "vertical",
+                        },
+                        "ratio": self.child_share(id, 0, children.len()),
+                    }));
+                    pending.extend(children.iter().rev());
+                }
+            }
+        }
+        Value::Array(layout)
+    }
+
+    /// Restore the native canvas layout against the current canvas membership.
+    /// Missing panes collapse only their own branch; surviving dividers keep their ratios.
+    pub fn from_canvas_layout(
+        scene_id: &str,
+        layout: &Value,
+        mut available: impl FnMut(&str) -> bool,
+    ) -> Option<Self> {
+        let mut nodes = Vec::new();
+        let mut sessions = HashSet::new();
+        let mut ratios = HashMap::new();
+        for item in layout.as_array()?.iter().rev() {
+            if let Some(session) = item.as_str() {
+                if !sessions.insert(session) {
+                    return None;
+                }
+                nodes.push(available(session).then(|| Self::mount(session)));
+                continue;
+            }
+            let id = item["id"].as_str()?;
+            let direction = match item["direction"].as_str()? {
+                "horizontal" => SplitDirection::Horizontal,
+                "vertical" => SplitDirection::Vertical,
+                _ => return None,
+            };
+            let first = nodes.pop()?;
+            let second = nodes.pop()?;
+            let subtree = match (first, second) {
+                (Some(first), Some(second)) => {
+                    let ratio = item["ratio"]
+                        .as_f64()
+                        .filter(|ratio| (MIN_RATIO..=MAX_RATIO).contains(ratio))
+                        .unwrap_or(0.5);
+                    if ratios.insert(id.to_owned(), ratio).is_some() {
+                        return None;
+                    }
+                    Some(SplitNode::Split {
+                        id: id.to_owned(),
+                        direction,
+                        children: vec![first, second],
+                    })
+                }
+                (first, second) => first.or(second),
+            };
+            nodes.push(subtree);
+        }
+        let root = nodes.pop()??;
+        (nodes.is_empty() && matches!(root, SplitNode::Split { .. })).then(|| Self {
+            scene_id: scene_id.to_owned(),
+            layout_revision: 0.,
+            root,
+            ratios,
+        })
+    }
+
     pub fn root(&self) -> &SplitNode {
         &self.root
     }
