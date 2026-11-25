@@ -603,7 +603,7 @@ mod probe {
             // before the composition has finished.
             view.set_screen(bottom.clone(), modes, None, view.scroll_request_id, cx);
             view.set_screen(history.clone(), modes, None, view.scroll_request_id, cx);
-            view.handle_key(&key, cx);
+            view.handle_key(&key, window, cx);
         })?;
         assert_eq!(events.take(), [Observed::Lines(i32::MIN)]);
         println!(
@@ -677,7 +677,7 @@ mod probe {
             view.set_input_disabled(true, cx);
             view.replace_and_mark_text_in_range(None, "a", Some(1..1), window, cx);
             assert!(view.marked_text_range(window, cx).is_none());
-            view.handle_key(&key, cx);
+            view.handle_key(&key, window, cx);
             view.replace_text_in_range(None, "字", window, cx);
             assert!(!view.composition.is_active());
             view.set_input_disabled(false, cx);

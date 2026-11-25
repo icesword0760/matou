@@ -2,6 +2,7 @@
 // Frozen references: hud/GitControlMenu.tsx, hud/EnvironmentControlMenu.tsx,
 // and TerminalHud.tsx (QuotaDetailWindows).
 use super::*;
+use crate::terminal_surface::session_history_seam::local_time::local_date_time_with_year;
 use matou_native_core::git_repo::{GitStatusDetail, LocalBranch};
 use matou_native_runtime::claude_accounts::ClaudeAccountsState;
 use matou_native_runtime::host::{GitFailure, GitReply};

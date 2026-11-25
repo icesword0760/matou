@@ -17,6 +17,11 @@ use serde_json::Value;
 
 use super::TerminalSurface;
 
+// The terminal probe includes this module without the workspace.
+#[path = "local_time.rs"]
+pub(crate) mod local_time;
+use local_time::local_date_time;
+
 pub(super) const WHEEL_SETTLE: Duration = Duration::from_millis(120);
 pub(super) const FALSE_START: Duration = Duration::from_millis(200);
 pub(super) const READ_TIMEOUT: Duration = Duration::from_secs(5);
@@ -998,7 +1003,7 @@ impl HistoryView {
                 .into_any_element();
         }
         if let Some(time) = self.compact_time {
-            let (_, time) = crate::workspace::local_date_time(time);
+            let (_, time) = local_date_time(time);
             return div()
                 .pt(style.spacing(4.))
                 .pb(style.spacing(14.))
@@ -1218,7 +1223,7 @@ impl HistoryStyle {
 }
 
 fn start_date(timestamp: u64, locale: InterfaceLocale) -> String {
-    let (date, time) = crate::workspace::local_date_time(timestamp);
+    let (date, time) = local_date_time(timestamp);
     if locale == InterfaceLocale::Chinese
         && let Some((month, day)) = date.split_once('/')
     {
