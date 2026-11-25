@@ -66,6 +66,7 @@ pub enum WorkerCommand {
     RetryStorage {
         reply: Sender<Result<()>>,
     },
+    EndStorage,
     SetEgressFrozen {
         frozen: bool,
         reply: Sender<Result<()>>,
@@ -133,6 +134,7 @@ pub struct SessionWorker {
     commands: Sender<WorkerCommand>,
     wake: SessionWaker,
     process_id: u32,
+    pub(crate) recovery_history_gap: Option<crate::history::HistoryGapCode>,
     shell_input: Arc<Mutex<ShellInput>>,
     thread: Option<JoinHandle<Result<()>>>,
 }
@@ -173,7 +175,11 @@ impl SessionWorker {
                 match Session::launch(options) {
                     Ok(mut session) => {
                         if started
-                            .send(Ok((session.waker(), session.process_id())))
+                            .send(Ok((
+                                session.waker(),
+                                session.process_id(),
+                                session.recovery_history_gap(),
+                            )))
                             .is_err()
                         {
                             return finish(&mut session, &session_id, &run_id, &events);
@@ -195,10 +201,11 @@ impl SessionWorker {
             })
             .context("start Shell session worker")?;
         match startup.recv() {
-            Ok(Ok((wake, process_id))) => Ok(Self {
+            Ok(Ok((wake, process_id, recovery_history_gap))) => Ok(Self {
                 commands,
                 wake,
                 process_id,
+                recovery_history_gap,
                 shell_input,
                 thread: Some(thread),
             }),
@@ -427,6 +434,7 @@ fn run(
                 WorkerCommand::RetryStorage { reply } => {
                     let _ = reply.send(session.retry_storage());
                 }
+                WorkerCommand::EndStorage => session.request_storage_end(),
                 WorkerCommand::SetEgressFrozen { frozen, reply } => {
                     let _ = reply.send(session.set_egress_frozen(frozen));
                 }

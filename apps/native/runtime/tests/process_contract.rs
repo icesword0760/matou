@@ -1333,6 +1333,7 @@ fn parked_startup_card_reads_its_binding_until_explicit_recovery() -> Result<()>
         if let Event::Recovery {
             session_id,
             state: RecoveryState::Deferred,
+            ..
         } = child.event(deadline, true)?
         {
             parked_ids.insert(session_id);
@@ -2742,6 +2743,7 @@ exec /bin/sleep 60
         if let Event::Recovery {
             session_id,
             state: RecoveryState::Failed(reason),
+            ..
         } = child.event(deadline, true)?
             && session_id == failed
         {
@@ -2951,6 +2953,7 @@ exec /bin/sleep 60
                 Event::Recovery {
                     session_id,
                     state: RecoveryState::StartFailed(reason),
+                    ..
                 } if session_id == child.session => {
                     let expected = expected.expect_err(&reason);
                     assert!(reason.ends_with(expected), "{scenario}: {reason}");
@@ -3417,6 +3420,7 @@ exec /bin/sleep 60
         if let Event::Recovery {
             session_id,
             state: RecoveryState::StartFailed(reason),
+            ..
         } = next.event(deadline, true)?
             && session_id == next.session
         {
@@ -3477,6 +3481,7 @@ exec /bin/sleep 60
         if let Event::Recovery {
             session_id,
             state: RecoveryState::Deferred,
+            ..
         } = next.event(deadline, true)?
             && session_id == next.session
         {
@@ -3699,6 +3704,7 @@ exec /bin/sleep 60
         if let Event::Recovery {
             session_id,
             state: RecoveryState::Failed(_),
+            ..
         } = child.event(deadline, true)?
             && session_id == child.session
         {
@@ -3926,6 +3932,7 @@ exec /bin/sleep 60
                 Event::Recovery {
                     session_id,
                     state: matou_native_runtime::host::RecoveryState::StartFailed(error),
+                    ..
                 } if session_id == child.session => bail!("{scenario}: {error}"),
                 _ => {}
             }
@@ -4853,7 +4860,9 @@ exec /bin/sleep 60
         let deadline = Instant::now() + TIMEOUT;
         let mut saw_restoring = false;
         loop {
-            if let Event::Recovery { session_id, state } = child.event(deadline, true)?
+            if let Event::Recovery {
+                session_id, state, ..
+            } = child.event(deadline, true)?
                 && session_id == session
             {
                 if state == RecoveryState::Restoring {

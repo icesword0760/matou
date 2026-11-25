@@ -427,7 +427,7 @@ mod probe {
                 assert_eq!(window.viewport_size(), size(px(1200.), px(780.)));
             })
             .unwrap();
-        assert!(expect_root(window, cx, "startup-neutral").is_empty());
+        has(&expect_root(window, cx, "startup-neutral"), "正在打开会话…");
 
         let mut details = DatabaseRecoveryDetails {
             recovery_id: String::new(),
@@ -870,14 +870,40 @@ mod probe {
             normal_incoming,
             size(px(1200.), px(780.)),
         );
-        assert!(expect_root(normal, cx, "startup-neutral").is_empty());
+        has(&expect_root(normal, cx, "startup-neutral"), "正在打开会话…");
         normal_sink.generation(1);
         normal
             .update(cx, |view, window, cx| {
                 view.change(1, ConnectionPhase::Ready, window, cx);
             })
             .unwrap();
-        assert!(expect_root(normal, cx, "startup-neutral").is_empty());
+        has(&expect_root(normal, cx, "startup-neutral"), "正在打开会话…");
+        normal_sink.read_only();
+        let labels = expect_root(normal, cx, "startup-neutral");
+        has(&labels, "无法连接运行时");
+        has(&labels, "probe read-only recovery");
+        normal_sink.reconnecting();
+        normal
+            .update(cx, |view, window, cx| {
+                view.change(1, ConnectionPhase::Reconnecting, window, cx);
+            })
+            .unwrap();
+        has(&expect_root(normal, cx, "startup-neutral"), "正在重新连接…");
+        normal_sink.generation(2);
+        normal_sink.starting();
+        normal
+            .update(cx, |view, window, cx| {
+                view.change(2, ConnectionPhase::Starting, window, cx);
+            })
+            .unwrap();
+        has(&expect_root(normal, cx, "startup-neutral"), "正在重新连接…");
+        normal_sink.generation(2);
+        normal
+            .update(cx, |view, window, cx| {
+                view.change(2, ConnectionPhase::Ready, window, cx);
+            })
+            .unwrap();
+        has(&expect_root(normal, cx, "startup-neutral"), "正在重新连接…");
         let normal_projection = Event::Ready {
             hierarchy: hierarchy.clone(),
             scenes: scenes.clone(),
@@ -886,15 +912,26 @@ mod probe {
         };
         normal
             .update(cx, |view, window, cx| {
-                view.receive(1, normal_projection, window, cx);
+                view.receive(2, normal_projection, window, cx);
                 assert!(view.workspaces_ready());
             })
             .unwrap();
         expect_root(normal, cx, "workspace-root");
         draw(normal, cx, false);
         println!(
-            "hidden normal startup roots: startup-neutral -> startup-neutral at bridge Ready -> workspace-root at projection"
+            "hidden normal startup: Opening -> Reconnecting across new attempt and bridge Ready -> workspace at projection"
         );
+        if std::env::args().any(|arg| arg == "--connection-feedback") {
+            normal
+                .update(cx, |_, window, _| window.remove_window())
+                .unwrap();
+            window
+                .update(cx, |_, window, _| window.remove_window())
+                .unwrap();
+            host.shutdown().unwrap();
+            std::fs::remove_dir_all(scratch).unwrap();
+            return;
+        }
 
         sink.generation(2);
         window

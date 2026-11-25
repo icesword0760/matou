@@ -260,6 +260,8 @@ pub struct Session {
     collector: Option<Collector>,
     delivery: Delivery,
     events: Vec<SessionEvent>,
+    recovery_history_gap: Option<crate::history::HistoryGapCode>,
+    ended_after_storage_fault: bool,
     exit_enqueued: bool,
     disposed: bool,
     closed: bool,
@@ -286,12 +288,14 @@ impl Session {
             "initial Shell PTY and terminal geometry differ"
         );
         let mut recovery_diagnostic = None;
+        let mut recovery_history_gap = None;
         let mut screen_epoch = 0;
         let [protocol_terminal, mut display_terminal] =
             if options.launch.profile != LaunchProfile::Shell {
                 let (mut terminals, mut has_history, resized) = if journal.last_sequence() > 0 {
                     let recovered = recover_screen(&options, &journal)?;
                     recovery_diagnostic = recovered.diagnostic;
+                    recovery_history_gap = recovered.history_gap;
                     screen_epoch = recovered.screen_epoch;
                     (
                         recovered.terminals,
@@ -415,6 +419,8 @@ impl Session {
                 replay_from: None,
             },
             events,
+            recovery_history_gap,
+            ended_after_storage_fault: false,
             exit_enqueued: false,
             disposed: false,
             closed: false,
@@ -423,6 +429,10 @@ impl Session {
 
     pub fn waker(&self) -> SessionWaker {
         self.waker.clone()
+    }
+
+    pub(crate) fn recovery_history_gap(&self) -> Option<crate::history::HistoryGapCode> {
+        self.recovery_history_gap
     }
 
     pub fn poll(&mut self, max_wait: Duration) -> Result<Vec<SessionEvent>> {
@@ -583,6 +593,29 @@ impl Session {
         ensure!(!self.closed, "Shell session is closed");
         self.flush_output()?;
         self.drive_gate(true)
+    }
+
+    pub(crate) fn request_storage_end(&mut self) {
+        let result = self
+            .end_after_storage_fault()
+            .map_err(|error| error.to_string());
+        self.events.push(SessionEvent::StorageEndResult {
+            result,
+            observed_at: Instant::now(),
+        });
+    }
+
+    fn end_after_storage_fault(&mut self) -> Result<()> {
+        if self.ended_after_storage_fault {
+            return Ok(());
+        }
+        ensure!(
+            !self.closed && self.gate.state() == State::Paused,
+            "Terminal storage is not faulted"
+        );
+        self.dispose()?;
+        self.ended_after_storage_fault = true;
+        Ok(())
     }
 
     pub fn set_egress_frozen(&mut self, frozen: bool) -> Result<()> {
@@ -1113,6 +1146,7 @@ impl Session {
     fn drive_gate(&mut self, retry: bool) -> Result<()> {
         let mut diagnostics = Vec::new();
         let mut exit = None;
+        let fault_code = Cell::new(StorageFaultCode::WriteFailed);
         let result = {
             let mut pauser = Pauser {
                 reasons: &mut self.pauses,
@@ -1128,7 +1162,6 @@ impl Session {
             let checkpoint = &mut self.checkpoint;
             let (_, _, cell_width_px, cell_height_px) = self.geometry;
             let events = RefCell::new(&mut self.events);
-            let fault_code = Cell::new(StorageFaultCode::WriteFailed);
             let mut persist = |record: &Record| {
                 self.journal.append(record).inspect_err(|error| {
                     fault_code.set(storage_fault_code(error));
@@ -1224,6 +1257,17 @@ impl Session {
             }
         };
         self.events.extend(diagnostics);
+        if retry
+            && self.gate.state() == State::Paused
+            && let Err(error) = &result
+        {
+            self.events.push(SessionEvent::StorageFault {
+                sequence: self.gate.last_persisted_sequence() + 1,
+                retained_bytes: self.gate.retained_bytes(),
+                code: fault_code.get(),
+                message: error.to_string(),
+            });
+        }
         if let Some((sequence, status)) = exit {
             let disposed = self.disposed;
             self.sync_checkpoint(true);
@@ -1283,8 +1327,17 @@ impl Session {
         self.reader.take();
         self.process.take();
         if let Err(error) = self.journal.close() {
-            self.events
-                .push(diagnostic(format!("close Shell journal: {error:#}")));
+            if self.gate.state() == State::Ended {
+                // An explicitly discarded queue cannot make its failing
+                // journal writable. The end result is about the run.
+                eprintln!(
+                    "close faulted terminal journal for {}: {error:#}",
+                    self.session_id
+                );
+            } else {
+                self.events
+                    .push(diagnostic(format!("close Shell journal: {error:#}")));
+            }
         }
     }
 }
@@ -1304,9 +1357,12 @@ struct RecoveredScreen {
     has_history: bool,
     resized: bool,
     diagnostic: Option<SessionEvent>,
+    history_gap: Option<crate::history::HistoryGapCode>,
 }
 
 fn recover_screen(options: &SessionOptions, journal: &SegmentJournal) -> Result<RecoveredScreen> {
+    use crate::history::HistoryGapCode;
+
     let through = journal.last_sequence();
     let domain_watermark = journal.domain_event_sequence_at_or_before(through);
     let target = options.terminal;
@@ -1378,13 +1434,20 @@ fn recover_screen(options: &SessionOptions, journal: &SegmentJournal) -> Result<
             Ok::<_, anyhow::Error>(())
         };
     let mut replay_diagnostic = None;
+    let mut history_gap = None;
     if from <= through {
+        let mut next_sequence = from;
         let replay = visit_frames(
             &options.launch.data_root,
             &options.session_id,
             from,
             Some(through),
             |record| {
+                let sequence = record.frame.sequence();
+                if sequence > next_sequence {
+                    history_gap = Some(HistoryGapCode::MissingSegment);
+                }
+                next_sequence = sequence + 1;
                 match record.frame {
                     Frame::Output { data, .. } => {
                         has_history |= !data.is_empty();
@@ -1410,7 +1473,10 @@ fn recover_screen(options: &SessionOptions, journal: &SegmentJournal) -> Result<
             },
         );
         if let Err(error) = replay {
+            history_gap = Some(HistoryGapCode::CorruptSegment);
             replay_diagnostic = Some(diagnostic(format!("recover terminal screen: {error:#}")));
+        } else if next_sequence <= through {
+            history_gap = Some(HistoryGapCode::MissingSegment);
         }
         feed_output(&mut terminals, &mut decoder, &[], true)?;
     }
@@ -1426,6 +1492,7 @@ fn recover_screen(options: &SessionOptions, journal: &SegmentJournal) -> Result<
         has_history,
         resized,
         diagnostic: replay_diagnostic,
+        history_gap,
     })
 }
 
@@ -1491,5 +1558,82 @@ fn storage_fault_code(error: &anyhow::Error) -> StorageFaultCode {
             StorageFaultCode::ReadOnly
         }
         _ => StorageFaultCode::WriteFailed,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::history::HistoryGapCode;
+    use matou_native_core::{journal::JournalOptions, pty::ShellLaunch};
+
+    #[test]
+    fn screen_recovery_preserves_readable_output_and_reports_gaps() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let options = SessionOptions {
+            session_id: "history-gap".into(),
+            launch: ShellLaunch {
+                profile: LaunchProfile::Codex,
+                argv: Vec::new(),
+                executable: PathBuf::new(),
+                cwd: root.path().into(),
+                data_root: root.path().into(),
+                inherited_env: Default::default(),
+                env: Default::default(),
+                cols: 32,
+                rows: 5,
+            },
+            terminal: TerminalOptions::new(32, 5, 8, 16),
+            journal: JournalOptions::default(),
+            restored_history: Vec::new(),
+            screen_recovery: None,
+            collect_history: false,
+        };
+        let mut journal =
+            SegmentJournal::open(root.path(), &options.session_id, options.journal.clone())?;
+        let append = |journal: &mut SegmentJournal, sequence, data: &[u8]| {
+            journal.append(&Record {
+                timestamp: 0,
+                frame: Frame::Output {
+                    sequence,
+                    data: data.to_vec(),
+                },
+            })?;
+            journal.flush()
+        };
+        append(&mut journal, 1, b"first\r\n")?;
+        assert_eq!(recover_screen(&options, &journal)?.history_gap, None);
+        append(&mut journal, 3, b"last\r\n")?;
+        let mut recovered = recover_screen(&options, &journal)?;
+        assert_eq!(recovered.history_gap, Some(HistoryGapCode::MissingSegment));
+        let screen = recovered.terminals[1].screen()?;
+        let rows: Vec<String> = screen
+            .cells
+            .chunks(screen.cols)
+            .take(2)
+            .map(|row| {
+                row.iter()
+                    .map(|cell| cell.text.as_str())
+                    .collect::<String>()
+                    .trim()
+                    .into()
+            })
+            .collect();
+        assert_eq!(rows, ["first", "last"]);
+
+        append(&mut journal, 4, b"trailing\r\n")?;
+        let path = journal.directory().join("segment-000001.mtj");
+        let bytes = std::fs::read(&path)?;
+        let mut corrupted = bytes.clone();
+        let middle_payload = corrupted
+            .windows(b"last\r\n".len())
+            .position(|bytes| bytes == b"last\r\n")
+            .context("middle frame payload")?;
+        corrupted[middle_payload] ^= 1;
+        std::fs::write(&path, corrupted)?;
+        let result = recover_screen(&options, &journal);
+        std::fs::write(path, bytes)?;
+        assert_eq!(result?.history_gap, Some(HistoryGapCode::CorruptSegment));
+        Ok(())
     }
 }

@@ -207,6 +207,7 @@ esac
                 if let Event::Recovery {
                     session_id,
                     state: RecoveryState::Failed(actual),
+                    ..
                 } = child
                     .event(deadline, true)
                     .with_context(|| format!("{case}: wait for restore failure"))?

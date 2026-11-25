@@ -826,6 +826,7 @@ fn codex_resume_cold_start_preserves_card_binding_and_legacy_material() -> Resul
             Event::Recovery {
                 session_id,
                 state: matou_native_runtime::host::RecoveryState::Ready,
+                ..
             } if session_id == session => ready = true,
             Event::Graph(graph) => {
                 for event in graph["providerIdentityEvents"]

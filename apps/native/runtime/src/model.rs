@@ -80,6 +80,10 @@ pub enum SessionEvent {
     StorageRecovered {
         sequence: u64,
     },
+    StorageEndResult {
+        result: Result<(), String>,
+        observed_at: Instant,
+    },
     /// Emitted after the final stored frame even if display delivery is paused.
     SavedExit {
         sequence: u64,

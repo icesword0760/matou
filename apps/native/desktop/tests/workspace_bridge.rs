@@ -556,6 +556,7 @@ impl<'a> Probe<'a> {
             Event::Recovery {
                 session_id: id,
                 state,
+                ..
             } if id == session_id => {
                 assert_eq!(&state, expected);
                 Ok(Some(()))

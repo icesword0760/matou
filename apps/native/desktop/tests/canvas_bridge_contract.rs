@@ -354,6 +354,7 @@ impl<'a> Probe<'a> {
                 Ok(Event::StorageFault {
                     session_id,
                     message,
+                    ..
                 }) => bail!("{session_id} storage fault: {message}"),
                 Ok(Event::Closed) | Err(async_channel::TryRecvError::Closed) => {
                     bail!("bridge closed")

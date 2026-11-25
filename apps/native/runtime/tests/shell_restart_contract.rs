@@ -150,7 +150,9 @@ fn ready(runtime: &RuntimeHost) -> Result<(String, String)> {
 
 fn failed_launch(runtime: &RuntimeHost, id: &str, rebuilding: bool) -> Result<String> {
     let reason = wait(runtime, "failure state", |event| match event {
-        Event::Recovery { session_id, state } if session_id == id => match state {
+        Event::Recovery {
+            session_id, state, ..
+        } if session_id == id => match state {
             RecoveryState::StartFailed(error) if !rebuilding => Ok(Some(error)),
             RecoveryState::Failed(error) if rebuilding => Ok(Some(error)),
             _ => bail!("wrong failure state: {state:?}"),
@@ -172,7 +174,9 @@ fn failed_launch(runtime: &RuntimeHost, id: &str, rebuilding: bool) -> Result<St
 
 fn expect_state(runtime: &RuntimeHost, id: &str, expected: RecoveryState) -> Result<()> {
     wait(runtime, "Shell state", |event| match event {
-        Event::Recovery { session_id, state } if session_id == id => {
+        Event::Recovery {
+            session_id, state, ..
+        } if session_id == id => {
             assert_eq!(state, expected);
             Ok(Some(()))
         }
@@ -187,7 +191,9 @@ fn assert_retry_ignored(runtime: &RuntimeHost, scene: &str, session: &str) -> Re
     })?;
     wait(runtime, "retry rejection barrier", |event| match event {
         Event::SceneClosePreview { scene_id, .. } if scene_id == scene => Ok(Some(())),
-        Event::Recovery { session_id, state } if session_id == session => {
+        Event::Recovery {
+            session_id, state, ..
+        } if session_id == session => {
             bail!("rejected retry unexpectedly emitted {state:?}")
         }
         _ => Ok(None),

@@ -488,6 +488,7 @@ exec /bin/cat
         Event::Recovery {
             session_id,
             state: matou_native_runtime::host::RecoveryState::Ready,
+            ..
         } if session_id == fixture.session => Some(()),
         _ => None,
     })?;

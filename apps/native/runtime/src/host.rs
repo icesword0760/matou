@@ -738,6 +738,9 @@ pub enum Command {
     RetryStorage {
         session_id: String,
     },
+    EndStorage {
+        session_id: String,
+    },
     RetryRecovery {
         session_id: String,
     },
@@ -1438,6 +1441,8 @@ pub enum Event {
     Recovery {
         session_id: String,
         state: RecoveryState,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        history_gap: Option<crate::history::HistoryGapCode>,
     },
     DeferredRecoveryPreview {
         session_id: String,
@@ -1512,9 +1517,15 @@ pub enum Event {
     StorageFault {
         session_id: String,
         message: String,
+        #[serde(default)]
+        retained_bytes: usize,
     },
     StorageRecovered {
         session_id: String,
+    },
+    StorageEndResult {
+        session_id: String,
+        result: Result<(), String>,
     },
     Diagnostic(String),
     Closed,
@@ -3692,6 +3703,12 @@ fn recovery_result(
 }
 
 pub fn storage_command_rejected(command: Command, code: &str, message: &str) -> Event {
+    if let Command::EndStorage { session_id } = command {
+        return Event::StorageEndResult {
+            session_id,
+            result: Err(format!("{code}: {message}")),
+        };
+    }
     if let Some(request) = EnvironmentChangeRequest::from_command(&command) {
         return request.reply(EnvironmentChangeResult::rejected(code));
     }
@@ -4791,6 +4808,7 @@ fn run_writable(
         send.send_blocking(Event::Recovery {
             session_id: session_id.clone(),
             state: RecoveryState::Deferred,
+            history_gap: None,
         })?;
     }
     let clean_exit = 'running: loop {
@@ -4936,6 +4954,7 @@ fn run_writable(
                     send.send_blocking(Event::Recovery {
                         session_id: session_id.clone(),
                         state: RecoveryState::Restoring,
+                        history_gap: None,
                     })?;
                     sessions.remove(&session_id);
                     dirty.remove(&session_id);
@@ -5237,6 +5256,7 @@ fn run_writable(
                         send.send_blocking(Event::Recovery {
                             session_id: session_id.clone(),
                             state: RecoveryState::Ready,
+                            history_gap: owner.recovery_history_gap(&session_id),
                         })?;
                     }
                     dirty.insert(session_id.clone());
@@ -6394,6 +6414,7 @@ fn run_writable(
                             send.send_blocking(Event::Recovery {
                                 session_id,
                                 state: RecoveryState::Restoring,
+                                history_gap: None,
                             })?;
                         }
                         Ok(None) => {
@@ -6830,6 +6851,7 @@ fn run_writable(
                         send.send_blocking(Event::Recovery {
                             session_id: session_id.clone(),
                             state: RecoveryState::Restoring,
+                            history_gap: None,
                         })?;
                     }
                     checks.request(&owner, &workspace_id)?;
@@ -6939,6 +6961,7 @@ fn run_writable(
                     send.send_blocking(Event::Recovery {
                         session_id: session_id.clone(),
                         state,
+                        history_gap: None,
                     })?;
                     match checks.request(&owner, &workspace_id) {
                         Ok(()) => {
@@ -6984,7 +7007,23 @@ fn run_writable(
                     if !sessions.contains(&session_id) {
                         continue;
                     }
-                    (session_id, WorkerCommand::RetryStorage { reply }, true)
+                    // A failed retry re-emits the scoped fault with the current
+                    // retained byte count. A successful retry emits Recovered.
+                    if let Err(error) =
+                        owner.send(&session_id, WorkerCommand::RetryStorage { reply })
+                    {
+                        send.send_blocking(Event::Diagnostic(format!("{error:#}")))?;
+                    }
+                    continue;
+                }
+                Command::EndStorage { session_id } => {
+                    if let Err(error) = owner.send(&session_id, WorkerCommand::EndStorage) {
+                        send.send_blocking(Event::StorageEndResult {
+                            session_id,
+                            result: Err(format!("{error:#}")),
+                        })?;
+                    }
+                    continue;
                 }
                 Command::PutGeometry { sequence, update } => {
                     let error = owner
@@ -7469,6 +7508,7 @@ fn run_writable(
                                 send.send_blocking(Event::Recovery {
                                     session_id: id.to_owned(),
                                     state: RecoveryState::Failed(error.to_owned()),
+                                    history_gap: None,
                                 })?;
                             }
                         }
@@ -7509,6 +7549,10 @@ fn run_writable(
                 }
                 OwnerEvent::Terminal(event) => {
                     let session_id = event.session_id;
+                    if let SessionEvent::StorageEndResult { result, .. } = event.event {
+                        send.send_blocking(Event::StorageEndResult { session_id, result })?;
+                        continue;
+                    }
                     if !sessions.contains(&session_id) {
                         continue;
                     }
@@ -7538,12 +7582,15 @@ fn run_writable(
                         SessionEvent::ScreenInvalidated => {
                             dirty.insert(session_id);
                         }
-                        SessionEvent::StorageFault { message, .. } => {
-                            send.send_blocking(Event::StorageFault {
-                                session_id,
-                                message,
-                            })?
-                        }
+                        SessionEvent::StorageFault {
+                            message,
+                            retained_bytes,
+                            ..
+                        } => send.send_blocking(Event::StorageFault {
+                            session_id,
+                            message,
+                            retained_bytes,
+                        })?,
                         SessionEvent::StorageRecovered { .. } => {
                             dirty.insert(session_id.clone());
                             send.send_blocking(Event::StorageRecovered { session_id })?;
@@ -7658,6 +7705,7 @@ fn run_writable(
                     send.send_blocking(Event::Recovery {
                         session_id: id.clone(),
                         state: RecoveryState::Ready,
+                        history_gap: owner.recovery_history_gap(id),
                     })?;
                 }
                 result => completed_changes.push((id.clone(), result)),
@@ -7672,6 +7720,7 @@ fn run_writable(
                     send.send_blocking(Event::Recovery {
                         session_id: id.clone(),
                         state: RecoveryState::Ready,
+                        history_gap: owner.recovery_history_gap(&id),
                     })?;
                     None
                 }
@@ -7799,6 +7848,7 @@ fn run_writable(
             }
             if !failed_launches.contains_key(&session_id) && sessions.contains(&session_id) {
                 send.send_blocking(Event::Recovery {
+                    history_gap: owner.recovery_history_gap(&session_id),
                     session_id,
                     state: RecoveryState::Ready,
                 })?;
@@ -9200,6 +9250,7 @@ fn report_launch_failure(
     send.send_blocking(Event::Recovery {
         session_id: session_id.to_owned(),
         state: state.clone(),
+        history_gap: None,
     })?;
     send.send_blocking(Event::Diagnostic(message))?;
     Ok(state)
@@ -11333,7 +11384,7 @@ mod tests {
     }
 
     #[test]
-    fn storage_pause_drops_input_before_the_shell_tracker() -> Result<()> {
+    fn faulted_storage_gates_input_and_supports_retry_and_idempotent_end() -> Result<()> {
         let root = tempfile::tempdir()?;
         let BootstrapResult::Writable {
             mut connection,
@@ -11401,7 +11452,7 @@ mod tests {
 
         fn wait_for_owner_event(
             owner: &mut ShellOwner,
-            found: impl Fn(&SessionEvent) -> bool,
+            mut found: impl FnMut(&SessionEvent) -> bool,
         ) -> Result<()> {
             let deadline = Instant::now() + Duration::from_secs(5);
             loop {
@@ -11415,8 +11466,28 @@ mod tests {
                 ensure!(Instant::now() < deadline, "expected terminal event");
             }
         }
+        let mut pid = None;
+        wait_for_owner_event(&mut owner, |event| match event {
+            SessionEvent::Started { pid: started, .. } => {
+                pid = Some(*started as i32);
+                false
+            }
+            SessionEvent::Output { .. } => true,
+            _ => false,
+        })?;
+        let end = || Command::EndStorage {
+            session_id: session_id.clone(),
+        };
+        assert!(!StoragePhase::ReadOnly.accepts(&end()));
+        assert!(matches!(
+            storage_command_rejected(end(), STORAGE_READ_ONLY, STORAGE_READ_ONLY_TITLE),
+            Event::StorageEndResult { session_id: id, result: Err(message) }
+                if id == session_id && message.contains(STORAGE_READ_ONLY)
+        ));
+        owner.send(&session_id, WorkerCommand::EndStorage)?;
         wait_for_owner_event(&mut owner, |event| {
-            matches!(event, SessionEvent::Output { .. })
+            matches!(event, SessionEvent::StorageEndResult { result: Err(error), .. }
+                if error == "Terminal storage is not faulted")
         })?;
         let range = root
             .path()
@@ -11462,7 +11533,14 @@ mod tests {
         let error = rejected.recv_timeout(Duration::from_secs(5))?.unwrap_err();
         assert_eq!(error.to_string(), "session storage is paused");
 
-        std::fs::remove_dir(range)?;
+        let (reply, failed) = mpsc::channel();
+        owner.send(&session_id, WorkerCommand::RetryStorage { reply })?;
+        assert!(failed.recv_timeout(Duration::from_secs(5))?.is_err());
+        wait_for_owner_event(
+            &mut owner,
+            |event| matches!(event, SessionEvent::StorageFault { retained_bytes, .. } if *retained_bytes > 0),
+        )?;
+        std::fs::remove_dir(&range)?;
         let (reply, recovered) = mpsc::channel();
         owner.send(&session_id, WorkerCommand::RetryStorage { reply })?;
         recovered.recv_timeout(Duration::from_secs(5))??;
@@ -11483,6 +11561,67 @@ mod tests {
         let (_, written, _) = operations.pop().context("resumed write")?;
         written.recv_timeout(Duration::from_secs(5))??;
         assert!(promotions.is_empty());
+
+        // A second outage can end only this run. The existing card remains
+        // attached to the scene, and the closed worker still serves its screen.
+        std::fs::remove_file(&range)?;
+        std::fs::create_dir(&range)?;
+        let (reply, written) = mpsc::channel();
+        owner.send(
+            &session_id,
+            WorkerCommand::Write {
+                bytes: format!("{}\n", "y".repeat(2048)).into_bytes(),
+                reply,
+            },
+        )?;
+        written.recv_timeout(Duration::from_secs(5))??;
+        wait_for_owner_event(&mut owner, |event| {
+            matches!(event, SessionEvent::StorageFault { .. })
+        })?;
+        let view = |owner: &ShellOwner| -> Result<Screen> {
+            let (reply, screen) = mpsc::channel();
+            owner.send(&session_id, WorkerCommand::Screen { reply })?;
+            screen.recv_timeout(Duration::from_secs(5))?
+        };
+        let saved_screen = view(&owner)?;
+        let previous = owner.graph(&ids.scene_id, None)?;
+        for _ in 0..2 {
+            owner.send(&session_id, WorkerCommand::EndStorage)?;
+            wait_for_owner_event(&mut owner, |event| {
+                matches!(event, SessionEvent::StorageEndResult { result: Ok(()), .. })
+            })?;
+        }
+        let stopped = owner
+            .session(&session_id)?
+            .expect("storage end retains the card");
+        assert!(stopped.archived_at.is_none());
+        assert_eq!(stopped.status, "exited");
+        assert_eq!(view(&owner)?, saved_screen);
+        let after = owner.graph(&ids.scene_id, None)?;
+        assert_eq!(
+            previous["nodes"].as_array().unwrap().len(),
+            after["nodes"].as_array().unwrap().len()
+        );
+        assert_eq!(
+            previous["nodes"][0]["sessionId"],
+            after["nodes"][0]["sessionId"],
+        );
+        assert_eq!(after["nodes"][0]["workStatus"], "exited");
+        let pid = pid.context("fixture PTY was started")?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        // Signal zero only checks whether the isolated fixture PID still exists.
+        while unsafe { libc::kill(pid, 0) } == 0 {
+            ensure!(
+                Instant::now() < deadline,
+                "faulted fixture PTY did not stop"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+        std::fs::remove_dir(&range)?;
         owner.shutdown()?;
         Ok(())
     }

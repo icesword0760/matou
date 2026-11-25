@@ -30,7 +30,8 @@ use matou_native_desktop::theme_tokens::{
     write_theme_preference,
 };
 use matou_native_runtime::history::{
-    HistoryCursor, HistoryLine, HistoryPage as OfflineHistoryPage, HistorySearchOptions,
+    HistoryCursor, HistoryGapCode, HistoryLine, HistoryPage as OfflineHistoryPage,
+    HistorySearchOptions,
 };
 use matou_native_runtime::history_worker::{HistoryReply, HistoryRequest};
 use matou_native_runtime::host::{
@@ -497,6 +498,10 @@ enum TabDialog {
         session_id: String,
         body: String,
     },
+    EndStorageProcess {
+        session_id: String,
+        return_focus: FocusHandle,
+    },
     LastSession {
         scene_id: String,
         session_id: String,
@@ -517,6 +522,7 @@ impl TabDialog {
         matches!(
             self,
             Self::CloseSession { .. }
+                | Self::EndStorageProcess { .. }
                 | Self::LastSession { .. }
                 | Self::RemoveSession { .. }
                 | Self::RenameSession { .. }
@@ -927,6 +933,30 @@ enum ProviderRestoreBanner<'a> {
 enum LoadingBadge {
     Recovering,
     Loading,
+    Reconnecting,
+}
+
+struct HistoryGapNotice {
+    code: HistoryGapCode,
+    expanded: bool,
+    dismissed: bool,
+}
+
+struct StorageFaultFeedback {
+    retained_bytes: usize,
+    retry_failed: bool,
+    end_pending: bool,
+    end_failed: bool,
+}
+
+fn retained_size(bytes: usize) -> String {
+    const KB: usize = 1024;
+    const MB: usize = KB * KB;
+    match bytes {
+        bytes if bytes >= MB => format!("{:.1} MB", bytes as f64 / MB as f64),
+        bytes if bytes >= KB => format!("{:.1} KB", bytes as f64 / KB as f64),
+        bytes => format!("{bytes} B"),
+    }
 }
 
 impl LoadingBadge {
@@ -968,8 +998,9 @@ impl LoadingBadge {
 
     fn label(self, locale: &InterfaceLocale) -> &'static str {
         match self {
-            Self::Recovering => locale.text("恢复中", "Recovering"),
-            Self::Loading => locale.text("加载中", "Loading"),
+            Self::Recovering => locale.text("正在恢复会话…", "Restoring session…"),
+            Self::Loading => locale.text("正在打开会话…", "Opening session…"),
+            Self::Reconnecting => locale.text("正在重新连接…", "Reconnecting…"),
         }
     }
 }
@@ -2200,6 +2231,8 @@ pub struct Workspace {
     #[cfg(target_os = "macos")]
     recovery_water_visibility: Option<gpui::Task<()>>,
     storage_fault_sessions: HashSet<String>,
+    storage_fault_feedback: HashMap<String, StorageFaultFeedback>,
+    history_gap_notices: HashMap<String, HistoryGapNotice>,
     order: Vec<String>,
     focused: Option<String>,
     pending_focus: Option<(String, String)>,
@@ -3312,6 +3345,8 @@ impl Workspace {
             #[cfg(target_os = "macos")]
             recovery_water_visibility: None,
             storage_fault_sessions: HashSet::new(),
+            storage_fault_feedback: HashMap::new(),
+            history_gap_notices: HashMap::new(),
             order: Vec::new(),
             focused: None,
             pending_focus: None,
@@ -4047,6 +4082,8 @@ impl Workspace {
         self.first_frame_content.clear();
         self.restoring_sessions.clear();
         self.recovery.clear();
+        self.storage_fault_sessions.clear();
+        self.storage_fault_feedback.clear();
         self.deferred_previews.clear();
         self.deferred_controls.clear();
         self.recovery_controls.clear();
@@ -4231,6 +4268,9 @@ impl Workspace {
                 session_id,
                 ..
             } => self.active_scene_id() != Some(scene_id) || self.graph_node(session_id).is_none(),
+            TabDialog::EndStorageProcess { session_id, .. } => {
+                !self.can_act_on_storage_fault(session_id) || !self.order.contains(session_id)
+            }
             TabDialog::RemoveSession {
                 scene_id,
                 session_id,
@@ -4328,6 +4368,9 @@ impl Workspace {
         let generation = envelope.generation();
         if generation != self.runtime_generation {
             self.retire_transport(generation, cx);
+            if matches!(self.dialog, Some(TabDialog::EndStorageProcess { .. })) {
+                self.close_dialog(window, cx);
+            }
         }
         let event = match envelope {
             BridgeEvent::TransportDiagnostic { message, .. } => {
@@ -4385,6 +4428,9 @@ impl Workspace {
                 }
                 self.transport_connected = matches!(phase, ConnectionPhase::Ready);
                 if !self.transport_connected {
+                    if matches!(self.dialog, Some(TabDialog::EndStorageProcess { .. })) {
+                        self.close_dialog(window, cx);
+                    }
                     self.retire_wiring_commands(cx);
                     let message = match &phase {
                         ConnectionPhase::Blocked(block) => block.message.clone(),
@@ -4472,6 +4518,8 @@ impl Workspace {
                 self.clear_read_only_history(cx);
                 self.recovery.clear();
                 self.storage_fault_sessions.clear();
+                self.storage_fault_feedback.clear();
+                self.history_gap_notices.clear();
                 self.deferred_previews.clear();
                 self.dialog = None;
                 match projection {
@@ -4525,15 +4573,6 @@ impl Workspace {
             }
             event => event,
         };
-        match &event {
-            Event::StorageFault { session_id, .. } => {
-                self.storage_fault_sessions.insert(session_id.clone());
-            }
-            Event::StorageRecovered { session_id } => {
-                self.storage_fault_sessions.remove(session_id);
-            }
-            _ => {}
-        }
         match event {
             Event::RestoreSessionEnvironmentResult(reply)
             | Event::LocateSessionEnvironmentResult(reply)
@@ -4986,6 +5025,8 @@ impl Workspace {
                     self.permission_changes.remove(&id);
                     self.permission_identities.remove(&id);
                     self.storage_fault_sessions.remove(&id);
+                    self.storage_fault_feedback.remove(&id);
+                    self.history_gap_notices.remove(&id);
                     self.card_controls.remove(&id);
                     self.card_history_controls.remove(&id);
                     self.remove_card_controls.remove(&id);
@@ -5310,9 +5351,34 @@ impl Workspace {
                     },
                 );
             }
-            Event::Recovery { session_id, state } => {
+            Event::Recovery {
+                session_id,
+                state,
+                history_gap,
+            } => {
                 if self.is_stopped_session(&session_id) {
                     return;
+                }
+                if matches!(state, RecoveryState::Ready) {
+                    if let Some(code) = history_gap {
+                        let notice = self
+                            .history_gap_notices
+                            .entry(session_id.clone())
+                            .or_insert(HistoryGapNotice {
+                                code,
+                                expanded: false,
+                                dismissed: false,
+                            });
+                        if notice.code != code {
+                            *notice = HistoryGapNotice {
+                                code,
+                                expanded: false,
+                                dismissed: false,
+                            };
+                        }
+                    } else {
+                        self.history_gap_notices.remove(&session_id);
+                    }
                 }
                 match &state {
                     // Remember the Restoring intent so a later Ready can still
@@ -5421,15 +5487,46 @@ impl Workspace {
                 }
                 self.resume_search_after_frame(cx);
             }
-            Event::StorageFault { message, .. } => {
+            Event::StorageFault {
+                session_id,
+                message,
+                retained_bytes,
+            } => {
+                let retry_failed = !self.storage_fault_sessions.insert(session_id.clone());
+                let feedback =
+                    self.storage_fault_feedback
+                        .entry(session_id)
+                        .or_insert(StorageFaultFeedback {
+                            retained_bytes,
+                            retry_failed,
+                            end_pending: false,
+                            end_failed: false,
+                        });
+                feedback.retained_bytes = retained_bytes;
+                feedback.retry_failed = retry_failed;
                 self.fault = Some(message);
-                self.show_error_toast(
-                    self.locale.text(
-                        "终端存储异常，请先恢复或结束当前会话。",
-                        "Terminal storage failed. Recover or stop this session.",
-                    ),
-                    cx,
-                );
+                self.sync_terminal_input(window, cx);
+            }
+            Event::StorageRecovered { session_id }
+            | Event::StorageEndResult {
+                session_id,
+                result: Ok(()),
+            } => {
+                self.storage_fault_sessions.remove(&session_id);
+                self.storage_fault_feedback.remove(&session_id);
+                self.fault = None;
+                self.close_invalid_dialog(window, cx);
+                self.sync_terminal_input(window, cx);
+            }
+            Event::StorageEndResult {
+                session_id,
+                result: Err(error),
+            } => {
+                if let Some(feedback) = self.storage_fault_feedback.get_mut(&session_id) {
+                    feedback.end_pending = false;
+                    feedback.end_failed = true;
+                }
+                self.fault = Some(error);
             }
             Event::DeferredRecoveryPreview {
                 session_id,
@@ -5458,7 +5555,6 @@ impl Workspace {
                     self.show_error_toast(toast, cx);
                 }
             }
-            Event::StorageRecovered { .. } => self.fault = None,
             Event::StartupBlocked(_) | Event::Closed => {}
         }
         self.reconcile_permission_overlay(window, cx);
@@ -6343,6 +6439,7 @@ impl Workspace {
                 || self.detached_path_invalid(id).unwrap_or(disabled)
                 || self.read_only.is_some()
                 || self.environment_unavailable(id)
+                || self.storage_fault_sessions.contains(id)
                 || blocked
                 || restore_hidden
                 || (self.settings.is_some() && !self.wiring.is_detached(id))
@@ -6382,23 +6479,351 @@ impl Workspace {
         )
     }
 
-    /// Windows has no recovery water; the first non-empty grid recorded by the
-    /// shared frame handler is the equivalent visible-first-frame handoff.
-    /// `session_frames` alone is not enough because an accepted empty frame can
-    /// precede the first painted content.
-    #[cfg(not(target_os = "macos"))]
+    fn render_history_gap_notice(
+        &self,
+        id: &str,
+        action_bounds: &CardActionBounds,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Stateful<Div>> {
+        let notice = self
+            .history_gap_notices
+            .get(id)
+            .filter(|notice| !notice.dismissed)?;
+        let focus = window.use_keyed_state(
+            SharedString::from(format!("history-gap-controls-{id}")),
+            cx,
+            |_, cx| {
+                [
+                    cx.focus_handle().tab_stop(true),
+                    cx.focus_handle().tab_stop(true),
+                ]
+            },
+        );
+        let [details_focus, close_focus] = focus.read(cx).clone();
+        let palette = self.theme_palette();
+        let actions = action_bounds.clone();
+        let details = self.button(
+            div()
+                .id("history-gap-details")
+                .relative()
+                .cursor_pointer()
+                .text_color(rgba(palette.workspace.accent))
+                .children(workspace_wiring::wiring_probe_bounds(format!(
+                    "history-gap-details-{id}"
+                )))
+                .child(ui_text(self.locale.text("详情", "Details"))),
+            &details_focus,
+            {
+                let id = id.to_owned();
+                move |this, _, cx| {
+                    if let Some(notice) = this.history_gap_notices.get_mut(&id) {
+                        notice.expanded = !notice.expanded;
+                    }
+                    cx.notify();
+                }
+            },
+            cx,
+        );
+        let close = self.button(
+            div()
+                .id("history-gap-dismiss")
+                .relative()
+                .cursor_pointer()
+                .px(px(4.))
+                .children(workspace_wiring::wiring_probe_bounds(format!(
+                    "history-gap-dismiss-{id}"
+                )))
+                .tooltip({
+                    let label = self.locale.text("关闭提示", "Dismiss notice");
+                    move |_, cx| cx.new(|_| CardTooltip(label.into())).into()
+                })
+                .child(ui_text("×")),
+            &close_focus,
+            {
+                let id = id.to_owned();
+                move |this, window, cx| {
+                    if let Some(notice) = this.history_gap_notices.get_mut(&id) {
+                        notice.dismissed = true;
+                    }
+                    if this.focused.as_deref() == Some(id.as_str())
+                        && let Some(terminal) = this.terminals.get(&id)
+                    {
+                        window.focus(&terminal.read(cx).focus);
+                    } else {
+                        window.blur();
+                    }
+                    cx.notify();
+                }
+            },
+            cx,
+        );
+        let reason = match notice.code {
+            HistoryGapCode::MissingSegment => self.locale.text(
+                "部分终端记录文件缺失。",
+                "Some terminal history files are missing.",
+            ),
+            HistoryGapCode::CorruptSegment => self.locale.text(
+                "部分终端记录无法读取。",
+                "Some terminal history could not be read.",
+            ),
+        };
+        Some(
+            div()
+                .id(SharedString::from(format!("history-gap-notice-{id}")))
+                .relative()
+                .children(workspace_wiring::wiring_probe_bounds(format!(
+                    "history-gap-notice-{id}"
+                )))
+                .flex_none()
+                .px(px(10.))
+                .py(px(5.))
+                .bg(rgba(palette.workspace.panel_muted))
+                .text_color(rgba(palette.workspace.text))
+                .text_size(px(11.))
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(px(7.))
+                        .on_children_prepainted(move |bounds, _, _| {
+                            actions.borrow_mut().extend(bounds)
+                        })
+                        .child(ui_text(
+                            self.locale
+                                .text("部分历史未能恢复", "Some history was not restored"),
+                        ))
+                        .child(details)
+                        .child(close),
+                )
+                .when(notice.expanded, |banner| {
+                    banner.child(div().mt(px(4.)).child(ui_text(reason)))
+                }),
+        )
+    }
+
+    fn can_act_on_storage_fault(&self, id: &str) -> bool {
+        self.domain_ready
+            && self.transport_connected
+            && self.read_only.is_none()
+            && self
+                .storage_fault_feedback
+                .get(id)
+                .is_some_and(|feedback| !feedback.end_pending)
+    }
+
+    fn end_storage_label(&self) -> &'static str {
+        self.locale.text("结束进程", "End process")
+    }
+
+    fn render_storage_fault(
+        &self,
+        id: &str,
+        action_bounds: &CardActionBounds,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Stateful<Div>> {
+        let feedback = self.storage_fault_feedback.get(id)?;
+        let title = if feedback.retained_bytes == 0 {
+            self.locale
+                .text("终端存储出现故障", "Terminal storage failed")
+                .to_owned()
+        } else {
+            let size = retained_size(feedback.retained_bytes);
+            match self.locale {
+                InterfaceLocale::Chinese => format!("终端存储出现故障，已保留 {size}"),
+                InterfaceLocale::English => format!("Terminal storage failed; {size} retained"),
+            }
+        };
+        let status = if feedback.end_pending {
+            Some(self.locale.text("正在结束进程…", "Ending process…"))
+        } else if feedback.end_failed {
+            Some(self.locale.text(
+                "未能结束进程，请重试。",
+                "Could not end the process. Try again.",
+            ))
+        } else if feedback.retry_failed {
+            Some(self.locale.text(
+                "终端存储仍不可用，可以再次重试。",
+                "Terminal storage is still unavailable. You can retry.",
+            ))
+        } else {
+            None
+        };
+        let focus = window.use_keyed_state(
+            SharedString::from(format!("storage-fault-controls-{id}")),
+            cx,
+            |_, cx| {
+                [
+                    cx.focus_handle().tab_stop(true),
+                    cx.focus_handle().tab_stop(true),
+                ]
+            },
+        );
+        let [retry_focus, end_focus] = focus.read(cx).clone();
+        let dark = self.wiring_dark();
+        let enabled = self.can_act_on_storage_fault(id);
+        // Palette from the frozen storage fault overlay.
+        let (scrim, border, background, text, detail, button_border, button_background) = if dark {
+            (
+                0x140e0fd1, 0xe4706657, 0x2a191bf5, 0xf4dedb, 0xd9b7b4, 0x6c4648, 0x422b2e,
+            )
+        } else {
+            (
+                0xfff7f6d6, 0xedc4c0ff, 0xfffffff7, 0x672d2a, 0x8f5f5b, 0xd9b5b2, 0xfff2f1,
+            )
+        };
+        let button = |action, label| {
+            let id = format!("storage-fault-{action}-{id}");
+            div()
+                .id(SharedString::from(id.clone()))
+                .relative()
+                .flex_none()
+                .px(px(10.))
+                .py(px(6.))
+                .rounded(px(7.))
+                .border_1()
+                .border_color(rgb(button_border))
+                .bg(rgb(button_background))
+                .text_size(px(11.))
+                .whitespace_nowrap()
+                .child(ui_text(label))
+                .children(workspace_wiring::wiring_probe_bounds(id))
+                .when(enabled, |button| {
+                    button
+                        .cursor_pointer()
+                        .hover(|style| style.border_color(rgb(0xe58f87)))
+                })
+                .when(!enabled, |button| button.opacity(0.5))
+        };
+        let retry = button("retry", self.locale.text("重试", "Retry"));
+        let end = button("end", self.end_storage_label());
+        let (retry, end) = if enabled {
+            let retry_id = id.to_owned();
+            let end_id = id.to_owned();
+            let return_focus = end_focus.clone();
+            (
+                self.button(
+                    retry,
+                    &retry_focus,
+                    move |this, _, cx| {
+                        if this.can_act_on_storage_fault(&retry_id) {
+                            this.send(
+                                Command::RetryStorage {
+                                    session_id: retry_id.clone(),
+                                },
+                                cx,
+                            );
+                        }
+                    },
+                    cx,
+                ),
+                self.button(
+                    end,
+                    &end_focus,
+                    move |this, window, cx| {
+                        if this.can_act_on_storage_fault(&end_id) {
+                            this.open_card_dialog(
+                                TabDialog::EndStorageProcess {
+                                    session_id: end_id.clone(),
+                                    return_focus: return_focus.clone(),
+                                },
+                                3,
+                                window,
+                                cx,
+                            );
+                            window.focus(&this.dialog_controls[1]);
+                        }
+                    },
+                    cx,
+                ),
+            )
+        } else {
+            (retry, end)
+        };
+        let actions = action_bounds.clone();
+        Some(
+            div()
+                .id(SharedString::from(format!("storage-fault-{id}")))
+                .absolute()
+                .inset_0()
+                .occlude()
+                .flex()
+                .items_center()
+                .justify_center()
+                .px(px(14.))
+                .py(px(12.))
+                .overflow_y_scroll()
+                .bg(rgba(scrim))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(
+                    div()
+                        .w_full()
+                        .max_w(px(430.))
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap(px(9.))
+                        .p(px(14.))
+                        .border_1()
+                        .border_color(rgba(border))
+                        .rounded(px(12.))
+                        .bg(rgba(background))
+                        .text_color(rgb(text))
+                        .text_center()
+                        .child(
+                            div()
+                                .size(px(22.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_full()
+                                .border_1()
+                                .border_color(rgb(0xe58f87))
+                                .text_size(px(13.))
+                                .font_weight(FontWeight::BOLD)
+                                .child("!"),
+                        )
+                        .child(
+                            div()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_size(px(13.))
+                                .child(ui_text(title)),
+                        )
+                        .children(status.map(|status| {
+                            div()
+                                .text_color(rgb(detail))
+                                .text_size(px(11.))
+                                .child(ui_text(status))
+                        }))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .justify_center()
+                                .gap(px(7.))
+                                .on_children_prepainted(move |bounds, _, _| {
+                                    actions.borrow_mut().extend(bounds)
+                                })
+                                .child(retry)
+                                .child(end),
+                        ),
+                ),
+        )
+    }
+
     fn can_show_loading_badge(&self) -> bool {
-        !self.wiring.board_open
+        self.domain_ready
+            && self.transport_connected
+            && !self.wiring.board_open
             && self.read_only.is_none()
             && self.active_path_valid()
             && self
                 .hierarchy
                 .as_ref()
                 .is_some_and(|hierarchy| hierarchy.scene.is_some())
-            && !matches!(
-                self.commands.connection().1,
-                ConnectionPhase::Stopped | ConnectionPhase::Blocked(_)
-            )
     }
 
     fn request_deferred_preview(&mut self, id: &str) {
@@ -7801,6 +8226,12 @@ impl Workspace {
         self.dialog_controls.clear();
         let focus = match dialog {
             Some(TabDialog::LastSession { return_focus, .. }) => return_focus,
+            Some(TabDialog::EndStorageProcess {
+                session_id,
+                return_focus,
+            }) => self
+                .can_act_on_storage_fault(&session_id)
+                .then_some(return_focus),
             Some(TabDialog::SessionLoader(state)) if state.history => self
                 .deferred_controls
                 .get(&state.session_id)
@@ -7899,6 +8330,24 @@ impl Workspace {
             .then(|| format!("当前事项下已存在名为\"{value}\"的标签页"))
     }
     fn confirm_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(TabDialog::EndStorageProcess { session_id, .. }) = &self.dialog {
+            let session_id = session_id.clone();
+            self.close_dialog(window, cx);
+            if self.can_act_on_storage_fault(&session_id) {
+                let sent = self.commands.send_at(
+                    self.runtime_generation,
+                    Command::EndStorage {
+                        session_id: session_id.clone(),
+                    },
+                );
+                if let Some(feedback) = self.storage_fault_feedback.get_mut(&session_id) {
+                    feedback.end_pending = sent.is_ok();
+                    feedback.end_failed = sent.is_err();
+                }
+                cx.notify();
+            }
+            return;
+        }
         if let Some(TabDialog::PermissionMode(state)) = &self.dialog {
             let request = self
                 .permission_confirmation_valid(state)
@@ -8032,7 +8481,10 @@ impl Workspace {
                     scope: *scope,
                 }),
             Some(
-                TabDialog::SessionLoader(_) | TabDialog::Branch(_) | TabDialog::PermissionMode(_),
+                TabDialog::SessionLoader(_)
+                | TabDialog::Branch(_)
+                | TabDialog::PermissionMode(_)
+                | TabDialog::EndStorageProcess { .. },
             )
             | None => return,
         };
@@ -11486,6 +11938,7 @@ impl Workspace {
                     | TabDialog::DeleteTask { .. }
                     | TabDialog::RemoveWorkspace { .. }
                     | TabDialog::CloseSession { .. }
+                    | TabDialog::EndStorageProcess { .. }
                     | TabDialog::LastSession { .. }
                     | TabDialog::RemoveSession { .. }
                     | TabDialog::PermissionMode(_)
@@ -12219,7 +12672,7 @@ impl Workspace {
         )
     }
 
-    fn loading_badge_element(label: &'static str) -> Div {
+    fn loading_badge_element(label: &'static str, color: Rgba) -> Div {
         let dot = div()
             .flex_none()
             .size(px(6.))
@@ -12230,7 +12683,7 @@ impl Workspace {
             dot.into_any_element()
         } else {
             dot.with_animation(
-                // The card header's element id scopes this pulse per card.
+                // The containing element scopes the pulse to this status.
                 "loading-badge-pulse",
                 Animation::new(Duration::from_millis(1350))
                     .repeat()
@@ -12248,13 +12701,12 @@ impl Workspace {
         };
         div()
             .flex_none()
-            .ml(px(8.))
             .flex()
             .items_center()
             .gap(px(5.))
             .text_size(px(9.))
             .line_height(relative(1.2))
-            .text_color(rgb(0x87b9eb))
+            .text_color(color)
             .child(
                 div()
                     .flex_none()
@@ -14471,6 +14923,16 @@ impl Workspace {
                     true,
                     false,
                 ),
+                TabDialog::EndStorageProcess { .. } => (
+                    self.locale.text(STOP_SESSION, "Stop session").into(),
+                    tabs_ui::dialog_body(dark).child(ui_text(self.locale.text(
+                        "停止后，原卡片和已保存的历史会保留。尚未写入的输出将丢失。",
+                        "The card and saved history will be kept. Output that has not been written will be lost.",
+                    )).pre_line()),
+                    self.end_storage_label().into(),
+                    true,
+                    false,
+                ),
                 TabDialog::LastSession { .. } => (
                     self.locale.text("提示", "Notice").into(),
                     tabs_ui::dialog_body(dark).child(ui_text(last_tab_body(self.locale)).pre_line()),
@@ -14512,7 +14974,10 @@ impl Workspace {
             let n = self.dialog_controls.len();
             let mut footer = tabs_ui::dialog_footer();
             if show_cancel {
-                let cancel = if matches!(dialog, TabDialog::RemoveSession { .. }) {
+                let cancel = if matches!(
+                    dialog,
+                    TabDialog::RemoveSession { .. } | TabDialog::EndStorageProcess { .. }
+                ) {
                     self.locale.text("取消", "Cancel")
                 } else {
                     "取消"
@@ -16014,19 +16479,68 @@ impl Render for Workspace {
             );
             return self.workspace_frame(page, true, window, cx);
         }
+        let (generation, phase) = self.commands.connection();
+        // A new attempt starts before its projection arrives. Keep the
+        // reconnect message through that boundary instead of flashing Opening.
+        let waiting = self.read_only.is_none()
+            && (!self.domain_ready
+                || generation != self.runtime_generation
+                || matches!(
+                    phase,
+                    ConnectionPhase::Starting | ConnectionPhase::Reconnecting
+                ));
+        let reconnecting = generation > 1 || phase == ConnectionPhase::Reconnecting;
+        let connection_message = match &phase {
+            ConnectionPhase::Blocked(block) => Some(block.message.as_str()),
+            ConnectionPhase::Stopped => Some(
+                self.locale
+                    .text("运行时连接已断开", "The runtime disconnected"),
+            ),
+            _ => None,
+        };
+        let connection_status = || {
+            if let Some(message) = connection_message {
+                div()
+                    .max_w(px(480.))
+                    .text_center()
+                    .text_size(px(13.))
+                    .text_color(rgba(palette.workspace.text))
+                    .child(ui_text(
+                        self.locale
+                            .text("无法连接运行时", "Could not connect to the runtime"),
+                    ))
+                    .child(
+                        div()
+                            .mt(px(4.))
+                            .text_color(rgba(palette.workspace.muted))
+                            .child(ui_text(message.to_owned())),
+                    )
+            } else {
+                let badge = if reconnecting {
+                    LoadingBadge::Reconnecting
+                } else {
+                    LoadingBadge::Loading
+                };
+                Self::loading_badge_element(badge.label(&self.locale), rgba(palette.workspace.text))
+                    .text_size(px(13.))
+            }
+        };
+        let connection_status = (waiting
+            || connection_message.is_some() && self.read_only.is_none())
+        .then(connection_status);
         if self.hierarchy.is_none()
-            && self.read_only.is_none()
-            && !matches!(
-                self.commands.connection().1,
-                ConnectionPhase::Blocked(_) | ConnectionPhase::Stopped
-            )
+            && let Some(status) = connection_status
         {
-            // The bridge can publish Ready before the workspace projection arrives.
             return self.workspace_frame(
                 div()
                     .id("startup-neutral")
                     .size_full()
-                    .bg(rgba(palette.workspace.canvas)),
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .p(px(16.))
+                    .bg(rgba(palette.workspace.canvas))
+                    .child(status),
                 true,
                 window,
                 cx,
@@ -16492,26 +17006,33 @@ impl Render for Workspace {
             } else {
                 None
             };
-            // The water owns the card handoff on macOS; Windows uses the
-            // equivalent first-frame state so both platforms label the gap.
+            #[cfg(target_os = "macos")]
+            let has_water = water.is_some();
+            #[cfg(not(target_os = "macos"))]
+            let has_water = false;
             let loading_badge = node
                 .and_then(|node| {
-                    #[cfg(target_os = "macos")]
-                    let awaiting_first_frame = water.is_some();
-                    #[cfg(not(target_os = "macos"))]
-                    let awaiting_first_frame = self.can_show_loading_badge()
+                    let awaiting_first_frame = !waiting
+                        && self.can_show_loading_badge()
                         && (!narrow || selected)
                         && positions[id] < carousel_left + viewport_width
                         && positions[id] + widths[id] > carousel_left;
                     self.loading_badge(id, node, awaiting_first_frame)
                 })
                 .map(|badge| {
-                    Self::loading_badge_element(badge.label(&self.locale)).children(
-                        workspace_wiring::wiring_probe_bounds(format!(
-                            "session-loading-badge-{id}"
-                        )),
+                    Self::loading_badge_element(
+                        badge.label(&self.locale),
+                        rgba(palette.workspace.text),
                     )
+                    .children(workspace_wiring::wiring_probe_bounds(format!(
+                        "session-loading-badge-{id}"
+                    )))
                 });
+            let (header_loading, body_loading) = if has_water {
+                (loading_badge.map(|badge| badge.ml(px(8.))), None)
+            } else {
+                (None, loading_badge)
+            };
             let card = card
                 .capture_any_mouse_down(cx.listener(
                     move |this, event: &MouseDownEvent, window, cx| {
@@ -16727,7 +17248,7 @@ impl Render for Workspace {
                         ui_text(title.replace(['\r', '\n'], " ")),
                         actions,
                         &palette,
-                        loading_badge,
+                        header_loading,
                     )
                     .id(SharedString::from(format!("session-header-{id}")))
                     .children(workspace_wiring::wiring_probe_bounds(format!(
@@ -16785,6 +17306,17 @@ impl Render for Workspace {
                         })
                         .flatten(),
                 )
+                .children(
+                    (!restore_hidden
+                        && fork_failure.is_none()
+                        && fork_progress.is_none()
+                        && !self.is_deferred(id)
+                        && self.read_only.is_none()
+                        && !has_water
+                        && body_loading.is_none())
+                    .then(|| self.render_history_gap_notice(id, &action_bounds, window, cx))
+                    .flatten(),
+                )
                 .child(if let Some(failure) = fork_failure {
                     failure.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 } else {
@@ -16795,6 +17327,9 @@ impl Render for Workspace {
                         .flex_1()
                         .min_h_0()
                         .relative()
+                        .children(workspace_wiring::wiring_probe_bounds(format!(
+                            "terminal-body-{id}"
+                        )))
                         .children((!restore_hidden).then(|| terminal.clone()))
                         .children(
                             self.history_view
@@ -16817,6 +17352,20 @@ impl Render for Workspace {
                         .children(self.deferred_card(id).map(|card| {
                             self.render_deferred_recovery_card(id, card, width, window, cx)
                         }))
+                        .children(body_loading.map(|badge| {
+                            // Keep the terminal laid out for measurements and
+                            // cover it until its first visible frame arrives.
+                            div()
+                                .id(SharedString::from(format!("first-frame-wait-{id}")))
+                                .absolute()
+                                .inset_0()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .bg(rgb(palette.terminal.background))
+                                .child(badge.text_size(px(12.)))
+                        }))
+                        .children(self.render_storage_fault(id, &action_bounds, window, cx))
                         .children(environment_overlay);
                     #[cfg(target_os = "macos")]
                     let body = body.when(water.is_some(), |body| body.opacity(0.));
@@ -17124,7 +17673,7 @@ impl Render for Workspace {
                     .flex_col()
                     .bg(stage_background)
                     .child({
-                        let stage = div().size_full().flex().flex_col().when(
+                        let stage = div().size_full().relative().flex().flex_col().when(
                             self.settings.is_some(),
                             |mut stage| {
                                 // Keep the terminal laid out while excluding it from focus and paint.
@@ -17149,6 +17698,25 @@ impl Render for Workspace {
                             .child(carousel)
                             .children(self.search_bar(cx))
                             .child(self.footer(window, cx))
+                            .children(connection_status.map(|status| {
+                                div()
+                                    .id("runtime-connection-status")
+                                    .absolute()
+                                    .top(px(52.))
+                                    .left_0()
+                                    .right_0()
+                                    .flex()
+                                    .justify_center()
+                                    .px(px(12.))
+                                    .child(
+                                        div()
+                                            .px(px(12.))
+                                            .py(px(6.))
+                                            .rounded(px(6.))
+                                            .bg(rgba(palette.workspace.panel))
+                                            .child(status),
+                                    )
+                            }))
                     })
                     .children(self.settings.as_ref().map(|(settings, _)| {
                         div().absolute().inset_0().occlude().child(settings.clone())

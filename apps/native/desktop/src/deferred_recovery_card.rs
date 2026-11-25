@@ -4,10 +4,9 @@
 // `hierarchyTerminal.pane` copy; the overlay fills the terminal body and does
 // not read or mutate any session data.
 
-use gpui::{prelude::*, *};
-use matou_native_terminal::Theme;
-
+use super::AppTheme;
 use crate::ui_text::ui_text;
+use gpui::{prelude::*, *};
 
 const DEFERRED_BADGE: &str = "会话尚未启动";
 const DEFERRED_BODY: &str = "启动时仅自动恢复最近使用的 16 条会话。此会话的记录已保留。";
@@ -138,14 +137,9 @@ impl super::Workspace {
         // button after the session-history dialog closes.
         let [history_focus, restore_focus] = &self.deferred_controls[id];
 
-        // Match the native terminal's default surface. `Theme::default()` is
-        // `Theme::LIGHT`; keep the frozen dark values for a dark surface, as
-        // `render_provider_restore_banner` does for the other in-card banner.
-        let theme = Theme::default();
-        let colors = if theme.background == Theme::LIGHT.background {
-            DeferredColors::LIGHT
-        } else {
-            DeferredColors::DARK
+        let colors = match self.theme.effective() {
+            AppTheme::Light => DeferredColors::LIGHT,
+            AppTheme::Dark => DeferredColors::DARK,
         };
 
         // `.session-deferred-card { width: min(460px, calc(100% - 16px)) }`

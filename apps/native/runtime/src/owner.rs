@@ -3756,6 +3756,13 @@ impl ShellOwner {
             .send(command)
     }
 
+    pub(crate) fn recovery_history_gap(
+        &self,
+        session_id: &str,
+    ) -> Option<crate::history::HistoryGapCode> {
+        self.shells.get(session_id)?.worker.recovery_history_gap
+    }
+
     pub fn poll(&mut self, max_wait: Duration) -> Result<Vec<OwnerEvent>> {
         let mut events = std::mem::take(&mut self.pending);
         if let Some(control) = &self.run_control {
@@ -5808,7 +5815,38 @@ impl ShellOwner {
                 disposed,
                 observed_at,
                 ..
-            } => self.finish_run(&event.session_id, *status, *disposed, *observed_at, events),
+            } => self.finish_run(
+                &event.session_id,
+                *status,
+                *disposed,
+                *observed_at,
+                false,
+                events,
+            ),
+            SessionEvent::StorageEndResult {
+                result,
+                observed_at,
+            } => {
+                let result = result.clone().and_then(|()| {
+                    // The journal cannot accept an exit frame. Record the
+                    // explicitly ended run through the normal domain exit path.
+                    let status = matou_native_core::pty::ProcessExit {
+                        exit_code: 1,
+                        signal: None,
+                    };
+                    self.finish_run(&event.session_id, status, true, *observed_at, true, events)
+                        .map_err(|error| format!("{error:#}"))
+                });
+                let observed_at = *observed_at;
+                events.push(OwnerEvent::Terminal(WorkerEvent {
+                    event: SessionEvent::StorageEndResult {
+                        result,
+                        observed_at,
+                    },
+                    ..event
+                }));
+                return;
+            }
             _ => {
                 events.push(OwnerEvent::Terminal(event));
                 return;
@@ -6018,6 +6056,7 @@ impl ShellOwner {
         status: matou_native_core::pty::ProcessExit,
         disposed: bool,
         observed_at: Instant,
+        storage_ended: bool,
         events: &mut Vec<OwnerEvent>,
     ) -> Result<()> {
         if let Some(control) = &self.run_control {
@@ -6025,7 +6064,7 @@ impl ShellOwner {
         }
         let retiring = self.shells[id].retiring;
         let promotion_verified = self.shells[id].promotion_verified();
-        if !self.closing && promotion_verified {
+        if !storage_ended && !self.closing && promotion_verified {
             // The worker publishes the check result before emitting its exit.
             // Drain accepted hooks while this run still owns its binding.
             let run_id = self.shells[id].run_id.clone();
@@ -6043,7 +6082,9 @@ impl ShellOwner {
         if shell.ended {
             return Ok(());
         }
-        shell.ended = true;
+        // If writing the domain exit also fails, a repeated storage-end
+        // request can finish recording it after storage is available again.
+        shell.ended = !storage_ended;
         #[cfg(any(unix, windows))]
         {
             shell.alias_preheat = None;
@@ -6075,7 +6116,7 @@ impl ShellOwner {
             .and_then(|hook| hook.resume)
             .filter(|resume| !had_identity && resume.tracks_restore());
         shell.cwd_capture = None;
-        let shutdown = disposed && self.closing && !retiring;
+        let shutdown = disposed && self.closing && !retiring && !storage_ended;
         let run = shell.run_id.clone();
         let pid = shell.worker.process_id();
         if shell.environment_stop {
@@ -6110,7 +6151,9 @@ impl ShellOwner {
             }
         }
         let time = now();
-        let (prefix, hash) = if shutdown {
+        let (prefix, hash) = if storage_ended {
+            ("runtime-storage-end", "storage-end")
+        } else if shutdown {
             ("runtime-shutdown", "shutdown")
         } else {
             ("runtime-exit", "exit")
@@ -6129,6 +6172,14 @@ impl ShellOwner {
             time,
         )?;
         events.push(OwnerEvent::Domain(commit));
+        if storage_ended {
+            self.set_work_status(id, events, |_| "exited")?;
+            self.shells
+                .get_mut(id)
+                .expect("registered Shell exit")
+                .ended = true;
+            return Ok(());
+        }
         if let Some((binding, fork)) = pending_antigravity
             && !retiring
             && !disposed

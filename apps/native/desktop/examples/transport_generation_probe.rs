@@ -187,6 +187,7 @@ mod workspace {
                     event: Event::Recovery {
                         session_id: self.order[0].clone(),
                         state,
+                        history_gap: None,
                     },
                 },
                 window,
@@ -486,6 +487,7 @@ mod workspace {
                     event: Event::Recovery {
                         session_id: id.clone(),
                         state: RecoveryState::Ready,
+                        history_gap: None,
                     },
                 },
                 window,
@@ -593,6 +595,7 @@ mod workspace {
                     event: Event::Recovery {
                         session_id: id.clone(),
                         state: RecoveryState::Restoring,
+                        history_gap: None,
                     },
                 },
                 window,
@@ -623,6 +626,7 @@ mod workspace {
                     event: Event::Recovery {
                         session_id: id.clone(),
                         state: RecoveryState::Ready,
+                        history_gap: None,
                     },
                 },
                 window,

@@ -24,6 +24,10 @@ impl ProbeReceiver {
     pub(super) fn starting(&self) {
         self.shared.state.lock().unwrap().phase = ConnectionPhase::Starting;
     }
+    #[allow(dead_code)]
+    pub(super) fn reconnecting(&self) {
+        self.shared.state.lock().unwrap().phase = ConnectionPhase::Reconnecting;
+    }
     pub(super) fn read_only(&self) {
         self.shared.state.lock().unwrap().phase = ConnectionPhase::Blocked(StartupBlock {
             kind: StartupBlockKind::ReadOnly,

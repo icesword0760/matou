@@ -194,6 +194,25 @@ mod workspace {
     }
 
     impl Workspace {
+        pub(super) fn assert_deferred_theme(
+            &mut self,
+            id: &str,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            for (preference, color) in [
+                (ThemePreference::Light, 0xf4f7fbeb),
+                (ThemePreference::Dark, 0x0d1117e0),
+                (ThemePreference::Light, 0xf4f7fbeb),
+            ] {
+                self.theme.set_preference(preference);
+                let card = self.deferred_card(id).unwrap();
+                let mut overlay = self.render_deferred_recovery_card(id, card, 320., window, cx);
+                assert_eq!(overlay.style().background, Some(rgba(color).into()));
+            }
+            cx.notify();
+        }
+
         pub(super) fn probe_locale(&mut self, locale: InterfaceLocale, cx: &mut Context<Self>) {
             self.locale = locale;
             if let Some(history) = &self.history_view {
@@ -1023,6 +1042,7 @@ mod workspace {
                 Event::Recovery {
                     session_id: id.into(),
                     state: RecoveryState::Ready,
+                    history_gap: None,
                 },
                 window,
                 cx,
@@ -3105,6 +3125,7 @@ mod probe {
             Event::Recovery {
                 session_id: FAILED.into(),
                 state: RecoveryState::Restoring,
+                history_gap: None,
             },
         );
         failed(
@@ -3120,6 +3141,7 @@ mod probe {
             Event::Recovery {
                 session_id: FAILED.into(),
                 state: RecoveryState::Failed("No Conversation Found".into()),
+                history_gap: None,
             },
         );
         deliver(
@@ -3128,6 +3150,7 @@ mod probe {
             Event::StorageFault {
                 session_id: FAILED.into(),
                 message: "probe storage".into(),
+                retained_bytes: 0,
             },
         );
         failed(
@@ -3341,6 +3364,7 @@ mod probe {
             Event::Recovery {
                 session_id: PEER.into(),
                 state: RecoveryState::Deferred,
+                history_gap: None,
             },
         );
         for locale in [InterfaceLocale::Chinese, InterfaceLocale::English] {
@@ -3695,6 +3719,7 @@ mod probe {
             Event::Recovery {
                 session_id: PARENT.into(),
                 state: RecoveryState::Failed("stale recovery callback".into()),
+                history_gap: None,
             },
         );
         window
@@ -3942,6 +3967,7 @@ mod probe {
         let failure = |state| Event::Recovery {
             session_id: PEER.into(),
             state,
+            history_gap: None,
         };
         let inspect = |cx: &mut AsyncApp, reason, blocked| {
             window
@@ -4103,6 +4129,7 @@ mod probe {
             Event::Recovery {
                 session_id: PEER.into(),
                 state: RecoveryState::StartFailed("obsolete startup failure".into()),
+                history_gap: None,
             },
         );
         inspect(cx, None, false, NO_BLOCK);
@@ -4172,6 +4199,7 @@ mod probe {
             Event::Recovery {
                 session_id: PEER.into(),
                 state: RecoveryState::Restoring,
+                history_gap: None,
             },
         );
         inspect(cx, Some(&reason), false, [Some("当前终端仍在恢复"), None]);
@@ -4183,6 +4211,7 @@ mod probe {
             Event::Recovery {
                 session_id: PEER.into(),
                 state: RecoveryState::Failed(reason.clone()),
+                history_gap: None,
             },
         );
         fixture.set_peer_environment("recovering");
@@ -4301,6 +4330,7 @@ mod probe {
             Event::Recovery {
                 session_id: PEER.into(),
                 state: RecoveryState::Ready,
+                history_gap: None,
             },
         );
         frame(cx, 2, b"\x1b[31mNo conversation found", FAILED_BACKGROUND);
@@ -4333,9 +4363,15 @@ mod probe {
             "restore failure painted the CLI terminal"
         );
         frame(cx, 3, b"\x1b[31mNo conversation found", FAILED_BACKGROUND);
-        assert_ne!(paint(cx), Some(FAILED_BACKGROUND), "late failed CLI frame painted");
+        assert_ne!(
+            paint(cx),
+            Some(FAILED_BACKGROUND),
+            "late failed CLI frame painted"
+        );
         window
-            .update(cx, |view, window, cx| view.assert_terminal_focus(PEER, false, window, cx))
+            .update(cx, |view, window, cx| {
+                view.assert_terminal_focus(PEER, false, window, cx)
+            })
             .unwrap();
         let hit = AnyWindowHandle::from(window)
             .update(cx, |_, window, cx| {
@@ -4349,7 +4385,9 @@ mod probe {
         click(window, cx, hit);
         dispatch_key(window, cx, "a");
         window
-            .update(cx, |view, window, cx| view.assert_terminal_focus(PEER, false, window, cx))
+            .update(cx, |view, window, cx| {
+                view.assert_terminal_focus(PEER, false, window, cx)
+            })
             .unwrap();
         assert!(!drain().any(|command| matches!(command, Command::Input { .. })));
 
@@ -4364,7 +4402,9 @@ mod probe {
             .unwrap();
         click(window, cx, history);
         window
-            .update(cx, |view, window, cx| view.assert_provider_history_open(window, cx))
+            .update(cx, |view, window, cx| {
+                view.assert_provider_history_open(window, cx)
+            })
             .unwrap();
         assert!(drain().any(|command| matches!(
             command,
@@ -4383,7 +4423,9 @@ mod probe {
                 view.assert_terminal_focus(PEER, true, window, cx);
             })
             .unwrap();
-        println!("Failed CLI frame did not paint or accept keys | history opens | same terminal paints recovered frame");
+        println!(
+            "Failed CLI frame did not paint or accept keys | history opens | same terminal paints recovered frame"
+        );
 
         // Wrapping the action group below the title used to count as a fit.
         // The reference keeps the actions beside the text at both widths.
@@ -4397,7 +4439,9 @@ mod probe {
             deliver(narrow, cx, narrow_fixture.event(true));
             for dark in [false, true] {
                 narrow
-                    .update(cx, |view, _, cx| view.provider_restore_probe_theme(dark, focused, cx))
+                    .update(cx, |view, _, cx| {
+                        view.provider_restore_probe_theme(dark, focused, cx)
+                    })
                     .unwrap();
                 let (bounds, rendered_reason) = capture_reason(narrow, cx);
                 let [banner, title, reason, retry, fresh] = [
@@ -4458,6 +4502,7 @@ mod probe {
             Event::Recovery {
                 session_id: PEER.into(),
                 state: RecoveryState::Deferred,
+                history_gap: None,
             },
         );
         draw(window, cx);
@@ -4476,20 +4521,21 @@ mod probe {
             Event::Recovery {
                 session_id: PEER.into(),
                 state: RecoveryState::Restoring,
+                history_gap: None,
             },
         );
         window
             .update(cx, |view, _, _| {
-                view.assert_loading_badge(PEER, true, Some("恢复中"));
+                view.assert_loading_badge(PEER, true, Some("正在恢复会话…"));
                 view.assert_loading_badge(PEER, false, None);
                 // Restoring -> Ready must stay "recovering" until the first
                 // visible frame arrives.
                 view.probe_recovery(PEER, Some(RecoveryState::Ready));
-                view.assert_loading_badge(PEER, true, Some("恢复中"));
+                view.assert_loading_badge(PEER, true, Some("正在恢复会话…"));
                 // A new Session can receive Ready without ever being part of
                 // the recovery plan; it must read as loading, not recovering.
                 view.probe_forget_restoring_intent(PEER);
-                view.assert_loading_badge(PEER, true, Some("加载中"));
+                view.assert_loading_badge(PEER, true, Some("正在打开会话…"));
                 view.probe_recovery(PEER, Some(RecoveryState::Failed("probe".into())));
                 view.assert_loading_badge(PEER, true, None);
                 view.probe_recovery(PEER, Some(RecoveryState::Restoring));
@@ -4582,6 +4628,7 @@ mod probe {
             Event::StorageFault {
                 session_id: PEER.into(),
                 message: "probe storage".into(),
+                retained_bytes: 0,
             },
         );
         assert_tooltip(cx, "终端存储异常，请先恢复或结束当前会话", false);
@@ -5433,6 +5480,7 @@ mod probe {
             Event::Recovery {
                 session_id: PARENT.into(),
                 state: RecoveryState::Failed("probe recovery failure".into()),
+                history_gap: None,
             },
         );
         draw(window, cx);
@@ -5523,6 +5571,7 @@ mod probe {
             Event::Recovery {
                 session_id: PEER.into(),
                 state: RecoveryState::Deferred,
+                history_gap: None,
             },
         );
         draw(window, cx);
@@ -5637,6 +5686,191 @@ mod probe {
             .unwrap();
     }
 
+    fn verify_terminal_recovery_feedback(cx: &mut AsyncApp) {
+        use matou_native_core::sessions::InterfaceLocale;
+        use matou_native_runtime::history::HistoryGapCode;
+        use std::collections::HashMap;
+
+        for width in [720., 900., 1200.] {
+            let mut fixture = Fixture::new();
+            fixture.focus(SCENE, PEER);
+            fixture.set_provider_restore("none", None, 3);
+            let (window, sink) = open_hidden(cx, width);
+            let paint = |cx: &mut AsyncApp| {
+                let mut bounds = HashMap::new();
+                let labels = crate::ui_text::capture(|| {
+                    bounds = AnyWindowHandle::from(window)
+                        .update(cx, |_, window, cx| {
+                            Workspace::capture_render_bounds(window, cx)
+                        })
+                        .unwrap();
+                });
+                (labels, bounds)
+            };
+            let assert_text = |labels: &[String], expected: &str| {
+                assert!(
+                    labels.iter().any(|label| label == expected),
+                    "missing {expected:?} at {width}: {labels:?}"
+                );
+            };
+            let drain = || std::iter::from_fn(|| sink.try_recv().ok()).collect::<Vec<_>>();
+            let recovery = |state, history_gap| Event::Recovery {
+                session_id: PEER.into(),
+                state,
+                history_gap,
+            };
+
+            window
+                .update(cx, |view, _, cx| {
+                    view.probe_locale(InterfaceLocale::Chinese, cx)
+                })
+                .unwrap();
+            assert_text(&paint(cx).0, "正在打开会话…");
+            deliver(window, cx, fixture.event(true));
+            deliver(window, cx, recovery(RecoveryState::Restoring, None));
+            assert_text(&paint(cx).0, "正在恢复会话…");
+            window
+                .update(cx, |view, window, cx| view.qualify(PEER, window, cx))
+                .unwrap();
+            assert!(
+                paint(cx)
+                    .1
+                    .contains_key(&format!("session-loading-badge-{PEER}")),
+                "an empty frame removed the wait"
+            );
+            window
+                .update(cx, |view, window, cx| {
+                    view.qualify_with_content(PEER, b"FIRST_VISIBLE_FRAME", window, cx);
+                })
+                .unwrap();
+            assert!(
+                !paint(cx)
+                    .1
+                    .contains_key(&format!("session-loading-badge-{PEER}")),
+                "the visible frame left the wait behind"
+            );
+
+            deliver(
+                window,
+                cx,
+                recovery(RecoveryState::Ready, Some(HistoryGapCode::MissingSegment)),
+            );
+            let (labels, bounds) = paint(cx);
+            assert_text(&labels, "部分历史未能恢复");
+            let banner = bounds[&format!("history-gap-notice-{PEER}")];
+            let body = bounds[&format!("terminal-body-{PEER}")];
+            assert!(banner.bottom() <= body.top() + px(1.) && body.size.height > px(0.));
+            click(
+                window,
+                cx,
+                bounds[&format!("history-gap-details-{PEER}")].center(),
+            );
+            assert_text(&paint(cx).0, "部分终端记录文件缺失。");
+            let dismissal = paint(cx).1[&format!("history-gap-dismiss-{PEER}")].center();
+            click(window, cx, dismissal);
+            assert!(
+                !paint(cx)
+                    .1
+                    .contains_key(&format!("history-gap-notice-{PEER}"))
+            );
+            deliver(window, cx, recovery(RecoveryState::Ready, None));
+            deliver(
+                window,
+                cx,
+                recovery(RecoveryState::Ready, Some(HistoryGapCode::CorruptSegment)),
+            );
+            assert_text(&paint(cx).0, "部分历史未能恢复");
+            deliver(window, cx, recovery(RecoveryState::Ready, None));
+            assert!(
+                !paint(cx)
+                    .1
+                    .contains_key(&format!("history-gap-notice-{PEER}"))
+            );
+
+            let fault = |retained_bytes| Event::StorageFault {
+                session_id: PEER.into(),
+                message: "probe storage fault".into(),
+                retained_bytes,
+            };
+            deliver(window, cx, fault(1536));
+            let (labels, bounds) = paint(cx);
+            assert_text(&labels, "终端存储出现故障，已保留 1.5 KB");
+            assert_text(&labels, "重试");
+            assert_text(&labels, "结束进程");
+            drain();
+            click(
+                window,
+                cx,
+                bounds[&format!("storage-fault-retry-{PEER}")].center(),
+            );
+            assert!(drain().iter().any(|command| matches!(command, Command::RetryStorage { session_id } if session_id == PEER)));
+            deliver(window, cx, fault(0));
+            assert_text(&paint(cx).0, "终端存储出现故障");
+            assert_text(&paint(cx).0, "终端存储仍不可用，可以再次重试。");
+            window
+                .update(cx, |view, _, cx| {
+                    view.probe_locale(InterfaceLocale::English, cx)
+                })
+                .unwrap();
+            deliver(window, cx, fault(2 * 1024 * 1024));
+            let (labels, _) = paint(cx);
+            assert_text(&labels, "Terminal storage failed; 2.0 MB retained");
+            assert_text(&labels, "Retry");
+            assert_text(&labels, "End process");
+            window
+                .update(cx, |view, _, cx| {
+                    view.probe_locale(InterfaceLocale::Chinese, cx)
+                })
+                .unwrap();
+            deliver(window, cx, fault(0));
+            let end = |cx: &mut AsyncApp| {
+                let action = paint(cx).1[&format!("storage-fault-end-{PEER}")].center();
+                click(window, cx, action);
+                assert_text(
+                    &paint(cx).0,
+                    "停止后，原卡片和已保存的历史会保留。尚未写入的输出将丢失。",
+                );
+            };
+            end(cx);
+            press(window, cx, "escape");
+            assert!(
+                !drain()
+                    .iter()
+                    .any(|command| matches!(command, Command::EndStorage { .. }))
+            );
+            assert_text(&paint(cx).0, "终端存储出现故障");
+            end(cx);
+            press(window, cx, "tab");
+            press(window, cx, "enter");
+            assert!(drain().iter().any(|command| matches!(command, Command::EndStorage { session_id } if session_id == PEER)));
+            deliver(
+                window,
+                cx,
+                Event::StorageEndResult {
+                    session_id: PEER.into(),
+                    result: Ok(()),
+                },
+            );
+            let (labels, bounds) = paint(cx);
+            assert!(!labels.iter().any(|label| label == "终端存储出现故障"));
+            assert!(bounds.contains_key(&format!("terminal-body-{PEER}")));
+
+            deliver(window, cx, recovery(RecoveryState::Deferred, None));
+            window
+                .update(cx, |view, window, cx| {
+                    view.assert_deferred_theme(PEER, window, cx)
+                })
+                .unwrap();
+            assert_text(&paint(cx).0, "会话尚未启动");
+            window
+                .update(cx, |_, window, _| window.remove_window())
+                .unwrap();
+            println!(
+                "{width} pt | opening/restoring/empty-to-visible, history details/dismiss/full recovery, retained bytes/retry/end cancel and confirm, deferred light-dark-light"
+            );
+        }
+    }
+
     fn verify_session_loader(cx: &mut AsyncApp) {
         use serde_json::{Value, json};
 
@@ -5705,6 +5939,7 @@ mod probe {
                 Event::StorageFault {
                     session_id: PEER.into(),
                     message: "probe storage".into(),
+                    retained_bytes: 0,
                 },
                 "终端存储异常，请先恢复或结束当前会话",
             ),
@@ -7408,6 +7643,7 @@ mod probe {
             Event::Recovery {
                 session_id: PARENT.into(),
                 state: RecoveryState::Restoring,
+                history_gap: None,
             },
         );
         fixture.permission_mode(Some("bypassPermissions"));
@@ -7488,6 +7724,7 @@ mod probe {
             Event::StorageFault {
                 session_id: PARENT.into(),
                 message: "probe storage fault".into(),
+                retained_bytes: 0,
             },
         );
         assert_chip(cx, Some(("Default", STORAGE, true)));
@@ -7557,6 +7794,7 @@ mod probe {
             Event::Recovery {
                 session_id: PARENT.into(),
                 state: RecoveryState::Deferred,
+                history_gap: None,
             },
         );
         draw(window, cx);
@@ -8079,6 +8317,7 @@ mod probe {
         let codex_title_only = std::env::args().any(|arg| arg == "--codex-title");
         let water_pointer_only = std::env::args().any(|arg| arg == "--recovery-water-pointer");
         let deferred_only = std::env::args().any(|arg| arg == "--deferred-recovery");
+        let feedback_only = std::env::args().any(|arg| arg == "--terminal-recovery-feedback");
         let show_deferred = std::env::args().any(|arg| arg == "--show-deferred-recovery");
         let loader_only = std::env::args().any(|arg| arg == "--session-loader");
         let provider_restore_only = std::env::args().any(|arg| arg == "--provider-restore");
@@ -8088,6 +8327,13 @@ mod probe {
         let codex_loader_only = std::env::args().any(|arg| arg == "--codex-loader");
         let codex_history_only = std::env::args().any(|arg| arg == "--codex-history");
         Application::new().with_assets(NativeAssets).run(move |cx| {
+            if feedback_only {
+                cx.spawn(async |cx| {
+                    verify_terminal_recovery_feedback(cx);
+                    cx.update(|cx| cx.quit()).unwrap();
+                }).detach();
+                return;
+            }
             if locale_only {
                 cx.spawn(async |cx| {
                     verify_workspace_locale(cx);

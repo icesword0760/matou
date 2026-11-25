@@ -113,7 +113,7 @@ fn matches_reference_credit_transitions_and_cumulative_acknowledgements() -> Res
 }
 
 #[cfg(target_os = "macos")]
-use matou_native_runtime::flow;
+use matou_native_runtime::{flow, history};
 #[cfg(target_os = "macos")]
 use probe_model::{SessionEvent, SessionOptions, StorageFaultCode};
 #[cfg(target_os = "macos")]
