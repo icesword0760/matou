@@ -13764,7 +13764,71 @@ impl Workspace {
             None,
             None,
             None,
+            None,
         )
+    }
+
+    fn session_provider_mark(
+        id: &str,
+        mode: Option<&str>,
+        locale: InterfaceLocale,
+        dark: bool,
+    ) -> Option<Stateful<Div>> {
+        let mode = mode?;
+        let mark = div()
+            .id(SharedString::from(format!("provider-mark-{id}")))
+            .size(px(16.))
+            .flex_none()
+            .mr(px(8.));
+        let (mark, tooltip) = match mode {
+            "claude-code" => (
+                mark.child(icon(
+                    "provider-claude",
+                    16.,
+                    rgb(if dark { 0xe08a6c } else { 0xd97757 }),
+                )),
+                locale.text("Claude Code 会话", "Claude Code session"),
+            ),
+            "codex" => (
+                mark.child(icon(
+                    "provider-codex",
+                    16.,
+                    rgb(if dark { 0xededed } else { 0x20242a }),
+                )),
+                locale.text("Codex 会话", "Codex session"),
+            ),
+            "antigravity" | "dsh" => {
+                let (letter, tooltip) = if mode == "antigravity" {
+                    ("A", locale.text("Antigravity 会话", "Antigravity session"))
+                } else {
+                    ("D", locale.text("DSH 会话", "DSH session"))
+                };
+                let color = rgb(if dark { 0x97b9e0 } else { 0x5f7898 });
+                (
+                    mark.flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(4.))
+                        .bg(Rgba { a: 0.12, ..color })
+                        .text_color(color)
+                        .text_size(px(9.))
+                        .line_height(px(16.))
+                        .font_weight(FontWeight::BOLD)
+                        .child(ui_text(letter)),
+                    tooltip,
+                )
+            }
+            "shell" => (
+                mark.child(icon(
+                    "provider-shell",
+                    16.,
+                    rgb(if dark { 0x98a1ae } else { 0x8a919b }),
+                )),
+                locale.text("Shell", "Shell"),
+            ),
+            _ => return None,
+        };
+        Some(mark.tooltip(move |_, cx| cx.new(|_| CardTooltip(tooltip.into())).into()))
     }
 
     fn loading_badge_element(label: &'static str, color: Rgba) -> Div {
@@ -13811,6 +13875,7 @@ impl Workspace {
         title: UiText,
         actions: Div,
         palette: &ThemePalette,
+        provider_mark: Option<Stateful<Div>>,
         loading_badge: Option<Div>,
         environment_badges: Option<Div>,
         notification_badge: Option<AnyElement>,
@@ -13837,6 +13902,7 @@ impl Workspace {
                     .min_w_0()
                     .flex()
                     .items_center()
+                    .children(provider_mark)
                     .child(
                         div()
                             .min_w_0()
@@ -14027,8 +14093,16 @@ impl Workspace {
         node: &Value,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let palette = self.theme_palette().cards;
+        let theme = self.theme_palette();
+        let palette = theme.cards;
         let title = node["title"].as_str().unwrap_or("Shell");
+        let provider_mark = Self::session_provider_mark(
+            id,
+            node["currentMode"].as_str(),
+            self.locale,
+            theme.terminal != Theme::LIGHT,
+        );
+        let has_provider_mark = provider_mark.is_some();
         let remove = self.stopped_remove_visible(node).then(|| {
             let blocked_reason = self.stopped_remove_blocked_reason();
             let tooltip = RemoveNodeTooltip {
@@ -14101,14 +14175,24 @@ impl Workspace {
                     .bg(rgba(palette.stopped_header))
                     .child(
                         div()
-                            .id(SharedString::from(format!("stopped-session-title-{id}")))
                             .min_w_0()
-                            .max_h(px(42.))
-                            .overflow_hidden()
-                            .text_color(rgba(palette.title))
-                            .text_size(px(12.))
-                            .font_weight(FontWeight::BOLD)
-                            .child(ui_text(title.to_owned()).normal_line_height()),
+                            .flex()
+                            .items_center()
+                            .children(provider_mark)
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("stopped-session-title-{id}")))
+                                    .min_w_0()
+                                    .max_h(px(42.))
+                                    .overflow_hidden()
+                                    .when(has_provider_mark, |title| {
+                                        title.whitespace_nowrap().text_ellipsis()
+                                    })
+                                    .text_color(rgba(palette.title))
+                                    .text_size(px(12.))
+                                    .font_weight(FontWeight::BOLD)
+                                    .child(ui_text(title.to_owned()).normal_line_height()),
+                            ),
                     )
                     .child(
                         div()
@@ -18824,6 +18908,12 @@ impl Render for Workspace {
                         ui_text(title.replace(['\r', '\n'], " ")),
                         actions,
                         &palette,
+                        Self::session_provider_mark(
+                            id,
+                            node.and_then(|node| node["currentMode"].as_str()),
+                            self.locale,
+                            palette.terminal != Theme::LIGHT,
+                        ),
                         header_loading,
                         node.filter(|_| !in_split).and_then(|node| {
                             self.card_environment_badges(id, node, width, &palette)
