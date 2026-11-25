@@ -24,6 +24,7 @@ Usage:
   mt ctx outline <file>
   mt ctx batch-search <query1> [query2 ...] [--dir <path>]
   mt ctx index <file> [--session <id>] [--data-root <path>]
+  mt ctx log <id> [--offset <bytes>] [--data-root <path>]
   mt ctx search <query> [--source <id>] [--limit <n>] [--data-root <path>]
   mt ctx resume [--session <id>] [--data-root <path>]
 ";
@@ -40,6 +41,7 @@ pub fn run_ctx_command(args: &[String], default_data_root: Option<&Path>) -> Res
         "outline" => cmd_outline(rest)?,
         "batch-search" => cmd_batch_search(rest)?,
         "index" => cmd_index(rest, default_data_root)?,
+        "log" => cmd_log(rest, default_data_root)?,
         "search" => cmd_search(rest, default_data_root)?,
         "resume" => cmd_resume(rest, default_data_root)?,
         other => bail!("Unknown `mt ctx` subcommand: {other}\n\n{CTX_HELP}"),
@@ -169,6 +171,61 @@ fn cmd_search(args: &[String], default_data_root: Option<&Path>) -> Result<Strin
         ));
     }
     Ok(out)
+}
+
+fn cmd_log(args: &[String], default_data_root: Option<&Path>) -> Result<String> {
+    let usage = "Usage: mt ctx log <id> [--offset <bytes>] [--data-root <path>]";
+    let id = args.first().context(usage)?;
+    anyhow::ensure!(
+        id.strip_prefix("log_").is_some_and(|seq| {
+            !seq.is_empty() && seq.bytes().all(|byte| byte.is_ascii_digit())
+        }),
+        "{usage}"
+    );
+    let mut options = args[1..].chunks_exact(2);
+    anyhow::ensure!(options.remainder().is_empty(), "{usage}");
+    let mut offset = 0;
+    let mut explicit_root = None;
+    for option in &mut options {
+        match option[0].as_str() {
+            "--offset" => offset = option[1].parse::<usize>().context("invalid --offset")?,
+            "--data-root" => explicit_root = Some(Path::new(&option[1])),
+            _ => bail!("{usage}"),
+        }
+    }
+    let root = resolve_data_root(explicit_root, default_data_root).or_else(|error| {
+        // Managed runs already receive this absolute path under their data root.
+        let roles = std::env::var_os("MATOU_FOREMAN_ROLES_FILE").map(PathBuf::from);
+        roles
+            .filter(|path| {
+                path.is_absolute()
+                    && path.file_name().is_some_and(|name| {
+                        name == matou_native_core::dispatch_roles::ROLES_FILENAME
+                    })
+            })
+            .and_then(|path| path.parent().map(Path::to_path_buf))
+            .ok_or(error)
+    })?;
+    let store = ContextGuardStore::open(&root)?;
+    store.prune_expired(None)?;
+    let Some(log) = store.get_full_log(id)? else {
+        bail!("Log `{id}` was not found or has expired.");
+    };
+    let remainder = log.get(offset..).context("invalid log byte offset")?;
+    if remainder.len() <= HARD_CAP_BYTES {
+        return Ok(remainder.to_owned());
+    }
+    // Reserve space for the continuation instruction, including its byte offset.
+    let tail = format!(
+        "\n\n[Continue with `mt ctx log {id} --offset {}`.]",
+        log.len()
+    );
+    let end = remainder.floor_char_boundary(HARD_CAP_BYTES - tail.len());
+    Ok(format!(
+        "{}\n\n[Continue with `mt ctx log {id} --offset {}`.]",
+        &remainder[..end],
+        offset + end
+    ))
 }
 
 fn cmd_resume(args: &[String], default_data_root: Option<&Path>) -> Result<String> {
