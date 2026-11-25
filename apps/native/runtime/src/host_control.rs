@@ -533,30 +533,46 @@ impl TerminalWrite {
         owner: &crate::owner::ShellOwner,
         session: &str,
     ) -> WireResult<Option<Reply>> {
+        let sent = self.advance_write(owner, session, |body| {
+            if body {
+                state.authorize(&request.digest, &request.method, request.deadline)?;
+            } else {
+                // Give Enter the entire quiet window once the body reaches the PTY.
+                state
+                    .tokens
+                    .authorize(&request.digest, &request.method, (state.clock)())?;
+            }
+            Ok(())
+        })?;
+        if sent {
+            Ok(Some(Reply::Ready(serialize_ok(
+                &request.id,
+                json!({"sent": true}),
+            )?)))
+        } else if matches!(self.step, InputStep::Acknowledge(_, false))
+            && (state.clock)() > request.deadline.saturating_add(1_000)
+        {
+            Err(deadline_elapsed())
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn advance_write(
+        &mut self,
+        owner: &crate::owner::ShellOwner,
+        session: &str,
+        authorize: impl FnOnce(bool) -> WireResult<()>,
+    ) -> WireResult<bool> {
         if let InputStep::Acknowledge(result, false) = &self.step {
             return match result.try_recv() {
-                Ok(Ok(())) => serialize_ok(&request.id, json!({"sent": true}))
-                    .map(Reply::Ready)
-                    .map(Some),
+                Ok(Ok(())) => Ok(true),
                 Ok(Err(error)) => Err(terminal_write_error(error)),
                 Err(mpsc::TryRecvError::Disconnected) => Err(input_not_ready()),
-                Err(mpsc::TryRecvError::Empty)
-                    if (state.clock)() > request.deadline.saturating_add(1_000) =>
-                {
-                    Err(deadline_elapsed())
-                }
-                Err(mpsc::TryRecvError::Empty) => Ok(None),
+                Err(mpsc::TryRecvError::Empty) => Ok(false),
             };
         }
-        if matches!(self.step, InputStep::Body(_)) {
-            state.authorize(&request.digest, &request.method, request.deadline)?;
-        } else {
-            // Once the body reaches the PTY, give Enter the entire quiet window.
-            // Capability expiry and Run replacement still stop the second write.
-            state
-                .tokens
-                .authorize(&request.digest, &request.method, (state.clock)())?;
-        }
+        authorize(matches!(self.step, InputStep::Body(_)))?;
         if owner.control_is_read_only().map_err(write_error)? {
             return Err(read_only_fault());
         }
@@ -578,14 +594,10 @@ impl TerminalWrite {
             InputStep::Body(bytes) => write(std::mem::take(bytes), self.submit)?,
             InputStep::Acknowledge(result, submit) => match result.try_recv() {
                 Ok(Ok(())) if *submit => InputStep::Echo(Instant::now()),
-                Ok(Ok(())) => {
-                    return serialize_ok(&request.id, json!({"sent": true}))
-                        .map(Reply::Ready)
-                        .map(Some);
-                }
+                Ok(Ok(())) => return Ok(true),
                 Ok(Err(error)) => return Err(terminal_write_error(error)),
                 Err(mpsc::TryRecvError::Disconnected) => return Err(input_not_ready()),
-                Err(mpsc::TryRecvError::Empty) => return Ok(None),
+                Err(mpsc::TryRecvError::Empty) => return Ok(false),
             },
             InputStep::Echo(started) => {
                 let elapsed = started.elapsed();
@@ -594,12 +606,173 @@ impl TerminalWrite {
                 if elapsed < Duration::from_millis(120)
                     || (!quiet && elapsed < Duration::from_secs(5))
                 {
-                    return Ok(None);
+                    return Ok(false);
                 }
                 write(vec![b'\r'], false)?
             }
         };
-        Ok(None)
+        Ok(false)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RescueDelivery {
+    Delivered,
+    ClipboardFallback,
+}
+
+enum RescuePromptState {
+    Waiting,
+    ReadingModes {
+        run: String,
+        result: Receiver<
+            Result<(
+                matou_native_terminal::Screen,
+                matou_native_terminal::InputModes,
+            )>,
+        >,
+    },
+    Writing(TerminalWrite),
+    Replayed(RescueDelivery),
+}
+
+/// A desktop-initiated first prompt shares the terminal write/Enter receipt
+/// path with Fork. A durable reservation fences partial writes and restarts.
+pub(crate) struct RescuePrompt {
+    pub(crate) session: String,
+    pub(crate) markdown: String,
+    deadline: Instant,
+    state: RescuePromptState,
+}
+
+impl RescuePrompt {
+    pub(crate) fn new(
+        owner: &mut ShellOwner,
+        session: String,
+        markdown: String,
+        now: i64,
+    ) -> Result<Self> {
+        let command_id = format!("host-rescue-prompt:{session}");
+        let existing = prompt_receipt(owner.control_storage(), &command_id)
+            .map_err(|error| anyhow::anyhow!("{}", error.message))?;
+        let state = if let Some(existing) = existing {
+            RescuePromptState::Replayed(if existing == "completed" {
+                RescueDelivery::Delivered
+            } else {
+                RescueDelivery::ClipboardFallback
+            })
+        } else {
+            let command = CommandMetadata {
+                command_id,
+                command_type: "rescue.prompt.delivery".into(),
+                request_hash: fingerprint(&json!(markdown)),
+                causation_id: None,
+                correlation_id: None,
+            };
+            matou_native_core::storage::execute(owner.control_storage(), &command, now, |_, _| {
+                Ok(json!("delivering"))
+            })?;
+            RescuePromptState::Waiting
+        };
+        Ok(Self {
+            session,
+            markdown,
+            deadline: Instant::now() + Duration::from_secs(20),
+            state,
+        })
+    }
+
+    pub(crate) fn needs_launch(&self) -> bool {
+        matches!(self.state, RescuePromptState::Waiting)
+    }
+
+    pub(crate) fn poll(
+        &mut self,
+        owner: &mut ShellOwner,
+        launch_failed: bool,
+        tick: Instant,
+        now: i64,
+    ) -> Option<RescueDelivery> {
+        if let RescuePromptState::Replayed(delivery) = self.state {
+            return Some(delivery);
+        }
+        let completed = if launch_failed || tick >= self.deadline {
+            false
+        } else {
+            self.advance(owner)?
+        };
+        let receipt = if completed { "completed" } else { "uncertain" };
+        let saved = set_prompt_receipt(
+            owner.control_storage(),
+            &format!("host-rescue-prompt:{}", self.session),
+            receipt,
+            now,
+        );
+        let delivery = if completed && saved.is_ok() {
+            RescueDelivery::Delivered
+        } else {
+            RescueDelivery::ClipboardFallback
+        };
+        self.state = RescuePromptState::Replayed(delivery);
+        Some(delivery)
+    }
+
+    pub(crate) fn yield_to_user_input(&mut self) {
+        self.deadline = Instant::now();
+    }
+
+    fn advance(&mut self, owner: &ShellOwner) -> Option<bool> {
+        match &mut self.state {
+            RescuePromptState::Waiting => {
+                let run = owner.rescue_terminal(&self.session)?.to_owned();
+                let (reply, result) = mpsc::channel();
+                if owner
+                    .send(&self.session, crate::worker::WorkerCommand::View { reply })
+                    .is_err()
+                {
+                    return Some(false);
+                }
+                self.state = RescuePromptState::ReadingModes { run, result };
+            }
+            RescuePromptState::ReadingModes { run, result } => match result.try_recv() {
+                Ok(Ok((_, modes)))
+                    if owner.rescue_terminal(&self.session) == Some(run.as_str()) =>
+                {
+                    self.state = RescuePromptState::Writing(TerminalWrite {
+                        run: run.clone(),
+                        submit: true,
+                        step: InputStep::Body(rescue_prompt_bytes(
+                            &self.markdown,
+                            modes.bracketed_paste,
+                        )),
+                    });
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                _ => return Some(false),
+            },
+            RescuePromptState::Writing(write) => {
+                match write.advance_write(owner, &self.session, |_| Ok(())) {
+                    Ok(false) => {}
+                    Ok(true) => return Some(true),
+                    Err(_) => return Some(false),
+                }
+            }
+            RescuePromptState::Replayed(_) => unreachable!("replay returns a stored receipt"),
+        }
+        None
+    }
+}
+
+fn rescue_prompt_bytes(markdown: &str, bracketed: bool) -> Vec<u8> {
+    let text: String = markdown
+        .chars()
+        .filter(|ch| !ch.is_control() || *ch == '\n')
+        .collect();
+    if bracketed {
+        format!("\x1b[200~{}\x1b[201~", text.replace('\n', "\r")).into_bytes()
+    } else {
+        // In an unbracketed terminal, embedded line breaks are submit keys.
+        text.replace('\n', " \u{23ce} ").into_bytes()
     }
 }
 
@@ -3923,7 +4096,12 @@ impl ForkWaitItem {
             return match write.advance(request, state, owner, &self.session) {
                 Ok(None) => Ok(None),
                 Ok(Some(_)) => {
-                    mark_prompt_complete(owner.control_storage(), &self.session, now)?;
+                    set_prompt_receipt(
+                        owner.control_storage(),
+                        &format!("host-fork-prompt:{}", self.session),
+                        "completed",
+                        now,
+                    )?;
                     Ok(Some(("started", None, "completed")))
                 }
                 Err(error) => Ok(Some((
@@ -3959,7 +4137,12 @@ impl ForkWaitItem {
                 },
             )));
         }
-        match prompt_receipt(owner.control_storage(), &self.session)?.as_deref() {
+        match prompt_receipt(
+            owner.control_storage(),
+            &format!("host-fork-prompt:{}", self.session),
+        )?
+        .as_deref()
+        {
             Some("completed") => return Ok(Some(("started", None, "completed"))),
             Some("delivering") => {
                 if Instant::now() < self.expires {
@@ -4008,17 +4191,28 @@ impl ForkWaitItem {
     }
 }
 
-fn prompt_receipt(connection: &Connection, session: &str) -> WireResult<Option<String>> {
+fn prompt_receipt(connection: &Connection, key: &str) -> WireResult<Option<String>> {
     connection.query_row(
         "SELECT json_extract(response_json, '$') FROM command_deduplication WHERE command_id = ?",
-        [format!("host-fork-prompt:{session}")], |row| row.get(0),
+        [key], |row| row.get(0),
     ).optional().map_err(sql_error)
 }
 
-fn mark_prompt_complete(connection: &Connection, session: &str, now: i64) -> WireResult<()> {
-    connection.execute(
+fn set_prompt_receipt(
+    connection: &Connection,
+    key: &str,
+    receipt: &str,
+    now: i64,
+) -> WireResult<()> {
+    let rows = connection.execute(
         "UPDATE command_deduplication SET response_json = ?, committed_at = ? WHERE command_id = ?",
-        params!["\"completed\"", now, format!("host-fork-prompt:{session}")],
+        params![json!(receipt).to_string(), now, key],
     ).map_err(sql_error)?;
+    if rows != 1 {
+        return Err(Fault::new(
+            "INTERNAL_ERROR",
+            "first prompt reservation disappeared",
+        ));
+    }
     Ok(())
 }

@@ -36,7 +36,10 @@ use uuid::Uuid;
 
 use crate::{
     ScreenRecoveryOptions, SessionEvent, SessionOptions,
-    agent_hud_projection::{AgentHudProjection, ConfigCounts, HudProvider, project_teammates},
+    agent_hud_projection::{
+        AgentHudProjection, AgentState, ConfigCounts, HudProvider, RunningTool, TaskStatus,
+        ToolActivity, ToolStatus, project_teammates,
+    },
     agent_hud_sources::{self, ExternalAgents},
     antigravity_catalog::Catalog as AntigravityCatalog,
     antigravity_events::{
@@ -53,7 +56,7 @@ use crate::{
     },
     codex_launch::CodexLaunch,
     codex_resume::{self, Resume as CodexResume},
-    context_guard::{HandoffBrief, SessionContextGuard},
+    context_guard::{HandoffBrief, SessionContextGuard, rescue},
     derived::{CwdTracker, WorkStatusTracker, terminal_summary_lines, utf16_tail},
     dsh_catalog::DshSessionCatalog,
     dsh_events::{DshEventOutcome, DshEvents, DshWorkStatus},
@@ -181,6 +184,15 @@ struct RunHook {
     pending_startup_observations: Vec<(Scope, Observation)>,
     hud: AgentHudProjection,
     context_guard: SessionContextGuard,
+    stall_handoff: Option<HandoffBrief>,
+    stall_git: Option<(Instant, mpsc::Receiver<Vec<String>>)>,
+    stall_notified: bool,
+    context_card_alert: Option<&'static str>,
+    rescue_ready: bool,
+    context_session_ended: bool,
+    dsh_compacted_percent: Option<f64>,
+    codex_context_tools: Vec<RunningTool>,
+    codex_context_last_tool: Option<ToolActivity>,
     optimizer_data_root: PathBuf,
     codex_context_percent: Option<f64>,
     mono_origin: Instant,
@@ -232,12 +244,167 @@ impl RunHook {
             Some(fallback)
         });
         let (percent, used, window) = self.hud.context_metrics(request);
-        let percent = self.codex_context_percent.or(percent);
+        let mut percent = self.codex_context_percent.or(percent);
+        if let Some(before) = self.dsh_compacted_percent {
+            match percent {
+                Some(current) if current == before => percent = None,
+                Some(_) => self.dsh_compacted_percent = None,
+                None => {}
+            }
+        }
         self.context_guard.observe_usage(usage);
         if self.context_guard.context_percent() != percent {
             self.context_guard.on_context_percent(percent, time);
         }
         (percent, used, window)
+    }
+
+    fn observe_watchdog(
+        &mut self,
+        gateway: Option<&Gateway>,
+        cwd: &str,
+        work_status: &str,
+        time: f64,
+    ) -> (Option<f64>, Option<u64>, Option<u64>) {
+        self.context_guard
+            .tick(time, self.mono_origin.elapsed().as_secs_f64() * 1000.0);
+        let agents = self
+            .codex
+            .as_ref()
+            .map(|codex| codex.hud_agents(time))
+            .unwrap_or_default();
+        let snapshot = self.hud.snapshot_with_agents(time, agents);
+        let metrics = self.observe_context_usage(gateway, time);
+        let tools = if self.codex_context_tools.is_empty() {
+            snapshot.running_tools.as_deref().unwrap_or_default()
+        } else {
+            &self.codex_context_tools
+        };
+        let active_tool = tools
+            .iter()
+            .find(|tool| {
+                crate::context_guard::is_long_running_tool(&tool.name, tool.target.as_deref())
+            })
+            .or_else(|| tools.last())
+            .map(|tool| (tool.name.as_str(), tool.target.as_deref()));
+        let awaiting_user = tools.iter().any(|tool| {
+            matches!(
+                tool.name.to_ascii_lowercase().as_str(),
+                "askuserquestion" | "ask_user_question" | "request_user_input"
+            )
+        });
+        let status = if self.context_session_ended
+            || matches!(work_status, "exited" | "interrupted" | "error")
+        {
+            TaskStatus::Idle
+        } else if awaiting_user || work_status == "needs-input" {
+            TaskStatus::NeedsInput
+        } else if snapshot.task_status == TaskStatus::Idle && work_status == "running" {
+            TaskStatus::Running
+        } else {
+            snapshot.task_status
+        };
+        self.context_guard
+            .sync_observed_state(status, metrics.0, active_tool, time);
+        let last_tool = self
+            .codex_context_last_tool
+            .as_ref()
+            .or(snapshot.last_tool.as_ref());
+        self.context_guard.observe_last_tool(last_tool, time);
+        if snapshot
+            .agents
+            .iter()
+            .flatten()
+            .any(|agent| agent.state == AgentState::Running)
+        {
+            self.context_guard.note_activity(time);
+        }
+        if let Some(tool) = last_tool
+            && tool.status == ToolStatus::Completed
+            && let Some(target) = tool.tool.target.as_deref()
+        {
+            for target in rescue::write_targets(&tool.tool.name, &json!({"path": target})) {
+                self.context_guard
+                    .record_modified_file(&rescue::display_path(
+                        Path::new(cwd),
+                        Path::new(&target),
+                    ));
+            }
+        }
+        metrics
+    }
+
+    fn observe_rescue_tool(&mut self, event: &str, payload: &Value, cwd: &str, time: f64) {
+        self.context_guard.note_activity(time);
+        if !matches!(event, "PostToolUse" | "PostToolUseFailure") {
+            return;
+        }
+        let input = payload
+            .get("tool_input")
+            .or_else(|| payload.get("toolInput"))
+            .or_else(|| payload.get("input"))
+            .unwrap_or(&Value::Null);
+        let Some(name) = ["tool_name", "toolName"]
+            .into_iter()
+            .find_map(|key| payload[key].as_str())
+        else {
+            return;
+        };
+        let targets = rescue::write_targets(name, input);
+        let command = input["command"]
+            .as_str()
+            .or_else(|| input["CommandLine"].as_str());
+        let response = payload
+            .get("tool_response")
+            .or_else(|| payload.get("toolResponse"))
+            .unwrap_or(&Value::Null);
+        let exit_code = ["exitCode", "exit_code"]
+            .into_iter()
+            .find_map(|key| response[key].as_i64().or_else(|| payload[key].as_i64()));
+        let failed = event == "PostToolUseFailure"
+            || payload["success"] == false
+            || response["success"] == false
+            || response["is_error"] == true
+            || response["isError"] == true
+            || exit_code.is_some_and(|code| code != 0);
+        let fallback = crate::agent_hud_projection::target_for_tool(name, input);
+        let target = command
+            .or_else(|| targets.first().map(String::as_str))
+            .or(fallback.as_deref());
+        self.context_guard
+            .record_tool_result(name, target, !failed, exit_code, time);
+        if !failed {
+            for target in targets {
+                self.context_guard
+                    .record_modified_file(&rescue::display_path(
+                        Path::new(cwd),
+                        Path::new(&target),
+                    ));
+            }
+        }
+    }
+
+    fn build_handoff(
+        &self,
+        session_id: &str,
+        title: &str,
+        cwd: &str,
+        time: f64,
+        git_files: &[String],
+    ) -> HandoffBrief {
+        let locale = sessions::current_interface_locale(sessions::read_locale_preference(
+            &self.optimizer_data_root,
+        ));
+        let log_ids = rescue::recent_log_ids(&self.optimizer_data_root, session_id);
+        self.context_guard.build_handoff_with_observations(
+            Some(title),
+            Some(cwd),
+            time,
+            locale,
+            git_files,
+            &log_ids,
+            &self.secrets,
+        )
     }
 
     fn remember_claude_transcript(&mut self, payload: &Value) {
@@ -345,6 +512,7 @@ pub struct ShellOwner {
     pub(crate) fork_setup: Option<Box<dyn Fn(&Path) -> Result<()> + Send>>,
     codex_forks: CodexForks,
     next_context_reminder_poll: Instant,
+    context_cards_changed: bool,
 }
 
 struct CatalogExit {
@@ -425,6 +593,7 @@ impl ShellOwner {
             fork_setup: None,
             codex_forks: CodexForks::default(),
             next_context_reminder_poll: Instant::now(),
+            context_cards_changed: false,
         };
         let runs = {
             let mut query = owner.connection.prepare("SELECT id FROM session_runs WHERE status IN ('starting','running') AND runtime_generation <> ? ORDER BY started_at")?;
@@ -1027,22 +1196,8 @@ impl ShellOwner {
             .as_ref()
             .map(|codex| codex.hud_agents(time))
             .unwrap_or_default();
-        let preview = hook.hud.snapshot_with_agents(time, agents.clone());
-        hook.context_guard
-            .tick(time, hook.mono_origin.elapsed().as_secs_f64() * 1000.0);
-        let active_tool = preview
-            .running_tools
-            .as_ref()
-            .and_then(|tools| tools.last())
-            .map(|tool| (tool.name.as_str(), tool.target.as_deref()));
         let (context_percent, context_used, context_window) =
             hook.observe_context_usage(shell.gateway.as_ref(), time);
-        hook.context_guard.sync_observed_state(
-            preview.task_status,
-            context_percent,
-            active_tool,
-            time,
-        );
         hook.context_guard.set_saved_noise_bytes(saved_noise_bytes);
         let optimizer_settings = ContextOptimizerConfig::for_data_root(data_root)
             .effective_for(hook.context_guard.provider_id())
@@ -1099,20 +1254,106 @@ impl ShellOwner {
     pub fn session_handoff_brief(
         &self,
         session_id: &str,
-        data_root: &Path,
+        _data_root: &Path,
     ) -> Option<HandoffBrief> {
-        let managed = self.shells.get(session_id)?;
-        let hook = managed.hook.as_ref()?;
-        let locale =
-            sessions::current_interface_locale(sessions::read_locale_preference(data_root));
-        let time = now() as f64;
-        let snap = hook.hud.snapshot(time);
-        Some(hook.context_guard.build_handoff_brief(
-            snap.session_name.as_deref(),
-            snap.cwd.as_deref(),
-            time,
-            locale,
-        ))
+        let shell = self.shells.get(session_id)?;
+        let hook = shell.hook.as_ref()?;
+        if let Some(brief) = hook.stall_handoff.as_ref()
+            && hook.context_guard.is_stalled(now() as f64)
+            && hook.stall_git.is_none()
+        {
+            return Some(brief.clone());
+        }
+        let session = self.session(session_id).ok().flatten()?;
+        let title = session.provider_title.as_deref().unwrap_or(&session.title);
+        let files = rescue::start_git_snapshot(PathBuf::from(&shell.cwd))
+            .ok()
+            .and_then(|result| result.recv_timeout(Duration::from_millis(400)).ok())
+            .unwrap_or_default();
+        Some(hook.build_handoff(session_id, title, &shell.cwd, now() as f64, &files))
+    }
+
+    pub(crate) fn context_guard_details(&self, session: &str, data_root: &Path) -> Result<Value> {
+        let hook = self
+            .shells
+            .get(session)
+            .and_then(|shell| shell.hook.as_ref());
+        let settings = hook.and_then(|hook| {
+            ContextOptimizerConfig::for_data_root(data_root)
+                .effective_for(hook.context_guard.provider_id())
+                .ok()
+        });
+        let summary = hook
+            .zip(settings.as_ref())
+            .and_then(|(hook, settings)| hook.context_guard.project_hud(now() as f64, settings));
+        let logs = rescue::recent_logs(data_root, session, hook.map_or(&[], |hook| &hook.secrets))?;
+        Ok(json!({
+            "sessionId": session,
+            "cache": summary.as_ref().and_then(|summary| summary.cache.as_ref()),
+            "stall": summary.as_ref().and_then(|summary| summary.stall.as_ref()),
+            "logs": logs,
+        }))
+    }
+
+    pub(crate) fn context_guard_log(
+        &self,
+        session: &str,
+        log: &str,
+        data_root: &Path,
+    ) -> Result<Value> {
+        let secrets = self
+            .shells
+            .get(session)
+            .and_then(|shell| shell.hook.as_ref())
+            .map_or(&[][..], |hook| hook.secrets.as_slice());
+        let preview = rescue::log_preview(data_root, session, log, secrets)?;
+        Ok(json!({"sessionId": session, "id": log, "preview": preview}))
+    }
+
+    pub(crate) fn rescue_terminal(&self, session_id: &str) -> Option<&str> {
+        let shell = self.shells.get(session_id)?;
+        let hook = shell.hook.as_ref()?;
+        if !shell.emitted_output
+            || shell.provider_startup_pending
+            || !hook.rescue_ready
+            || shell.worker.is_finished()
+        {
+            return None;
+        }
+        self.control_terminal(session_id).map(|(run, _)| run)
+    }
+
+    pub(crate) fn create_rescue_sibling(
+        &mut self,
+        command: &CommandMetadata,
+        input: &canvas::CreateShellSiblingInput,
+        ids: &canvas::CanvasIds,
+        messages: &canvas::CanvasMessages<'_>,
+    ) -> Result<Value> {
+        let session = self
+            .session(&input.source_session_id)?
+            .context("Session does not exist")?;
+        let kind = match session.kind.as_str() {
+            "claude-code" => LaunchProfile::ClaudeCode,
+            "codex" => LaunchProfile::Codex,
+            "antigravity" => LaunchProfile::Antigravity,
+            "dsh" => LaunchProfile::Dsh,
+            _ => anyhow::bail!("No handoff for a Shell session"),
+        };
+        let profile = canvas::SessionSiblingProfile {
+            kind,
+            cwd: Some(&session.cwd),
+            permission_mode: None,
+        };
+        canvas::create_session_sibling(
+            &mut self.connection,
+            command,
+            input,
+            ids,
+            messages,
+            input.now,
+            &profile,
+        )
     }
 
     pub fn session(&self, id: &str) -> Result<Option<StoredSession>> {
@@ -1126,6 +1367,15 @@ impl ShellOwner {
         let focused = graph["focusedSessionId"].as_str().map(str::to_owned);
         if let Some(nodes) = graph["nodes"].as_array_mut() {
             for node in nodes {
+                if let Some(alert) = node["sessionId"]
+                    .as_str()
+                    .and_then(|id| self.shells.get(id))
+                    .filter(|shell| !shell.ended && !shell.retiring)
+                    .and_then(|shell| shell.hook.as_ref())
+                    .and_then(|hook| hook.context_card_alert)
+                {
+                    node["contextCardAlert"] = json!(alert);
+                }
                 if node["environment"]["kind"] == "worktree"
                     && node["environment"]["state"] == "ready"
                     && node["environment"]["path"]
@@ -3666,6 +3916,15 @@ impl ShellOwner {
                 pending_startup_observations: Vec::new(),
                 hud,
                 context_guard: SessionContextGuard::new(hud_provider),
+                stall_handoff: None,
+                stall_git: None,
+                stall_notified: false,
+                context_card_alert: None,
+                rescue_ready: false,
+                context_session_ended: false,
+                dsh_compacted_percent: None,
+                codex_context_tools: Vec::new(),
+                codex_context_last_tool: None,
                 optimizer_data_root: options.launch.data_root.clone(),
                 codex_context_percent: None,
                 mono_origin: Instant::now(),
@@ -3693,6 +3952,18 @@ impl ShellOwner {
             None
         };
         clear_control_environment(&mut options.launch);
+        if hook.is_some() {
+            set_var(
+                &mut options.launch.env,
+                "MATOU_DATA_ROOT".into(),
+                options.launch.data_root.clone().into_os_string(),
+            );
+            set_var(
+                &mut options.launch.env,
+                "MATOU_SESSION_ID".into(),
+                session_id.clone().into(),
+            );
+        }
         let roles_path = options
             .launch
             .data_root
@@ -4023,6 +4294,10 @@ impl ShellOwner {
         Ok(events)
     }
 
+    pub(crate) fn take_context_card_changes(&mut self) -> bool {
+        std::mem::take(&mut self.context_cards_changed)
+    }
+
     fn poll_context_reminders(&mut self, events: &mut Vec<OwnerEvent>) {
         let tick = Instant::now();
         if self.closing || tick < self.next_context_reminder_poll {
@@ -4057,10 +4332,130 @@ impl ShellOwner {
             else {
                 continue;
             };
-            if !settings.enabled || !settings.cache_monitor {
+            if !settings.enabled || (!settings.cache_monitor && !settings.stall_rescue) {
+                hook.stall_handoff = None;
+                hook.stall_git = None;
+                hook.stall_notified = false;
+                self.context_cards_changed |= hook.context_card_alert.take().is_some();
                 continue;
             }
-            hook.observe_context_usage(shell.gateway.as_ref(), time as f64);
+            let work_status = self
+                .connection
+                .query_row(
+                    "SELECT work_status FROM sessions WHERE id = ? AND archived_at IS NULL",
+                    [session_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .unwrap_or(None);
+            let Some(work_status) = work_status else {
+                continue;
+            };
+            hook.observe_watchdog(
+                shell.gateway.as_ref(),
+                &shell.cwd,
+                &work_status,
+                time as f64,
+            );
+            let stalled = settings.stall_rescue && hook.context_guard.is_stalled(time as f64);
+            let card_alert = if stalled {
+                Some("stalled")
+            } else if settings.cache_monitor && hook.context_guard.has_critical_context() {
+                Some("critical")
+            } else {
+                None
+            };
+            self.context_cards_changed |= hook.context_card_alert != card_alert;
+            hook.context_card_alert = card_alert;
+            if stalled {
+                if hook.stall_handoff.is_none() {
+                    if let Ok(Some(session)) = sessions::get_session(&self.connection, session_id) {
+                        let title = session.provider_title.as_deref().unwrap_or(&session.title);
+                        hook.stall_handoff = Some(hook.build_handoff(
+                            session_id,
+                            title,
+                            &shell.cwd,
+                            time as f64,
+                            &[],
+                        ));
+                        if let Ok(receive) = rescue::start_git_snapshot(PathBuf::from(&shell.cwd)) {
+                            hook.stall_git = Some((tick, receive));
+                        }
+                    }
+                }
+                let git = hook
+                    .stall_git
+                    .as_ref()
+                    .map(|(_, receive)| receive.try_recv());
+                if let Some(Ok(files)) = git {
+                    hook.stall_git = None;
+                    if let Ok(Some(session)) = sessions::get_session(&self.connection, session_id) {
+                        let title = session.provider_title.as_deref().unwrap_or(&session.title);
+                        hook.stall_handoff = Some(hook.build_handoff(
+                            session_id,
+                            title,
+                            &shell.cwd,
+                            time as f64,
+                            &files,
+                        ));
+                    }
+                } else if matches!(git, Some(Err(mpsc::TryRecvError::Disconnected))) {
+                    hook.stall_git = None;
+                }
+                if !hook.stall_notified
+                    && hook
+                        .stall_git
+                        .as_ref()
+                        .is_none_or(|(start, _)| start.elapsed() >= Duration::from_secs(2))
+                {
+                    let id = (self.next_id)();
+                    let labels: Option<(String, String)> = self
+                        .connection
+                        .query_row(
+                            "SELECT workspaces.name, sessions.title FROM sessions
+                         JOIN tasks ON tasks.id = sessions.task_id
+                         JOIN workspaces ON workspaces.id = tasks.workspace_id
+                         WHERE sessions.id = ?",
+                            [session_id],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )
+                        .optional()
+                        .unwrap_or(None);
+                    let subtitle =
+                        labels.map(|(workspace, title)| format!("{workspace} · {title}"));
+                    let locale =
+                        sessions::current_interface_locale(sessions::read_locale_preference(&root));
+                    let notification = json!({
+                        "eventType": "context-stall-detected",
+                        "title": locale.text("会话疑似卡死", "Session appears stalled"),
+                        "subtitle": subtitle.as_deref().map(|title| rescue::redact(title, &hook.secrets)),
+                        "body": locale.text("点击定位卡片并使用交接摘要继续。", "Open the card to continue with its handoff brief."),
+                        "sound": true,
+                        "cooldownKey": id,
+                    });
+                    match sessions::publish_provider_notification(
+                        &mut self.connection,
+                        &command(id.clone(), "agent.notification.publish", id),
+                        session_id,
+                        &shell.run_id,
+                        &self.generation,
+                        hook.context_guard.provider_id(),
+                        notification,
+                        time,
+                    ) {
+                        Ok(commit) if commit.result["published"] == true => {
+                            hook.stall_notified = true;
+                            events.push(OwnerEvent::Domain(commit));
+                        }
+                        Ok(_) => {}
+                        Err(error) => diagnostic(events, session_id, format!("{error:#}")),
+                    }
+                }
+            } else {
+                hook.stall_handoff = None;
+                hook.stall_git = None;
+                hook.stall_notified = false;
+            }
             let reminders: Vec<_> = hook
                 .context_guard
                 .pending_reminders(time as f64, settings)
@@ -4584,8 +4979,11 @@ impl ShellOwner {
         if let Some(event) = update.event_name {
             hud["hookEventName"] = json!(event);
         }
-        redact_hud(&mut hud, &hook.secrets);
-        hook.hud.ingest_provider(&hud, time as f64);
+        hook.rescue_ready |= agy.run.conversation_id().is_some()
+            && !matches!(
+                hud["agent_state"].as_str(),
+                Some("initializing" | "authenticating")
+            );
         let status = update
             .work_status
             .filter(|_| hook.last_submission.is_none_or(|sent| sent <= received_at));
@@ -4607,6 +5005,12 @@ impl ShellOwner {
             .title_candidate
             .as_ref()
             .map(|_| agy.catalog_root.clone());
+        if let Some(event) = update.event_name {
+            hook.observe_rescue_tool(event, &hud, &shell.cwd, time as f64);
+            hook.context_session_ended = event == "SessionEnd";
+        }
+        redact_hud(&mut hud, &hook.secrets);
+        hook.hud.ingest_provider(&hud, time as f64);
         if let Some(status) = status {
             use antigravity_events::WorkStatus;
             let status = match status {
@@ -4670,6 +5074,9 @@ impl ShellOwner {
             let more = agy
                 .transcript
                 .poll(&agy.catalog_root, &path, identity, |row| {
+                    if row.is_some() {
+                        hook.context_guard.note_activity(now() as f64);
+                    }
                     hook.hud.ingest_antigravity_row(row)
                 })
                 .unwrap_or_default();
@@ -4828,6 +5235,22 @@ impl ShellOwner {
                 return;
             }
         };
+        let event = payload["event_type"].as_str();
+        let data = &payload["event_data"];
+        let time = now() as f64;
+        hook.rescue_ready |= event == Some("ready") && payload["ready"] == true;
+        if event == Some("compaction/end")
+            && data.get("completed").and_then(Value::as_bool) != Some(false)
+            && (data["error"].is_null() || data["error"] == "" || data["error"] == false)
+        {
+            hook.dsh_compacted_percent = hook.hud.context_metrics(None).0;
+            hook.context_guard.on_compaction();
+        }
+        // The bridge also sends ready snapshots as a heartbeat. Their mere
+        // arrival says that the UI is alive, even when the agent is stuck.
+        if !matches!(event, Some("ready" | "snapshot" | "agent/status")) {
+            hook.context_guard.note_activity(time);
+        }
         if let Some(identity) = update.identity
             && identity.persisted
         {
@@ -5013,6 +5436,9 @@ impl ShellOwner {
             return;
         };
         let backlog = hook.claude_live.poll(root, path, identity, |row| {
+            if row.is_some() {
+                hook.context_guard.note_activity(now() as f64);
+            }
             hook.hud.ingest_live_claude_history(row)
         });
         if matches!(backlog, Ok(false)) {
@@ -5106,7 +5532,19 @@ impl ShellOwner {
             }
             return;
         }
-        if matches!(observation.event, "unknown" | "SessionEnd") {
+        if observation.event == "SessionEnd" {
+            if hook
+                .last_observation
+                .as_ref()
+                .is_none_or(|last| last.identity == observation.identity)
+            {
+                hook.context_session_ended = true;
+                hook.context_guard
+                    .on_task_status(TaskStatus::Idle, now() as f64);
+            }
+            return;
+        }
+        if observation.event == "unknown" {
             return;
         }
         if let (Some(expected), Some(identity)) = (&scope.expected_id, &observation.identity)
@@ -5297,6 +5735,11 @@ impl ShellOwner {
             if hook.hud.complete_claude_compaction(&payload, time) {
                 hook.context_guard.on_compaction();
             }
+            hook.observe_rescue_tool(hook_event, &payload, &shell.cwd, time);
+            hook.rescue_ready |= hook_event == "SessionStart";
+            if matches!(hook_event, "SessionStart" | "UserPromptSubmit") {
+                hook.context_session_ended = false;
+            }
             hook.hud.ingest_provider(&payload, time);
             hook.sync_gateway_context();
         }
@@ -5417,9 +5860,7 @@ impl ShellOwner {
             {
                 return;
             }
-            if let Some(raw) = observation.hud_payload.take() {
-                hook.hud.ingest_provider(&raw, now() as f64);
-            }
+            let raw = observation.hud_payload.take();
             let Some(effect) = codex.apply_admitted(observation.event, payload, &shell.cwd) else {
                 return;
             };
@@ -5455,6 +5896,12 @@ impl ShellOwner {
                         format!("Record Codex Fork readiness: {error:#}"),
                     ),
                 }
+            }
+            hook.context_session_ended |= observation.event == "SessionEnd";
+            if let Some(raw) = raw {
+                let time = now() as f64;
+                hook.observe_rescue_tool(observation.event, &raw, &shell.cwd, time);
+                hook.hud.ingest_provider(&raw, time);
             }
             let notification = observation.notification.map(|(notice, _)| notice.payload());
             self.apply_codex_effect(
@@ -5619,6 +6066,7 @@ impl ShellOwner {
         hook.hud.set_resumable(true);
         hook.codex_fork_ready = commit.result["metadata"]["canFork"] == true;
         codex.confirm(rollout, expected.unwrap_or(&identity_text).to_owned());
+        hook.rescue_ready = true;
         hook.deadline = None;
         hook.codex_resume = None;
         observation.identity = Some(identity_text);
@@ -5678,8 +6126,30 @@ impl ShellOwner {
                     hook.context_guard.on_compaction();
                 }
                 if codex.take_hud_change() {
-                    hook.codex_context_percent =
-                        codex.hud_projection(|_| false)["contextPercent"].as_f64();
+                    let projection = codex.hud_projection(|_| true);
+                    hook.codex_context_percent = projection["contextPercent"].as_f64();
+                    let tool = |value: &Value| {
+                        Some(RunningTool {
+                            name: value["name"].as_str()?.to_owned(),
+                            target: value["target"].as_str().map(str::to_owned),
+                        })
+                    };
+                    hook.codex_context_tools = projection["runningTools"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(tool)
+                        .collect();
+                    let last = &projection["lastTool"];
+                    hook.codex_context_last_tool = tool(last).and_then(|tool| {
+                        let status = match last["status"].as_str()? {
+                            "completed" => ToolStatus::Completed,
+                            "error" => ToolStatus::Error,
+                            "running" => ToolStatus::Running,
+                            _ => return None,
+                        };
+                        Some(ToolActivity { tool, status })
+                    });
                     changed = true;
                 }
                 if self.codex_hud.idle()
@@ -6038,6 +6508,7 @@ impl ShellOwner {
                 }
                 if let Some(hook) = &mut shell.hook {
                     hook.last_submission = Some(*submitted_at);
+                    hook.context_guard.note_activity(now() as f64);
                 }
                 if let Err(error) = self.set_work_status(&event.session_id, events, |_| "running") {
                     diagnostic(
@@ -6137,6 +6608,11 @@ impl ShellOwner {
         let shell = self.shells.get_mut(id).expect("registered session output");
         shell.emitted_output = true;
         shell.last_output = Some(Instant::now());
+        if let Some(hook) = &mut shell.hook
+            && rescue::has_completed_output_line(data)
+        {
+            hook.context_guard.note_activity(now() as f64);
+        }
         #[cfg(any(unix, windows))]
         if !self.closing
             && let Some(input) = shell.alias_preheat.take()
@@ -8509,3 +8985,7 @@ mod provider_tests {
         Ok(())
     }
 }
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "context_guard/rescue_tests.rs"]
+mod context_rescue_tests;

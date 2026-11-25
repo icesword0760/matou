@@ -33,7 +33,7 @@ use crate::{
     egress_probe::{self, EgressMonitor, EgressSample, Family, LiveEgressSampler, RuleMode},
     environment_runtime::{self, EnvironmentTarget, WorktreeExpectation},
     history_worker::{HistoryReply, HistoryRequest, HistoryWorker},
-    host_control::ControlServer,
+    host_control::{ControlServer, RescueDelivery, RescuePrompt},
     owner::{ClaudeForkRebuild, DshLaunch, OwnerEvent, ShellOwner},
     protocol::{
         ClaudeModelCatalogReply, ClaudeModelCatalogResult, ClaudeModelPreferencesReply,
@@ -988,6 +988,19 @@ pub enum Command {
         request_id: u64,
         session_id: String,
     },
+    RescueSessionWithHandoff {
+        request_id: u64,
+        session_id: String,
+    },
+    GetContextGuardDetails {
+        request_id: u64,
+        session_id: String,
+    },
+    GetContextGuardLog {
+        request_id: u64,
+        session_id: String,
+        log_id: String,
+    },
     ForkSession {
         scene_id: String,
         source_session_id: String,
@@ -1200,7 +1213,9 @@ impl StoragePhase {
                 | Command::GetAccountSummary { .. }
                 | Command::GetContextOptimizerStats { .. }
                 | Command::GetAgentHud { .. }
-                | Command::GetSessionHandoffBrief { .. },
+                | Command::GetSessionHandoffBrief { .. }
+                | Command::GetContextGuardDetails { .. }
+                | Command::GetContextGuardLog { .. },
             ) => true,
             (
                 Self::ReadOnly,
@@ -2450,9 +2465,32 @@ impl RuntimeWiring {
                             "markdown": brief.markdown,
                             "stalledTool": brief.stalled_tool,
                             "modifiedFiles": brief.modified_files,
+                            "logIds": brief.log_ids,
                             "contextPercent": brief.context_percent,
                         })
                     })),
+            ),
+            Command::GetContextGuardDetails { request_id, session_id } => (
+                "contextGuardDetailsResult",
+                *request_id,
+                owner.map_or_else(
+                    || Ok(json!({
+                        "sessionId": session_id,
+                        "logs": crate::context_guard::rescue::recent_logs(data_root, session_id, &[])?,
+                    })),
+                    |owner| owner.context_guard_details(session_id, data_root),
+                ),
+            ),
+            Command::GetContextGuardLog { request_id, session_id, log_id } => (
+                "contextGuardLogResult",
+                *request_id,
+                owner.map_or_else(
+                    || Ok(json!({
+                        "sessionId": session_id, "id": log_id,
+                        "preview": crate::context_guard::rescue::log_preview(data_root, session_id, log_id, &[])?,
+                    })),
+                    |owner| owner.context_guard_log(session_id, log_id, data_root),
+                ),
             ),
             _ => return None,
         };
@@ -3759,6 +3797,9 @@ pub fn storage_command_rejected(command: Command, code: &str, message: &str) -> 
             Some(("claudeAccountsResult", *request_id))
         }
         Command::SetTaskStatus { request_id, .. } => Some(("taskStatusResult", *request_id)),
+        Command::RescueSessionWithHandoff { request_id, .. } => {
+            Some(("rescueSessionWithHandoffResult", *request_id))
+        }
         Command::LoadDshSession { request_id, .. } => Some(("dshSessionLoadResult", *request_id)),
         Command::LoadAntigravitySession { request_id, .. } => {
             Some(("antigravitySessionLoadResult", *request_id))
@@ -4762,6 +4803,7 @@ fn run_writable(
     let mut catalog_details = Vec::new();
     let mut catalog_load_errors = Vec::new();
     let mut tasks_dirty = false;
+    let mut rescues = HashMap::<u64, (Value, RescuePrompt)>::new();
     if recovery_request.is_some() {
         // Reject commands already on the wire during the recovered bootstrap.
         // Neither a second action nor ordinary writes join the new workspace.
@@ -5510,6 +5552,65 @@ fn run_writable(
             if wiring.dispatch_live_update(&command, &data_root, send) {
                 continue;
             }
+            if let Command::RescueSessionWithHandoff {
+                request_id,
+                session_id,
+            } = &command
+            {
+                if rescues.contains_key(request_id) {
+                    continue;
+                }
+                let result = start_context_rescue(
+                    &mut owner,
+                    &data_root,
+                    generation,
+                    window_id,
+                    *request_id,
+                    session_id,
+                );
+                match result {
+                    Ok(Some((created, prompt))) => {
+                        if prompt.needs_launch() {
+                            let workspace_id = created["workspace"]["id"]
+                                .as_str()
+                                .context("Rescue card has no workspace")?
+                                .to_owned();
+                            if let Err(error) = checks.request(&owner, &workspace_id) {
+                                send.send_blocking(Event::Diagnostic(format!(
+                                    "Rescue workspace validation: {error:#}"
+                                )))?;
+                            } else {
+                                failed_launches.remove(&prompt.session);
+                                launch_retries.insert(
+                                    prompt.session.clone(),
+                                    LaunchRetry {
+                                        workspace_id,
+                                        recovering: false,
+                                        validated: false,
+                                        fresh_codex: false,
+                                        claude_rebuild: None,
+                                    },
+                                );
+                            }
+                            graph_dirty = true;
+                        }
+                        rescues.insert(*request_id, (created, prompt));
+                    }
+                    result => {
+                        let result = result.map(|_| Value::Null);
+                        let reply =
+                            wiring_result("rescueSessionWithHandoffResult", *request_id, result);
+                        let projection = active_graph(
+                            &owner,
+                            scene_id.as_deref(),
+                            window_id,
+                            &startup_deferred,
+                        )?;
+                        send.send_blocking(with_graph_projection(reply, projection))?;
+                    }
+                }
+                continue;
+            }
             if let Some(reply) = wiring.handle(&command, &data_root, Some(&mut owner)) {
                 let projection =
                     active_graph(&owner, scene_id.as_deref(), window_id, &startup_deferred)?;
@@ -6138,6 +6239,12 @@ fn run_writable(
                     bytes,
                     defer_ordering,
                 } => {
+                    if let Some((_, prompt)) = rescues
+                        .values_mut()
+                        .find(|(_, prompt)| prompt.session == session_id)
+                    {
+                        prompt.yield_to_user_input();
+                    }
                     if permission_changes.contains_key(&session_id) {
                         if let Err(error) = owner.send_permission_consent_input(&session_id, bytes)
                         {
@@ -7234,7 +7341,10 @@ fn run_writable(
                 | Command::GetClaudeAccounts { .. }
                 | Command::ClaudeAccountCommand { .. }
                 | Command::GetAgentHud { .. }
-                | Command::GetSessionHandoffBrief { .. } => {
+                | Command::GetSessionHandoffBrief { .. }
+                | Command::RescueSessionWithHandoff { .. }
+                | Command::GetContextGuardDetails { .. }
+                | Command::GetContextGuardLog { .. } => {
                     unreachable!("Runtime wiring command handled above")
                 }
                 #[cfg(all(test, target_os = "macos"))]
@@ -7928,6 +8038,33 @@ fn run_writable(
             permission_results.push(permission_result(&id, &change.mode, error));
             graph_dirty = true;
         }
+        let mut rescue_results = Vec::new();
+        for (&request, (created, prompt)) in &mut rescues {
+            let failed = failed_launches.contains_key(&prompt.session)
+                || (!owner.has_shell_worker(&prompt.session)
+                    && !launch_retries.contains_key(&prompt.session));
+            if let Some(delivery) = prompt.poll(&mut owner, failed, Instant::now(), self::now()) {
+                let mut result = json!({
+                    "sessionId": prompt.session,
+                    "sceneId": created["scene"]["id"],
+                    "taskId": created["task"]["id"],
+                    "workspaceId": created["workspace"]["id"],
+                    "delivery": "delivered",
+                });
+                if matches!(delivery, RescueDelivery::ClipboardFallback) {
+                    result["delivery"] = json!("clipboard_fallback");
+                    result["markdown"] = json!(prompt.markdown);
+                }
+                rescue_results.push((request, result));
+            }
+        }
+        for (request, result) in rescue_results {
+            rescues.remove(&request);
+            let reply = wiring_result("rescueSessionWithHandoffResult", request, Ok(result));
+            let projection =
+                active_graph(&owner, scene_id.as_deref(), window_id, &startup_deferred)?;
+            send.send_blocking(with_graph_projection(reply, projection))?;
+        }
         let released: Vec<_> = provider_starting
             .keys()
             .filter(|id| {
@@ -8301,6 +8438,7 @@ fn run_writable(
             }
         }
         graph_dirty |= owner.poll_codex_hud();
+        graph_dirty |= owner.take_context_card_changes();
         if owner.take_egress_membership_change() {
             let status = owner.egress().status();
             if status
@@ -10361,26 +10499,78 @@ fn metadata(kind: &str, input: &Value) -> CommandMetadata {
     }
 }
 
-fn navigate(
-    owner: &mut ShellOwner,
-    window_id: &str,
-    command: Command,
-) -> Result<(HierarchyResult, Vec<String>, Option<NavigationAction>)> {
-    let time = now();
-    let ids = CanvasIds {
+fn canvas_ids() -> CanvasIds {
+    CanvasIds {
         scene_id: id(),
         root_node_id: id(),
         secondary_node_id: id(),
         session_id: id(),
         mount_id: id(),
         relation_id: id(),
-    };
-    let messages = CanvasMessages {
+    }
+}
+fn canvas_messages() -> CanvasMessages<'static> {
+    CanvasMessages {
         new_canvas: "新画布",
         duplicate_scene_name: "当前事项下已存在同名页签",
         workspace_path_invalid: WORKSPACE_PATH_INVALID,
         detached_session_must_return: "独立窗口中的会话需要先回到原会话列表",
+    }
+}
+pub(crate) fn start_context_rescue(
+    owner: &mut ShellOwner,
+    data_root: &Path,
+    generation: &str,
+    window_id: &str,
+    request_id: u64,
+    source: &str,
+) -> Result<Option<(Value, RescuePrompt)>> {
+    let Some(brief) = owner.session_handoff_brief(source, data_root) else {
+        return Ok(None);
     };
+    let scene = owner
+        .notification_scene_id(window_id, source)?
+        .context("Source card has no canvas")?;
+    let time = now();
+    let command = CommandMetadata {
+        command_id: format!("host-rescue-create:{generation}:{window_id}:{request_id}"),
+        command_type: "hierarchy.rescue-session".into(),
+        request_hash: json!({"sourceSessionId": source}).to_string(),
+        causation_id: None,
+        correlation_id: None,
+    };
+    let input = CreateShellSiblingInput {
+        window_id: window_id.into(),
+        scene_id: scene,
+        source_session_id: source.into(),
+        parent_session_id: None,
+        execution_context_id: None,
+        title: None,
+        navigation: Some("preserve".into()),
+        now: time,
+    };
+    let created = owner.create_rescue_sibling(
+        &command,
+        &input,
+        &canvas_ids(),
+        &canvas_messages(),
+    )?["created"]
+        .clone();
+    let session = created["session"]["id"]
+        .as_str()
+        .context("Rescue card has no session ID")?;
+    let prompt = RescuePrompt::new(owner, session.to_owned(), brief.markdown, time)?;
+    Ok(Some((created, prompt)))
+}
+
+fn navigate(
+    owner: &mut ShellOwner,
+    window_id: &str,
+    command: Command,
+) -> Result<(HierarchyResult, Vec<String>, Option<NavigationAction>)> {
+    let time = now();
+    let ids = canvas_ids();
+    let messages = canvas_messages();
     match command {
         Command::CreateWorkspace { root_directory } => {
             let directory = resolve_workspace_directory(&root_directory)?;

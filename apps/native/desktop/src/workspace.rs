@@ -82,6 +82,10 @@ use footer_controls::{
     EnvironmentActionState, FooterGitProjection, FooterGitRequest, FooterMenu, FooterPopover,
 };
 
+#[path = "context_rescue_ui.rs"]
+mod context_rescue_ui;
+use context_rescue_ui::ContextDetailsPopover;
+
 #[path = "project_instructions.rs"]
 mod project_instructions;
 
@@ -1855,7 +1859,12 @@ impl Notifications {
         let workspace_id = text("workspaceId");
         let context_reminder = matches!(
             text("eventType"),
-            Some("context-water-warning" | "context-water-critical" | "context-cache-expiry")
+            Some(
+                "context-water-warning"
+                    | "context-water-critical"
+                    | "context-cache-expiry"
+                    | "context-stall-detected"
+            )
         );
         let read = !context_reminder && session_id.is_some() && session_id == focused;
         let (id, cooldown_key) = if let Some(index) = replacement {
@@ -1877,7 +1886,7 @@ impl Notifications {
                 return false;
             }
             *cooldown = (now, cooldown.1 + 1);
-            if let Some(session_id) = session_id {
+            if !context_reminder && let Some(session_id) = session_id {
                 self.dismiss_session(session_id);
             }
             self.sequence += 1;
@@ -2400,6 +2409,8 @@ pub struct Workspace {
     footer_shell: Option<String>,
     project_instructions: HashMap<AnyWindowHandle, project_instructions::Instructions>,
     footer_popovers: HashMap<AnyWindowHandle, FooterPopover>,
+    context_details: HashMap<AnyWindowHandle, ContextDetailsPopover>,
+    context_rescue_requests: HashMap<String, u64>,
     environment_actions: HashMap<String, EnvironmentActionState>,
     #[cfg(debug_assertions)]
     environment_picker_path: Option<PathBuf>,
@@ -3515,6 +3526,8 @@ impl Workspace {
                 .map(str::to_owned),
             project_instructions: HashMap::new(),
             footer_popovers: HashMap::new(),
+            context_details: HashMap::new(),
+            context_rescue_requests: HashMap::new(),
             environment_actions: HashMap::new(),
             #[cfg(debug_assertions)]
             environment_picker_path: None,
@@ -12544,6 +12557,10 @@ impl Workspace {
             }
             return;
         }
+        if stroke.key == "escape" && self.close_context_details(window, cx) {
+            cx.stop_propagation();
+            return;
+        }
         if self.footer_popover_key(stroke, window, cx) {
             cx.stop_propagation();
             return;
@@ -16981,6 +16998,9 @@ impl Workspace {
         if footer_menu.is_some() {
             footer = footer.child(self.footer_popover_overlay(window, cx));
         }
+        if let Some(panel) = self.render_context_details(window, cx) {
+            footer = footer.child(panel);
+        }
 
         // Flatten the old primary wrapper into the status row so the model is
         // a real flex sibling. AGENTS, permission, context and tools keep their
@@ -17333,77 +17353,43 @@ impl Workspace {
                         if dark { 0xffffff12 } else { 0x5a677812 },
                     ),
                 };
-                for pill in [
-                    guard_view.stall_pill.as_ref(),
-                    guard_view.saved_pill.as_ref(),
-                ]
-                .into_iter()
-                .flatten()
-                {
+                if let Some(pill) = guard_view.stall_pill.as_ref() {
                     let (fg, bg) = pill_colors(pill.tone);
-                    primary = primary.child(
-                        div()
-                            .flex_none()
-                            .px(px(6.))
-                            .py(px(1.5))
-                            .rounded(px(5.))
-                            .bg(rgba(bg))
-                            .text_size(px(10.))
-                            .font_weight(FontWeight(600.))
-                            .text_color(rgb(fg))
-                            .whitespace_nowrap()
-                            .child(pill.label.clone()),
-                    );
+                    primary = primary.child(self.context_hud_pill(pill.label.clone(), fg, bg));
                 }
-                if let Some((label, detail, tone)) = footer_cache_usage(live, locale) {
-                    let (fg, bg) = pill_colors(tone);
-                    primary = primary.child(
-                        div()
-                            .id("footer-cache-countdown")
-                            .flex_none()
-                            .px(px(6.))
-                            .py(px(1.5))
-                            .rounded(px(5.))
-                            .bg(rgba(bg))
-                            .text_size(px(10.))
-                            .font_weight(FontWeight(600.))
-                            .text_color(rgb(fg))
-                            .whitespace_nowrap()
-                            .child(label)
-                            .tooltip(move |_, cx| cx.new(|_| CardTooltip(detail.into())).into()),
-                    );
-                }
-                if guard_view.show_handoff_button
-                    && let Some(target_session) = session.map(str::to_owned)
-                {
-                    let (fg, bg) = if guard_view.handoff_urgent {
-                        (0xffffff, 0xb34d47ff)
-                    } else {
-                        (0x2679d8, 0x2679d81f)
-                    };
-                    let btn_label = if guard_view.handoff_urgent {
-                        locale.text("一键交接续聊", "Rescue handoff")
-                    } else {
-                        locale.text("交接摘要", "Handoff")
-                    };
-                    primary = primary.child(
-                        div()
-                            .id("footer-context-guard-handoff")
-                            .flex_none()
-                            .px(px(7.))
-                            .py(px(1.5))
-                            .rounded(px(5.))
-                            .cursor_pointer()
-                            .bg(rgba(bg))
-                            .text_size(px(10.))
-                            .font_weight(FontWeight(650.))
-                            .text_color(rgb(fg))
-                            .whitespace_nowrap()
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.request_session_handoff(target_session.clone(), cx);
-                            }))
-                            .child(btn_label),
-                    );
+                if let Some(session) = session {
+                    if let Some(pill) = guard_view.saved_pill.as_ref() {
+                        let (fg, bg) = pill_colors(pill.tone);
+                        primary = primary.child(self.context_details_trigger(
+                            "footer-context-saved",
+                            session,
+                            pill.label.clone(),
+                            None,
+                            fg,
+                            bg,
+                            cx,
+                        ));
+                    }
+                    if let Some((label, detail, tone)) = footer_cache_usage(live, locale) {
+                        let (fg, bg) = pill_colors(tone);
+                        primary = primary.child(self.context_details_trigger(
+                            "footer-cache-countdown",
+                            session,
+                            label,
+                            Some(detail),
+                            fg,
+                            bg,
+                            cx,
+                        ));
+                    }
+                    if guard_view.show_handoff_button && self.read_only.is_none() {
+                        primary = primary.child(self.context_handoff_actions(
+                            session,
+                            "footer",
+                            guard_view.handoff_urgent,
+                            cx,
+                        ));
+                    }
                 }
             }
             status = status.child(primary).child(optional).child(fixed);
@@ -18687,6 +18673,7 @@ impl Render for Workspace {
                     )
                 })
                 .children(self.render_card_egress(id, cx))
+                .children(node.and_then(|node| self.render_context_card_alert(id, node, cx)))
                 .children(in_split.then(|| self.render_live_teammates(id)).flatten())
                 .children(provider_banner.map(|banner| {
                     self.render_provider_restore_banner(

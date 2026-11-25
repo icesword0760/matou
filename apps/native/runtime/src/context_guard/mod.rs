@@ -5,7 +5,7 @@
 //! servers and zero extra background processes. Behavior is gated per-agent by
 //! `matou_native_core::context_optimizer_config::AgentOptimizerSettings`.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 pub mod cli;
 mod claude_output;
@@ -25,7 +25,12 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use std::sync::LazyLock;
 
-use crate::agent_hud_projection::{ContextUsageSample, HudProvider, TaskStatus};
+use crate::agent_hud_projection::{
+    ContextUsageSample, HudProvider, TaskStatus, ToolActivity, ToolStatus,
+};
+
+#[path = "rescue.rs"]
+pub(crate) mod rescue;
 
 const CACHE_EXPIRING_SOON_SEC: u64 = 60;
 const KEEPALIVE_TRIGGER_WINDOW_SEC: u64 = 45;
@@ -191,6 +196,7 @@ pub struct ToolTraceEntry {
     pub tool_name: String,
     pub target: Option<String>,
     pub succeeded: Option<bool>,
+    pub exit_code: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -202,6 +208,7 @@ pub struct HandoffBrief {
     pub modified_files: Vec<String>,
     pub recent_tools: Vec<ToolTraceEntry>,
     pub stalled_tool: Option<String>,
+    pub log_ids: Vec<String>,
     pub markdown: String,
 }
 
@@ -231,6 +238,7 @@ pub struct SessionContextGuard {
     saved_noise_bytes: u64,
     modified_files: VecDeque<String>,
     recent_tools: VecDeque<ToolTraceEntry>,
+    observed_last_tool: Option<ToolActivity>,
 }
 
 impl SessionContextGuard {
@@ -250,6 +258,7 @@ impl SessionContextGuard {
             saved_noise_bytes: 0,
             modified_files: VecDeque::new(),
             recent_tools: VecDeque::new(),
+            observed_last_tool: None,
         }
     }
 
@@ -268,7 +277,7 @@ impl SessionContextGuard {
     pub fn on_task_status(&mut self, status: TaskStatus, now_ms: f64) {
         self.task_status = status;
         self.last_activity_ms = Some(now_ms);
-        if matches!(status, TaskStatus::Idle | TaskStatus::NeedsInput) {
+        if status != TaskStatus::Running {
             self.active_tool = None;
         }
     }
@@ -289,26 +298,48 @@ impl SessionContextGuard {
         if context_percent != self.context_percent {
             self.on_context_percent(context_percent, now_ms);
         }
-        match active_tool {
-            Some((name, target)) => {
-                let same_tool = self.active_tool.as_ref().is_some_and(|cur| {
-                    cur.name == name && cur.target.as_deref() == target
-                });
-                if !same_tool {
-                    self.on_tool_started(name, target, now_ms);
-                }
-            }
-            None => {
-                if let Some(prev) = self.active_tool.take() {
-                    self.on_tool_finished(
-                        &prev.name,
-                        prev.target.as_deref(),
-                        status != TaskStatus::Error,
-                        now_ms,
-                    );
-                }
-            }
+        if status != TaskStatus::Running {
+            return;
         }
+        if let Some((name, target)) = active_tool {
+            let same_tool = self
+                .active_tool
+                .as_ref()
+                .is_some_and(|cur| cur.name == name && cur.target.as_deref() == target);
+            if !same_tool {
+                self.on_tool_started(name, target, now_ms);
+            }
+        } else {
+            self.active_tool = None;
+        }
+    }
+
+    pub(crate) fn note_activity(&mut self, now_ms: f64) {
+        self.last_activity_ms = Some(now_ms);
+    }
+
+    pub(crate) fn observe_last_tool(&mut self, tool: Option<&ToolActivity>, now_ms: f64) {
+        if self.observed_last_tool.as_ref() == tool {
+            return;
+        }
+        self.observed_last_tool = tool.cloned();
+        if let Some(tool) = tool.filter(|tool| tool.status != ToolStatus::Running) {
+            self.record_tool_result(
+                &tool.tool.name,
+                tool.tool.target.as_deref(),
+                tool.status == ToolStatus::Completed,
+                None,
+                now_ms,
+            );
+        }
+    }
+
+    pub(crate) fn is_stalled(&self, now_ms: f64) -> bool {
+        self.compute_stall_status(now_ms).severity == StallSeverity::Stalled
+    }
+
+    pub(crate) fn has_critical_context(&self) -> bool {
+        classify_context_pressure(self.context_percent) == ContextPressure::Critical
     }
 
     pub(crate) fn context_percent(&self) -> Option<f64> {
@@ -394,20 +425,36 @@ impl SessionContextGuard {
 
     pub fn on_tool_finished(&mut self, name: &str, target: Option<&str>, succeeded: bool, now_ms: f64) {
         self.active_tool = None;
-        self.last_activity_ms = Some(now_ms);
+        self.record_tool_result(name, target, succeeded, None, now_ms);
+    }
+
+    pub(crate) fn record_tool_result(
+        &mut self,
+        name: &str,
+        target: Option<&str>,
+        succeeded: bool,
+        exit_code: Option<i64>,
+        now_ms: f64,
+    ) {
+        self.note_activity(now_ms);
         self.push_tool_trace(ToolTraceEntry {
             tool_name: name.to_owned(),
             target: target.map(str::to_owned),
             succeeded: Some(succeeded),
+            exit_code,
         });
     }
 
     pub fn on_file_modified(&mut self, path: &str, now_ms: f64) {
+        self.note_activity(now_ms);
+        self.record_modified_file(path);
+    }
+
+    pub(crate) fn record_modified_file(&mut self, path: &str) {
         let trimmed = path.trim();
         if trimmed.is_empty() {
             return;
         }
-        self.last_activity_ms = Some(now_ms);
         if let Some(pos) = self.modified_files.iter().position(|p| p == trimmed) {
             self.modified_files.remove(pos);
         }
@@ -427,7 +474,9 @@ impl SessionContextGuard {
             if drift > SLEEP_DRIFT_THRESHOLD_MS {
                 self.sleep_guard_recoveries = self.sleep_guard_recoveries.saturating_add(1);
                 if let Some(last) = self.last_activity_ms.as_mut() {
-                    *last += drift;
+                    if *last <= prev_wall {
+                        *last += drift;
+                    }
                 }
                 if let Some(tool) = self.active_tool.as_mut() {
                     tool.started_at_ms += drift;
@@ -463,7 +512,8 @@ impl SessionContextGuard {
             ContextPressure::Normal
         };
         let handoff_ready = settings.stall_rescue
-            && (!self.modified_files.is_empty()
+            && (context_pressure == ContextPressure::Critical
+                || !self.modified_files.is_empty()
                 || !self.recent_tools.is_empty()
                 || self.active_tool.is_some()
                 || matches!(
@@ -489,15 +539,53 @@ impl SessionContextGuard {
         now_ms: f64,
         locale: InterfaceLocale,
     ) -> HandoffBrief {
-        let stall = self.compute_stall_status(now_ms);
-        let modified_files: Vec<String> = self.modified_files.iter().cloned().collect();
-        let recent_tools: Vec<ToolTraceEntry> = self.recent_tools.iter().cloned().collect();
-        let stalled_tool = stall.stalled_tool.clone();
+        self.build_handoff_with_observations(session_name, cwd, now_ms, locale, &[], &[], &[])
+    }
 
-        let markdown = render_handoff_markdown(
+    pub(crate) fn recorded_modified_files(&self) -> impl Iterator<Item = &str> {
+        self.modified_files.iter().map(String::as_str)
+    }
+
+    pub(crate) fn build_handoff_with_observations(
+        &self,
+        session_name: Option<&str>,
+        cwd: Option<&str>,
+        now_ms: f64,
+        locale: InterfaceLocale,
+        modified_files: &[String],
+        log_ids: &[String],
+        secrets: &[String],
+    ) -> HandoffBrief {
+        let stall = self.compute_stall_status(now_ms);
+        let redact = |text: &str| rescue::redact(text, secrets);
+        let session_name = session_name.map(redact);
+        let cwd = cwd.map(redact);
+        let mut seen_files = HashSet::new();
+        let modified_files: Vec<String> = self
+            .recorded_modified_files()
+            .chain(modified_files.iter().map(String::as_str))
+            .map(redact)
+            .filter(|path| seen_files.insert(path.clone()))
+            .collect();
+        let recent_tools: Vec<_> = self
+            .recent_tools
+            .iter()
+            .map(|tool| ToolTraceEntry {
+                tool_name: redact(&tool.tool_name),
+                target: tool.target.as_deref().map(|target| {
+                    let text = redact(target);
+                    text[..text.floor_char_boundary(text.len().min(640))].to_owned()
+                }),
+                succeeded: tool.succeeded,
+                exit_code: tool.exit_code,
+            })
+            .collect();
+        let stalled_tool = stall.stalled_tool.as_deref().map(redact);
+
+        let mut markdown = render_handoff_markdown(
             self.provider,
-            session_name,
-            cwd,
+            session_name.as_deref(),
+            cwd.as_deref(),
             self.context_percent,
             &modified_files,
             &recent_tools,
@@ -507,14 +595,25 @@ impl SessionContextGuard {
             locale,
         );
 
+        if !log_ids.is_empty() {
+            markdown.push_str(locale.text(
+                "\n\n## 可检索的截断日志\n",
+                "\n\n## Retrievable truncated logs\n",
+            ));
+            for id in log_ids {
+                markdown.push_str(&format!("- `{id}`\n"));
+            }
+        }
+
         HandoffBrief {
             provider: self.provider,
-            session_name: session_name.map(str::to_owned),
-            cwd: cwd.map(str::to_owned),
+            session_name,
+            cwd,
             context_percent: self.context_percent,
             modified_files,
             recent_tools,
             stalled_tool,
+            log_ids: log_ids.to_vec(),
             markdown: redact_secrets(&markdown),
         }
     }
@@ -571,7 +670,10 @@ impl SessionContextGuard {
         let reference_ms = self
             .active_tool
             .as_ref()
-            .map(|t| t.started_at_ms)
+            .map(|t| {
+                t.started_at_ms
+                    .max(self.last_activity_ms.unwrap_or(t.started_at_ms))
+            })
             .or(self.last_activity_ms)
             .unwrap_or(now_ms);
         let silent_ms = (now_ms - reference_ms).max(0.0);
@@ -607,6 +709,15 @@ impl SessionContextGuard {
     }
 
     fn push_tool_trace(&mut self, entry: ToolTraceEntry) {
+        if entry.exit_code.is_none()
+            && self.recent_tools.back().is_some_and(|previous| {
+                previous.tool_name == entry.tool_name
+                    && previous.succeeded == entry.succeeded
+                    && previous.target == entry.target
+            })
+        {
+            return;
+        }
         self.recent_tools.push_back(entry);
         while self.recent_tools.len() > MAX_RECENT_TOOLS {
             self.recent_tools.pop_front();
@@ -654,7 +765,7 @@ impl ContextReminder {
                 "context-water-critical",
                 locale.text("上下文占用达到 85%", "Context usage reached 85%"),
                 open,
-                true,
+                false,
             ),
             Self::CacheExpiry { timing: CacheTiming::Estimate, .. } => (
                 "context-cache-expiry",
@@ -687,10 +798,15 @@ fn classify_context_pressure(percent: Option<f64>) -> ContextPressure {
     }
 }
 
-fn is_long_running_tool(name: &str, target: Option<&str>) -> bool {
+pub(crate) fn is_long_running_tool(name: &str, target: Option<&str>) -> bool {
     let lower_name = name.to_ascii_lowercase();
-    let lower_target = target.unwrap_or_default().to_ascii_lowercase();
-    if lower_name.contains("bash") || lower_name.contains("command") || lower_name.contains("shell") {
+    if lower_name.contains("bash") || lower_name.contains("command") || lower_name.contains("shell")
+    {
+        let Some(target) = target else {
+            // Some hosts expose the shell tool name without its command.
+            return true;
+        };
+        let lower_target = target.to_ascii_lowercase();
         return [
             "cargo ",
             "pnpm ",
@@ -750,6 +866,7 @@ fn render_handoff_markdown(
         if !modified_files.is_empty() {
             lines.push(String::new());
             lines.push("## Modified Files".to_owned());
+            lines.push("Includes tool writes and shared worktree changes.".to_owned());
             for file in modified_files {
                 lines.push(format!("- `{file}`"));
             }
@@ -763,6 +880,10 @@ fn render_handoff_markdown(
                     Some(false) => "failed",
                     None => "running",
                 };
+                let status = step.exit_code.map_or_else(
+                    || status.to_owned(),
+                    |code| format!("{status} (exit {code})"),
+                );
                 match step.target.as_deref() {
                     Some(target) if !target.trim().is_empty() => {
                         lines.push(format!("- `{}` ({target}) — {status}", step.tool_name));
@@ -797,6 +918,7 @@ fn render_handoff_markdown(
         if !modified_files.is_empty() {
             lines.push(String::new());
             lines.push("## 已修改文件".to_owned());
+            lines.push("来自工具写入记录与共享工作树。".to_owned());
             for file in modified_files {
                 lines.push(format!("- `{file}`"));
             }
@@ -810,6 +932,10 @@ fn render_handoff_markdown(
                     Some(false) => "失败",
                     None => "进行中",
                 };
+                let status = step.exit_code.map_or_else(
+                    || status.to_owned(),
+                    |code| format!("{status}（退出码 {code}）"),
+                );
                 match step.target.as_deref() {
                     Some(target) if !target.trim().is_empty() => {
                         lines.push(format!("- `{}`（{target}）— {status}", step.tool_name));
