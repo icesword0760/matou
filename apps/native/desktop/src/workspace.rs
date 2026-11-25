@@ -467,36 +467,51 @@ struct WorkspaceDragMotion {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PermissionMode {
     Default,
+    Manual,
     Auto,
     Ask,
     AcceptEdits,
     Plan,
+    DontAsk,
     Bypass,
+    Turbo,
+    AlwaysProceed,
+    CliSettings,
+    AskForApproval,
+    ApproveForMe,
+    ReadOnly,
+    FullAccess,
 }
 
 impl PermissionMode {
-    const ALL: [Self; 5] = [
-        Self::Default,
+    const CLAUDE: [Self; 6] = [
+        Self::Manual,
         Self::Auto,
         Self::AcceptEdits,
         Self::Plan,
+        Self::DontAsk,
         Self::Bypass,
     ];
 
-    const CODEX: [Self; 4] = [Self::Default, Self::AcceptEdits, Self::Plan, Self::Bypass];
+    const CODEX: [Self; 5] = [
+        Self::AskForApproval,
+        Self::ApproveForMe,
+        Self::FullAccess,
+        Self::ReadOnly,
+        Self::CliSettings,
+    ];
 
-    const ANTIGRAVITY: [Self; 6] = [
-        Self::Default,
-        Self::Auto,
+    const ANTIGRAVITY: [Self; 5] = [
         Self::Ask,
+        Self::Auto,
         Self::AcceptEdits,
         Self::Plan,
-        Self::Bypass,
+        Self::Turbo,
     ];
 
     fn supported(node: &Value) -> Option<&'static [Self]> {
         match node["currentMode"].as_str() {
-            Some("claude-code") => Some(&Self::ALL),
+            Some("claude-code") => Some(&Self::CLAUDE),
             Some("codex") => Some(&Self::CODEX),
             Some("antigravity") => Some(&Self::ANTIGRAVITY),
             _ => None,
@@ -508,6 +523,15 @@ impl PermissionMode {
     }
 
     fn observed(node: &Value, value: Option<&str>) -> Self {
+        let value = match (node["currentMode"].as_str(), value) {
+            (Some("codex"), Some("acceptEdits")) => Some("askForApproval"),
+            (Some("codex"), Some("plan")) => Some("readOnly"),
+            (Some("codex"), Some("bypassPermissions")) => Some("fullAccess"),
+            (Some("codex"), None) => Some("default"),
+            (Some("claude-code"), Some("default")) => Some("manual"),
+            (Some("antigravity"), Some("bypassPermissions")) => return Self::AlwaysProceed,
+            _ => value,
+        };
         Self::supported(node)
             .unwrap_or_default()
             .iter()
@@ -518,12 +542,19 @@ impl PermissionMode {
 
     fn value(self) -> &'static str {
         match self {
-            Self::Default => "default",
+            Self::Default | Self::CliSettings => "default",
+            Self::Manual => "manual",
             Self::Auto => "auto",
             Self::Ask => "ask",
             Self::AcceptEdits => "acceptEdits",
             Self::Plan => "plan",
-            Self::Bypass => "bypassPermissions",
+            Self::DontAsk => "dontAsk",
+            Self::Bypass | Self::AlwaysProceed => "bypassPermissions",
+            Self::Turbo => "turbo",
+            Self::AskForApproval => "askForApproval",
+            Self::ApproveForMe => "approveForMe",
+            Self::ReadOnly => "readOnly",
+            Self::FullAccess => "fullAccess",
         }
     }
 
@@ -531,12 +562,44 @@ impl PermissionMode {
     fn label(self) -> &'static str {
         match self {
             Self::Default => "Default",
+            Self::Manual => "Manual",
             Self::Auto => "Auto",
             Self::Ask => "Ask",
             Self::AcceptEdits => "Accept Edits",
-            Self::Plan => "Plan Mode",
+            Self::Plan => "Plan",
+            Self::DontAsk => "Don't Ask",
             Self::Bypass => "Bypass Permissions",
+            Self::Turbo => "Turbo",
+            Self::AlwaysProceed => "Always Proceed",
+            Self::CliSettings => "CLI Settings",
+            Self::AskForApproval => "Ask for approval",
+            Self::ApproveForMe => "Approve for me",
+            Self::ReadOnly => "Read Only",
+            Self::FullAccess => "Full Access",
         }
+    }
+
+    fn is_high_permission(self) -> bool {
+        matches!(
+            self,
+            Self::Bypass | Self::Turbo | Self::AlwaysProceed | Self::FullAccess
+        )
+    }
+
+    fn description(self, locale: InterfaceLocale) -> Option<&'static str> {
+        Some(match self {
+            Self::Manual => locale.text("读文件一般无需确认，编辑和执行命令按规则询问你", "Reads are generally allowed. Edits and commands follow your approval rules."),
+            Self::DontAsk => locale.text("自动拒绝需要确认的操作，已允许的操作仍可运行", "Automatically denies actions that require approval. Allowed actions can still run."),
+            Self::Bypass => locale.text("跳过常规工具审批，沙箱由 Claude Code 单独配置", "Skips tool approvals. Claude Code configures the sandbox separately."),
+            Self::Turbo => locale.text("跳过常规工具审批，关闭终端沙箱，允许访问工作区外的文件", "Skips tool approvals, disables the terminal sandbox, and allows access outside the workspace."),
+            Self::AlwaysProceed => locale.text("跳过常规工具审批，沙箱和文件访问范围取决于 CLI 设置", "Skips tool approvals. Sandbox and file access follow CLI settings."),
+            Self::CliSettings => locale.text("使用 Codex CLI 配置中的审批和沙箱设置", "Uses the approval and sandbox settings from the Codex CLI configuration."),
+            Self::AskForApproval => locale.text("允许读写工作区，需要扩大权限时询问你", "Reads and writes in the workspace. Asks before expanding permissions."),
+            Self::ApproveForMe => locale.text("使用工作区沙箱，由 Codex 先审查权限请求", "Uses the workspace sandbox and lets Codex review permission requests first."),
+            Self::ReadOnly => locale.text("默认只读，写入或扩大权限时需要审批", "Read-only by default. Writes and expanded permissions require approval."),
+            Self::FullAccess => locale.text("跳过审批并关闭 Codex 沙箱", "Skips approvals and disables the Codex sandbox."),
+            _ => return None,
+        })
     }
 }
 
@@ -553,25 +616,52 @@ struct PermissionConfirmation {
     target: PermissionMode,
     resumable: bool,
     provider: &'static str,
+    locale: InterfaceLocale,
 }
 
 impl PermissionConfirmation {
     // Frozen i18n/messages/hud.ts: bypassEnter*, bypassExit*, bypassNotResumable.
     fn copy(&self) -> (&'static str, String, &'static str) {
         let agent = self.provider;
-        let (title, action, confirm) = if self.target == PermissionMode::Bypass {
-            ("切换到高权限模式", "切换到", "确认切换")
+        let locale = self.locale;
+        let entering = self.target.is_high_permission();
+        let (title, confirm, mode) = if entering {
+            (
+                locale.text("切换到高权限模式", "Switch to elevated permissions"),
+                locale.text("确认切换", "Switch"),
+                self.target,
+            )
         } else {
-            ("退出高权限模式", "退出", "确认退出")
+            (
+                locale.text("退出高权限模式", "Leave elevated permissions"),
+                locale.text("确认退出", "Switch"),
+                self.from,
+            )
         };
-        let body = if self.resumable {
-            format!(
-                "{action} Bypass Permissions 会打断当前 {agent} 会话进程（正在执行的任务会被中断），重启后会自动 resume 恢复会话历史。\n\n是否确认？"
-            )
-        } else {
-            format!(
-                "当前 {agent} 会话还没有生成可恢复的 sessionId。继续切换会启动一个全新的 {agent} 会话，当前内容将不会保留。\n\n是否确认？"
-            )
+        let label = mode.label();
+        let effect = match (locale, self.resumable) {
+            (InterfaceLocale::Chinese, true) => {
+                let action = if entering { "切换到" } else { "退出" };
+                format!(
+                    "{action} {label} 会重启当前 {agent} 会话。正在执行的任务会中断，重启后会恢复会话历史。"
+                )
+            }
+            (InterfaceLocale::English, true) => {
+                let action = if entering { "Switching to" } else { "Leaving" };
+                format!(
+                    "{action} {label} restarts this {agent} session and interrupts any running task. The session history will be restored."
+                )
+            }
+            (InterfaceLocale::Chinese, false) => format!(
+                "当前 {agent} 会话还无法恢复。继续切换将启动新会话，当前内容不会带入新会话。"
+            ),
+            (InterfaceLocale::English, false) => format!(
+                "This {agent} session cannot be resumed yet. Switching starts a new session without the current history."
+            ),
+        };
+        let body = match entering.then(|| mode.description(locale)).flatten() {
+            Some(description) => format!("{description}{}\n\n{effect}", locale.text("。", "")),
+            None => effect,
         };
         (title, body, confirm)
     }
@@ -10081,14 +10171,23 @@ impl Workspace {
         let change = self.permission_changes.get(id);
         let mode = change.map_or_else(|| self.observed_permission(id, node), |change| change.from);
         let blocked = self.permission_blocked_reason(id, node);
+        let description = mode.description(self.locale);
         Some(PermissionChip {
             modes: PermissionMode::supported(node)?,
             mode,
             title: blocked.map_or_else(
-                || match self.locale {
-                    InterfaceLocale::Chinese => format!("当前权限模式：{}，点击切换", mode.label()),
-                    InterfaceLocale::English => {
-                        format!("Permission mode: {} · Click to switch", mode.label())
+                || {
+                    if let Some(description) = description {
+                        format!("{} · {description}", mode.label())
+                    } else {
+                        match self.locale {
+                            InterfaceLocale::Chinese => {
+                                format!("当前权限模式：{}，点击切换", mode.label())
+                            }
+                            InterfaceLocale::English => {
+                                format!("Permission mode: {} · Click to switch", mode.label())
+                            }
+                        }
                     }
                 },
                 str::to_owned,
@@ -10211,7 +10310,7 @@ impl Workspace {
         if from == target {
             return;
         }
-        if from == PermissionMode::Bypass || target == PermissionMode::Bypass {
+        if from.is_high_permission() || target.is_high_permission() {
             let live = self.live_agent_hud(&session_id);
             let resumable = live
                 .and_then(|hud| hud["resumable"].as_bool())
@@ -10231,6 +10330,7 @@ impl Workspace {
                 from,
                 target,
                 resumable,
+                locale: self.locale,
             };
             if self
                 .detached_session_for_window(window.window_handle())
@@ -18110,7 +18210,15 @@ impl Workspace {
                             label => (label, 0x8b949e),
                         }
                     };
-                    let title = SharedString::from(permission.to_owned());
+                    let title = if fields.mode == "dsh" {
+                        let hint = locale.text(
+                            "在 DSH 会话中使用 /permission 切换",
+                            "Use /permission in the DSH session to switch",
+                        );
+                        format!("{permission} · {hint}").into()
+                    } else {
+                        SharedString::from(permission.to_owned())
+                    };
                     primary = primary.child(
                         div()
                             .id("footer-readonly-permission")
@@ -18277,7 +18385,7 @@ impl Workspace {
             .flex_none()
             .flex()
             .items_center()
-            .child(self.permission_chip_view(chip, cx))
+            .child(self.permission_chip_view(chip, menu_open, cx))
             .children(footer_bounds_probe("permission"));
         if !menu_open {
             return wrapper;
@@ -18292,8 +18400,12 @@ impl Workspace {
     }
 
     /// `.status-perm-badge` + `.is-clickable` + `.status-field:disabled`.
-    /// Use the frozen abbreviations in the row and the full title in the tooltip.
-    fn permission_chip_view(&self, chip: &PermissionChip, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn permission_chip_view(
+        &self,
+        chip: &PermissionChip,
+        menu_open: bool,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         let dark = self.theme.effective() == AppTheme::Dark;
         let colors = popover_colors(dark);
         let tooltip: SharedString = chip.title.clone().into();
@@ -18308,22 +18420,14 @@ impl Workspace {
             .text_size(px(10.))
             .line_height(px(PERMISSION_CHIP_LINE_HEIGHT))
             .font_weight(FontWeight::SEMIBOLD)
-            .text_color(rgb(
-                if chip.mode == PermissionMode::Auto && chip.modes == PermissionMode::ANTIGRAVITY {
-                    permission_mode_color(PermissionMode::Default)
-                } else {
-                    permission_mode_color(chip.mode)
-                },
-            ))
+            .text_color(rgb(permission_mode_color(chip.mode)))
             .whitespace_nowrap()
             .hover(move |style| style.bg(colors.hover_wash))
-            .tooltip(move |_, cx| cx.new(|_| CardTooltip(tooltip.clone())).into())
+            .when(!menu_open, |cell| {
+                cell.tooltip(move |_, cx| cx.new(|_| CardTooltip(tooltip.clone())).into())
+            })
             .child(permission_tracked_text(
-                if chip.mode == PermissionMode::Auto && chip.modes == PermissionMode::ANTIGRAVITY {
-                    "D".into()
-                } else {
-                    permission_chip_text(chip.mode)
-                },
+                permission_chip_text(chip.mode),
                 PERMISSION_CHIP_TRACKING,
             ));
         if chip.disabled {
@@ -18384,7 +18488,7 @@ impl Workspace {
                 SharedString::from("permission-menu-item-focus"),
                 cx,
                 |_, cx| {
-                    (0..PermissionMode::ALL
+                    (0..PermissionMode::CLAUDE
                         .len()
                         .max(PermissionMode::ANTIGRAVITY.len()))
                         .map(|_| cx.focus_handle().tab_stop(true))
@@ -18396,7 +18500,10 @@ impl Workspace {
         let colors = popover_colors(self.theme.effective() == AppTheme::Dark);
         let items = chip.modes.iter().copied().enumerate().map(|(index, mode)| {
             let item = permission_menu_item(mode, chip.mode, colors)
-                .children(footer_bounds_probe(mode.value()));
+                .children(footer_bounds_probe(mode.value()))
+                .when_some(mode.description(self.locale), |item, description| {
+                    item.tooltip(move |_, cx| cx.new(|_| CardTooltip(description.into())).into())
+                });
             self.button(
                 item,
                 &focuses[index],
@@ -21060,12 +21167,15 @@ const PERMISSION_MENU_CHECK: &str = "✓";
 /// `.status-perm-badge.perm-<mode>`. `Auto` keeps the frozen green text.
 fn permission_mode_color(mode: PermissionMode) -> u32 {
     match mode {
-        PermissionMode::Default => 0x8b949e,
-        PermissionMode::Auto => 0x7ee787,
-        PermissionMode::Ask => 0xa371f7,
-        PermissionMode::AcceptEdits => 0xd29922,
-        PermissionMode::Plan => 0x58a6ff,
-        PermissionMode::Bypass => 0xff6b35,
+        PermissionMode::Default | PermissionMode::Manual | PermissionMode::CliSettings => 0x8b949e,
+        PermissionMode::Auto | PermissionMode::ApproveForMe => 0x7ee787,
+        PermissionMode::Ask | PermissionMode::AskForApproval => 0xa371f7,
+        PermissionMode::AcceptEdits | PermissionMode::DontAsk => 0xd29922,
+        PermissionMode::Plan | PermissionMode::ReadOnly => 0x58a6ff,
+        PermissionMode::Bypass
+        | PermissionMode::Turbo
+        | PermissionMode::AlwaysProceed
+        | PermissionMode::FullAccess => 0xff6b35,
     }
 }
 
@@ -21082,11 +21192,20 @@ fn permission_menu_dot_color(mode: PermissionMode) -> u32 {
 fn permission_chip_text(mode: PermissionMode) -> SharedString {
     match mode {
         PermissionMode::Default => "D",
-        PermissionMode::Auto => "A",
+        PermissionMode::Manual => "Manual",
+        PermissionMode::Auto => "Auto",
         PermissionMode::Ask => "AK",
         PermissionMode::AcceptEdits => "AE",
         PermissionMode::Plan => "PM",
+        PermissionMode::DontAsk => "Don't Ask",
         PermissionMode::Bypass => "BP",
+        PermissionMode::Turbo => "Turbo",
+        PermissionMode::AlwaysProceed => "Always Proceed",
+        PermissionMode::CliSettings => "CLI",
+        PermissionMode::AskForApproval => "Ask",
+        PermissionMode::ApproveForMe => "Approve for me",
+        PermissionMode::ReadOnly => "Read Only",
+        PermissionMode::FullAccess => "Full Access",
     }
     .into()
 }
@@ -21094,11 +21213,20 @@ fn permission_chip_text(mode: PermissionMode) -> SharedString {
 fn permission_mode_slug(mode: PermissionMode) -> &'static str {
     match mode {
         PermissionMode::Default => "default",
+        PermissionMode::Manual => "manual",
         PermissionMode::Auto => "auto",
         PermissionMode::Ask => "ask",
         PermissionMode::AcceptEdits => "accept-edits",
         PermissionMode::Plan => "plan",
+        PermissionMode::DontAsk => "dont-ask",
         PermissionMode::Bypass => "bypass-permissions",
+        PermissionMode::Turbo => "turbo",
+        PermissionMode::AlwaysProceed => "always-proceed",
+        PermissionMode::CliSettings => "cli-settings",
+        PermissionMode::AskForApproval => "ask-for-approval",
+        PermissionMode::ApproveForMe => "approve-for-me",
+        PermissionMode::ReadOnly => "read-only",
+        PermissionMode::FullAccess => "full-access",
     }
 }
 
@@ -21614,6 +21742,8 @@ fn footer_shell_name(shell: &str) -> Option<&str> {
 fn loader_permission_label(mode: &str, locale: InterfaceLocale) -> &str {
     match mode {
         "" | "default" => locale.text("默认权限", "Default"),
+        "manual" => locale.text("手动审批", "Manual"),
+        "dontAsk" => locale.text("自动拒绝待审批操作", "Don't Ask"),
         "auto" => locale.text("自动模式", "Auto"),
         "acceptEdits" => locale.text("自动接受编辑", "Accept Edits"),
         "plan" => locale.text("计划模式", "Plan Mode"),

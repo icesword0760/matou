@@ -157,6 +157,7 @@ pub(super) struct FooterPopover {
     result: Option<Value>,
     error: Option<String>,
     git: Option<GitMenu>,
+    stats_section: Option<codex_hud::StatsSection>,
     _activation: Option<Subscription>,
 }
 
@@ -400,7 +401,10 @@ impl Workspace {
             })
             .child(footer_text("stats", "⋯"))
             .children(footer_bounds_probe("stats"))
-            .tooltip(move |_, cx| cx.new(|_| CardTooltip(title.into())).into());
+            .when(
+                !popup.is_some_and(|popup| popup.menu == FooterMenu::Stats),
+                |button| button.tooltip(move |_, cx| cx.new(|_| CardTooltip(title.into())).into()),
+            );
         Some(self.footer_menu_trigger_with_stats(
             button,
             FooterMenu::Stats,
@@ -552,6 +556,7 @@ impl Workspace {
                 result: None,
                 error: None,
                 git,
+                stats_section: None,
                 _activation: matches!(menu, FooterMenu::Quota | FooterMenu::Stats).then(|| {
                     cx.observe_window_activation(window, |this, window, cx| {
                         if !window.is_window_active() {
@@ -1505,7 +1510,10 @@ impl Workspace {
             return true;
         }
         if stroke.key == "tab"
-            && matches!(popup.menu, FooterMenu::Git | FooterMenu::Environment)
+            && matches!(
+                popup.menu,
+                FooterMenu::Git | FooterMenu::Environment | FooterMenu::Stats
+            )
             && !stroke.modifiers.alt
             && !stroke.modifiers.control
             && !stroke.modifiers.platform
@@ -1573,14 +1581,45 @@ impl Workspace {
                 self.environment_panel(popup, window, cx, dark),
             ),
             FooterMenu::Git => ("footer-git-menu", self.git_panel(popup, window, cx, dark)),
-            FooterMenu::Stats => (
-                "footer-stats-menu",
-                codex_hud::stats_panel(
+            FooterMenu::Stats => {
+                let node = self.hud_node(&popup.session).unwrap_or(&Value::Null);
+                let live = self
+                    .live_agent_hud(&popup.session)
+                    .unwrap_or(&node["codexHud"]);
+                let focuses = window
+                    .use_keyed_state("footer-stats-section-focus", cx, |_, cx| {
+                        std::array::from_fn::<_, 4, _>(|_| cx.focus_handle().tab_stop(true))
+                    })
+                    .read(cx)
+                    .clone();
+                let view = codex_hud::stats_panel(
                     stats.expect("stats trigger supplies the summary"),
+                    live,
+                    node,
+                    popup.stats_section,
                     self.locale,
                     dark,
-                ),
-            ),
+                    |section, row| {
+                        self.button(
+                            row,
+                            &focuses[section as usize],
+                            move |this, window, cx| {
+                                if let Some(popup) = this
+                                    .footer_popovers
+                                    .get_mut(&window.window_handle())
+                                    .filter(|popup| popup.menu == FooterMenu::Stats)
+                                {
+                                    popup.stats_section =
+                                        (popup.stats_section != Some(section)).then_some(section);
+                                    cx.notify();
+                                }
+                            },
+                            cx,
+                        )
+                    },
+                );
+                ("footer-stats-menu", view)
+            }
             FooterMenu::Quota => {
                 let node = self.hud_node(&popup.session).unwrap_or(&Value::Null);
                 let live = self
@@ -3626,7 +3665,27 @@ mod tests {
         assert!(
             PermissionMode::supported(&node)
                 .unwrap()
-                .contains(&PermissionMode::Bypass)
+                .contains(&PermissionMode::Turbo)
+        );
+        let old_agy =
+            serde_json::json!({"currentMode":"antigravity", "permissionMode":"bypassPermissions"});
+        assert_eq!(
+            PermissionMode::from_node(&old_agy).label(),
+            "Always Proceed"
+        );
+        let codex =
+            serde_json::json!({"currentMode":"codex", "permissionMode":"bypassPermissions"});
+        assert_eq!(PermissionMode::from_node(&codex).label(), "Full Access");
+        assert!(
+            !PermissionMode::supported(&codex)
+                .unwrap()
+                .contains(&PermissionMode::Plan)
+        );
+        let claude =
+            serde_json::json!({"currentMode":"claude-code", "permissionMode":"bypassPermissions"});
+        assert_eq!(
+            PermissionMode::from_node(&claude).label(),
+            "Bypass Permissions"
         );
     }
 }

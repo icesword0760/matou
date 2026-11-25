@@ -819,6 +819,7 @@ fn codex_resume_cold_start_preserves_card_binding_and_legacy_material() -> Resul
     );
     let raw = fs::read_to_string(home.join("argv"))?;
     let argv: Vec<_> = raw.split_terminator('\0').collect();
+    assert!(argv.contains(&"--dangerously-bypass-approvals-and-sandbox"));
     let status_dir = format!(
         "shell_environment_policy.set.MATOU_AGENT_STATUS_DIR={}",
         json!(child.data.join("agent-status").join(&child.session))
@@ -879,7 +880,7 @@ fn codex_resume_cold_start_preserves_card_binding_and_legacy_material() -> Resul
     let graph = confirmed(&mut child, UUID)?;
     assert_eq!(
         node(&graph, &session).unwrap()["permissionMode"],
-        "bypassPermissions"
+        "fullAccess"
     );
     assert_eq!(codex_binding(&db, &session)?.unwrap().id, binding.id);
 
@@ -1357,6 +1358,27 @@ fn wait_permission(child: &mut RuntimeChild, mode: &str) -> Result<(Value, Value
     Ok((graph, receipt))
 }
 
+const ASK_FOR_APPROVAL_ARGS: &[&str] = &[
+    "--ask-for-approval",
+    "on-request",
+    "-c",
+    "sandbox_mode=\"workspace-write\"",
+    "-c",
+    "default_permissions=\":workspace\"",
+    "-c",
+    "approvals_reviewer=\"user\"",
+];
+const READ_ONLY_ARGS: &[&str] = &[
+    "--ask-for-approval",
+    "on-request",
+    "-c",
+    "sandbox_mode=\"read-only\"",
+    "-c",
+    "default_permissions=\":read-only\"",
+    "-c",
+    "approvals_reviewer=\"user\"",
+];
+
 fn assert_permission_argv(home: &Path, expected: &[&str]) -> Result<()> {
     let raw = fs::read_to_string(home.join("argv"))?;
     let argv: Vec<_> = raw.split_terminator('\0').collect();
@@ -1409,7 +1431,7 @@ fn codex_fresh_permission_restart_confirms_without_a_session_start() -> Result<(
     assert!(codex_binding(&db, &session)?.is_none());
     let old = list_runs(&db, &session)?.pop().context("initial run")?;
 
-    let mode = "bypassPermissions";
+    let mode = "fullAccess";
     set_permission(&mut child, mode)?;
     assert_fresh_permission_confirmed(&mut child, mode)?;
     let argv = fs::read_to_string(home.join("argv"))?;
@@ -1441,9 +1463,9 @@ fn codex_permission_switches_keep_card_uuid_and_retire_each_replaced_run() -> Re
         let (_, receipt) = wait_permission(&mut child, invalid)?;
         assert_eq!(receipt["error"], "invalid permission mode");
     }
-    set_permission(&mut child, "bypassPermissions")?;
+    set_permission(&mut child, "fullAccess")?;
     assert!(
-        wait_permission(&mut child, "bypassPermissions")?
+        wait_permission(&mut child, "fullAccess")?
             .1
             .get("error")
             .is_none()
@@ -1452,22 +1474,11 @@ fn codex_permission_switches_keep_card_uuid_and_retire_each_replaced_run() -> Re
     println!("unsupported Auto and unknown modes rejected; current mode is a no-op");
 
     for (mode, flags) in [
+        ("askForApproval", ASK_FOR_APPROVAL_ARGS),
+        ("approveForMe", &["--approve-for-me"]),
+        ("readOnly", READ_ONLY_ARGS),
         (
-            "acceptEdits",
-            [
-                "--ask-for-approval",
-                "on-request",
-                "--sandbox",
-                "workspace-write",
-            ]
-            .as_slice(),
-        ),
-        (
-            "plan",
-            &["--ask-for-approval", "on-request", "--sandbox", "read-only"],
-        ),
-        (
-            "bypassPermissions",
+            "fullAccess",
             &["--dangerously-bypass-approvals-and-sandbox"],
         ),
         (
@@ -1564,7 +1575,7 @@ fn codex_permission_switches_keep_card_uuid_and_retire_each_replaced_run() -> Re
         old = new;
         old_url = current_url;
     }
-    assert_eq!(list_runs(&db, &session)?.len(), 6);
+    assert_eq!(list_runs(&db, &session)?.len(), 7);
     for (event, expected) in [("UserPromptSubmit", "running"), ("Stop", "idle")] {
         emit(
             &mut child,
@@ -1598,23 +1609,18 @@ fn codex_permission_failed_switch_stays_on_card_and_retries_target_mode() -> Res
     let held_stub = root.path().join("held fixture Codex");
     for (mode, flags, reason) in [
         (
-            "plan",
-            ["--ask-for-approval", "on-request", "--sandbox", "read-only"],
+            "readOnly",
+            READ_ONLY_ARGS,
             "provider resume exited with code 23",
         ),
         (
-            "acceptEdits",
-            [
-                "--ask-for-approval",
-                "on-request",
-                "--sandbox",
-                "workspace-write",
-            ],
+            "askForApproval",
+            ASK_FOR_APPROVAL_ARGS,
             "provider process could not start",
         ),
     ] {
         let previous = list_runs(&db, &session)?.pop().unwrap();
-        if mode == "plan" {
+        if mode == "readOnly" {
             fs::write(home.join("early-exit"), "")?;
         } else {
             fs::rename(&stub, &held_stub)?;
@@ -1649,7 +1655,7 @@ fn codex_permission_failed_switch_stays_on_card_and_retries_target_mode() -> Res
         })?;
         assert_shell_gone(previous.pid.unwrap() as u32)?;
         let failed = list_runs(&db, &session)?.pop().unwrap();
-        if mode == "plan" {
+        if mode == "readOnly" {
             assert_eq!(failed.exit_code, Some(23));
             assert_eq!(failed.ordinal, previous.ordinal + 1);
             assert_shell_gone(failed.pid.unwrap() as u32)?;
@@ -1673,7 +1679,7 @@ fn codex_permission_failed_switch_stays_on_card_and_retries_target_mode() -> Res
                 && graph["agentNotifications"][0]["operation"] == "dismiss"
         })?;
         first_screen(&mut child, &home, Some(UUID), false)?;
-        assert_permission_argv(&home, &flags)?;
+        assert_permission_argv(&home, flags)?;
         let retried = replacement(&db, &session, &failed)?;
         emit(&mut child, &home, "retry-start", started(UUID, &rollout))?;
         confirmed(&mut child, UUID)?;
@@ -1778,7 +1784,8 @@ fn codex_permission_requires_session_start_and_times_out_to_retryable_failure() 
     let (mut child, home, rollout, db) = establish(root.path())?;
     let session = child.session.clone();
     let binding = codex_binding(&db, &session)?.unwrap();
-    set_permission(&mut child, "plan")?;
+    let mode = "readOnly";
+    set_permission(&mut child, mode)?;
     first_screen(&mut child, &home, Some(UUID), false)?;
     let deadline = Instant::now() + Duration::from_secs(15);
     let reason = "provider resume identity confirmation timed out";
@@ -1790,8 +1797,8 @@ fn codex_permission_requires_session_start_and_times_out_to_retryable_failure() 
             } => {
                 bail!("permission switch became ready without a matching hook");
             }
-            Event::Graph(graph) if permission_receipt(&graph, "plan").is_some() => {
-                assert_eq!(permission_receipt(&graph, "plan").unwrap()["error"], reason);
+            Event::Graph(graph) if permission_receipt(&graph, mode).is_some() => {
+                assert_eq!(permission_receipt(&graph, mode).unwrap()["error"], reason);
                 assert_eq!(
                     node(&graph, &session).unwrap()["providerRestoreState"],
                     "failed"
@@ -1813,10 +1820,7 @@ fn codex_permission_requires_session_start_and_times_out_to_retryable_failure() 
         codex_binding(&db, &session)?.unwrap().restore_state,
         "restoring"
     );
-    assert_permission_argv(
-        &home,
-        &["--ask-for-approval", "on-request", "--sandbox", "read-only"],
-    )?;
+    assert_permission_argv(&home, READ_ONLY_ARGS)?;
     let retried = replacement(&db, &session, &failed)?;
     let deadline = Instant::now() + Duration::from_secs(14);
     loop {
@@ -1839,7 +1843,7 @@ fn codex_permission_requires_session_start_and_times_out_to_retryable_failure() 
     confirmed(&mut child, UUID)?;
     assert_eq!(codex_binding(&db, &session)?.unwrap().id, binding.id);
     println!(
-        "no SessionStart: confirmation timed out and the same card failed; Plan retry succeeded"
+        "no SessionStart: confirmation timed out and the same card failed; Read Only retry succeeded"
     );
     shutdown(child)
 }

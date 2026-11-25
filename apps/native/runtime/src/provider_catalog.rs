@@ -1128,7 +1128,7 @@ fn index(
         let message = &row["message"];
         for mode in [&row["permissionMode"], &message["permissionMode"]] {
             if let Some(
-                mode @ ("default" | "auto" | "acceptEdits" | "plan" | "bypassPermissions"),
+                mode @ ("default" | "manual" | "auto" | "acceptEdits" | "plan" | "dontAsk" | "bypassPermissions"),
             ) = mode.as_str()
             {
                 entry.permission_mode = mode.to_owned();

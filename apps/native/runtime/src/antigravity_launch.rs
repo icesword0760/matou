@@ -13,13 +13,22 @@ use anyhow::{Context, Result, ensure};
 #[cfg(unix)]
 use matou_native_core::provider_launch::resolve_command_with_login_path;
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::dsh_events::{js_whitespace, valid_session_id};
 
 const COMMAND_OVERRIDE: &str = "MATOU_ANTIGRAVITY_COMMAND";
 const PLUGIN_OVERRIDE: &str = "MATOU_ANTIGRAVITY_PLUGIN_DIR";
 const STAMP_PATH: &str = ".matou-plugin-version";
+pub(crate) const MODES: &[&str] = &[
+    "default",
+    "auto",
+    "ask",
+    "acceptEdits",
+    "plan",
+    "turbo",
+    "bypassPermissions",
+];
 const RUN_VARIABLES: &[&str] = &[
     "MATOU_AGENT_STATUS_DIR",
     "MATOU_FOREMAN_ROLES_FILE",
@@ -60,6 +69,7 @@ pub enum PermissionMode {
     Ask,
     AcceptEdits,
     Plan,
+    Turbo,
     BypassPermissions,
 }
 
@@ -71,6 +81,7 @@ impl PermissionMode {
             Self::Ask => "ask",
             Self::AcceptEdits => "acceptEdits",
             Self::Plan => "plan",
+            Self::Turbo => "turbo",
             Self::BypassPermissions => "bypassPermissions",
         }
     }
@@ -81,6 +92,7 @@ impl PermissionMode {
             "ask" => Self::Ask,
             "acceptEdits" => Self::AcceptEdits,
             "plan" => Self::Plan,
+            "turbo" => Self::Turbo,
             "bypassPermissions" => Self::BypassPermissions,
             _ => Self::Default,
         }
@@ -92,8 +104,33 @@ impl PermissionMode {
             Self::Auto => &["--mode", "auto"],
             Self::AcceptEdits => &["--mode", "accept-edits"],
             Self::Plan => &["--mode", "plan"],
-            Self::BypassPermissions => &["--dangerously-skip-permissions"],
+            Self::Turbo | Self::BypassPermissions => &["--dangerously-skip-permissions"],
         }
+    }
+
+    fn settings_overrides(self) -> Option<Map<String, Value>> {
+        let tool_permission = match self {
+            Self::Default | Self::BypassPermissions => return None,
+            Self::Turbo => "always-proceed",
+            Self::Ask | Self::Auto | Self::AcceptEdits | Self::Plan => "request-review",
+        };
+        let mut settings = Map::from_iter([
+            ("toolPermission".into(), Value::from(tool_permission)),
+            (
+                "allowNonWorkspaceAccess".into(),
+                Value::from(self == Self::Turbo),
+            ),
+        ]);
+        if self == Self::Ask {
+            // The empty agent mode selects the CLI's default execution mode.
+            settings.insert("agentMode".into(), Value::from(""));
+        }
+        if self == Self::Turbo {
+            // Auto can enable sandboxing, and the default execution mode can request diff review.
+            settings.insert("agentMode".into(), Value::from("accept-edits"));
+            settings.insert("enableTerminalSandbox".into(), Value::from(false));
+        }
+        Some(settings)
     }
 }
 
@@ -106,9 +143,10 @@ pub fn interactive_permission(command: &str) -> Option<PermissionMode> {
         return None;
     }
     let mut permission = PermissionMode::Default;
+    let mut skips_tool_review = false;
     while let Some(token) = tokens.next() {
         if token == "--dangerously-skip-permissions" {
-            permission = PermissionMode::BypassPermissions;
+            skips_tool_review = true;
             continue;
         }
         let mode = if token == "--mode" {
@@ -123,7 +161,11 @@ pub fn interactive_permission(command: &str) -> Option<PermissionMode> {
             _ => return None,
         };
     }
-    Some(permission)
+    Some(if skips_tool_review {
+        PermissionMode::BypassPermissions
+    } else {
+        permission
+    })
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -224,12 +266,13 @@ pub fn prepare(input: LaunchInput<'_>) -> Result<LaunchPlan> {
     environment.insert("PWD".into(), cwd.clone().into_os_string());
 
     let mut argv = Vec::new();
-    if let Some(path) = input
+    let settings_path = input
         .settings_path
         .filter(|path| !path.as_os_str().is_empty())
-    {
-        let path = checked_path(&cwd, path)?;
-        argv.extend([OsString::from("--settings"), path.into_os_string()]);
+        .map(|path| checked_path(&cwd, path))
+        .transpose()?;
+    if let Some(settings) = settings_argument(settings_path, input.permission)? {
+        argv.extend([OsString::from("--settings"), settings]);
     }
     if let Some(path) = env_value(&environment, "MATOU_ANTIGRAVITY_SYSTEM_MESSAGE_FILE")
         .filter(|path| !path.is_empty())
@@ -290,6 +333,27 @@ pub fn prepare(input: LaunchInput<'_>) -> Result<LaunchPlan> {
         environment,
         mode,
     })
+}
+
+fn settings_argument(
+    path: Option<PathBuf>,
+    permission: PermissionMode,
+) -> Result<Option<OsString>> {
+    let Some(overrides) = permission.settings_overrides() else {
+        return Ok(path.map(PathBuf::into_os_string));
+    };
+    let mut settings = match path {
+        Some(path) => {
+            let bytes = fs::read(&path).with_context(|| {
+                format!("Could not read Antigravity settings: {}", path.display())
+            })?;
+            serde_json::from_slice::<Map<String, Value>>(&bytes)
+                .with_context(|| format!("Invalid Antigravity settings: {}", path.display()))?
+        }
+        None => Map::new(),
+    };
+    settings.extend(overrides);
+    Ok(Some(serde_json::to_string(&settings)?.into()))
 }
 
 fn checked_path(cwd: &Path, path: &Path) -> Result<PathBuf> {

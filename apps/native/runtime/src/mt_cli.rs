@@ -566,17 +566,23 @@ fn structure_request(
         let mut params = json!({"submissionKey": options.key("--submission-key")});
         if operation == "session" {
             let profile = options.values.get("--profile").copied().unwrap_or("shell");
-            if !["shell", "claude-code", "codex", "antigravity", "dsh"].contains(&profile) {
-                return Err(usage(
-                    "--profile 需要 shell、claude-code、codex、antigravity、dsh",
-                ));
-            }
+            use matou_native_core::pty::LaunchProfile;
+            let kind = match profile {
+                "shell" => LaunchProfile::Shell,
+                "claude-code" => LaunchProfile::ClaudeCode,
+                "codex" => LaunchProfile::Codex,
+                "antigravity" => LaunchProfile::Antigravity,
+                "dsh" => LaunchProfile::Dsh,
+                _ => {
+                    return Err(usage(
+                        "--profile 需要 shell、claude-code、codex、antigravity、dsh",
+                    ));
+                }
+            };
             if options.values.get("--permission-mode").is_some_and(|mode| {
-                !["default", "acceptEdits", "plan", "bypassPermissions"].contains(mode)
+                crate::host::normalize_provider_permission(kind, mode).is_none()
             }) {
-                return Err(usage(
-                    "--permission-mode 需要 default、acceptEdits、plan 或 bypassPermissions",
-                ));
+                return Err(usage("--permission-mode 与所选 Agent 的权限档位不匹配"));
             }
             params["profile"] = json!(profile);
         }

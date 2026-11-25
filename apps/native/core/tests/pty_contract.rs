@@ -328,6 +328,42 @@ mod mac {
     }
 
     #[test]
+    fn pty_colors_are_enabled_for_agents_and_preserved_for_shell() -> Result<()> {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir()?;
+        let mut launch = launch(temp.path(), "/bin/sh")?;
+        launch.argv = vec![
+            "-c".into(),
+            r#"printf 'MATOU_COLORS=<%s>:<%s>:<%s>\n' "${NO_COLOR-unset}" "${COLORTERM-unset}" "${FORCE_COLOR-unset}""#.into(),
+        ];
+        launch.inherited_env.insert("NO_COLOR".into(), "1".into());
+        launch.inherited_env.insert("COLORTERM".into(), "".into());
+        for (profile, expected) in [
+            (LaunchProfile::Shell, "<1>:<>:<unset>"),
+            (LaunchProfile::Codex, "<unset>:<truecolor>:<unset>"),
+            (LaunchProfile::Antigravity, "<unset>:<truecolor>:<unset>"),
+            (LaunchProfile::Dsh, "<unset>:<truecolor>:<unset>"),
+            (LaunchProfile::ClaudeCode, "<unset>:<truecolor>:<1>"),
+        ] {
+            launch.profile = profile;
+            if profile != LaunchProfile::Shell {
+                launch.env = launch.inherited_env.clone();
+            }
+            if profile == LaunchProfile::ClaudeCode {
+                launch.env.insert("FORCE_COLOR".into(), "1".into());
+            }
+            let (mut process, reader) = PtyProcess::spawn(&launch)?;
+            let (receive, worker) = start_reader(reader);
+            collect_until(&receive, format!("MATOU_COLORS={expected}").as_bytes())
+                .with_context(|| format!("checking {} color environment", profile.kind()))?;
+            assert_eq!(finish(&mut process)?.exit_code, 0);
+            drop(process);
+            drain_and_join(receive, worker)?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn codex_child_keeps_only_the_current_dispatch_roles_path() -> Result<()> {
         let _guard = TEST_LOCK.lock().unwrap();
         let temp = tempfile::tempdir()?;

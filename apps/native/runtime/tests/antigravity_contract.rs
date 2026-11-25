@@ -8,6 +8,7 @@ use std::{
 
 use anyhow::Result;
 use matou_native_runtime::{
+    agent_hud_projection::{AgentHudProjection, HudProvider},
     antigravity_catalog::{
         Catalog, DetailOptions, EventKind, ListOptions, RecoveryCandidate, SearchScope,
         catalog_root,
@@ -73,6 +74,15 @@ fn antigravity_launch_contract() -> Result<()> {
         Some(PermissionMode::BypassPermissions)
     );
     for command in [
+        "agy --dangerously-skip-permissions --mode auto",
+        "agy --mode=plan --dangerously-skip-permissions",
+    ] {
+        assert_eq!(
+            interactive_permission(command),
+            Some(PermissionMode::BypassPermissions)
+        );
+    }
+    for command in [
         "agy --help",
         "agy --mode",
         "agy --mode typo",
@@ -86,6 +96,12 @@ fn antigravity_launch_contract() -> Result<()> {
     let fake = executable(&root, "agy")?;
     let override_command = executable(&root, "custom agy")?;
     let settings = root.join("settings with spaces.json");
+    let file_settings = json!({
+        "agentMode": "plan", "toolPermission": "always-proceed",
+        "enableTerminalSandbox": true, "allowNonWorkspaceAccess": true,
+        "allow": ["command(echo)"], "deny": ["command(sudo)"]
+    });
+    fs::write(&settings, file_settings.to_string())?;
     let system_message = root.join("system message.json");
     let path = std::env::join_paths([&root])?;
     let launch = |mode, permission, model, command: Option<&Path>| {
@@ -168,6 +184,7 @@ fn antigravity_launch_contract() -> Result<()> {
             PermissionMode::BypassPermissions,
             &["--dangerously-skip-permissions"],
         ),
+        (PermissionMode::Turbo, &["--dangerously-skip-permissions"]),
         (PermissionMode::Ask, &[]),
     ] {
         let mode = LaunchMode::Resume("agy-conv-1".into());
@@ -177,14 +194,62 @@ fn antigravity_launch_contract() -> Result<()> {
             Some("  local model  "),
             Some(&override_command),
         )?;
-        let mut expected = vec!["--settings".into(), settings_arg.into()];
-        expected
-            .extend(["--model", "local model", "--conversation", "agy-conv-1"].map(OsString::from));
+        assert_eq!(resume.argv[0], "--settings");
+        if permission == PermissionMode::BypassPermissions {
+            assert_eq!(resume.argv[1], settings_arg);
+        } else {
+            let settings: Value = serde_json::from_str(resume.argv[1].to_str().unwrap())?;
+            assert_eq!(settings["allow"], file_settings["allow"]);
+            assert_eq!(settings["deny"], file_settings["deny"]);
+            if permission == PermissionMode::Turbo {
+                assert_eq!(settings["agentMode"], "accept-edits");
+                assert_eq!(settings["toolPermission"], "always-proceed");
+                assert_eq!(settings["enableTerminalSandbox"], false);
+                assert_eq!(settings["allowNonWorkspaceAccess"], true);
+            } else {
+                let agent_mode = if permission == PermissionMode::Ask {
+                    ""
+                } else {
+                    "plan"
+                };
+                assert_eq!(settings["agentMode"], agent_mode);
+                assert_eq!(settings["toolPermission"], "request-review");
+                assert_eq!(settings["enableTerminalSandbox"], true);
+                assert_eq!(settings["allowNonWorkspaceAccess"], false);
+            }
+        }
+        let mut expected = Vec::from(
+            ["--model", "local model", "--conversation", "agy-conv-1"].map(OsString::from),
+        );
         expected.extend(flags.iter().map(OsString::from));
-        assert_eq!(resume.argv, expected);
+        assert_eq!(resume.argv[2..], expected);
         assert_eq!(resume.mode, mode);
         assert_eq!(resume.executable, override_command);
     }
+    assert_eq!(
+        serde_json::from_slice::<Value>(&fs::read(&settings)?)?,
+        file_settings
+    );
+
+    let turbo = prepare(LaunchInput {
+        cwd: &root,
+        settings_path: None,
+        model: None,
+        permission: PermissionMode::Turbo,
+        mode: LaunchMode::Fresh,
+        inherited_environment: BTreeMap::from([("PATH".into(), path.clone())]),
+        run_environment: BTreeMap::new(),
+    })?;
+    assert_eq!(turbo.argv.len(), 3);
+    assert_eq!(turbo.argv[0], "--settings");
+    assert_eq!(
+        serde_json::from_str::<Value>(turbo.argv[1].to_str().unwrap())?,
+        json!({
+            "agentMode": "accept-edits", "toolPermission": "always-proceed",
+            "enableTerminalSandbox": false, "allowNonWorkspaceAccess": true
+        })
+    );
+    assert_eq!(turbo.argv[2], "--dangerously-skip-permissions");
     let fork = launch(
         LaunchMode::Fork(" agy-conv-1 ".into()),
         PermissionMode::Default,
@@ -469,6 +534,75 @@ fn observed(outcome: Outcome<'_>) -> Update<'_> {
         Outcome::Observed(update) => update,
         other => panic!("expected accepted observation, got {other:?}"),
     }
+}
+
+#[test]
+fn antigravity_high_permission_survives_native_cycle_reports() {
+    for permission in [PermissionMode::Turbo, PermissionMode::BypassPermissions] {
+        let mut run = Run::new("current", LaunchMode::Fresh, permission);
+        let mut hud = AgentHudProjection::new("session", HudProvider::Antigravity, 0.);
+        hud.seed_settings(None, Some(permission.as_str()), None, None, false);
+        let auto =
+            json!({"conversationId":"agy-fixture", "agent_state":"idle", "cycle_mode":"auto"});
+        assert_eq!(
+            run.ingest("retired", Source::Statusline, &auto, 1),
+            Outcome::Ignored
+        );
+        let update = observed(run.ingest("current", Source::Statusline, &auto, 2));
+        assert_eq!(update.identity.unwrap().permission, Some(permission));
+        assert_eq!(update.permission_changed, None);
+        hud.ingest_provider(&auto, 2.);
+        assert_eq!(hud.snapshot(2.).permission_mode, Some(permission.as_str()));
+
+        let plan =
+            json!({"conversationId":"agy-fixture", "agent_state":"idle", "cycle_mode":"plan"});
+        let update = observed(run.ingest("current", Source::Statusline, &plan, 3));
+        assert_eq!(update.permission_changed, None);
+        assert!(update.identity.is_none());
+        hud.ingest_provider(&plan, 3.);
+        assert_eq!(hud.snapshot(3.).permission_mode, Some(permission.as_str()));
+    }
+}
+
+#[test]
+fn antigravity_default_follows_native_modes_without_persisting_explicit_auto() {
+    let mut run = Run::new("current", LaunchMode::Fresh, PermissionMode::Default);
+    let mut hud = AgentHudProjection::new("session", HudProvider::Antigravity, 0.);
+    let auto = json!({"conversationId":"agy-fixture", "agent_state":"idle", "cycle_mode":"auto"});
+    let update = observed(run.ingest("current", Source::Statusline, &auto, 1));
+    assert_eq!(
+        update.identity.unwrap().permission,
+        Some(PermissionMode::Default)
+    );
+    assert_eq!(update.permission_changed, Some(PermissionMode::Auto));
+    hud.ingest_provider(&auto, 1.);
+    assert_eq!(hud.snapshot(1.).permission_mode, Some("auto"));
+
+    let malformed =
+        json!({"conversationId":"agy-fixture", "agent_state":"idle", "cycle_mode":false});
+    let update = observed(run.ingest("current", Source::Statusline, &malformed, 2));
+    assert_eq!(update.permission_changed, None);
+    hud.ingest_provider(&malformed, 2.);
+    assert_eq!(hud.snapshot(2.).permission_mode, Some("auto"));
+
+    let ask = json!({"conversationId":"agy-fixture", "agent_state":"idle", "cycle_mode":""});
+    let update = observed(run.ingest("current", Source::Statusline, &ask, 3));
+    assert_eq!(update.permission_changed, Some(PermissionMode::Ask));
+    hud.ingest_provider(&ask, 3.);
+    assert_eq!(hud.snapshot(3.).permission_mode, Some("ask"));
+
+    let plan = json!({"conversationId":"agy-fixture", "agent_state":"idle", "cycleMode":"plan"});
+    let update = observed(run.ingest("current", Source::Statusline, &plan, 4));
+    assert_eq!(update.permission_changed, Some(PermissionMode::Plan));
+    hud.ingest_provider(&plan, 4.);
+    assert_eq!(hud.snapshot(4.).permission_mode, Some("plan"));
+
+    let mut explicit = Run::new("current", LaunchMode::Fresh, PermissionMode::Auto);
+    let update = observed(explicit.ingest("current", Source::Statusline, &auto, 1));
+    assert_eq!(
+        update.identity.unwrap().permission,
+        Some(PermissionMode::Auto)
+    );
 }
 
 #[test]

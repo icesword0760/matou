@@ -210,11 +210,13 @@ pub fn official_time_zone_endpoint(endpoint: Option<&OsStr>, official_host: &str
 }
 
 pub const EFFORTS: [&str; 6] = ["follow", "low", "medium", "high", "xhigh", "max"];
-pub const CLAUDE_PERMISSION_MODES: [&str; 5] = [
+pub const CLAUDE_PERMISSION_MODES: [&str; 7] = [
     "default",
+    "manual",
     "auto",
     "acceptEdits",
     "plan",
+    "dontAsk",
     "bypassPermissions",
 ];
 
@@ -2791,7 +2793,9 @@ fn claude_argv(
     }
     match permission {
         Some("bypassPermissions") => argv.push("--dangerously-skip-permissions".into()),
-        Some(mode @ ("auto" | "acceptEdits" | "plan")) => {
+        // The internal `default` name also works on versions that predate the Manual label.
+        Some("manual") => argv.extend(["--permission-mode".into(), "default".into()]),
+        Some(mode @ ("auto" | "acceptEdits" | "plan" | "dontAsk")) => {
             argv.extend(["--permission-mode".into(), mode.into()]);
         }
         _ => {}

@@ -776,29 +776,58 @@ impl StatsSummary {
     }
 }
 
-pub(super) fn stats_summary(hud: &Value, node: &Value, _locale: InterfaceLocale) -> StatsSummary {
-    let counts = &hud["configCounts"];
-    let legacy_counts = &node["configCounts"];
-    let tool_hud = if hud["runningTools"].is_array() || hud["toolCounts"].is_array() {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum StatsSection {
+    Tools,
+    Hooks,
+    Mcps,
+    Todos,
+}
+
+impl StatsSection {
+    const fn id(self) -> &'static str {
+        match self {
+            Self::Tools => "tools",
+            Self::Hooks => "hooks",
+            Self::Mcps => "mcps",
+            Self::Todos => "todos",
+        }
+    }
+}
+
+fn stats_tools_hud<'a>(hud: &'a Value, node: &'a Value) -> &'a Value {
+    if hud["runningTools"].is_array() || hud["toolCounts"].is_array() {
         hud
     } else {
         &node["codexHud"]
-    };
+    }
+}
+
+pub(super) fn stats_summary(hud: &Value, node: &Value, _locale: InterfaceLocale) -> StatsSummary {
+    let counts = &hud["configCounts"];
+    let legacy_counts = &node["configCounts"];
+    let tool_hud = stats_tools_hud(hud, node);
     let tool_total = || {
         let running = array(&tool_hud["runningTools"])
             .iter()
             .filter(|tool| clean_text(&tool["name"]).is_some())
             .count() as u64;
-        array(&tool_hud["toolCounts"])
+        let completed = array(&tool_hud["toolCounts"])
             .iter()
             .filter(|tool| clean_text(&tool["name"]).is_some())
             .filter_map(|tool| nonnegative_count(&tool["count"]))
-            .fold(running, u64::saturating_add)
+            .reduce(u64::saturating_add);
+        let recorded_empty = ["runningTools", "toolCounts"]
+            .into_iter()
+            .any(|key| tool_hud[key].as_array().is_some_and(Vec::is_empty));
+        (running > 0 || completed.is_some() || recorded_empty)
+            .then(|| running.saturating_add(completed.unwrap_or_default()))
     };
-    let tools = hud["toolCount"]
-        .as_u64()
+    let explicit_tool_count = hud["toolCount"].as_u64();
+    let tools = explicit_tool_count
         .filter(|&total| total > 0)
-        .unwrap_or_else(tool_total);
+        .or_else(tool_total)
+        .or(explicit_tool_count);
     let hooks = counts["hooks"]
         .as_u64()
         .or_else(|| legacy_counts["hooks"].as_u64())
@@ -817,7 +846,7 @@ pub(super) fn stats_summary(hud: &Value, node: &Value, _locale: InterfaceLocale)
         .count();
     let todos = array(&hud["todos"]);
     StatsSummary {
-        tools: (tools > 0).then_some(tools),
+        tools,
         hooks: (hooks > 0).then_some(hooks),
         mcp: (mcps > 0 || errors > 0).then_some((mcps, errors)),
         todos: (!todos.is_empty()).then(|| {
@@ -830,87 +859,225 @@ pub(super) fn stats_summary(hud: &Value, node: &Value, _locale: InterfaceLocale)
     }
 }
 
-pub(super) fn stats_panel(summary: &StatsSummary, locale: InterfaceLocale, dark: bool) -> Div {
+fn call_count(count: u64, locale: InterfaceLocale) -> String {
+    match locale {
+        InterfaceLocale::Chinese => format!("{count} 次"),
+        InterfaceLocale::English => {
+            let unit = if count == 1 { "call" } else { "calls" };
+            format!("{count} {unit}")
+        }
+    }
+}
+
+fn stats_detail_rows(
+    section: StatsSection,
+    hud: &Value,
+    node: &Value,
+    locale: InterfaceLocale,
+) -> Vec<SharedString> {
+    let config_names = |key| {
+        [hud, &hud["configCounts"], &node["configCounts"]]
+            .into_iter()
+            .map(|source| strings(&source[key]))
+            .find(|names| !names.is_empty())
+            .unwrap_or_default()
+    };
+    match section {
+        StatsSection::Tools => {
+            let tools = stats_tools_hud(hud, node);
+            let mut rows: Vec<_> = array(&tools["runningTools"])
+                .iter()
+                .filter_map(|tool| {
+                    let name = clean_text(&tool["name"])?;
+                    let running = locale.text("运行中", "Running");
+                    let mut label = format!("{name} · {running}");
+                    if let Some(target) = clean_text(&tool["target"]) {
+                        label.push_str(" · ");
+                        label.push_str(&target);
+                    }
+                    Some(SharedString::from(label))
+                })
+                .collect();
+            let mut counts: Vec<_> = array(&tools["toolCounts"])
+                .iter()
+                .filter_map(|tool| {
+                    let count = nonnegative_count(&tool["count"]).filter(|&count| count > 0)?;
+                    Some((clean_text(&tool["name"])?, count))
+                })
+                .collect();
+            counts.sort_by(|(a_name, a), (b_name, b)| b.cmp(a).then_with(|| a_name.cmp(b_name)));
+            rows.extend(counts.into_iter().map(|(name, count)| {
+                SharedString::from(format!("{name} · {}", call_count(count, locale)))
+            }));
+            rows
+        }
+        StatsSection::Hooks => config_names("hookNames"),
+        StatsSection::Mcps => {
+            let error_label = locale.text("错误", "Error");
+            let mut rows: Vec<_> = strings(&hud["mcpErrors"])
+                .into_iter()
+                .map(|error| SharedString::from(format!("{error_label} · {error}")))
+                .collect();
+            rows.extend(config_names("mcpServerNames"));
+            rows
+        }
+        StatsSection::Todos => array(&hud["todos"])
+            .iter()
+            .filter_map(|todo| {
+                let marker = match todo["status"].as_str() {
+                    Some("completed") => "✓",
+                    Some("in_progress") => "▸",
+                    _ => "○",
+                };
+                Some(SharedString::from(format!(
+                    "{marker} {}",
+                    clean_text(&todo["content"])?
+                )))
+            })
+            .collect(),
+    }
+}
+
+pub(super) fn stats_panel(
+    summary: &StatsSummary,
+    hud: &Value,
+    node: &Value,
+    expanded: Option<StatsSection>,
+    locale: InterfaceLocale,
+    dark: bool,
+    mut button: impl FnMut(StatsSection, Stateful<Div>) -> Stateful<Div>,
+) -> Div {
     let (background, border, muted, body) = if dark {
-        (rgb(0x1b1d21), rgb(0x2d3035), rgb(0x6e7681), rgb(0xe7e9ec))
+        (rgb(0x1b1d21), rgb(0x2d3035), rgb(0xa0a7b2), rgb(0xe7e9ec))
     } else {
         (rgb(0xffffff), rgba(0x0000001a), rgb(0x6b7280), rgb(0x1f2328))
     };
+    let palette = popover_colors(dark);
     let numeric_features = FontFeatures(std::sync::Arc::new(vec![("tnum".to_owned(), 1)]));
-    let cell = |id, label, value, color| {
-        let mut number = div()
-            .whitespace_nowrap()
-            .text_color(color)
-            .child(footer_text(id, value));
-        number
-            .text_style()
-            .get_or_insert_with(Default::default)
-            .font_features = Some(numeric_features.clone());
-        div()
-            .flex_1()
-            .min_w_0()
-            .flex()
-            .items_baseline()
-            .justify_between()
-            .gap(px(10.))
-            .text_size(px(12.))
-            .line_height(px(19.2))
-            .children(footer_bounds_probe(id))
-            .child(
-                div()
-                    .whitespace_nowrap()
-                    .text_color(muted)
-                    .child(ui_text(label)),
-            )
-            .child(number)
-    };
-    let cells = [
-        summary.tools.map(|tools| {
-            cell(
-                "tools",
-                locale.text("工具", "Tools"),
-                tools.to_string(),
-                body,
-            )
-        }),
-        summary
-            .hooks
-            .map(|hooks| cell("hooks", "Hooks", hooks.to_string(), body)),
-        summary.mcp.map(|(mcps, errors)| {
-            let errors_label = locale.text("错误", "errors");
-            let color = if errors > 0 {
+    let sections = [
+        (
+            StatsSection::Tools,
+            locale.text("工具调用", "Tool calls"),
+            Some(summary.tools.map_or_else(
+                || locale.text("暂无统计", "Unavailable").to_owned(),
+                |count| call_count(count, locale),
+            )),
+            if summary.tools.is_some() { body } else { muted },
+        ),
+        (
+            StatsSection::Hooks,
+            "Hooks",
+            summary.hooks.map(|count| count.to_string()),
+            body,
+        ),
+        (
+            StatsSection::Mcps,
+            "MCP",
+            summary.mcp.map(|(count, errors)| {
+                format!("{count} · {errors} {}", locale.text("错误", "errors"))
+            }),
+            if summary.mcp.is_some_and(|(_, errors)| errors > 0) {
                 AgentState::Error.badge_color(dark)
             } else {
                 body
-            };
-            cell(
-                "mcps",
-                "MCP",
-                format!("{mcps} · {errors} {errors_label}"),
-                color,
-            )
-        }),
-        summary.todos.map(|(done, total)| {
-            cell(
-                "todos",
-                locale.text("待办", "Todos"),
-                format!("{done} / {total}"),
-                body,
-            )
-        }),
+            },
+        ),
+        (
+            StatsSection::Todos,
+            locale.text("待办", "Todos"),
+            summary
+                .todos
+                .map(|(done, total)| format!("{done} / {total}")),
+            body,
+        ),
     ];
-    let mut grid = div().flex().flex_col().gap(px(7.));
-    let mut cells = cells.into_iter().flatten();
-    while let Some(left) = cells.next() {
-        grid = grid.child(
-            div()
+    let rows = sections
+        .into_iter()
+        .filter_map(|(section, label, value, color)| {
+            let value = value?;
+            let id = section.id();
+            let details = stats_detail_rows(section, hud, node, locale);
+            let expandable = !details.is_empty();
+            let is_expanded = expandable && expanded == Some(section);
+            let mut number = div()
+                .whitespace_nowrap()
+                .text_color(color)
+                .child(footer_text(id, value));
+            number
+                .text_style()
+                .get_or_insert_with(Default::default)
+                .font_features = Some(numeric_features.clone());
+            let heading = div()
+                .id(id)
+                .min_w_0()
                 .flex()
-                .w_full()
-                .gap(px(18.))
-                .child(left)
-                .child(cells.next().unwrap_or_else(|| div().flex_1().min_w_0())),
-        );
-    }
+                .items_center()
+                .min_h(px(28.))
+                .px(px(6.))
+                .rounded(px(4.))
+                .gap(px(10.))
+                .text_size(px(12.))
+                .line_height(px(19.2))
+                .children(footer_bounds_probe(id))
+                .child(
+                    div()
+                        .size(px(12.))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_color(muted)
+                        .when(expandable, |arrow| {
+                            let path = if is_expanded {
+                                "icons/chevron-down.svg"
+                            } else {
+                                "icons/chevron-right.svg"
+                            };
+                            arrow.child(svg().path(path).size(px(12.)).text_color(muted))
+                        }),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .whitespace_nowrap()
+                        .text_color(body)
+                        .child(ui_text(label)),
+                )
+                .child(number);
+            let heading = if expandable {
+                button(
+                    section,
+                    heading
+                        .cursor_pointer()
+                        .hover(move |style| style.bg(palette.hover)),
+                )
+            } else {
+                heading
+            };
+            Some(div().child(heading).when(is_expanded, |row| {
+                row.child(
+                    div()
+                        .id(("stats-details", section as usize))
+                        .children(footer_bounds_probe("stats-details"))
+                        .max_h(px(174.))
+                        .overflow_y_scroll()
+                        .pl(px(28.))
+                        .pr(px(6.))
+                        .py(px(3.))
+                        .text_size(px(11.))
+                        .line_height(px(17.))
+                        .text_color(muted)
+                        .children(details.into_iter().enumerate().map(|(index, detail)| {
+                            div().py(px(2.)).child(if index == 0 {
+                                footer_text("stats-first-detail", detail)
+                            } else {
+                                ui_text(detail)
+                            })
+                        })),
+                )
+            }))
+        });
     div()
         .w(px(360.))
         .max_w_full()
@@ -936,7 +1103,7 @@ pub(super) fn stats_panel(summary: &StatsSummary, locale: InterfaceLocale, dark:
                 .text_color(muted)
                 .child(footer_text("stats-title", stats_title(locale))),
         )
-        .child(grid)
+        .children(rows)
 }
 
 fn agents_tooltip(
@@ -1280,6 +1447,18 @@ mod tests {
                 locale,
             )
             .is_empty()
+        );
+        assert_eq!(
+            stats_summary(&json!({"toolCounts": []}), &Value::Null, locale).tools,
+            Some(0)
+        );
+        assert_eq!(
+            stats_summary(&json!({"toolCount": 0}), &Value::Null, locale).tools,
+            Some(0)
+        );
+        assert_eq!(
+            stats_summary(&json!({"configCounts": {"hooks": 1}}), &Value::Null, locale).tools,
+            None
         );
     }
 

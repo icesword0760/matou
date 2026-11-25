@@ -6444,28 +6444,32 @@ fn run_writable(
                     )
                 }
                 Command::SetProviderPermissionMode { session_id, mode } => {
-                    let profile = match owner
-                        .session(&session_id)?
-                        .as_ref()
-                        .map(|session| session.kind.as_str())
-                    {
-                        Some("antigravity") => LaunchProfile::Antigravity,
-                        Some("codex") => LaunchProfile::Codex,
-                        _ => LaunchProfile::ClaudeCode,
-                    };
-                    let modes: &[&str] = if profile == LaunchProfile::Codex {
-                        &codex_permissions::MODES
-                    } else {
-                        &CLAUDE_PERMISSION_MODES
-                    };
-                    if !modes.contains(&mode.as_str()) {
+                    let profile = owner.session(&session_id)?.and_then(|session| {
+                        match session.kind.as_str() {
+                            "antigravity" => Some(LaunchProfile::Antigravity),
+                            "codex" => Some(LaunchProfile::Codex),
+                            "claude-code" => Some(LaunchProfile::ClaudeCode),
+                            _ => None,
+                        }
+                    });
+                    let Some((profile, normalized)) = profile.and_then(|profile| {
+                        normalize_provider_permission(profile, &mode).map(|mode| (profile, mode))
+                    }) else {
+                        let error = if profile.is_none()
+                            && CLAUDE_PERMISSION_MODES.contains(&mode.as_str())
+                        {
+                            "active AI Session is required for permission respawn"
+                        } else {
+                            "invalid permission mode"
+                        };
                         permission_results.push(permission_result(
                             &session_id,
                             &mode,
-                            Some("invalid permission mode".into()),
+                            Some(error.into()),
                         ));
                         continue;
-                    }
+                    };
+                    let mode = normalized.to_owned();
                     if let Some(change) = permission_changes.get(&session_id) {
                         if change.mode != mode {
                             permission_results.push(permission_result(
@@ -6487,20 +6491,11 @@ fn run_writable(
                         );
                         let binding = owner.permission_binding(&session_id)?;
                         if binding.as_ref().is_some_and(|binding| {
-                            let permission = binding.metadata.get("permissionMode");
-                            let current = if profile == LaunchProfile::Codex {
-                                codex_permissions::selected_mode(permission)
-                            } else {
-                                permission
-                                    .and_then(Value::as_str)
-                                    .filter(|mode| {
-                                        CLAUDE_PERMISSION_MODES.contains(mode)
-                                            || profile == LaunchProfile::Antigravity
-                                                && *mode == "ask"
-                                    })
-                                    .unwrap_or("default")
-                            };
-                            current == mode
+                            binding.metadata["permissionMode"]
+                                .as_str()
+                                .and_then(|mode| normalize_provider_permission(profile, mode))
+                                .unwrap_or("default")
+                                == mode
                         }) {
                             return Ok(None);
                         }
@@ -9162,6 +9157,22 @@ impl PermissionChange {
         }
         Ok(())
     }
+}
+
+pub(crate) fn normalize_provider_permission(
+    profile: LaunchProfile,
+    mode: &str,
+) -> Option<&'static str> {
+    let modes: &[&str] = match profile {
+        LaunchProfile::Codex => return codex_permissions::normalize_mode(mode),
+        LaunchProfile::Antigravity => antigravity_launch::MODES,
+        LaunchProfile::ClaudeCode => &CLAUDE_PERMISSION_MODES,
+        // Older callers sent these values even when the provider owned the setting.
+        LaunchProfile::Shell | LaunchProfile::Dsh => {
+            &["default", "acceptEdits", "plan", "bypassPermissions"]
+        }
+    };
+    modes.iter().copied().find(|candidate| *candidate == mode)
 }
 
 fn permission_result(session_id: &str, mode: &str, error: Option<String>) -> Value {

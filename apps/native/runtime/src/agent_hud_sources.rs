@@ -55,7 +55,7 @@ fn add_json_hooks(hooks: &mut BTreeSet<String>, config: &Value) {
     }
 }
 
-pub(crate) fn codex_config(root: Option<&Path>) -> (ConfigCounts, Vec<String>) {
+pub(crate) fn codex_config(root: Option<&Path>) -> (ConfigCounts, Vec<String>, Vec<String>) {
     let mut mcp = BTreeSet::new();
     let mut hooks: BTreeSet<_> = codex_events::EVENTS
         .into_iter()
@@ -74,6 +74,7 @@ pub(crate) fn codex_config(root: Option<&Path>) -> (ConfigCounts, Vec<String>) {
             ..ConfigCounts::default()
         },
         hooks.into_iter().collect(),
+        mcp.into_iter().collect(),
     )
 }
 
@@ -149,7 +150,7 @@ fn add_antigravity_hooks(hooks: &mut BTreeSet<String>, config: &Value) {
     }
 }
 
-pub(crate) fn antigravity_config(roots: &[PathBuf]) -> (ConfigCounts, Vec<String>) {
+pub(crate) fn antigravity_config(roots: &[PathBuf]) -> (ConfigCounts, Vec<String>, Vec<String>) {
     let mut mcp = BTreeSet::new();
     let mut hooks = BTreeSet::new();
     for root in roots {
@@ -188,6 +189,7 @@ pub(crate) fn antigravity_config(roots: &[PathBuf]) -> (ConfigCounts, Vec<String
             ..ConfigCounts::default()
         },
         hooks.into_iter().collect(),
+        mcp.into_iter().collect(),
     )
 }
 
@@ -428,8 +430,9 @@ skip = true
             root.path().join("hooks.json"),
             r#"{"hooks":{"PostToolUse":[],"SubagentStop":[]}}"#,
         )?;
-        let (counts, events) = codex_config(Some(root.path()));
+        let (counts, events, mcp_names) = codex_config(Some(root.path()));
         assert_eq!(counts.mcps, 2);
+        assert_eq!(mcp_names, ["one.with.dots", "second"]);
         assert_eq!(counts.hooks, codex_events::EVENTS.len() + 2);
         assert!(events.contains(&"PreCompact".into()));
         assert!(events.contains(&"SubagentStop".into()));
@@ -454,7 +457,7 @@ skip = true
             plugin.join("hooks.json"),
             r#"{"plugin-name":{"PreToolUse":[],"Stop":[]}}"#,
         )?;
-        let (counts, hooks) = antigravity_config(&[root.path().into()]);
+        let (counts, hooks, mcp_names) = antigravity_config(&[root.path().into()]);
         assert_eq!(
             counts,
             ConfigCounts {
@@ -465,6 +468,7 @@ skip = true
             }
         );
         assert_eq!(hooks, ["PreToolUse", "Stop"]);
+        assert_eq!(mcp_names, ["a", "b"]);
         Ok(())
     }
 

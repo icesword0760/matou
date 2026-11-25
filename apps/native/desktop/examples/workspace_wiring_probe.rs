@@ -3250,7 +3250,7 @@ mod workspace {
         assert!(draw_hud(window.into(), cx).contains_key("footer-stats-menu"));
         for (key, text) in [
             ("mcps", "2 · 1 错误"),
-            ("tools", "3"),
+            ("tools", "3 次"),
             ("hooks", "1"),
             ("todos", "0 / 1"),
         ] {
@@ -3713,37 +3713,37 @@ mod workspace {
             window.into(),
             cx,
             MouseButton::Left,
-            permission["bypassPermissions"].center(),
+            permission["turbo"].center(),
         );
         window.update(cx, |view, window, cx| {
             assert!(matches!(&view.dialog, Some(TabDialog::PermissionMode(state))
-                if state.provider == "Antigravity" && state.from == PermissionMode::Ask && state.target == PermissionMode::Bypass));
+                if state.provider == "Antigravity" && state.from == PermissionMode::Ask && state.target == PermissionMode::Turbo));
             view.confirm_dialog(window, cx);
         }).unwrap();
         assert!(std::iter::from_fn(|| sink.try_recv().ok()).any(|command| matches!(command,
-            Command::SetProviderPermissionMode { session_id, mode } if session_id == A && mode == "bypassPermissions")));
+            Command::SetProviderPermissionMode { session_id, mode } if session_id == A && mode == "turbo")));
         window
             .update(cx, |view, _, cx| {
-                view.graph["nodes"][0]["permissionMode"] = json!("bypassPermissions");
+                view.graph["nodes"][0]["permissionMode"] = json!("turbo");
                 view.reconcile_permission_modes(
                     &[json!({
-                        "sessionId": A, "permissionMode": "bypassPermissions"
+                        "sessionId": A, "permissionMode": "turbo"
                     })],
                     cx,
                 );
-                assert_eq!(view.permission_chip().unwrap().mode, PermissionMode::Bypass);
+                assert_eq!(view.permission_chip().unwrap().mode, PermissionMode::Turbo);
                 cx.notify();
             })
             .unwrap();
-        let bypass = draw_hud(window.into(), cx)["permission"];
-        click(window.into(), cx, MouseButton::Left, bypass.center());
+        let turbo = draw_hud(window.into(), cx)["permission"];
+        click(window.into(), cx, MouseButton::Left, turbo.center());
         let ask = draw_hud(window.into(), cx)["ask"];
         click(window.into(), cx, MouseButton::Left, ask.center());
         window
             .update(cx, |view, window, cx| {
                 assert!(
                     matches!(&view.dialog, Some(TabDialog::PermissionMode(state))
-                if state.from == PermissionMode::Bypass && state.target == PermissionMode::Ask)
+                if state.from == PermissionMode::Turbo && state.target == PermissionMode::Ask)
                 );
                 view.close_dialog(window, cx);
             })
@@ -3840,6 +3840,8 @@ mod workspace {
             hud["contextGuard"]["cache"]["hitRatioPercent"] = json!(91.0);
             hud["contextUsedTokens"] = json!(percent * 2000);
             hud["configCounts"] = json!({"mcps":4,"hooks":11});
+            hud["hookNames"] = json!(["PostToolUse", "PreToolUse", "SessionStart", "SessionEnd", "Stop", "PreCompact", "PostCompact", "PermissionRequest", "UserPromptSubmit", "SubagentStart", "SubagentStop"]);
+            hud["mcpServerNames"] = json!(["browser", "files", "search", "workspace"]);
             if mode != "claude-code" {
                 hud["mcpErrors"] = json!(["Server offline"]);
             }
@@ -3852,6 +3854,8 @@ mod workspace {
                     .collect::<Vec<_>>()
             );
             hud["toolCount"] = json!(123);
+            hud["runningTools"] = json!([{"name":"Read", "target":"src/lib.rs"}]);
+            hud["toolCounts"] = json!([{"name":"Bash", "count":122}]);
             if mode != "claude-code" {
                 hud["allUsageWindows"] =
                     json!([{"label":"All models","usedPercent":77,"resetText":"13:00"}]);
@@ -3974,22 +3978,17 @@ mod workspace {
         }
     }
 
-    fn assert_stats_grid(bounds: &HashMap<&'static str, Bounds<Pixels>>) {
+    fn assert_stats_rows(bounds: &HashMap<&'static str, Bounds<Pixels>>) {
         let panel = bounds["footer-stats-menu"];
         assert_eq!(panel.size.width, px(360.));
-        assert!(
-            (px(96.)..=px(98.)).contains(&panel.size.height),
-            "stats panel height: {:?}",
-            panel.size.height,
-        );
-        let (tools, hooks) = (bounds["tools"], bounds["hooks"]);
-        let (mcps, todos) = (bounds["mcps"], bounds["todos"]);
-        assert_eq!(tools.top(), hooks.top());
-        assert_eq!(mcps.top(), todos.top());
-        assert_eq!((tools.left(), tools.right()), (mcps.left(), mcps.right()));
-        assert_eq!((hooks.left(), hooks.right()), (todos.left(), todos.right()));
-        assert_eq!(hooks.left() - tools.right(), px(18.));
-        assert!((mcps.top() - tools.bottom() - px(7.)).abs() <= px(0.5));
+        assert!(!bounds.contains_key("stats-details"));
+        let rows = ["tools", "hooks", "mcps", "todos"].map(|key| bounds[key]);
+        for pair in rows.windows(2) {
+            assert_eq!(pair[0].left(), pair[1].left());
+            assert_eq!(pair[0].right(), pair[1].right());
+            assert!(pair[0].bottom() <= pair[1].top());
+        }
+        assert!(rows.last().unwrap().bottom() < panel.bottom());
     }
 
     async fn capture_footer_stats(cx: &mut AsyncApp, root: &std::path::Path, output: &std::path::Path) {
@@ -4034,7 +4033,7 @@ mod workspace {
             let bounds = draw_preview(cx);
             assert!(!bounds.contains_key("cache") && !bounds.contains_key("handoff"));
             click(window.into(), cx, MouseButton::Left, bounds["stats"].center());
-            assert_stats_grid(&draw_preview(cx));
+            assert_stats_rows(&draw_preview(cx));
             // The layout probe draws the frame. Ask AppKit to present it even
             // when another window has interrupted the probe's display link.
             unsafe {
@@ -4202,19 +4201,45 @@ mod workspace {
                         cx.notify();
                     })
                     .unwrap();
-                assert_stats_grid(&draw_hud(handle, cx));
+                let collapsed = draw_hud(handle, cx);
+                assert_stats_rows(&collapsed);
                 let errors = if mode == "claude-code" { 0 } else { 1 };
                 let title = locale.text("会话统计", "Session stats");
                 let errors_label = locale.text("错误", "errors");
                 for (key, expected) in [
                     ("stats-title", title.into()),
-                    ("tools", "123".into()),
+                    ("tools", locale.text("123 次", "123 calls").into()),
                     ("hooks", "11".into()),
                     ("mcps", format!("4 · {errors} {errors_label}")),
                     ("todos", "3 / 7".into()),
                 ] {
                     assert_full_hud_text(handle, cx, key, &expected);
                 }
+                click(handle, cx, MouseButton::Left, collapsed["tools"].center());
+                let expanded = draw_hud(handle, cx);
+                assert!(expanded["tools"].bottom() <= expanded["stats-details"].top());
+                assert!(expanded["stats-details"].bottom() <= expanded["hooks"].top());
+                assert_full_hud_text(
+                    handle,
+                    cx,
+                    "stats-first-detail",
+                    locale.text("Read · 运行中 · src/lib.rs", "Read · Running · src/lib.rs"),
+                );
+                click(handle, cx, MouseButton::Left, expanded["hooks"].center());
+                let hooks = draw_hud(handle, cx);
+                assert_eq!(hooks["tools"].bottom(), hooks["hooks"].top());
+                assert_eq!(hooks["stats-details"].size.height, px(174.));
+                assert_full_hud_text(handle, cx, "stats-first-detail", "PostToolUse");
+                press(window, cx, "enter");
+                let collapsed = draw_hud(handle, cx);
+                assert_stats_rows(&collapsed);
+                click(handle, cx, MouseButton::Left, collapsed["mcps"].center());
+                let first_mcp = if errors == 0 {
+                    "browser"
+                } else {
+                    locale.text("错误 · Server offline", "Error · Server offline")
+                };
+                assert_full_hud_text(handle, cx, "stats-first-detail", first_mcp);
                 click(handle, cx, MouseButton::Left, point(px(20.), px(90.)));
                 assert!(!draw_hud(handle, cx).contains_key("footer-stats-menu"));
                 println!(

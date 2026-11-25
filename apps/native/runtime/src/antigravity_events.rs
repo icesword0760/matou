@@ -105,6 +105,7 @@ pub struct Run {
     work_status: WorkStatus,
     last_agent_state: Option<String>,
     error_latched: bool,
+    launch_permission: PermissionMode,
     permission: PermissionMode,
     observed_cycle_mode: bool,
     observed_prompt: bool,
@@ -132,6 +133,7 @@ impl Run {
             work_status: WorkStatus::Starting,
             last_agent_state: None,
             error_latched: false,
+            launch_permission: permission,
             permission,
             observed_cycle_mode: false,
             observed_prompt: false,
@@ -254,38 +256,12 @@ impl Run {
             return Outcome::Ignored;
         }
 
-        let reported_permission = match first_text(
+        let reported_permission = observe_permission(
             payload,
-            &[
-                "cycle_mode",
-                "cycleMode",
-                "permission_mode",
-                "permissionMode",
-            ],
-        ) {
-            Some("auto") if self.permission == PermissionMode::Auto => Some(PermissionMode::Auto),
-            Some("auto" | "default") => Some(PermissionMode::Default),
-            Some("ask") => Some(PermissionMode::Ask),
-            Some("bypassPermissions" | "bypass-permissions") => {
-                Some(PermissionMode::BypassPermissions)
-            }
-            Some("accept-edits" | "acceptEdits") => Some(PermissionMode::AcceptEdits),
-            Some("plan") => Some(PermissionMode::Plan),
-            None if is_statusline
-                && (payload.contains_key("cycle_mode")
-                    || payload.contains_key("cycleMode")
-                    || self.observed_cycle_mode
-                        && ["model", "context_window", "agent_state"]
-                            .iter()
-                            .any(|key| payload.contains_key(*key))) =>
-            {
-                Some(PermissionMode::Ask)
-            }
-            _ => None,
-        };
-        if is_statusline && reported_permission.is_some() {
-            self.observed_cycle_mode = true;
-        }
+            is_statusline,
+            self.permission,
+            &mut self.observed_cycle_mode,
+        );
         let permission_changed =
             reported_permission.filter(|permission| *permission != self.permission);
         if let Some(permission) = permission_changed {
@@ -298,7 +274,16 @@ impl Run {
                 conversation_id,
                 cwd: first_text(payload, &["cwd"]),
                 model: text(model).or_else(|| text(model.and_then(|model| model.get("id")))),
-                permission: reported_permission,
+                permission: reported_permission.map(|permission| {
+                    // Preserve native defaults on restore when Auto was only observed.
+                    if permission == PermissionMode::Auto
+                        && self.launch_permission != PermissionMode::Auto
+                    {
+                        PermissionMode::Default
+                    } else {
+                        permission
+                    }
+                }),
             };
             let lifecycle = !is_statusline
                 && match event_name {
@@ -421,6 +406,50 @@ fn text(value: Option<&Value>) -> Option<&str> {
 
 fn first_text<'a>(payload: &'a Map<String, Value>, keys: &[&str]) -> Option<&'a str> {
     keys.iter().find_map(|key| text(payload.get(*key)))
+}
+
+fn reported_mode(mode: &str) -> Option<PermissionMode> {
+    Some(match mode {
+        "default" | "ask" => PermissionMode::Ask,
+        "auto" => PermissionMode::Auto,
+        "accept-edits" | "acceptEdits" => PermissionMode::AcceptEdits,
+        "plan" | "planmode" => PermissionMode::Plan,
+        "bypassPermissions" | "bypass-permissions" | "bypass" => PermissionMode::BypassPermissions,
+        _ => return None,
+    })
+}
+
+pub(crate) fn observe_permission(
+    payload: &Map<String, Value>,
+    is_statusline: bool,
+    current: PermissionMode,
+    observed_cycle_mode: &mut bool,
+) -> Option<PermissionMode> {
+    const CYCLE_KEYS: &[&str] = &["cycle_mode", "cycleMode"];
+    let explicit =
+        first_text(payload, &["permission_mode", "permissionMode"]).and_then(reported_mode);
+    let reported = match first_text(payload, CYCLE_KEYS) {
+        Some("default") => explicit.or(Some(PermissionMode::Ask)),
+        Some(cycle) => reported_mode(cycle),
+        None => explicit.or_else(|| {
+            let default_cycle = match CYCLE_KEYS.iter().find_map(|key| payload.get(*key)) {
+                Some(value) => value.is_null() || value.is_string(),
+                None => {
+                    *observed_cycle_mode
+                        && ["model", "context_window", "agent_state"]
+                            .iter()
+                            .any(|key| payload.contains_key(*key))
+                }
+            };
+            (is_statusline && default_cycle).then_some(PermissionMode::Ask)
+        }),
+    }?;
+    *observed_cycle_mode |= is_statusline;
+    // Cycle mode can change independently of these launch-time permissions.
+    Some(match current {
+        PermissionMode::Turbo | PermissionMode::BypassPermissions => current,
+        _ => reported,
+    })
 }
 
 fn stop_error(payload: &Map<String, Value>) -> bool {

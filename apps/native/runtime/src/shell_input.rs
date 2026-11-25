@@ -171,7 +171,9 @@ fn interactive_launch_with_cc(
             return resolve_cc();
         }
         (Some("codex"), None, None) => (LaunchProfile::Codex, "default"),
-        (Some("codex"), Some(CODEX_BYPASS), None) => (LaunchProfile::Codex, "bypassPermissions"),
+        (Some("codex"), Some(CODEX_BYPASS | "--yolo"), None) => {
+            (LaunchProfile::Codex, "bypassPermissions")
+        }
         _ => return None,
     };
     Some(InteractiveLaunch { profile, mode })

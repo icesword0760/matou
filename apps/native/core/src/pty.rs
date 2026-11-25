@@ -446,7 +446,7 @@ impl PtyProcess {
         );
 
         let mut command = CommandBuilder::new(&launch.executable);
-        let environment = match launch.profile {
+        let mut environment = match launch.profile {
             LaunchProfile::Shell => {
                 let environment = prepare_shell_environment(launch)?;
                 #[cfg(unix)]
@@ -499,12 +499,12 @@ impl PtyProcess {
                 environment
             }
         };
+        if launch.profile != LaunchProfile::Shell {
+            remove_var(&mut environment, OsStr::new("NO_COLOR"));
+            set_var(&mut environment, "COLORTERM".into(), "truecolor".into());
+        }
         #[cfg(unix)]
-        let environment = {
-            let mut environment = environment;
-            ensure_utf8_locale(&mut environment);
-            environment
-        };
+        ensure_utf8_locale(&mut environment);
         command.args(&launch.argv);
         command.cwd(&launch.cwd);
         command.env_clear();

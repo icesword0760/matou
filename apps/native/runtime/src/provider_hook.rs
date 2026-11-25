@@ -414,6 +414,33 @@ pub(crate) struct Registration {
 }
 
 impl Registration {
+    pub fn configure_antigravity_args(&self, argv: &mut Vec<String>) -> Result<()> {
+        let path = self
+            .settings_path
+            .to_str()
+            .context("Antigravity settings path is not UTF-8")?;
+        let settings_args = match argv.as_slice() {
+            [flag, source, ..] if flag == "--settings" => {
+                let mut settings: Map<String, Value> = if source.starts_with('{') {
+                    serde_json::from_str(source)?
+                } else {
+                    serde_json::from_reader(File::open(source)?)?
+                };
+                // Preserve Matou's status line and keep the hook URL out of process arguments.
+                let managed: Map<String, Value> =
+                    serde_json::from_reader(File::open(&self.settings_path)?)?;
+                settings.extend(managed);
+                let temporary = self.settings_path.with_extension("json.tmp");
+                write_private(&temporary, &serde_json::to_vec_pretty(&settings)?, 0o600)?;
+                fs::rename(temporary, &self.settings_path)?;
+                0..2
+            }
+            _ => 0..0,
+        };
+        argv.splice(settings_args, ["--settings".to_owned(), path.to_owned()]);
+        Ok(())
+    }
+
     pub fn attach_dsh(
         &mut self,
         dump: &str,

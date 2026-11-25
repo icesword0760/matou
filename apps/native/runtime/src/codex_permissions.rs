@@ -11,13 +11,29 @@ use serde_json::Value;
 
 use crate::{codex_launch, shell_input::CODEX_BYPASS};
 
-pub(crate) const MODES: [&str; 4] = ["default", "acceptEdits", "plan", "bypassPermissions"];
+pub(crate) const MODES: [&str; 5] = [
+    "default",
+    "askForApproval",
+    "approveForMe",
+    "readOnly",
+    "fullAccess",
+];
 const DEFAULT_PERMISSIONS: (&str, &str) = ("on-request", "workspace-write");
+
+pub(crate) fn normalize_mode(mode: &str) -> Option<&'static str> {
+    let mode = match mode {
+        "acceptEdits" => "askForApproval",
+        "plan" => "readOnly",
+        "bypassPermissions" => "fullAccess",
+        _ => mode,
+    };
+    MODES.into_iter().find(|candidate| *candidate == mode)
+}
 
 pub(crate) fn selected_mode(value: Option<&Value>) -> &'static str {
     value
         .and_then(Value::as_str)
-        .and_then(|value| MODES.into_iter().find(|mode| *mode == value))
+        .and_then(normalize_mode)
         .unwrap_or("default")
 }
 
@@ -28,16 +44,40 @@ pub(crate) fn append_args(
     environment: &BTreeMap<OsString, OsString>,
 ) -> (&'static str, Option<&'static str>) {
     let mode = selected_mode(requested);
-    let invalid_mode = requested.is_some_and(|value| value.as_str() != Some(mode));
-    let ((approval, sandbox), invalid_config) = match mode {
-        "bypassPermissions" => {
+    match mode {
+        "fullAccess" => {
             argv.push(CODEX_BYPASS.into());
             return (mode, None);
         }
-        "acceptEdits" => (DEFAULT_PERMISSIONS, false),
-        "plan" => (("on-request", "read-only"), false),
-        _ => default_permissions(cwd, environment),
-    };
+        "approveForMe" => {
+            argv.push("--approve-for-me".into());
+            return (mode, None);
+        }
+        "askForApproval" | "readOnly" => {
+            let (sandbox, profile) = if mode == "askForApproval" {
+                ("workspace-write", ":workspace")
+            } else {
+                ("read-only", ":read-only")
+            };
+            // Codex prefers the named profile when both settings are in the same layer.
+            // Older versions can use sandbox_mode, while --sandbox would force it on all versions.
+            argv.extend([
+                "--ask-for-approval".into(),
+                "on-request".into(),
+                "-c".into(),
+                format!("sandbox_mode=\"{sandbox}\""),
+                "-c".into(),
+                format!("default_permissions=\"{profile}\""),
+                "-c".into(),
+                "approvals_reviewer=\"user\"".into(),
+            ]);
+            return (mode, None);
+        }
+        _ => {}
+    }
+    let invalid_mode =
+        requested.is_some_and(|value| value.as_str().and_then(normalize_mode).is_none());
+    let ((approval, sandbox), invalid_config) = default_permissions(cwd, environment);
     argv.extend([
         "--ask-for-approval".into(),
         approval.into(),
@@ -206,6 +246,7 @@ extra = [
 ]
 'approval_policy' = "untrusted"
 "sandbox_mode" = 'danger-full-access' # root choice
+approvals_reviewer = "auto_review"
 [profiles.sample]
 approval_policy = "never"
 sandbox_mode = "read-only"
@@ -218,8 +259,29 @@ sandbox_mode = "read-only"
             ("USERPROFILE".into(), home.into_os_string()),
             ("MATOU_CODEX_COMMAND".into(), executable.into_os_string()),
         ]);
-        for (mode, args) in [
+        let ask_for_approval = [
+            "--ask-for-approval",
+            "on-request",
+            "-c",
+            "sandbox_mode=\"workspace-write\"",
+            "-c",
+            "default_permissions=\":workspace\"",
+            "-c",
+            "approvals_reviewer=\"user\"",
+        ];
+        let read_only = [
+            "--ask-for-approval",
+            "on-request",
+            "-c",
+            "sandbox_mode=\"read-only\"",
+            "-c",
+            "default_permissions=\":read-only\"",
+            "-c",
+            "approvals_reviewer=\"user\"",
+        ];
+        for (requested, mode, args) in [
             (
+                "default",
                 "default",
                 [
                     "--ask-for-approval",
@@ -229,23 +291,22 @@ sandbox_mode = "read-only"
                 ]
                 .as_slice(),
             ),
-            (
-                "acceptEdits",
-                &[
-                    "--ask-for-approval",
-                    "on-request",
-                    "--sandbox",
-                    "workspace-write",
-                ],
-            ),
-            (
-                "plan",
-                &["--ask-for-approval", "on-request", "--sandbox", "read-only"],
-            ),
-            ("bypassPermissions", &[CODEX_BYPASS]),
+            ("askForApproval", "askForApproval", &ask_for_approval),
+            ("approveForMe", "approveForMe", &["--approve-for-me"]),
+            ("readOnly", "readOnly", &read_only),
+            ("fullAccess", "fullAccess", &[CODEX_BYPASS]),
+            ("acceptEdits", "askForApproval", &ask_for_approval),
+            ("plan", "readOnly", &read_only),
+            ("bypassPermissions", "fullAccess", &[CODEX_BYPASS]),
         ] {
-            let plan =
-                codex_launch::prepare(temp.path(), &cwd, Some(&json!(mode)), env.clone(), 80, 24)?;
+            let plan = codex_launch::prepare(
+                temp.path(),
+                &cwd,
+                Some(&json!(requested)),
+                env.clone(),
+                80,
+                24,
+            )?;
             assert_eq!(plan.permission_mode, mode);
             assert_eq!(plan.permission_warning, None);
             assert_eq!(
@@ -260,7 +321,7 @@ sandbox_mode = "read-only"
                 plan.launch.env[OsStr::new("OPENAI_BASE_URL")],
                 "https://api.openai.com/v1"
             );
-            println!("fresh {mode}: {args:?}; config root, cwd and env verified");
+            println!("fresh {requested} as {mode}: {args:?}; config root, cwd and env verified");
         }
         assert_eq!(fs::read_to_string(codex_home.join("config.toml"))?, config);
         env.remove(OsStr::new("CODEX_HOME"));

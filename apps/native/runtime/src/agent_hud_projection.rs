@@ -7,8 +7,12 @@ use regex::Regex;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::context_guard::ContextGuardHudSummary;
-use crate::provider_hook::{nonempty, one_line};
+use crate::{
+    antigravity_events,
+    antigravity_launch::PermissionMode as AntigravityPermission,
+    context_guard::ContextGuardHudSummary,
+    provider_hook::{nonempty, one_line},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -287,6 +291,8 @@ pub struct HudSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hook_names: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcp_server_names: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub context_guard: Option<ContextGuardHudSummary>,
 }
 
@@ -353,6 +359,7 @@ impl AgentHudProjection {
                 all_usage_windows: None,
                 config_counts: None,
                 hook_names: None,
+                mcp_server_names: None,
                 context_guard: None,
             },
             context_tokens: None,
@@ -397,7 +404,7 @@ impl AgentHudProjection {
         self.hud.resumable = resumable;
         if self.hud.provider != HudProvider::Dsh {
             self.hud.permission_mode = permission_mode
-                .and_then(normalize_permission)
+                .and_then(|mode| normalize_permission(mode, self.hud.provider))
                 .or(Some("default"));
         }
         let strategy = model_strategy.or(model).and_then(normalize_model_strategy);
@@ -409,8 +416,8 @@ impl AgentHudProjection {
     }
 
     pub fn update_permission(&mut self, mode: &str, pending: bool) {
-        if let Some(mode) =
-            normalize_permission(mode).filter(|_| self.hud.provider != HudProvider::Dsh)
+        if self.hud.provider != HudProvider::Dsh
+            && let Some(mode) = normalize_permission(mode, self.hud.provider)
         {
             self.hud.permission_mode = Some(mode);
             self.pending_permission = pending.then_some(mode);
@@ -537,9 +544,15 @@ impl AgentHudProjection {
         true
     }
 
-    pub(crate) fn set_config(&mut self, counts: ConfigCounts, hook_names: Vec<String>) {
+    pub(crate) fn set_config(
+        &mut self,
+        counts: ConfigCounts,
+        hook_names: Vec<String>,
+        mcp_server_names: Vec<String>,
+    ) {
         self.hud.config_counts = Some(counts);
         self.hud.hook_names = Some(hook_names);
+        self.hud.mcp_server_names = Some(mcp_server_names);
     }
 
     pub fn set_context_guard(&mut self, summary: Option<ContextGuardHudSummary>) {
@@ -787,39 +800,30 @@ impl AgentHudProjection {
 
     fn observe_settings(&mut self, payload: &Value, event: Option<&str>) {
         let antigravity = self.hud.provider == HudProvider::Antigravity;
-        let cycle_mode = first_text(payload, &["cycle_mode", "cycleMode"]);
-        let cycle_tick = antigravity
-            && event.is_none()
-            && (payload
-                .get("cycle_mode")
-                .or_else(|| payload.get("cycleMode"))
-                .is_some()
-                || self.cycle_mode_observed
-                    && ["model", "context_window", "agent_state"]
-                        .iter()
-                        .any(|key| payload.get(*key).is_some()));
-        self.cycle_mode_observed |= cycle_tick;
-        let raw_permission = if antigravity {
-            cycle_mode
-                .map(|mode| {
-                    if mode == "auto" && self.hud.permission_mode != Some("auto") {
-                        "default"
-                    } else {
-                        mode
-                    }
+        let reported_permission = if antigravity {
+            let current = self
+                .hud
+                .permission_mode
+                .map(AntigravityPermission::from_saved);
+            payload
+                .as_object()
+                .and_then(|payload| {
+                    antigravity_events::observe_permission(
+                        payload,
+                        event.is_none(),
+                        current.unwrap_or_default(),
+                        &mut self.cycle_mode_observed,
+                    )
                 })
-                .or_else(|| first_text(payload, &["permission_mode", "permissionMode"]))
+                .map(AntigravityPermission::as_str)
         } else {
             first_text(payload, &["permission_mode", "permissionMode"])
+                .and_then(|mode| normalize_permission(mode, self.hud.provider))
         };
-        if let Some(mode) = raw_permission
-            .and_then(normalize_permission)
-            .or_else(|| (cycle_tick && cycle_mode.is_none()).then_some("ask"))
-            .filter(|mode| {
-                self.pending_permission
-                    .is_none_or(|pending| pending == *mode)
-            })
-        {
+        if let Some(mode) = reported_permission.filter(|mode| {
+            self.pending_permission
+                .is_none_or(|pending| pending == *mode)
+        }) {
             self.hud.permission_mode = Some(mode);
             self.pending_permission = None;
             self.permission_observed = true;
@@ -1494,7 +1498,7 @@ pub(crate) fn update_mcp_error(errors: &mut Vec<String>, name: &str, status: Too
     }
 }
 
-fn normalize_permission(value: &str) -> Option<&'static str> {
+fn normalize_permission(value: &str, provider: HudProvider) -> Option<&'static str> {
     let normalized: String = value
         .chars()
         .filter(|ch| !matches!(ch, '_' | '-') && !ch.is_whitespace())
@@ -1502,11 +1506,18 @@ fn normalize_permission(value: &str) -> Option<&'static str> {
         .collect();
     match normalized.as_str() {
         "default" => Some("default"),
+        "manual" => Some("manual"),
         "auto" => Some("auto"),
         "acceptedits" => Some("acceptEdits"),
         "plan" | "planmode" => Some("plan"),
         "ask" => Some("ask"),
+        "dontask" => Some("dontAsk"),
         "bypasspermissions" | "bypass" => Some("bypassPermissions"),
+        "turbo" if provider == HudProvider::Antigravity => Some("turbo"),
+        "askforapproval" if provider == HudProvider::Codex => Some("askForApproval"),
+        "approveforme" if provider == HudProvider::Codex => Some("approveForMe"),
+        "readonly" if provider == HudProvider::Codex => Some("readOnly"),
+        "fullaccess" if provider == HudProvider::Codex => Some("fullAccess"),
         _ => None,
     }
 }
@@ -1729,7 +1740,10 @@ impl AgentHudProjection {
             self.hud.started_at = self.hud.started_at.min(started_at);
         }
         if !self.permission_observed
-            && let Some(mode) = history.permission.as_deref().and_then(normalize_permission)
+            && let Some(mode) = history
+                .permission
+                .as_deref()
+                .and_then(|mode| normalize_permission(mode, HudProvider::ClaudeCode))
         {
             self.hud.permission_mode = Some(mode);
         }

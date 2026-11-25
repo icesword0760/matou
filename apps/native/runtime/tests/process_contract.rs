@@ -5999,7 +5999,7 @@ while IFS= read -r line; do printf 'INPUT <%s>\n' "$line"; done
 }
 
 #[test]
-fn antigravity_permission_command_restarts_same_conversation_and_projects_hud() -> Result<()> {
+fn antigravity_turbo_restarts_same_conversation_and_survives_auto_status() -> Result<()> {
     use matou_native_core::sessions::{antigravity_binding, list_runs};
     use serde_json::{Value, json};
 
@@ -6135,7 +6135,7 @@ while IFS= read -r line; do :; done
         .context("initial run")?;
     child.send(Command::SetProviderPermissionMode {
         session_id: child.session.clone(),
-        mode: "plan".into(),
+        mode: "turbo".into(),
     })?;
     let deadline = Instant::now() + TIMEOUT;
     let new_url = loop {
@@ -6152,19 +6152,44 @@ while IFS= read -r line; do :; done
         thread::sleep(Duration::from_millis(20));
     };
     let args = fs::read_to_string(root.join("argv"))?;
-    assert!(args.lines().collect::<Vec<_>>().ends_with(&[
-        "--conversation",
-        CONVERSATION,
-        "--mode",
-        "plan"
-    ]));
-    status(new_url.trim(), "plan")?;
-    let response = permission_mode_result(&mut child, "plan")?;
+    let args: Vec<_> = args.lines().collect();
+    assert!(
+        args.windows(2)
+            .any(|args| args == ["--conversation", CONVERSATION])
+    );
+    assert!(args.contains(&"--dangerously-skip-permissions"));
+    assert_eq!(args.iter().filter(|arg| **arg == "--settings").count(), 1);
+    let settings_path = args
+        .windows(2)
+        .find_map(|args| (args[0] == "--settings").then_some(args[1]))
+        .context("expected per-session settings")?;
+    let settings: Value = serde_json::from_slice(&fs::read(settings_path)?)?;
+    assert_eq!(settings["statusLine"]["stack_with_default"], true);
+    assert_eq!(settings["toolPermission"], "always-proceed");
+    assert_eq!(settings["enableTerminalSandbox"], false);
+    assert_eq!(settings["allowNonWorkspaceAccess"], true);
+    status(new_url.trim(), "auto")?;
+    let response = permission_mode_result(&mut child, "turbo")?;
     assert!(response.get("error").is_none(), "{response}");
+    status(new_url.trim(), "auto")?;
+    child.send(Command::GetAgentHud {
+        request_id: 56,
+        session_id: child.session.clone(),
+    })?;
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        if let Event::Graph(graph) = child.event(deadline, true)?
+            && graph["type"] == "agentHudResult"
+            && graph["requestId"] == 56
+        {
+            assert_eq!(graph["result"]["hud"]["permissionMode"], "turbo");
+            break;
+        }
+    }
     let confirmed = antigravity_binding(&db, &child.session)?.context("confirmed binding")?;
     assert_eq!(confirmed.id, binding.id);
     assert_eq!(confirmed.provider_session_id, CONVERSATION);
-    assert_eq!(confirmed.metadata["permissionMode"], "plan");
+    assert_eq!(confirmed.metadata["permissionMode"], "turbo");
     assert_ne!(
         list_runs(&db, &child.session)?.pop().unwrap().id,
         old_run.id

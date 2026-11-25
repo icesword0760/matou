@@ -3242,16 +3242,6 @@ fn create_structure(
         .map(str::to_owned);
     let key = action_text(params, "submissionKey", 160)?;
     let enter = optional_bool(params, "enter")?;
-    let mode = params
-        .get("permissionMode")
-        .map(|_| {
-            choice(
-                params,
-                "permissionMode",
-                &["default", "acceptEdits", "plan", "bypassPermissions"],
-            )
-        })
-        .transpose()?;
     let cwd = params
         .get("cwd")
         .map(|_| action_text(params, "cwd", 4096))
@@ -3271,6 +3261,17 @@ fn create_structure(
     } else {
         LaunchProfile::Shell
     };
+    let mode = params
+        .get("permissionMode")
+        .map(|value| {
+            value
+                .as_str()
+                .and_then(|mode| crate::host::normalize_provider_permission(profile, mode))
+                .ok_or_else(|| {
+                    Fault::new(INVALID, "params.permissionMode is invalid for the profile")
+                })
+        })
+        .transpose()?;
     let command = metadata(caller, method, format!("host-action:{key}"), params);
     let (record, changed) = if let Some(result) = replay(owner.control_storage(), &command)? {
         (result, false)

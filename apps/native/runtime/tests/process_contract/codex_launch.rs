@@ -161,7 +161,7 @@ fn codex_launch_promotes_exact_commands_on_the_same_card() -> Result<()> {
         ),
         (
             "Codex fixture",
-            "bypassPermissions",
+            "fullAccess",
             [
                 &b" codex   --dangerously-bypass-"[..],
                 b"approvals-and-sandbox  ",
@@ -213,7 +213,7 @@ fn codex_launch_promotes_exact_commands_on_the_same_card() -> Result<()> {
         child.send(Command::Refresh)?;
         let before = graph_for(&mut child, "shell")?;
         assert_same_card(&child, &before);
-        if mode == "bypassPermissions" {
+        if mode == "fullAccess" {
             db.execute(
                 "INSERT INTO provider_bindings (
                      id, session_id, provider, provider_session_id, resume_state,
@@ -302,7 +302,7 @@ fn codex_launch_promotes_exact_commands_on_the_same_card() -> Result<()> {
         assert!(!root.path().join("Shell 家目录/shell-codex-argv").exists());
         let actual = argv(&codex_home.join("argv"))?;
         let mut expected = vec!["-c", "check_for_update_on_startup=false"];
-        let endpoint = if mode == "bypassPermissions" {
+        let endpoint = if mode == "fullAccess" {
             expected.extend([
                 "-c",
                 "model_reasoning_effort=\"high\"",
@@ -359,7 +359,7 @@ fn codex_launch_promotes_exact_commands_on_the_same_card() -> Result<()> {
             format!("{}\nxterm-256color\n{endpoint}\n", codex_home.display())
         );
         assert_no_binding(&db, &child.session)?;
-        if mode == "bypassPermissions" {
+        if mode == "fullAccess" {
             let previous_binding = db.query_row(
                 "SELECT resume_state, updated_at FROM provider_bindings WHERE id='legacy-fixture'",
                 [],

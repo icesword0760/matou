@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, OnceLock,
@@ -1145,11 +1145,20 @@ impl ShellOwner {
                         .map(|config| crate::provider_hook::claude_config_counts(&cwd, config));
                     if let Some(config) = &config {
                         let count = |key: &str| config[key].as_u64().unwrap_or_default() as usize;
-                        let names = config["hookNames"]
+                        let hook_names = config["hookNames"]
                             .as_array()
                             .into_iter()
                             .flatten()
                             .filter_map(Value::as_str)
+                            .map(str::to_owned)
+                            .collect();
+                        let mcp_names = config["mcpServerNames"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(Value::as_str)
+                            .collect::<BTreeSet<_>>()
+                            .into_iter()
                             .map(str::to_owned)
                             .collect();
                         hook.hud.set_config(
@@ -1159,22 +1168,23 @@ impl ShellOwner {
                                 claude_md: count("claudeMd"),
                                 rules: count("rules"),
                             },
-                            names,
+                            hook_names,
+                            mcp_names,
                         );
                     }
                     config.unwrap_or_default()
                 }
                 LaunchProfile::Codex => {
-                    let (counts, events) = agent_hud_sources::codex_config(
+                    let (counts, events, mcp_names) = agent_hud_sources::codex_config(
                         hook.codex.as_ref().and_then(|codex| codex.home()),
                     );
-                    hook.hud.set_config(counts, events);
+                    hook.hud.set_config(counts, events, mcp_names);
                     Value::Null
                 }
                 LaunchProfile::Antigravity => {
-                    let (counts, events) =
+                    let (counts, events, mcp_names) =
                         agent_hud_sources::antigravity_config(&hook.antigravity_config);
-                    hook.hud.set_config(counts, events);
+                    hook.hud.set_config(counts, events, mcp_names);
                     Value::Null
                 }
                 _ => Value::Null,
@@ -3757,14 +3767,9 @@ impl ShellOwner {
                             })
                             .filter_map(|(_, value)| value.to_str().map(str::to_owned)),
                     );
-                    let settings_path = registration
-                        .settings_path
-                        .to_str()
-                        .context("Antigravity settings path is not UTF-8")?;
-                    options
-                        .launch
-                        .argv
-                        .splice(0..0, ["--settings".to_owned(), settings_path.to_owned()]);
+                    registration
+                        .configure_antigravity_args(&mut options.launch.argv)
+                        .context("Prepare Antigravity session settings")?;
                     options.launch.env.extend(run_environment);
                     antigravity = Some(AntigravityObservation {
                         run: antigravity_events::Run::new(&run_id, mode.clone(), permission),
@@ -5629,7 +5634,13 @@ impl ShellOwner {
                 .as_str()
                 .map(str::to_owned)
         } else {
-            safe(observation.permission_mode)
+            safe(observation.permission_mode).map(|mode| {
+                if mode == "default" && hook.launch_metadata["permissionMode"] == "manual" {
+                    "manual".into()
+                } else {
+                    mode
+                }
+            })
         };
         observation.cwd = safe(observation.cwd)
             .filter(|cwd| Path::new(cwd).is_absolute() && Path::new(cwd).is_dir());
@@ -8535,11 +8546,11 @@ mod provider_tests {
         fs::create_dir(cwd.join(".claude"))?;
         fs::write(
             config_root.join("settings.json"),
-            r#"{"hooks":{"Stop":[],"PreToolUse":[]}}"#,
+            r#"{"hooks":{"Stop":[],"PreToolUse":[]},"mcpServers":{"global":{},"shared":{}}}"#,
         )?;
         fs::write(
             cwd.join(".claude/settings.local.json"),
-            r#"{"hooks":{"Stop":[],"SessionStart":[]}}"#,
+            r#"{"hooks":{"Stop":[],"SessionStart":[]},"mcpServers":{"local":{},"shared":{}}}"#,
         )?;
         let BootstrapResult::Writable {
             mut connection,
@@ -8802,6 +8813,11 @@ mod provider_tests {
         assert_eq!(hud["hud"]["gitBranch"], "main");
         assert_eq!(hud["hud"]["toolCounts"], json!([{"name":"Read","count":1}]));
         assert_eq!(hud["hud"]["subagentCount"], 2);
+        assert_eq!(hud["hud"]["configCounts"]["mcps"], 3);
+        assert_eq!(
+            hud["hud"]["mcpServerNames"],
+            json!(["global", "local", "shared"])
+        );
         assert_eq!(hud["hud"]["configCounts"]["hooks"], 3);
         assert_eq!(
             hud["hud"]["configCounts"]["hookNames"],
