@@ -6,16 +6,11 @@ use std::{
 
 use regex::Regex;
 
-use anyhow::Result;
-use rusqlite::{Connection, OptionalExtension, params};
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use super::{redact_secrets, store::ContextGuardStore};
 
 const LOG_LIMIT: usize = 10;
-const LOG_PREVIEW_BYTES: usize = 8 * 1024;
-const LOG_COMMAND_BYTES: usize = 512;
-const LOG_LIST_PREVIEW_BYTES: usize = 240;
 
 pub(crate) fn redact(text: &str, secrets: &[String]) -> String {
     let mut text = text.to_owned();
@@ -167,94 +162,6 @@ pub(crate) fn recent_log_ids(root: &Path, session: &str) -> Vec<String> {
         .collect()
 }
 
-pub(crate) fn recent_logs(root: &Path, session: &str, secrets: &[String]) -> Result<Vec<Value>> {
-    let Some(db) = open_log_reader(root)? else {
-        return Ok(Vec::new());
-    };
-    let mut list = db.prepare(
-        "SELECT id, command, raw_bytes FROM log_sources
-         WHERE session_id = ? AND tool_name <> 'mt-ctx-index' ORDER BY seq DESC LIMIT ?",
-    )?;
-    let rows = list.query_map(params![session, LOG_LIMIT as i64], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, i64>(2)?,
-        ))
-    })?;
-    rows.map(|row| {
-        let (id, command, raw_bytes) = row?;
-        let preview = read_log_preview(&db, session, &id, secrets)?.unwrap_or_default();
-        Ok(json!({
-            "id": id,
-            "command": clip(&redact(&command, secrets), LOG_COMMAND_BYTES),
-            "rawBytes": raw_bytes,
-            "preview": clip(&preview, LOG_LIST_PREVIEW_BYTES),
-        }))
-    })
-    .collect()
-}
-
-pub(crate) fn log_preview(
-    root: &Path,
-    session: &str,
-    id: &str,
-    secrets: &[String],
-) -> Result<Option<String>> {
-    match open_log_reader(root)? {
-        Some(db) => read_log_preview(&db, session, id, secrets),
-        None => Ok(None),
-    }
-}
-
-fn open_log_reader(root: &Path) -> Result<Option<Connection>> {
-    let path = root.join("context_guard.sqlite");
-    if !path.is_file() {
-        return Ok(None);
-    }
-    let db = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    db.busy_timeout(std::time::Duration::from_millis(80))?;
-    Ok(Some(db))
-}
-
-fn read_log_preview(
-    db: &Connection,
-    session: &str,
-    id: &str,
-    secrets: &[String],
-) -> Result<Option<String>> {
-    // Match the reconstruction rule used by the log store. Take a bounded
-    // prefix plus look-ahead so redaction sees credentials across chunk boundaries.
-    let Some((size, stored)) = db
-        .query_row(
-            "SELECT raw_bytes, COALESCE((SELECT SUM(length(CAST(body AS BLOB)))
-           FROM log_chunks WHERE source_id = log_sources.id), 0)
-         FROM log_sources WHERE session_id = ? AND id = ? AND tool_name <> 'mt-ctx-index' ",
-            params![session, id],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-        )
-        .optional()?
-    else {
-        return Ok(None);
-    };
-    let mut query =
-        db.prepare("SELECT body FROM log_chunks WHERE source_id = ? ORDER BY chunk_index")?;
-    let mut chunks = query.query([id])?;
-    let mut text = String::new();
-    while let Some(row) = chunks.next()? {
-        if size != stored && !text.is_empty() {
-            text.push('\n');
-        }
-        text.push_str(row.get_ref(0)?.as_str()?);
-        if text.len() > LOG_PREVIEW_BYTES * 2 {
-            break;
-        }
-    }
-    Ok(Some(
-        clip(&redact(&text, secrets), LOG_PREVIEW_BYTES).to_owned(),
-    ))
-}
-
 fn clip(text: &str, max: usize) -> &str {
     &text[..text.floor_char_boundary(text.len().min(max))]
 }
@@ -262,39 +169,17 @@ fn clip(text: &str, max: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Result;
+    use serde_json::json;
 
     #[test]
-    fn previews_are_session_scoped_bounded_and_redacted() -> Result<()> {
+    fn recent_log_ids_are_session_scoped() -> Result<()> {
         let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR"))?;
         let store = ContextGuardStore::open(root.path())?;
-        let raw = format!(
-            "{}\nAPI_KEY=private-sample-value\n{}",
-            "测试".repeat(580),
-            "内容".repeat(1_700),
-        );
-        let source = store.save_log(
-            "owner",
-            "Bash",
-            "cargo test --password=private-command",
-            &raw,
-        )?;
+        let source = store.save_log("owner", "Bash", "cargo test", "output")?;
         store.save_log("other", "Bash", "echo other", "other card")?;
-        let details = recent_logs(root.path(), "owner", &[])?;
-        assert_eq!(details.len(), 1);
-        assert_eq!(details[0]["id"], source.id);
-        assert_eq!(details[0]["rawBytes"], raw.len());
-        assert!(
-            !details[0]["command"]
-                .as_str()
-                .unwrap()
-                .contains("private-command")
-        );
-        assert!(log_preview(root.path(), "other", &source.id, &[])?.is_none());
-        let preview = log_preview(root.path(), "owner", &source.id, &[])?.unwrap();
-        assert!(preview.len() <= LOG_PREVIEW_BYTES);
-        assert!(preview.contains("API_KEY=[REDACTED]"));
-        assert!(!preview.contains("private-sample-value"));
         assert_eq!(recent_log_ids(root.path(), "owner"), [source.id]);
+        assert!(recent_log_ids(root.path(), "other").len() == 1);
         Ok(())
     }
 

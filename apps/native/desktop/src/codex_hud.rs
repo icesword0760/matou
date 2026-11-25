@@ -768,8 +768,6 @@ pub(super) struct StatsSummary {
     pub(super) hooks: Option<u64>,
     pub(super) mcp: Option<(u64, usize)>,
     pub(super) todos: Option<(usize, usize)>,
-    pub(super) context: Option<(u64, u64)>,
-    pub(super) cache_hit_percent: Option<f64>,
 }
 
 impl StatsSummary {
@@ -829,33 +827,14 @@ pub(super) fn stats_summary(hud: &Value, node: &Value, _locale: InterfaceLocale)
                 .count();
             (done, todos.len())
         }),
-        context: hud["contextUsedTokens"]
-            .as_u64()
-            .zip(hud["contextWindowSize"].as_u64()),
-        cache_hit_percent: hud["contextGuard"]["cache"]["hitRatioPercent"]
-            .as_f64()
-            .filter(|percent| percent.is_finite())
-            .map(|percent| percent.clamp(0., 100.)),
     }
 }
 
 pub(super) fn stats_panel(summary: &StatsSummary, locale: InterfaceLocale, dark: bool) -> Div {
-    let (background, border, divider, muted, body) = if dark {
-        (
-            rgb(0x1b1d21),
-            rgb(0x2d3035),
-            rgb(0x26282d),
-            rgb(0x6e7681),
-            rgb(0xe7e9ec),
-        )
+    let (background, border, muted, body) = if dark {
+        (rgb(0x1b1d21), rgb(0x2d3035), rgb(0x6e7681), rgb(0xe7e9ec))
     } else {
-        (
-            rgb(0xffffff),
-            rgba(0x0000001a),
-            rgba(0x00000014),
-            rgb(0x6b7280),
-            rgb(0x1f2328),
-        )
+        (rgb(0xffffff), rgba(0x0000001a), rgb(0x6b7280), rgb(0x1f2328))
     };
     let numeric_features = FontFeatures(std::sync::Arc::new(vec![("tnum".to_owned(), 1)]));
     let cell = |id, label, value, color| {
@@ -919,26 +898,6 @@ pub(super) fn stats_panel(summary: &StatsSummary, locale: InterfaceLocale, dark:
                 body,
             )
         }),
-        summary.context.map(|(used, window)| {
-            cell(
-                "stats-context",
-                locale.text("上下文", "Context"),
-                format!(
-                    "{} / {}",
-                    footer_token_count(used),
-                    footer_token_count(window)
-                ),
-                body,
-            )
-        }),
-        summary.cache_hit_percent.map(|percent| {
-            cell(
-                "stats-cache-hit",
-                locale.text("命中", "Cache hit"),
-                format!("{percent:.0}%"),
-                body,
-            )
-        }),
     ];
     let mut grid = div().flex().flex_col().gap(px(7.));
     let mut cells = cells.into_iter().flatten();
@@ -978,24 +937,6 @@ pub(super) fn stats_panel(summary: &StatsSummary, locale: InterfaceLocale, dark:
                 .child(footer_text("stats-title", stats_title(locale))),
         )
         .child(grid)
-        .child(
-            div()
-                .mt(px(10.))
-                .pt(px(8.))
-                .border_t_1()
-                .border_color(divider)
-                .text_size(px(11.))
-                .line_height(px(17.6))
-                .whitespace_normal()
-                .text_color(muted)
-                .child(footer_text(
-                    "stats-note",
-                    locale.text(
-                        "68% 时环变红；缓存剩 10 分钟内由蓝转黄并进常驻位。",
-                        "Ring turns red at 68%; cache pill turns amber and stays visible within 10 min.",
-                    ),
-                )),
-        )
 }
 
 fn agents_tooltip(
@@ -1271,8 +1212,6 @@ mod tests {
                         hooks: Some(1),
                         mcp: Some((2, 2)),
                         todos: Some((1, 2)),
-                        context: Some((136_000, 200_000)),
-                        cache_hit_percent: Some(91.),
                     }
                 );
             }
@@ -1342,24 +1281,6 @@ mod tests {
             )
             .is_empty()
         );
-    }
-
-    #[::core::prelude::v1::test]
-    fn footer_stats_cache_hit_percent_is_optional_and_clamped() {
-        let locale = InterfaceLocale::English;
-        for (value, expected) in [
-            (json!(91.4), Some(91.4)),
-            (json!(-3.5), Some(0.)),
-            (json!(125.5), Some(100.)),
-            (json!("91"), None),
-            (json!(f64::NAN), None),
-            (Value::Null, None),
-        ] {
-            let hud = json!({"contextGuard": {"cache": {"hitRatioPercent": value}}});
-            let summary = stats_summary(&hud, &Value::Null, locale);
-            assert_eq!(summary.cache_hit_percent, expected);
-            assert_eq!(summary.is_empty(), expected.is_none());
-        }
     }
 
     #[::core::prelude::v1::test]

@@ -1442,20 +1442,6 @@ exec /bin/cat
             "handoffReady": guard["handoffReady"]
         })
     );
-    let details = result(
-        &host,
-        Command::GetContextGuardDetails {
-            request_id: 70,
-            session_id: id.clone(),
-        },
-        70,
-        "contextGuardDetailsResult",
-    )?;
-    assert!(details["cache"].is_object());
-    assert_eq!(
-        details,
-        json!({"sessionId": id, "cache": details["cache"], "logs": []})
-    );
     let brief = result(
         &host,
         Command::GetSessionHandoffBrief {

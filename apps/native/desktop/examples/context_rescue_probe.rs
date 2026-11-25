@@ -147,12 +147,6 @@ mod workspace {
                     "cache":{"timing":"precise","remainingSec":221,"warm":true,"hitRatioPercent":83},
                     "handoffReady":true
                 });
-                let logs = json!([
-                    {"id":"log_0042","command":"cargo test --workspace","rawBytes":216541,
-                     "preview":"test build_matrix ... FAILED"},
-                    {"id":"log_0041","command":"pnpm check","rawBytes":65534,
-                     "preview":"packages/runtime: completed"}
-                ]);
                 let mut sequence = 0;
                 loop {
                     while let Ok(command) = sink.try_recv() {
@@ -162,17 +156,6 @@ mod workspace {
                                     "model":"Claude", "contextPercent":89, "contextWindowSize":200000,
                                     "taskStatus":"running", "contextGuard":guard
                                 }})
-                            ),
-                            Command::GetContextGuardDetails { request_id, session_id } => (
-                                "contextGuardDetailsResult", request_id, json!({
-                                    "sessionId":session_id, "cache":guard["cache"], "logs":logs
-                                })
-                            ),
-                            Command::GetContextGuardLog { request_id, session_id, log_id } => (
-                                "contextGuardLogResult", request_id, json!({
-                                    "sessionId":session_id, "id":log_id,
-                                    "preview":"running 42 tests\ntest build_matrix ... FAILED\nerror: fixture configuration unavailable\nAPI_KEY=[REDACTED]\ntest result: FAILED. 41 passed; 1 failed"
-                                })
                             ),
                             Command::GetSessionHandoffBrief { request_id, .. } => (
                                 "sessionHandoffBriefResult", request_id, json!({

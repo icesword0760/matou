@@ -1260,42 +1260,6 @@ impl ShellOwner {
         Some(hook.build_handoff(session_id, title, &shell.cwd, &files))
     }
 
-    pub(crate) fn context_guard_details(&self, session: &str, data_root: &Path) -> Result<Value> {
-        let hook = self
-            .shells
-            .get(session)
-            .and_then(|shell| shell.hook.as_ref());
-        let settings = hook.and_then(|hook| {
-            ContextOptimizerConfig::for_data_root(data_root)
-                .effective_for(hook.context_guard.provider_id())
-                .ok()
-        });
-        let summary = hook
-            .zip(settings.as_ref())
-            .and_then(|(hook, settings)| hook.context_guard.project_hud(now() as f64, settings));
-        let logs = rescue::recent_logs(data_root, session, hook.map_or(&[], |hook| &hook.secrets))?;
-        Ok(json!({
-            "sessionId": session,
-            "cache": summary.as_ref().and_then(|summary| summary.cache.as_ref()),
-            "logs": logs,
-        }))
-    }
-
-    pub(crate) fn context_guard_log(
-        &self,
-        session: &str,
-        log: &str,
-        data_root: &Path,
-    ) -> Result<Value> {
-        let secrets = self
-            .shells
-            .get(session)
-            .and_then(|shell| shell.hook.as_ref())
-            .map_or(&[][..], |hook| hook.secrets.as_slice());
-        let preview = rescue::log_preview(data_root, session, log, secrets)?;
-        Ok(json!({"sessionId": session, "id": log, "preview": preview}))
-    }
-
     pub(crate) fn rescue_terminal(&self, session_id: &str) -> Option<&str> {
         let shell = self.shells.get(session_id)?;
         let hook = shell.hook.as_ref()?;

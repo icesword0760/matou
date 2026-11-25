@@ -994,15 +994,6 @@ pub enum Command {
         request_id: u64,
         session_id: String,
     },
-    GetContextGuardDetails {
-        request_id: u64,
-        session_id: String,
-    },
-    GetContextGuardLog {
-        request_id: u64,
-        session_id: String,
-        log_id: String,
-    },
     ForkSession {
         scene_id: String,
         source_session_id: String,
@@ -1215,9 +1206,7 @@ impl StoragePhase {
                 | Command::GetAccountSummary { .. }
                 | Command::GetContextOptimizerStats { .. }
                 | Command::GetAgentHud { .. }
-                | Command::GetSessionHandoffBrief { .. }
-                | Command::GetContextGuardDetails { .. }
-                | Command::GetContextGuardLog { .. },
+                | Command::GetSessionHandoffBrief { .. },
             ) => true,
             (
                 Self::ReadOnly,
@@ -2470,28 +2459,6 @@ impl RuntimeWiring {
                             "contextPercent": brief.context_percent,
                         })
                     })),
-            ),
-            Command::GetContextGuardDetails { request_id, session_id } => (
-                "contextGuardDetailsResult",
-                *request_id,
-                owner.map_or_else(
-                    || Ok(json!({
-                        "sessionId": session_id,
-                        "logs": crate::context_guard::rescue::recent_logs(data_root, session_id, &[])?,
-                    })),
-                    |owner| owner.context_guard_details(session_id, data_root),
-                ),
-            ),
-            Command::GetContextGuardLog { request_id, session_id, log_id } => (
-                "contextGuardLogResult",
-                *request_id,
-                owner.map_or_else(
-                    || Ok(json!({
-                        "sessionId": session_id, "id": log_id,
-                        "preview": crate::context_guard::rescue::log_preview(data_root, session_id, log_id, &[])?,
-                    })),
-                    |owner| owner.context_guard_log(session_id, log_id, data_root),
-                ),
             ),
             _ => return None,
         };
@@ -7348,9 +7315,7 @@ fn run_writable(
                 | Command::ClaudeAccountCommand { .. }
                 | Command::GetAgentHud { .. }
                 | Command::GetSessionHandoffBrief { .. }
-                | Command::RescueSessionWithHandoff { .. }
-                | Command::GetContextGuardDetails { .. }
-                | Command::GetContextGuardLog { .. } => {
+                | Command::RescueSessionWithHandoff { .. } => {
                     unreachable!("Runtime wiring command handled above")
                 }
                 #[cfg(all(test, target_os = "macos"))]

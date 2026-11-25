@@ -254,26 +254,6 @@ pub fn agent_display_name(agent_id: &str) -> &str {
     }
 }
 
-/// Compact HUD text for KV-cache remaining lifetime.
-pub fn format_cache_countdown(remaining_sec: u64, warm: bool, locale: InterfaceLocale) -> String {
-    if !warm || remaining_sec == 0 {
-        return locale.text("缓存已冷", "Cache cold").to_owned();
-    }
-    let mins = remaining_sec / 60;
-    let secs = remaining_sec % 60;
-    if mins > 0 {
-        match locale {
-            InterfaceLocale::Chinese => format!("缓存 {mins}m {secs:02}s"),
-            InterfaceLocale::English => format!("Cache {mins}m {secs:02}s"),
-        }
-    } else {
-        match locale {
-            InterfaceLocale::Chinese => format!("缓存 {secs}s"),
-            InterfaceLocale::English => format!("Cache {secs}s"),
-        }
-    }
-}
-
 /// Compact HUD text for blocked noise volume.
 pub fn format_saved_noise_bytes(bytes: u64, locale: InterfaceLocale) -> String {
     let amount = if bytes >= 1_048_576 {
@@ -303,11 +283,9 @@ pub struct HudPill {
 }
 
 /// Pure presentation model parsed from `live["contextGuard"]` for rendering
-/// cache countdown, saved noise, and handoff actions in
-/// the workspace HUD bar.
+/// saved noise and handoff actions in the workspace HUD bar.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContextGuardHudView {
-    pub cache_pill: Option<HudPill>,
     pub saved_pill: Option<HudPill>,
     pub show_handoff_button: bool,
     pub handoff_urgent: bool,
@@ -316,29 +294,6 @@ pub struct ContextGuardHudView {
 impl ContextGuardHudView {
     pub fn from_live_hud(live: &Value, locale: InterfaceLocale) -> Option<Self> {
         let guard = live.get("contextGuard")?.as_object()?;
-        let cache_pill = guard.get("cache").and_then(Value::as_object).map(|cache| {
-            let remaining = cache
-                .get("remainingSec")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            let warm = cache.get("warm").and_then(Value::as_bool).unwrap_or(false);
-            let expiring_soon = cache
-                .get("expiringSoon")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let tone = if !warm || remaining == 0 {
-                HudPillTone::Neutral
-            } else if expiring_soon {
-                HudPillTone::Warning
-            } else {
-                HudPillTone::Accent
-            };
-            HudPill {
-                label: format_cache_countdown(remaining, warm, locale),
-                tone,
-            }
-        });
-
         let saved_bytes = guard
             .get("savedNoiseBytes")
             .and_then(Value::as_u64)
@@ -355,11 +310,10 @@ impl ContextGuardHudView {
         let handoff_urgent = pressure == "critical";
         let show_handoff_button = handoff_urgent || pressure == "warning";
 
-        if cache_pill.is_none() && saved_pill.is_none() && !show_handoff_button {
+        if saved_pill.is_none() && !show_handoff_button {
             return None;
         }
         Some(Self {
-            cache_pill,
             saved_pill,
             show_handoff_button,
             handoff_urgent,
@@ -1017,8 +971,8 @@ impl Render for ContextOptimizerSettingsPanel {
 mod tests {
     use super::{
         ADVANCED_ITEMS, AgentOptimizerSettings, AgentSavings, ContextGuardHudView,
-        ContextOptimizerConfig, ContextOptimizerPanelState, HudPillTone, InterfaceLocale,
-        OptimizerAvailability, OptimizerToggle, advanced_copy, can_toggle, format_cache_countdown,
+        ContextOptimizerConfig, ContextOptimizerPanelState, InterfaceLocale,
+        OptimizerAvailability, OptimizerToggle, advanced_copy, can_toggle,
         format_saved_noise_bytes, unavailable_reason,
     };
     use std::rc::Rc;
@@ -1267,14 +1221,6 @@ mod tests {
     #[test]
     fn hud_formatting_helpers_handle_locales_and_units() {
         assert_eq!(
-            format_cache_countdown(185, true, InterfaceLocale::Chinese),
-            "缓存 3m 05s"
-        );
-        assert_eq!(
-            format_cache_countdown(0, false, InterfaceLocale::English),
-            "Cache cold"
-        );
-        assert_eq!(
             format_saved_noise_bytes(150 * 1024, InterfaceLocale::Chinese),
             "已省 150 KB"
         );
@@ -1295,7 +1241,7 @@ mod tests {
                 "contextGuard": {
                     "contextPressure": pressure,
                     "handoffReady": ready,
-                    "cache": { "remainingSec": 45, "warm": true }
+                    "savedNoiseBytes": 2048
                 }
             });
             let view = ContextGuardHudView::from_live_hud(&live, InterfaceLocale::Chinese).unwrap();
@@ -1305,7 +1251,7 @@ mod tests {
     }
 
     #[test]
-    fn hud_view_renders_cache_saved_noise_and_critical_handoff() {
+    fn hud_view_renders_saved_noise_and_critical_handoff() {
         let live = serde_json::json!({
             "contextGuard": {
                 "contextPressure": "critical",
@@ -1320,8 +1266,6 @@ mod tests {
             }
         });
         let view = ContextGuardHudView::from_live_hud(&live, InterfaceLocale::Chinese).unwrap();
-        assert_eq!(view.cache_pill.as_ref().unwrap().label, "缓存 45s");
-        assert_eq!(view.cache_pill.as_ref().unwrap().tone, HudPillTone::Warning);
         assert_eq!(view.saved_pill.as_ref().unwrap().label, "已省 96 KB");
         assert!(view.show_handoff_button);
         assert!(view.handoff_urgent);

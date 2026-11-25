@@ -3227,14 +3227,7 @@ mod workspace {
             );
         }
         assert!(!bounds.contains_key("account"));
-        for key in [
-            "mcps",
-            "tools",
-            "hooks",
-            "todos",
-            "stats-context",
-            "stats-cache-hit",
-        ] {
+        for key in ["mcps", "tools", "hooks", "todos"] {
             assert!(
                 hud_text(window.into(), cx, key).is_none(),
                 "{key} stayed in the footer"
@@ -3260,8 +3253,6 @@ mod workspace {
             ("tools", "3"),
             ("hooks", "1"),
             ("todos", "0 / 1"),
-            ("stats-context", "136k / 200k"),
-            ("stats-cache-hit", "91%"),
         ] {
             assert_eq!(hud_text(window.into(), cx, key).as_deref(), Some(text));
         }
@@ -3961,10 +3952,19 @@ mod workspace {
             .unwrap();
     }
 
-    fn assert_footer_cache_two_windows(bounds: &HashMap<&'static str, Bounds<Pixels>>) {
+    fn assert_footer_two_quota_windows(bounds: &HashMap<&'static str, Bounds<Pixels>>) {
         assert!(bounds["quota-first"].right() < bounds["quota-second"].left());
-        assert!(bounds["quota-second"].right() <= bounds["cache"].left());
-        for key in ["quota-second", "cache"] {
+        assert!(
+            bounds["quota-second"].right() <= bounds["primary"].right(),
+            "quota-second {:?} is clipped by primary {:?}",
+            bounds["quota-second"],
+            bounds["primary"]
+        );
+        for key in ["agents", "git", "environment", "egress"] {
+            assert!(bounds.contains_key(key), "missing {key} in compact footer");
+        }
+        for key in ["name", "context"] {
+            assert!(bounds.contains_key(key), "missing {key} at 720pt");
             assert!(
                 bounds[key].right() <= bounds["primary"].right(),
                 "{key} {:?} is clipped by primary {:?}",
@@ -3972,36 +3972,24 @@ mod workspace {
                 bounds["primary"]
             );
         }
-        for key in ["agents", "git", "environment", "egress"] {
-            assert!(bounds.contains_key(key), "missing {key} in compact footer");
-        }
-        assert!(!bounds.contains_key("name") && !bounds.contains_key("context"));
     }
 
     fn assert_stats_grid(bounds: &HashMap<&'static str, Bounds<Pixels>>) {
         let panel = bounds["footer-stats-menu"];
         assert_eq!(panel.size.width, px(360.));
         assert!(
-            (px(150.)..=px(180.)).contains(&panel.size.height),
+            (px(96.)..=px(98.)).contains(&panel.size.height),
             "stats panel height: {:?}",
             panel.size.height,
         );
         let (tools, hooks) = (bounds["tools"], bounds["hooks"]);
         let (mcps, todos) = (bounds["mcps"], bounds["todos"]);
-        let (context, cache_hit) = (bounds["stats-context"], bounds["stats-cache-hit"]);
         assert_eq!(tools.top(), hooks.top());
         assert_eq!(mcps.top(), todos.top());
-        assert_eq!(context.top(), cache_hit.top());
         assert_eq!((tools.left(), tools.right()), (mcps.left(), mcps.right()));
-        assert_eq!((tools.left(), tools.right()), (context.left(), context.right()));
         assert_eq!((hooks.left(), hooks.right()), (todos.left(), todos.right()));
-        assert_eq!(
-            (hooks.left(), hooks.right()),
-            (cache_hit.left(), cache_hit.right())
-        );
         assert_eq!(hooks.left() - tools.right(), px(18.));
         assert!((mcps.top() - tools.bottom() - px(7.)).abs() <= px(0.5));
-        assert!((context.top() - mcps.bottom() - px(7.)).abs() <= px(0.5));
     }
 
     async fn capture_footer_stats(cx: &mut AsyncApp, root: &std::path::Path, output: &std::path::Path) {
@@ -4106,7 +4094,6 @@ mod workspace {
             .unwrap();
         let critical = draw_hud(handle, cx);
         assert_full_hud_text(handle, cx, "context", "68%");
-        assert!(critical["cache"].right() <= critical["handoff"].left());
         click(handle, cx, MouseButton::Left, critical["handoff"].center());
         assert!(
             std::iter::from_fn(|| sink.try_recv().ok()).any(|command| matches!(
@@ -4117,7 +4104,7 @@ mod workspace {
         window
             .update(cx, |_, window, _| window.remove_window())
             .unwrap();
-        println!("footer pressure | normal HUD stays clean, critical cache and copy brief are clickable");
+        println!("footer pressure | normal HUD stays clean, critical copy brief is clickable");
     }
 
     fn verify_footer_widths(cx: &mut AsyncApp, root: &std::path::Path) {
@@ -4196,14 +4183,7 @@ mod workspace {
                 );
                 assert_full_hud_text(handle, cx, "agents", &agents);
                 assert_eq!(hud_text(handle, cx, "context-usage"), None);
-                for stat in [
-                    "tools",
-                    "hooks",
-                    "mcps",
-                    "todos",
-                    "stats-context",
-                    "stats-cache-hit",
-                ] {
+                for stat in ["tools", "hooks", "mcps", "todos"] {
                     assert_eq!(hud_text(handle, cx, stat), None);
                 }
                 click(handle, cx, MouseButton::Left, bounds["quota"].center());
@@ -4232,12 +4212,6 @@ mod workspace {
                     ("hooks", "11".into()),
                     ("mcps", format!("4 · {errors} {errors_label}")),
                     ("todos", "3 / 7".into()),
-                    ("stats-context", format!("{}k / 200k", match mode {
-                        "claude-code" => 52,
-                        "codex" => 82,
-                        _ => 36,
-                    })),
-                    ("stats-cache-hit", "91%".into()),
                 ] {
                     assert_full_hud_text(handle, cx, key, &expected);
                 }
@@ -4310,8 +4284,8 @@ mod workspace {
         assert_full_hud_text(handle, cx, "quota-first-percent", "82%");
         assert_full_hud_text(handle, cx, "quota-second", "Weekly");
         assert_full_hud_text(handle, cx, "quota-second-percent", "41%");
-        assert_footer_cache_two_windows(&bounds);
-        println!("footer Claude Code 720pt | 5h 82% · Weekly 41% and 5m cache fit");
+        assert_footer_two_quota_windows(&bounds);
+        println!("footer Claude Code 720pt | 5h 82% · Weekly 41% fit");
         window
             .update(cx, |_, window, _| window.remove_window())
             .unwrap();
@@ -4507,10 +4481,7 @@ mod workspace {
                     let (mode, settings) = probe.split_once(':').expect("provider:width[:preview]");
                     let (width, preview) = settings.split_once(':').unwrap_or((settings, ""));
                     assert!(FOOTER_MODES.contains(&mode) && ["970", "720"].contains(&width));
-                    assert!(matches!(
-                        preview,
-                        "" | "stats" | "quota" | "cache" | "cache-two-windows"
-                    ));
+                    assert!(matches!(preview, "" | "stats" | "quota"));
                     let title = if preview.is_empty() {
                         format!("Matou footer · {mode} · {width}pt")
                     } else {
@@ -4530,11 +4501,7 @@ mod workspace {
                         "codex" => 1,
                         _ => 3,
                     };
-                    let (quota_count, remaining_sec) = match preview {
-                        "cache" => (1, 300),
-                        "cache-two-windows" => (2, 300),
-                        _ => (2, 1018),
-                    };
+                    let (quota_count, remaining_sec) = (2, 1018);
                     load_footer_fixture(
                         window,
                         cx,
@@ -4560,19 +4527,13 @@ mod workspace {
                         };
                         draw_preview(cx);
                         let bounds = draw_preview(cx);
-                        if preview == "cache-two-windows" {
-                            assert_footer_cache_two_windows(&bounds);
-                        } else if preview == "cache" {
-                            assert!(bounds["cache"].right() <= bounds["primary"].right() + px(0.5));
+                        click(handle, cx, MouseButton::Left, bounds[preview].center());
+                        let panel = if preview == "stats" {
+                            "footer-stats-menu"
                         } else {
-                            click(handle, cx, MouseButton::Left, bounds[preview].center());
-                            let panel = if preview == "stats" {
-                                "footer-stats-menu"
-                            } else {
-                                "footer-quota-menu"
-                            };
-                            assert!(draw_preview(cx).contains_key(panel));
-                        }
+                            "footer-quota-menu"
+                        };
+                        assert!(draw_preview(cx).contains_key(panel));
                         println!("{title} ready");
                     }
                     return;

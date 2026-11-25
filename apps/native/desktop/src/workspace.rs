@@ -87,7 +87,6 @@ use footer_controls::{
 
 #[path = "context_rescue_ui.rs"]
 mod context_rescue_ui;
-use context_rescue_ui::ContextDetailsPopover;
 
 #[path = "project_instructions.rs"]
 mod project_instructions;
@@ -2829,7 +2828,6 @@ pub struct Workspace {
     footer_shell: Option<String>,
     project_instructions: HashMap<AnyWindowHandle, project_instructions::Instructions>,
     footer_popovers: HashMap<AnyWindowHandle, FooterPopover>,
-    context_details: HashMap<AnyWindowHandle, ContextDetailsPopover>,
     context_rescue_requests: HashMap<String, u64>,
     environment_actions: HashMap<String, EnvironmentActionState>,
     #[cfg(debug_assertions)]
@@ -4010,7 +4008,6 @@ impl Workspace {
                 .map(str::to_owned),
             project_instructions: HashMap::new(),
             footer_popovers: HashMap::new(),
-            context_details: HashMap::new(),
             context_rescue_requests: HashMap::new(),
             environment_actions: HashMap::new(),
             #[cfg(debug_assertions)]
@@ -13253,10 +13250,6 @@ impl Workspace {
             }
             return;
         }
-        if stroke.key == "escape" && self.close_context_details(window, cx) {
-            cx.stop_propagation();
-            return;
-        }
         if self.footer_popover_key(stroke, window, cx) {
             cx.stop_propagation();
             return;
@@ -17750,9 +17743,6 @@ impl Workspace {
         let show_context = status_content_width > codex_hud::CONTEXT_HIDE_BELOW;
         let compact = !show_count || status_content_width < FOOTER_COMPACT_STATUS_WIDTH;
         let font_size = px(if compact { 10. } else { 10.5 });
-        let cache_usage = session.and_then(|_| footer_cache_usage(live, locale, compact));
-        // Give the quota and cache reminder the room normally used by model details.
-        let compact_cache_with_quota = compact && cache_usage.is_some() && quota.is_some();
         let show_session_health = agents.is_some() && quota.is_some();
         let status_gap = if !show_count {
             3.
@@ -18127,7 +18117,6 @@ impl Workspace {
                 }
             }
             if show_model
-                && !compact_cache_with_quota
                 && let Some(name) = fields.name.as_deref().filter(|name| !name.is_empty())
             {
                 let full_label = fields
@@ -18154,7 +18143,7 @@ impl Workspace {
                     }),
                 ));
             }
-            if show_context && !compact_cache_with_quota {
+            if show_context {
                 let context = fields
                     .live_hud
                     .as_ref()
@@ -18186,32 +18175,7 @@ impl Workspace {
                     live, locale,
                 )
             {
-                use matou_native_desktop::context_optimizer_settings::HudPillTone;
-                let pill_colors = |tone: HudPillTone| match tone {
-                    HudPillTone::Warning if dark => (0xe3b341, 0xd2992224),
-                    HudPillTone::Warning => (0xb45309, 0xd9770622),
-                    HudPillTone::Accent => (0x2679d8, 0x2679d81a),
-                    HudPillTone::Neutral => (
-                        if dark { 0x9ca3af } else { 0x5a6778 },
-                        if dark { 0xffffff12 } else { 0x5a677812 },
-                    ),
-                };
                 if let Some(session) = session {
-                    if let Some((label, detail, tone)) = cache_usage {
-                        let (fg, bg) = pill_colors(tone);
-                        primary = primary.child(
-                            self.context_details_trigger(
-                                "footer-cache-countdown",
-                                session,
-                                label,
-                                Some(detail),
-                                fg,
-                                bg,
-                                cx,
-                            )
-                            .children(footer_bounds_probe("cache")),
-                        );
-                    }
                     if guard_view.show_handoff_button && self.read_only.is_none() {
                         primary = primary.child(self.context_handoff_actions(
                             session,
@@ -18239,9 +18203,6 @@ impl Workspace {
             footer = footer.child(self.footer_popover_overlay(window, cx));
         } else if self.footer_popovers.contains_key(&window.window_handle()) {
             cx.defer_in(window, Self::dismiss_footer_popover);
-        }
-        if let Some(panel) = self.render_context_details(window, cx) {
-            footer = footer.child(panel);
         }
         status = status.child(
             // Measure the real status and optional boxes after layout. The next
@@ -21033,66 +20994,6 @@ fn footer_token_count(count: u64) -> String {
     }
 }
 
-fn footer_cache_usage(
-    live: &Value,
-    locale: InterfaceLocale,
-    compact: bool,
-) -> Option<(
-    String,
-    &'static str,
-    matou_native_desktop::context_optimizer_settings::HudPillTone,
-)> {
-    use matou_native_desktop::context_optimizer_settings::{HudPillTone, format_cache_countdown};
-
-    let cache = live.get("contextGuard")?.get("cache")?.as_object()?;
-    let remaining = cache.get("remainingSec")?.as_u64()?;
-    if remaining > 600 {
-        return None;
-    }
-    let (label, detail) = match cache.get("timing").and_then(Value::as_str) {
-        Some("precise") => (
-            format_cache_countdown(remaining, remaining > 0, locale),
-            locale.text(
-                "剩余时间来自该路由报告的缓存到期时间。",
-                "Countdown based on the cache expiry reported by this route.",
-            ),
-        ),
-        Some("estimate") => {
-            let label = if remaining > 0 {
-                format!(
-                    "{} · {}",
-                    format_cache_countdown(remaining, true, locale),
-                    locale.text("估算", "est.")
-                )
-            } else {
-                locale
-                    .text("缓存预计已过期", "Cache estimated expired")
-                    .to_owned()
-            };
-            (
-                label,
-                locale.text("按最近一次缓存活动时间和该路由的默认时长估算，实际到期时间可能不同。", "Estimated from the last cache activity and the route’s default lifetime. Actual expiry may differ."),
-            )
-        }
-        _ => return None,
-    };
-    let label = if compact {
-        if remaining == 0 {
-            locale.text("◷ 已过期", "◷ expired").to_owned()
-        } else {
-            format!("{}m", remaining.div_ceil(60))
-        }
-    } else {
-        format!("◷ {label}")
-    };
-    let tone = if remaining == 0 {
-        HudPillTone::Neutral
-    } else {
-        HudPillTone::Warning
-    };
-    Some((label, detail, tone))
-}
-
 fn footer_text(key: &'static str, text: impl Into<SharedString>) -> UiText {
     let text = text.into();
     let geometry = FOOTER_READINGS.with_borrow(|readings| {
@@ -21363,58 +21264,6 @@ fn footer_widths(
 #[cfg(test)]
 mod hud_theme_and_footer_tests {
     use super::*;
-
-    #[::core::prelude::v1::test]
-    fn footer_cache_requires_known_timing_and_at_most_ten_minutes() {
-        let locale = InterfaceLocale::English;
-        for timing in ["precise", "estimate"] {
-            for remaining in [0, 1, 599, 600, 601, 1018] {
-                let hud = serde_json::json!({
-                    "contextGuard": {"cache": {"timing": timing, "remainingSec": remaining}}
-                });
-                assert_eq!(
-                    footer_cache_usage(&hud, locale, false).is_some(),
-                    remaining <= 600
-                );
-                if (1..=600).contains(&remaining) {
-                    let (label, _, tone) = footer_cache_usage(&hud, locale, true).unwrap();
-                    assert_eq!(label, format!("{}m", (remaining as u64).div_ceil(60)));
-                    assert_eq!(
-                        tone,
-                        matou_native_desktop::context_optimizer_settings::HudPillTone::Warning
-                    );
-                }
-            }
-        }
-        for cache in [
-            serde_json::json!({"remainingSec": 0}),
-            serde_json::json!({"timing": "unknown", "remainingSec": 0}),
-            serde_json::json!({"timing": "precise"}),
-        ] {
-            let hud = serde_json::json!({"contextGuard": {"cache": cache}});
-            assert!(footer_cache_usage(&hud, locale, false).is_none());
-        }
-    }
-
-    #[::core::prelude::v1::test]
-    fn compact_footer_cache_names_expiry_in_both_locales() {
-        for timing in ["precise", "estimate"] {
-            let hud = serde_json::json!({
-                "contextGuard": {"cache": {"timing": timing, "remainingSec": 0}}
-            });
-            for (locale, expected) in [
-                (InterfaceLocale::Chinese, "◷ 已过期"),
-                (InterfaceLocale::English, "◷ expired"),
-            ] {
-                let (label, _, tone) = footer_cache_usage(&hud, locale, true).unwrap();
-                assert_eq!(label, expected);
-                assert_eq!(
-                    tone,
-                    matou_native_desktop::context_optimizer_settings::HudPillTone::Neutral
-                );
-            }
-        }
-    }
 
     #[::core::prelude::v1::test]
     fn terminal_search_bar_uses_light_and_dark_chrome_and_states() {
