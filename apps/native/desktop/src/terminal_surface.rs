@@ -447,7 +447,7 @@ pub struct TerminalSurface {
     scroll_request_id: u64,
     history_binding: Option<HistoryBinding>,
     history_user_row: Option<UserRowPaint>,
-    history_without_live: bool,
+    terminal_active: Option<bool>,
     history_locale: InterfaceLocale,
     history_probe: WheelProbe,
     session_history: Option<HistoryView>,
@@ -627,7 +627,7 @@ impl TerminalSurface {
             scroll_request_id: 0,
             history_binding: None,
             history_user_row: None,
-            history_without_live: false,
+            terminal_active: None,
             history_locale: InterfaceLocale::default(),
             history_probe: WheelProbe::default(),
             session_history: None,
@@ -650,6 +650,7 @@ impl TerminalSurface {
     }
 
     pub fn set_input_disabled(&mut self, disabled: bool, cx: &mut Context<Self>) {
+        let disabled = disabled || self.terminal_active == Some(false);
         if self.input_disabled == disabled {
             return;
         }
@@ -875,24 +876,32 @@ impl TerminalSurface {
     pub(crate) fn set_history_binding(
         &mut self,
         binding: Option<HistoryBinding>,
-        without_live: bool,
+        terminal_active: Option<bool>,
         locale: InterfaceLocale,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.history_without_live = without_live;
-        if self.history_binding != binding {
+        let binding_changed = self.history_binding != binding;
+        let availability_changed = self.terminal_active != terminal_active;
+        let locale_changed = self.history_locale != locale;
+        self.terminal_active = terminal_active;
+        self.history_locale = locale;
+        if binding_changed {
             self.history_binding = binding;
             self.history_user_row = None;
             self.history_probe.reset();
             self.session_history = None;
             self.history_updates = None;
-            cx.notify();
+        } else if availability_changed
+            && self
+                .session_history
+                .as_ref()
+                .is_some_and(|history| history.live() == (terminal_active == Some(false)))
+        {
+            self.close_session_history(false, window, cx);
         }
-        if self.history_locale != locale {
-            self.history_locale = locale;
-            if self.session_history.is_some() {
-                cx.notify();
-            }
+        if binding_changed || availability_changed || locale_changed {
+            cx.notify();
         }
     }
 
@@ -904,6 +913,75 @@ impl TerminalSurface {
         self.history_binding.as_ref().map_or(0, |binding| {
             session_history_seam::input_rows(binding.profile, screen)
         })
+    }
+
+    fn input_footer_height(&self) -> Pixels {
+        self.metrics.height * 3.
+    }
+
+    fn render_input_footer(&self, cx: &Context<Self>) -> Option<impl IntoElement> {
+        let disconnected = self.terminal_active == Some(false);
+        let reviewing_output = self.terminal_active == Some(true)
+            && !self.input_disabled
+            && self.screen.as_ref().is_some_and(|screen| {
+                !screen.alternate
+                    && screen.scrollbar.offset + (screen.rows as u64) < screen.scrollbar.total
+            });
+        if !disconnected && !reviewing_output {
+            return None;
+        }
+        let (foreground, background) = self
+            .screen
+            .as_ref()
+            .map_or((self.theme.foreground, self.theme.background), |screen| {
+                (screen.foreground, screen.background)
+            });
+        let foreground = gpui::Hsla::from(rgb(foreground));
+        let label = if disconnected {
+            self.history_locale
+                .text("会话未连接，恢复后可输入", "Resume the session to type")
+        } else {
+            self.history_locale.text("回到输入区", "Return to input")
+        };
+        Some(
+            div()
+                .id("terminal-input-footer")
+                .absolute()
+                .left(px(14.))
+                .right(px(14.))
+                .bottom(self.vertical_inset)
+                .h(self.input_footer_height())
+                .bg(rgb(background))
+                .occlude()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .when(reviewing_output, |footer| {
+                    footer
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.focus.focus(window);
+                            this.scroll_on_input(cx);
+                            cx.stop_propagation();
+                        }))
+                })
+                .flex()
+                .flex_col()
+                .justify_center()
+                .child(
+                    div()
+                        .h(self.metrics.height * 2.)
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .border_t_1()
+                        .border_b_1()
+                        .border_color(foreground.opacity(0.30))
+                        .text_color(foreground.opacity(0.65))
+                        .text_size(px(self.font_size as f32))
+                        .font_family(self.font.family.clone())
+                        .child("›")
+                        .child(div().min_w_0().text_ellipsis().child(label)),
+                ),
+        )
     }
 
     fn hidden_cli_jump_hint(&self, screen: &Screen) -> Option<JumpHint> {
@@ -931,22 +1009,17 @@ impl TerminalSurface {
     }
 
     fn history_body_contains(&self, position: Point<Pixels>) -> bool {
-        let input_rows = if self
-            .session_history
-            .as_ref()
-            .is_some_and(|history| !history.live())
-        {
-            0
+        let input_height = if self.terminal_active == Some(false) {
+            self.input_footer_height()
         } else {
-            self.screen
-                .as_ref()
-                .map_or(0, |screen| self.history_input_rows(screen))
+            self.screen.as_ref().map_or(px(0.), |screen| {
+                self.metrics.height * self.history_input_rows(screen) as f32
+            })
         };
         self.grid.is_some_and(|grid| {
             grid.bounds.contains(&position)
                 && position.y
-                    < grid.bounds.top()
-                        + self.metrics.height * grid.rows.saturating_sub(input_rows) as f32
+                    < grid.bounds.top() + self.metrics.height * grid.rows as f32 - input_height
         })
     }
 
@@ -1282,6 +1355,11 @@ impl TerminalSurface {
             0
         };
         let history_height = height * rows.saturating_sub(input_rows) as f32;
+        let input_height = if live {
+            height * input_rows as f32
+        } else {
+            self.input_footer_height()
+        };
         let foreground = screen.map_or(self.theme.foreground, |screen| screen.foreground);
         let background = screen.map_or(self.theme.background, |screen| screen.background);
         let light = self.theme == Theme::LIGHT;
@@ -1387,7 +1465,7 @@ impl TerminalSurface {
             .id("session-history-seam")
             .absolute()
             .top(self.vertical_inset)
-            .bottom(self.vertical_inset + height * input_rows as f32)
+            .bottom(self.vertical_inset + input_height)
             .when(live, |layer| layer.max_h(history_height))
             .left(px(14.))
             .right(px(14.))
@@ -2220,7 +2298,7 @@ impl TerminalSurface {
         let downwards = event.delta.pixel_delta(px(20.)).y < px(0.);
         if upwards
             && !alternate
-            && self.history_without_live
+            && self.terminal_active == Some(false)
             && self.history_binding.is_some()
             && self.search.is_none()
         {
@@ -2401,7 +2479,8 @@ impl TerminalSurface {
         }
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             if let Some(screen) = screen {
-                let show_cursor = screen.cursor_visible
+                let show_cursor = self.terminal_active != Some(false)
+                    && screen.cursor_visible
                     && screen.cursor_has_position
                     && screen.cursor_col < cols
                     && screen.cursor_row < rows
@@ -2782,7 +2861,7 @@ impl Render for TerminalSurface {
             )
             .on_scroll_wheel(cx.listener(move |this, event, _, cx| {
                 if this.transport_generation == generation
-                    && (!this.transport_suspended || this.history_without_live)
+                    && (!this.transport_suspended || this.terminal_active == Some(false))
                 {
                     this.on_scroll(event, cx);
                 }
@@ -2906,6 +2985,7 @@ impl Render for TerminalSurface {
                     .cursor(PointerStyle::Arrow),
             )
             .children(self.render_session_history(cx))
+            .children(self.render_input_footer(cx))
             .when(can_drop_files, |element| {
                 // Paint the tint above the opaque terminal canvas.
                 element.child(
@@ -3289,6 +3369,65 @@ mod file_drop_tests {
                 format!("{plain} \"{spaced}\"")
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod session_history_tests {
+    use super::*;
+    use gpui::TestAppContext;
+    use matou_native_core::pty::LaunchProfile;
+
+    #[test]
+    fn history_preserves_the_input_area_when_the_terminal_resumes() -> anyhow::Result<()> {
+        let mut cx = TestAppContext::single();
+        let handle = cx.add_window(|_, cx| TerminalSurface::new(cx));
+        let binding = HistoryBinding {
+            profile: LaunchProfile::ClaudeCode,
+            cwd: "/work".into(),
+            provider_session_id: Some("transcript".into()),
+        };
+        let scroll = ScrollWheelEvent {
+            delta: gpui::ScrollDelta::Lines(point(0., 1.)),
+            ..Default::default()
+        };
+        handle.update(&mut cx, |surface, window, cx| {
+            surface.set_history_binding(
+                Some(binding.clone()),
+                Some(true),
+                InterfaceLocale::Chinese,
+                window,
+                cx,
+            );
+            surface.on_scroll(&scroll, cx);
+            assert!(surface.session_history.is_none());
+            assert!(surface.render_input_footer(cx).is_none());
+
+            surface.set_history_binding(
+                Some(binding.clone()),
+                Some(false),
+                InterfaceLocale::Chinese,
+                window,
+                cx,
+            );
+            surface.on_scroll(&scroll, cx);
+            let history = surface.session_history.as_ref().expect("offline history");
+            assert!(!history.live());
+            assert!(surface.render_input_footer(cx).is_some());
+            history.focus.focus(window);
+
+            surface.set_history_binding(
+                Some(binding),
+                Some(true),
+                InterfaceLocale::Chinese,
+                window,
+                cx,
+            );
+            assert!(surface.session_history.is_none());
+            assert!(surface.render_input_footer(cx).is_none());
+            assert!(surface.focus.is_focused(window));
+        })?;
+        Ok(())
     }
 }
 

@@ -10474,6 +10474,7 @@ fn active_graph(
                         .filter(|binding| !binding.provider_session_id.is_empty())
                         .map(|binding| binding.provider_session_id);
                     node["historyProviderSessionId"] = json!(provider_session_id);
+                    node["terminalActive"] = json!(owner.environment_worker_active(&session.id));
                     if supports_fresh_permission {
                         node["resumable"] = json!(resumable);
                         if !resumable

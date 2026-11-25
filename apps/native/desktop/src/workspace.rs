@@ -6767,16 +6767,14 @@ impl Workspace {
                 continue;
             }
             let history_binding = terminal_history_binding(node);
-            let history_without_live = matches!(
-                node["workStatus"].as_str(),
-                Some("exited" | "idle" | "starting")
-            );
+            let terminal_active = node["terminalActive"].as_bool();
             if let Some(terminal) = self.terminals.get(id) {
                 terminal.update(cx, |surface, cx| {
                     surface.set_history_binding(
                         history_binding,
-                        history_without_live,
+                        terminal_active,
                         self.locale,
+                        window,
                         cx,
                     )
                 });
@@ -6805,7 +6803,13 @@ impl Workspace {
                 surface.set_theme(theme, cx);
                 surface.set_font_size(self.terminal_font_size, cx);
                 surface.begin_transport_generation(self.runtime_generation, cx);
-                surface.set_history_binding(history_binding, history_without_live, self.locale, cx);
+                surface.set_history_binding(
+                    history_binding,
+                    terminal_active,
+                    self.locale,
+                    window,
+                    cx,
+                );
                 surface.set_input_disabled(disabled || self.recovery_blocked(id), cx);
                 surface
             });

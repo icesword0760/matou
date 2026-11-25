@@ -136,7 +136,7 @@ fn graph(
 }
 
 fn confirmed(child: &mut RuntimeChild, id: &str) -> Result<Value> {
-    graph(child, "confirmed identity", |graph, card| {
+    let graph = graph(child, "confirmed identity", |graph, card| {
         card["workStatus"] == "idle"
             && card["providerRestoreState"] == "none"
             && graph["providerIdentityEvents"]
@@ -146,7 +146,12 @@ fn confirmed(child: &mut RuntimeChild, id: &str) -> Result<Value> {
                         event["result"] == "confirmed" && event["providerSessionId"] == id
                     })
                 })
-    })
+    })?;
+    assert_eq!(
+        node(&graph, &child.session).unwrap()["terminalActive"],
+        true
+    );
+    Ok(graph)
 }
 
 fn failed(child: &mut RuntimeChild, reason: &str) -> Result<()> {
@@ -169,9 +174,13 @@ fn failed(child: &mut RuntimeChild, reason: &str) -> Result<()> {
 
 fn restart(child: &mut RuntimeChild) -> Result<()> {
     child.input("quit")?;
-    graph(child, "process exited", |_, card| {
+    let graph = graph(child, "process exited", |_, card| {
         card["workStatus"] == "exited"
     })?;
+    assert_eq!(
+        node(&graph, &child.session).unwrap()["terminalActive"],
+        false
+    );
     child.send(Command::RestartSession {
         session_id: child.session.clone(),
     })
