@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
-import { execFile } from 'node:child_process'
-import { mkdtemp, readFile, stat } from 'node:fs/promises'
+import { execFile, spawnSync } from 'node:child_process'
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import test from 'node:test'
@@ -13,8 +13,9 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const source = join(root, 'apps/runtime/control-assets')
 const execFileAsync = promisify(execFile)
 
-test('copies executable mt wrappers and complete provider guidance', async () => {
+test('copies executable mt wrappers and complete provider guidance', async (t) => {
   const temporaryRoot = await mkdtemp(join(tmpdir(), 'matou-control-assets-'))
+  t.after(() => rm(temporaryRoot, { recursive: true, force: true }))
   const destination = join(temporaryRoot, 'control-assets')
   await prepareRuntimeControlAssets({ source, destination })
 
@@ -61,7 +62,9 @@ test('copies executable mt wrappers and complete provider guidance', async () =>
     destination, 'providers/claude-plugin/hooks/session-start.mjs'
   )
   const claudeSessionStart = JSON.parse(
-    (await execFileAsync(process.execPath, [claudeSessionStartPath])).stdout
+    (await execFileAsync(process.execPath, [claudeSessionStartPath], {
+      env: { ...process.env, MATOU_FOREMAN_ROLES_FILE: '', MATOU_FOREMAN_DEPTH: '' }
+    })).stdout
   ).hookSpecificOutput.additionalContext
 
   assert.equal(
@@ -92,7 +95,7 @@ test('copies executable mt wrappers and complete provider guidance', async () =>
   assert.match(unixWrapper, /mt-cli\.cjs/)
   assert.match(windowsWrapper, /ELECTRON_RUN_AS_NODE/)
   assert.equal(manifest.name, 'matou-host-control')
-  assert.equal(claudeHooks.hooks.SessionStart[0].matcher, 'startup|clear|compact')
+  assert.equal(claudeHooks.hooks.SessionStart[0].matcher, 'startup|resume|clear|compact')
   assert.match(
     claudeHooks.hooks.SessionStart[0].hooks[0].command,
     /session-start\.mjs/
@@ -100,6 +103,7 @@ test('copies executable mt wrappers and complete provider guidance', async () =>
   assert.match(claudeSessionStart, /Matou host control is active/)
   assert.match(claudeSessionStart, /invoke `matou-host-control:mt-terminal` immediately/)
   assert.match(claudeSessionStart, /Skip alternate terminal host environment discovery/)
+  assert.match(claudeSessionStart, /用户自定义 Agent 生态位与默认配置/)
   for (const document of [shared, claudeSkill, targetRules, commands, codex]) {
     assert.match(document, /identify/)
     assert.match(document, /list/)
@@ -190,4 +194,83 @@ JSON`
   if (process.platform !== 'win32') {
     assert.equal((await stat(join(destination, 'bin/mt'))).mode & 0o777, 0o755)
   }
+})
+
+test('Claude SessionStart injects the same dispatch roles as Foreman across lifecycle sources and unreadable settings', async (t) => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), 'matou-session-start-'))
+  t.after(() => rm(temporaryRoot, { recursive: true, force: true }))
+  const plugin = join(source, 'providers/claude-plugin')
+  const hookPath = join(plugin, 'hooks/session-start.mjs')
+  const foremanPath = join(plugin, 'skills/agent-foreman/scripts/foreman.mjs')
+  const rolesPath = join(temporaryRoot, 'dispatch-roles.json')
+  const env = {
+    ...process.env, MATOU_FOREMAN_DEPTH: '', FOREMAN_RUN_DIR: join(temporaryRoot, 'runs'),
+    MATOU_FOREMAN_ROLES_FILE: rolesPath
+  }
+  const readHook = (source, hookEnv = env) => {
+    const processResult = spawnSync(process.execPath, [hookPath], {
+      env: hookEnv, encoding: 'utf8', timeout: 5000, input: JSON.stringify({ hook_event_name: 'SessionStart', source })
+    })
+    assert.equal(processResult.error, undefined)
+    assert.equal(processResult.status, 0, processResult.stderr)
+    const output = JSON.parse(processResult.stdout).hookSpecificOutput
+    assert.equal(output.hookEventName, 'SessionStart')
+    assert.match(output.additionalContext, /Matou host control is active/)
+    return output.additionalContext
+  }
+  const roleHeading = '## 用户自定义 Agent 生态位与默认配置（以本节为准）'
+  const verifyParity = async context => {
+    const roles = (await execFileAsync(process.execPath, [foremanPath, 'roles'], { env })).stdout.trimEnd()
+    assert.equal(context.slice(context.indexOf(roleHeading)), roles)
+  }
+  const agents = [
+    { id: 'codex', mode: 'auto', model: 'sol', effort: 'low', speed: 'ultrafast', role: ' 第一项\r\n第二项\r第三项 ' },
+    { id: 'dsh', enabled: false, role: '不可派' },
+    { id: 'agy', mode: 'explicit', model: 'gemini-pro-orchestrator-neon', effort: 'high', role: '咨询' }
+  ]
+  await writeFile(rolesPath, JSON.stringify({ version: 1, defaultAgent: 'agy', allowSubDispatch: false, agents }))
+  for (const source of ['startup', 'resume', 'clear', 'compact']) {
+    const context = readHook(source)
+    await verifyParity(context)
+    assert.match(context, /运行 `mt-foreman roles`/)
+    assert.match(context, /速度: 超快.*：第一项\n  第二项\n  第三项/)
+    assert.match(context, /默认兜底主力 \| 模型: gemini-pro-orchestrator-neon · 无推理档位/)
+    assert.match(context, /已停用（禁止派活）.*DSH/)
+    assert.match(context, /已关闭.*Orchestrator 模型内部自带的并行子代理不受影响/)
+  }
+  assert.doesNotMatch(readHook('startup', { ...env, MATOU_FOREMAN_DEPTH: '1' }), /用户自定义 Agent 生态位/)
+
+  await writeFile(join(temporaryRoot, 'config.json'), JSON.stringify({ version: 1, defaults: { agent: 'agy' } }))
+  agents[2].model = 'gpt-oss-120b-medium'
+  await writeFile(rolesPath, JSON.stringify({ version: 1, agents }))
+  const legacy = readHook('resume')
+  await verifyParity(legacy)
+  assert.match(legacy, /默认兜底主力 \| 模型: gpt-oss-120b-medium · 推理: 中/)
+  assert.match(legacy, /自动派」协作者（Codex）职责范围内的子任务时，跨执行者转派 1 层子任务/)
+
+  const builtins = readHook('startup', { ...env, MATOU_FOREMAN_ROLES_FILE: '' })
+  assert.match(builtins, /\*\*Codex\*\*（默认兜底主力/)
+  assert.match(builtins, /\*\*DSH\*\*（按职责自动派/)
+  assert.match(builtins, /\*\*Antigravity（反重力）\*\*（仅点名时派/)
+  assert.match(builtins, /自动派」协作者（Codex、DSH）职责范围内的子任务时，跨执行者转派 1 层子任务/)
+  await rm(rolesPath)
+  assert.equal(readHook('resume'), builtins)
+  assert.equal(readHook('resume', { ...env, MATOU_FOREMAN_ROLES_FILE: temporaryRoot }), builtins)
+  await writeFile(rolesPath, '{broken json')
+  assert.equal(readHook('clear'), builtins)
+  await writeFile(rolesPath, JSON.stringify({ version: 2, agents }))
+  assert.equal(readHook('clear'), builtins)
+
+  await writeFile(rolesPath, JSON.stringify({ version: 1, agents: [{ id: 'agy', model: { toString: null }, role: [] }] }))
+  const malformedAgent = readHook('compact')
+  await verifyParity(malformedAgent)
+  assert.match(malformedAgent, /按默认职责执行。/)
+  assert.match(malformedAgent, /当前无可转派协作者（需至少启用两个执行者且目标协作者处于「按职责自动派」，当前仅由顶层监工直接派活）/)
+
+  const valid = JSON.stringify({ version: 1, agents })
+  const exactLimit = valid + ' '.repeat(256 * 1024 - Buffer.byteLength(valid))
+  await writeFile(rolesPath, exactLimit)
+  assert.equal(readHook('compact'), legacy)
+  await writeFile(rolesPath, exactLimit + ' ')
+  assert.equal(readHook('compact'), builtins)
 })

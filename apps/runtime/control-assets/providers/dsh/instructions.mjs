@@ -1,7 +1,7 @@
 /** A native agent-scoped system section. Never interpolate run credentials. */
 export function hasManagedMtEnvironment(env, runId) {
   return typeof runId === 'string' && runId.length > 0 && env.MATOU_CONTROL_PROTOCOL === '1' && env.MATOU_CONTROL_CALLER_RUN === runId &&
-    ['MATOU_CONTROL_ENDPOINT', 'MATOU_CONTROL_TOKEN', 'MATOU_CONTROL_CALLER_SESSION', 'MATOU_CONTROL_NODE_EXECUTABLE']
+    ['MATOU_CONTROL_ENDPOINT', 'MATOU_CONTROL_TOKEN', 'MATOU_CONTROL_CALLER_SESSION']
       .every(key => typeof env[key] === 'string' && env[key].length > 0)
 }
 
@@ -23,8 +23,17 @@ export function attachMtShellEnvironment(ctx, env, runId, ownsAgent) {
   if (typeof registry?.register !== 'function' || !hasManagedMtEnvironment(env, runId)) return undefined
   return registry.register({
     name: 'matou:host-control',
-    variables: { DSH_MATOU_CONTROL_TOKEN: { description: 'Private current-session Matou control identity for mt; never print it.' } },
+    variables: {
+      DSH_MATOU_CONTROL_TOKEN: { description: 'Private current-session Matou control identity for mt; never print it.' },
+      MATOU_FOREMAN_ROLES_FILE: { description: 'Matou dispatch settings file for mt-foreman.' },
+      MATOU_AGENT_STATUS_DIR: { description: 'Matou status directory for dispatched agents.' }
+    },
     resolve: execution => hasManagedMtEnvironment(env, runId) && ownsAgent(execution?.agent)
-      ? { DSH_MATOU_CONTROL_TOKEN: env.MATOU_CONTROL_TOKEN } : {}
+      ? {
+          DSH_MATOU_CONTROL_TOKEN: env.MATOU_CONTROL_TOKEN,
+          ...(env.MATOU_FOREMAN_ROLES_FILE ? { MATOU_FOREMAN_ROLES_FILE: env.MATOU_FOREMAN_ROLES_FILE } : {}),
+          ...(env.MATOU_AGENT_STATUS_DIR ? { MATOU_AGENT_STATUS_DIR: env.MATOU_AGENT_STATUS_DIR } : {})
+        }
+      : {}
   })
 }

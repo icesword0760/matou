@@ -9,12 +9,14 @@ description: Use whenever work is handed to another coding agent — the user sa
 
 ## 分工
 
-> 如果当前环境存在 `MATOU_FOREMAN_ROLES_FILE`（Matou 码头会话自带），派活前先运行 `mt-foreman roles`（或直接读该文件），**以用户在 Matou 设置页自定义的最新生态位、默认模型与二次转包策略为准**；未自定义时按以下默认分工执行。
+> 如果当前环境存在 `MATOU_FOREMAN_ROLES_FILE`（Matou 码头会话自带），派活前先运行 `mt-foreman roles`，**以用户在 Matou 设置页自定义的最新生态位、默认执行者、模型与二次转包策略为准**。`mt-foreman config` 可查看生效的运行默认值。未自定义时按以下默认分工执行。
+>
+> 码头开启二次转包时，Foreman 给顶层执行者列出本机可用的其他「启用 + 按职责自动派」协作者和他们最新的职责。执行者可按这份说明转派一层。
 
 - **你（当前监工会话）**：创意方向、理解用户意图、产品取舍、审美、查清原因和定方案、验收标准、与用户沟通、看实物验收。
 - **Codex**（主力执行者）：方案定好后的一切落地，包括细节设计、编码与测试、源码阅读与调研（也包括为定方案先做的调研）、图片/媒体生成、数据处理、打包。
 - **DSH**（可选，本机装了 DSH CLI 才有）：主要做**前端 UI 设计**，包括页面和组件的视觉设计、布局、样式、交互外观，以及把它们实现成前端界面代码。用同一个脚本加 `--agent dsh` 派给它，默认 DeepSeek-V4.1-Flash + 高档推理。其他活都优先交给 Codex；Codex 任务里遇到前端 UI 设计的部分，会按运行约定自己派给 DSH 子任务。审美和验收仍由你判，流程和总把控和 Codex 完全一样。
-- **Antigravity**（可选，本机装了 agy CLI 才有）：用户点名时才派。用同一个脚本加 `--agent agy`，默认用 Orchestrator (Carbon)（型号 `gemini-pro-orchestrator`，没有推理档位可选）；用户点名别的模型时才换，例如 `--model hydrogen` / `argon` / `carbon` 按 `--effort` 取该系列最新版。Orchestrator 类型的模型可以自己派子代理并行做（子代理用什么模型由它定；运行约定要求子代理先读原始交代、往 progress.log 记进度），其他 Antigravity 模型不派子代理。只用选定的模型：额度用完或找不到它时任务直接失败并写明原因，不自动换模型，也不自动换执行者；你报告用户，由用户决定改派给谁。流程和总把控和 Codex 完全一样。
+- **Antigravity**（可选，本机装了 agy CLI 才有）：用户点名时才派。用同一个脚本加 `--agent agy`，默认用 Orchestrator (Carbon)（型号 `gemini-pro-orchestrator`，没有推理档位可选）；用户点名别的模型时才换，用 `--model hydrogen` / `argon` / `carbon` / `neon` / `flash` 按 `--effort` 取该系列最新版。Claude 的 `claude-opus-5-5` 和 `claude-sonnet-5-5` 按档位取对应型号。Orchestrator 类型的模型可以自己派子代理并行做（子代理用什么模型由它定；运行约定要求子代理先读原始交代、往 progress.log 记进度），其他 Antigravity 模型不派子代理。只用选定的模型：额度用完或找不到它时任务直接失败并写明原因，不自动换模型，也不自动换执行者；你报告用户，由用户决定改派给谁。流程和总把控和 Codex 完全一样。
 - 你只直接改协调性文件（项目规则、方案、交代书、技能文档）。执行者前面不加任何传话 Agent，由你直接调用监督脚本。
 
 ## 流程
