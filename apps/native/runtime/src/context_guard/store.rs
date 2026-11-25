@@ -258,6 +258,11 @@ impl ContextGuardStore {
         let now_sec = unix_now_sec();
         let mut conn = open_connection(&self.db_path, self.busy_timeout)?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // Hook writes have their own deadline. Foreground CLI writes perform
+        // maintenance so an expired backlog cannot prevent a hook replacement.
+        if deadline.is_none() {
+            delete_expired(&tx, now_sec - DEFAULT_RETENTION_SECS, self.fts5_enabled)?;
+        }
         let seq: i64 = tx.query_row(
             "SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'log_sources'), 0) + 1",
             [],
@@ -314,8 +319,8 @@ impl ContextGuardStore {
         let conn = open_connection(&self.db_path, self.busy_timeout)?;
         let raw_bytes = conn
             .query_row(
-                "SELECT raw_bytes FROM log_sources WHERE id = ?1",
-                params![source_id],
+                "SELECT raw_bytes FROM log_sources WHERE id = ?1 AND created_at_sec >= ?2",
+                params![source_id, unix_now_sec() - DEFAULT_RETENTION_SECS],
                 |row| row.get::<_, i64>(0),
             )
             .optional()?;
@@ -340,11 +345,31 @@ impl ContextGuardStore {
         }
     }
 
-    /// Full-text search across stored logs/documents, optionally scoped to one `source_id`.
+    /// Full-text search across stored logs/documents, optionally scoped to one source.
     pub fn search(
         &self,
         query: &str,
         source_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<SearchHit>> {
+        self.search_logs(query, source_id, None, limit)
+    }
+
+    pub(super) fn search_session(
+        &self,
+        query: &str,
+        source_id: Option<&str>,
+        session_id: &str,
+        limit: usize,
+    ) -> Result<Vec<SearchHit>> {
+        self.search_logs(query, source_id, Some(session_id), limit)
+    }
+
+    fn search_logs(
+        &self,
+        query: &str,
+        source_id: Option<&str>,
+        session_id: Option<&str>,
         limit: usize,
     ) -> Result<Vec<SearchHit>> {
         let clean = query.trim();
@@ -352,30 +377,32 @@ impl ContextGuardStore {
             return Ok(Vec::new());
         }
         let limit = limit.clamp(1, 20) as i64;
-        let conn = open_connection(&self.db_path, self.busy_timeout)?;
+        let mut conn = open_connection(&self.db_path, self.busy_timeout)?;
+        let tx = conn.transaction()?;
+        let cutoff = unix_now_sec() - DEFAULT_RETENTION_SECS;
+        if let Some(id) = source_id
+            && session_id.is_some()
+        {
+            check_log_source(&tx, id, cutoff)?;
+        }
+        let session_id = session_id.filter(|_| source_id.is_none());
 
         if self.fts5_enabled {
             let fts_query = sanitize_fts_query(clean);
             if !fts_query.is_empty() {
-                let hits = if let Some(src) = source_id {
-                    let mut stmt = conn.prepare(
-                        "SELECT source_id, heading, chunk_index, body
-                         FROM log_chunks_fts
-                         WHERE log_chunks_fts MATCH ?1 AND source_id = ?2
-                         ORDER BY bm25(log_chunks_fts)
-                         LIMIT ?3",
-                    )?;
-                    collect_hits(&mut stmt, params![fts_query, src, limit], clean)?
-                } else {
-                    let mut stmt = conn.prepare(
-                        "SELECT source_id, heading, chunk_index, body
-                         FROM log_chunks_fts
-                         WHERE log_chunks_fts MATCH ?1
-                         ORDER BY bm25(log_chunks_fts)
-                         LIMIT ?2",
-                    )?;
-                    collect_hits(&mut stmt, params![fts_query, limit], clean)?
-                };
+                let mut stmt = tx.prepare(
+                    "SELECT source_id, heading, chunk_index, body
+                     FROM log_chunks_fts JOIN log_sources ON log_sources.id = source_id
+                     WHERE log_chunks_fts MATCH ?1 AND (?2 IS NULL OR source_id = ?2)
+                       AND (?3 IS NULL OR session_id = ?3) AND created_at_sec >= ?4
+                     ORDER BY bm25(log_chunks_fts)
+                     LIMIT ?5",
+                )?;
+                let hits = collect_hits(
+                    &mut stmt,
+                    params![fts_query, source_id, session_id, cutoff, limit],
+                    clean,
+                )?;
                 if !hits.is_empty() {
                     return Ok(hits);
                 }
@@ -383,51 +410,51 @@ impl ContextGuardStore {
         }
 
         // Deterministic substring fallback (also catches punctuation-heavy error tokens).
-        let like_pattern = format!("%{}%", clean.replace('%', "\\%").replace('_', "\\_"));
-        let hits = if let Some(src) = source_id {
-            let mut stmt = conn.prepare(
-                "SELECT source_id, heading, chunk_index, body
-                 FROM log_chunks
-                 WHERE source_id = ?1 AND body LIKE ?2 ESCAPE '\\'
-                 ORDER BY chunk_index ASC
-                 LIMIT ?3",
-            )?;
-            collect_hits(&mut stmt, params![src, like_pattern, limit], clean)?
-        } else {
-            let mut stmt = conn.prepare(
-                "SELECT source_id, heading, chunk_index, body
-                 FROM log_chunks
-                 WHERE body LIKE ?1 ESCAPE '\\'
-                 ORDER BY id DESC
-                 LIMIT ?2",
-            )?;
-            collect_hits(&mut stmt, params![like_pattern, limit], clean)?
-        };
-        Ok(hits)
+        let like_pattern = format!(
+            "%{}%",
+            clean
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        );
+        let mut stmt = tx.prepare(
+            "SELECT source_id, heading, chunk_index, body
+             FROM log_chunks JOIN log_sources ON log_sources.id = source_id
+             WHERE body LIKE ?1 ESCAPE '\\' AND (?2 IS NULL OR source_id = ?2)
+               AND (?3 IS NULL OR session_id = ?3) AND created_at_sec >= ?4
+             ORDER BY log_sources.seq DESC, chunk_index ASC
+             LIMIT ?5",
+        )?;
+        collect_hits(
+            &mut stmt,
+            params![like_pattern, source_id, session_id, cutoff, limit],
+            clean,
+        )
     }
 
     /// Removes logs older than `retention_secs` (defaults to 7 days).
     pub fn prune_expired(&self, retention_secs: Option<i64>) -> Result<usize> {
         let cutoff = unix_now_sec() - retention_secs.unwrap_or(DEFAULT_RETENTION_SECS);
-        let conn = open_connection(&self.db_path, self.busy_timeout)?;
-        let tx = conn.unchecked_transaction()?;
-        let expired_ids: Vec<String> = {
-            let mut stmt = tx.prepare("SELECT id FROM log_sources WHERE created_at_sec < ?1")?;
-            stmt.query_map(params![cutoff], |row| row.get(0))?
-                .collect::<std::result::Result<Vec<_>, _>>()?
-        };
-        for id in &expired_ids {
-            tx.execute("DELETE FROM log_chunks WHERE source_id = ?1", params![id])?;
-            if self.fts5_enabled {
-                let _ = tx.execute(
-                    "DELETE FROM log_chunks_fts WHERE source_id = ?1",
-                    params![id],
-                );
-            }
-            tx.execute("DELETE FROM log_sources WHERE id = ?1", params![id])?;
-        }
+        let mut conn = open_connection(&self.db_path, self.busy_timeout)?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let removed = delete_expired(&tx, cutoff, self.fts5_enabled)?;
         tx.commit()?;
-        Ok(expired_ids.len())
+        Ok(removed)
+    }
+
+    pub(super) fn require_log_source(&self, source_id: &str) -> Result<()> {
+        let conn = open_connection(&self.db_path, self.busy_timeout)?;
+        check_log_source(&conn, source_id, unix_now_sec() - DEFAULT_RETENTION_SECS)
+    }
+
+    pub(super) fn mark_manual_resume(&self, session_id: &str) -> Result<()> {
+        let conn = open_connection(&self.db_path, self.busy_timeout)?;
+        conn.execute(
+            "INSERT INTO session_resume (session_id, manual_resume_at) VALUES (?1, ?2)
+             ON CONFLICT(session_id) DO UPDATE SET manual_resume_at = max(manual_resume_at, excluded.manual_resume_at)",
+            params![session_id, unix_now_sec()],
+        )?;
+        Ok(())
     }
 
     pub fn list_session_logs(
@@ -439,21 +466,28 @@ impl ContextGuardStore {
         let mut stmt = conn.prepare(
             "SELECT id, session_id, tool_name, command, raw_bytes, created_at_sec
              FROM log_sources
-             WHERE session_id = ?1
+             WHERE session_id = ?1 AND created_at_sec >= ?2
              ORDER BY seq DESC
-             LIMIT ?2",
+             LIMIT ?3",
         )?;
         let rows = stmt
-            .query_map(params![session_id, limit.clamp(1, 50) as i64], |row| {
-                Ok(StoredLogRecord {
-                    id: row.get(0)?,
-                    session_id: row.get(1)?,
-                    tool_name: row.get(2)?,
-                    command: row.get(3)?,
-                    raw_bytes: row.get::<_, i64>(4)?.max(0) as usize,
-                    created_at_sec: row.get(5)?,
-                })
-            })?
+            .query_map(
+                params![
+                    session_id,
+                    unix_now_sec() - DEFAULT_RETENTION_SECS,
+                    limit.clamp(1, 50) as i64
+                ],
+                |row| {
+                    Ok(StoredLogRecord {
+                        id: row.get(0)?,
+                        session_id: row.get(1)?,
+                        tool_name: row.get(2)?,
+                        command: row.get(3)?,
+                        raw_bytes: row.get::<_, i64>(4)?.max(0) as usize,
+                        created_at_sec: row.get(5)?,
+                    })
+                },
+            )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -461,13 +495,62 @@ impl ContextGuardStore {
     pub fn latest_source_id(&self, session_id: &str) -> Result<Option<String>> {
         let conn = open_connection(&self.db_path, self.busy_timeout)?;
         conn.query_row(
-            "SELECT id FROM log_sources WHERE session_id = ?1 ORDER BY seq DESC LIMIT 1",
-            params![session_id],
+            "SELECT id FROM log_sources WHERE session_id = ?1 AND created_at_sec >= ?2 ORDER BY seq DESC LIMIT 1",
+            params![session_id, unix_now_sec() - DEFAULT_RETENTION_SECS],
             |row| row.get(0),
         )
         .optional()
         .map_err(Into::into)
     }
+}
+
+fn delete_expired(conn: &Connection, cutoff: i64, fts5_enabled: bool) -> Result<usize> {
+    let expired = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM log_sources WHERE created_at_sec < ?1)",
+        [cutoff],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !expired {
+        return Ok(0);
+    }
+    if fts5_enabled {
+        conn.execute(
+            "DELETE FROM log_chunks_fts WHERE source_id IN
+                (SELECT id FROM log_sources WHERE created_at_sec < ?1)",
+            [cutoff],
+        )?;
+    }
+    conn.execute(
+        "DELETE FROM log_chunks WHERE source_id IN
+            (SELECT id FROM log_sources WHERE created_at_sec < ?1)",
+        [cutoff],
+    )?;
+    Ok(conn.execute(
+        "DELETE FROM log_sources WHERE created_at_sec < ?1",
+        [cutoff],
+    )?)
+}
+
+fn check_log_source(conn: &Connection, id: &str, cutoff: i64) -> Result<()> {
+    let (created, high_water): (Option<i64>, Option<i64>) = conn.query_row(
+        "SELECT (SELECT created_at_sec FROM log_sources WHERE id = ?1),
+                (SELECT seq FROM sqlite_sequence WHERE name = 'log_sources')",
+        [id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if created.is_some_and(|time| time >= cutoff) {
+        return Ok(());
+    }
+    // IDs are assigned from AUTOINCREMENT in the insert transaction. Its
+    // high-water mark also covers rows cleaned up by older versions.
+    let was_allocated = id
+        .strip_prefix("log_")
+        .and_then(|digits| digits.parse::<i64>().ok())
+        .is_some_and(|seq| seq > 0 && Some(seq) <= high_water && id == format!("log_{seq:04}"));
+    if created.is_some() || was_allocated {
+        anyhow::bail!("Log `{id}` has expired (7-day retention) and is no longer available.");
+    }
+    anyhow::bail!("Log `{id}` was not found.");
 }
 
 fn open_connection(path: &Path, busy_timeout: Duration) -> Result<Connection> {
@@ -501,7 +584,12 @@ fn open_saved_stats(data_root: &Path, now: SystemTime) -> Result<(Connection, St
     Ok((conn, today))
 }
 
-fn record_saved_stats(data_root: &Path, agent_id: &str, bytes: u64, now: SystemTime) -> Result<()> {
+pub(super) fn record_saved_stats(
+    data_root: &Path,
+    agent_id: &str,
+    bytes: u64,
+    now: SystemTime,
+) -> Result<()> {
     let (conn, day) = open_saved_stats(data_root, now)?;
     let bytes = i64::try_from(bytes)?;
     conn.execute(
@@ -557,6 +645,12 @@ fn init_schema(conn: &Connection) -> Result<bool> {
         );
         CREATE INDEX IF NOT EXISTS idx_log_sources_session
             ON log_sources (session_id, seq DESC);
+        CREATE INDEX IF NOT EXISTS idx_log_sources_created
+            ON log_sources (created_at_sec);
+        CREATE TABLE IF NOT EXISTS session_resume (
+            session_id TEXT PRIMARY KEY,
+            manual_resume_at INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS log_chunks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             source_id TEXT NOT NULL,

@@ -26,13 +26,17 @@ export function attachMtShellEnvironment(ctx, env, runId, ownsAgent) {
     variables: {
       DSH_MATOU_CONTROL_TOKEN: { description: 'Private current-session Matou control identity for mt; never print it.' },
       MATOU_FOREMAN_ROLES_FILE: { description: 'Matou dispatch settings file for mt-foreman.' },
-      MATOU_AGENT_STATUS_DIR: { description: 'Matou status directory for dispatched agents.' }
+      MATOU_AGENT_STATUS_DIR: { description: 'Matou status directory for dispatched agents.' },
+      MATOU_DATA_ROOT: { description: 'Matou data directory for mt ctx.' },
+      MATOU_SESSION_ID: { description: 'Current Matou card for mt ctx.' }
     },
     resolve: execution => hasManagedMtEnvironment(env, runId) && ownsAgent(execution?.agent)
       ? {
           DSH_MATOU_CONTROL_TOKEN: env.MATOU_CONTROL_TOKEN,
           ...(env.MATOU_FOREMAN_ROLES_FILE ? { MATOU_FOREMAN_ROLES_FILE: env.MATOU_FOREMAN_ROLES_FILE } : {}),
-          ...(env.MATOU_AGENT_STATUS_DIR ? { MATOU_AGENT_STATUS_DIR: env.MATOU_AGENT_STATUS_DIR } : {})
+          ...(env.MATOU_AGENT_STATUS_DIR ? { MATOU_AGENT_STATUS_DIR: env.MATOU_AGENT_STATUS_DIR } : {}),
+          ...(env.MATOU_DATA_ROOT ? { MATOU_DATA_ROOT: env.MATOU_DATA_ROOT } : {}),
+          ...(env.MATOU_SESSION_ID ? { MATOU_SESSION_ID: env.MATOU_SESSION_ID } : {})
         }
       : {}
   })

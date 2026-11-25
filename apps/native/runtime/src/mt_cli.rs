@@ -135,6 +135,24 @@ const NOT_CONNECTED: &str = "未连接到 Matou Host Control；请在 Matou 托�
 
 /// Invoke the CLI from the runtime child before the stdio handshake.
 pub fn run(args: impl IntoIterator<Item = OsString>) -> i32 {
+    let args: Vec<_> = args.into_iter().collect();
+    if let [ctx, exec, rest @ ..] = args.as_slice()
+        && ctx == "ctx"
+        && exec == "exec"
+    {
+        let mut stderr = io::stderr().lock();
+        return match crate::context_guard::cli::run_ctx_exec(
+            rest,
+            &mut io::stdout().lock(),
+            &mut stderr,
+        ) {
+            Ok(code) => code,
+            Err(error) => {
+                let _ = writeln!(stderr, "{error:#}");
+                1
+            }
+        };
+    }
     let args: Vec<_> = args
         .into_iter()
         .map(|arg| arg.to_string_lossy().into_owned())
@@ -176,7 +194,7 @@ pub(crate) fn run_with(
         return match crate::context_guard::cli::run_ctx_command(&args[1..], None) {
             Ok(text) => {
                 let output = if json_output {
-                    pretty_json(&json!({ "text": text }))
+                    cap_ctx_response(&text, |text| pretty_json(&json!({ "text": text })))
                 } else {
                     text
                 };
@@ -187,9 +205,11 @@ pub(crate) fn run_with(
                 }
             }
             Err(error) => {
-                let cli_err = CliError::new("INVALID_ARGUMENT", error.to_string());
-                let _ = writeln!(stderr, "{}", cli_err.format(json_output));
-                cli_err.exit_code()
+                let cli_err = |message: &str| CliError::new("INVALID_ARGUMENT", message);
+                let message = &error.to_string();
+                let output = cap_ctx_response(message, |message| cli_err(message).format(json_output));
+                let _ = writeln!(stderr, "{output}");
+                cli_err(message).exit_code()
             }
         };
     }
@@ -235,6 +255,29 @@ pub(crate) fn run_with(
             error.exit_code()
         }
     }
+}
+
+fn cap_ctx_response(text: &str, format: impl Fn(&str) -> String) -> String {
+    let limit = crate::context_guard::filter::HARD_CAP_BYTES - 1;
+    let output = format(text);
+    if output.len() <= limit {
+        return output;
+    }
+
+    let (mut start, mut end) = (0, text.len());
+    while start < end {
+        let mid = start + (end - start).div_ceil(2);
+        let candidate = &text[..text.floor_char_boundary(mid)];
+        if format(&format!("{candidate}\n... [capped at 8.8 KB]")).len() <= limit {
+            start = mid;
+        } else {
+            end = mid - 1;
+        }
+    }
+    format(&format!(
+        "{}\n... [capped at 8.8 KB]",
+        &text[..text.floor_char_boundary(start)]
+    ))
 }
 
 fn request(

@@ -3,6 +3,13 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 
 const MAX_CONFIG_BYTES = 256 * 1024;
+const MT_CTX_INSTRUCTIONS = [
+  '## Matou Context Helpers (`mt ctx`)',
+  '- Before reading an unfamiliar large file, run `mt ctx outline <file>` and read only targeted line ranges.',
+  '- Combine multiple symbol lookups in one call with `mt ctx batch-search <q1> <q2> ...`.',
+  '- When a log is trimmed and saved as `log_XXXX`, search it with `mt ctx search <query> --source log_XXXX`.',
+  '- After `/compact`, run `mt ctx resume` to recover saved log sources and progress clues.'
+].join('\n');
 const AGENT_IDS = ['codex', 'dsh', 'agy'];
 const DEFAULT_ROLES = {
   allowSubDispatch: true,
@@ -17,7 +24,7 @@ const DEFAULT_ROLES = {
   ],
 };
 
-function readConfig(file) {
+function readConfig(file, { missing = null, defaultVersion } = {}) {
   if (!file) return null;
   try {
     const fd = openSync(file, constants.O_RDONLY | constants.O_NONBLOCK);
@@ -33,13 +40,31 @@ function readConfig(file) {
       }
       if (size > MAX_CONFIG_BYTES) return null;
       const parsed = JSON.parse(buffer.toString('utf8', 0, size));
-      return parsed?.version === 1 ? parsed : null;
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+      const version = Object.hasOwn(parsed, 'version') ? parsed.version : defaultVersion;
+      return version === 1 ? parsed : null;
     } finally {
       closeSync(fd);
     }
-  } catch {
-    return null;
+  } catch (error) {
+    return error?.code === 'ENOENT' ? missing : null;
   }
+}
+
+function contextToolsEnabled() {
+  if (!process.env.MATOU_DATA_ROOT) return false;
+  const config = readConfig(path.join(process.env.MATOU_DATA_ROOT, 'context-optimizer.json'), {
+    missing: {},
+    defaultVersion: 1
+  });
+  if (!config) return false;
+  const isObject = value => value && typeof value === 'object' && !Array.isArray(value);
+  if (Object.hasOwn(config, 'agents') && !isObject(config.agents)) return false;
+  const agents = config.agents ?? {};
+  if (!Object.hasOwn(agents, 'claude-code')) return true;
+  const settings = agents['claude-code'];
+  if (!isObject(settings)) return false;
+  return ['enabled', 'cliTools'].every(key => !Object.hasOwn(settings, key) || settings[key] === true);
 }
 
 function readMatouRolesConfig() {
@@ -111,6 +136,8 @@ if (!process.env.MATOU_FOREMAN_DEPTH) {
   const roles = readMatouRolesConfig();
   additionalContext += `\n\n在当前码头托管会话中派活请直接运行 \`mt-foreman\`。配置变更后可运行 \`mt-foreman roles\` 查看最新配置。\n\n${formatMatouRolesMarkdown(roles, roles.defaultAgent)}`;
 }
+
+if (contextToolsEnabled()) additionalContext += `\n\n${MT_CTX_INSTRUCTIONS}`;
 
 process.stdout.write(JSON.stringify({
   hookSpecificOutput: {

@@ -30,7 +30,7 @@ describe('DSH native system section and mode boundary', () => {
     const register = vi.fn((_spec: Record<string, unknown>) => () => {})
     const env = { MATOU_CONTROL_PROTOCOL: '1', MATOU_CONTROL_CALLER_RUN: 'run', MATOU_CONTROL_CALLER_SESSION: 'card',
       MATOU_CONTROL_ENDPOINT: '/control.sock', MATOU_CONTROL_TOKEN: 'test-session-value',
-      MATOU_FOREMAN_ROLES_FILE: '', MATOU_AGENT_STATUS_DIR: '' }
+      MATOU_FOREMAN_ROLES_FILE: '', MATOU_AGENT_STATUS_DIR: '', MATOU_DATA_ROOT: '', MATOU_SESSION_ID: '' }
     const main = {}, background = {}, child = {}
     let live = true
     attachMtShellEnvironment({ get: () => ({ register }) }, env, 'run', (agent: unknown) => live && agent === main)
@@ -38,11 +38,17 @@ describe('DSH native system section and mode boundary', () => {
     expect(Object.keys(spec.resolve({ agent: main }))).toEqual(['DSH_MATOU_CONTROL_TOKEN'])
     env.MATOU_FOREMAN_ROLES_FILE = '/settings/dispatch-roles.json'
     env.MATOU_AGENT_STATUS_DIR = '/status/agents'
-    expect(Object.keys(spec.variables)).toEqual(['DSH_MATOU_CONTROL_TOKEN', 'MATOU_FOREMAN_ROLES_FILE', 'MATOU_AGENT_STATUS_DIR'])
+    env.MATOU_DATA_ROOT = '/data/root'
+    env.MATOU_SESSION_ID = 'card'
+    expect(Object.keys(spec.variables)).toEqual([
+      'DSH_MATOU_CONTROL_TOKEN', 'MATOU_FOREMAN_ROLES_FILE', 'MATOU_AGENT_STATUS_DIR', 'MATOU_DATA_ROOT', 'MATOU_SESSION_ID'
+    ])
     expect(spec.resolve({ agent: main })).toEqual({
       DSH_MATOU_CONTROL_TOKEN: env.MATOU_CONTROL_TOKEN,
       MATOU_FOREMAN_ROLES_FILE: env.MATOU_FOREMAN_ROLES_FILE,
-      MATOU_AGENT_STATUS_DIR: env.MATOU_AGENT_STATUS_DIR
+      MATOU_AGENT_STATUS_DIR: env.MATOU_AGENT_STATUS_DIR,
+      MATOU_DATA_ROOT: env.MATOU_DATA_ROOT,
+      MATOU_SESSION_ID: env.MATOU_SESSION_ID
     })
     expect(spec.resolve({ agent: background })).toEqual({})
     expect(spec.resolve({ agent: child })).toEqual({})

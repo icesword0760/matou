@@ -203,7 +203,7 @@ fn unavailable_reason(
 ) -> Option<&'static str> {
     use OptimizerAvailability::{Available, Pending, Unsupported};
     use OptimizerToggle::{
-        BlockSensitiveReads, CacheExpiryNotify, CacheKeepalive, CliTools, NoiseFilter,
+        BlockSensitiveReads, CacheExpiryNotify, CacheKeepalive, NoiseFilter, ReadDedup,
     };
     match (entry.availability(field), field, entry.agent_id.as_str()) {
         (Available, _, _) if field != OptimizerToggle::MasterEnabled && !entry.settings.enabled => {
@@ -218,17 +218,13 @@ fn unavailable_reason(
             "暂无可靠的静默续命方式：自动发送会进入对话并消耗额度。等能确认送达后再开放。",
             "There is no reliable way to refresh the cache silently yet. An automatic message would appear in the conversation and use quota. This will be available once silent delivery can be verified.",
         )),
-        (Pending, CliTools, _) => Some(locale.text(
-            "运行时还没接入会话提示注入，开关暂时只保存偏好；接入后开放。",
-            "Session guidance for these tools is still being integrated. Your saved preference will apply once it is available.",
-        )),
         (Pending, NoiseFilter, "codex") => Some(locale.text(
             "Codex 当前版本不支持在结果交给 AI 前替换输出，自动省日志暂不可用；已记录，待适配。",
             "Pending integration. This Codex version cannot replace tool output before it reaches the model, so automatic trimming is unavailable.",
         )),
-        (Pending, NoiseFilter, "antigravity") => Some(locale.text(
-            "反重力支持执行前改写命令的方式，Matou 正在适配，完成并登录验证后开放。",
-            "Pending integration and testing. Antigravity can rewrite commands before execution. Matou will enable trimming after integration and signed-in testing.",
+        (Pending, NoiseFilter | ReadDedup | BlockSensitiveReads, "antigravity") => Some(locale.text(
+            "协议适配已完成，待本机登录 Antigravity 完成端到端验证后开放。",
+            "Protocol integration is complete. This will be available after end-to-end testing in a locally signed-in Antigravity session.",
         )),
         (Pending, BlockSensitiveReads, "codex") => Some(locale.text(
             "Codex 读文件走 Bash，.env 保护暂未覆盖，待适配。",
@@ -237,14 +233,6 @@ fn unavailable_reason(
         (Pending, _, "codex") => Some(locale.text(
             "Codex 通过 Bash 读文件，当前防重复读没有覆盖这条路径，待适配。",
             "Codex reads files through Bash. Skipping duplicate reads needs an integration for that route.",
-        )),
-        (Pending, BlockSensitiveReads, "antigravity") => Some(locale.text(
-            "反重力的读文件路径需要先适配并验证，再开放 .env 保护。",
-            "The Antigravity file reader needs to be integrated and tested before .env protection is available.",
-        )),
-        (Pending, _, "antigravity") => Some(locale.text(
-            "反重力的专用读文件工具需要先适配并验证，再开放读保护。",
-            "Pending validation. Matou needs to integrate Antigravity's dedicated file reader and verify protection in a signed-in session.",
         )),
         (Pending, _, _) => Some(locale.text(
             "待适配或验证，确认可用后开放。",
@@ -558,15 +546,21 @@ fn advanced_copy(field: OptimizerToggle, locale: InterfaceLocale) -> AdvancedCop
         CliTools => AdvancedCopy {
             title: t("更省 token 的查找工具", "Search with fewer tokens"),
             description: t(
-                "查找工具可以看大文件大纲、批量搜索、查被截断的日志。自动引导 AI 使用这些工具的功能正在接入。",
-                "The built-in tools can outline large files, run batch searches, and find trimmed logs. Automatic guidance for the AI is still being integrated.",
+                "引导 AI 查看大文件大纲、批量搜索和查找被截断的日志。对新启动的会话生效。",
+                "Guides the AI to outline large files, run batch searches, and find trimmed logs. Applies to newly started sessions.",
             ),
-            recommendation: t("暂不可用", "Unavailable"),
-            benefit: t("接入后可减少重复读取", "Fewer repeat reads once available"),
-            cost: t("接入后再确认", "To be confirmed"),
+            recommendation: t("重度使用推荐开", "Recommended for heavy use"),
+            benefit: t(
+                "大文件和大日志处理更快",
+                "Process large files and logs faster",
+            ),
+            cost: t(
+                "会在新会话启动提示里加 4 行固定说明",
+                "Adds four fixed lines of guidance to the startup prompt for new sessions",
+            ),
             when_off: t(
-                "只用轻量对话时可以关",
-                "Leave it off for lightweight conversations.",
+                "只做简短问答时可以关",
+                "Leave it off if you only ask brief questions.",
             ),
         },
         CacheKeepalive => AdvancedCopy {
@@ -1180,7 +1174,7 @@ mod tests {
     use super::{
         ADVANCED_ITEMS, AgentOptimizerSettings, AgentSavings, ContextGuardHudView,
         ContextOptimizerConfig, ContextOptimizerPanelState, HudPillTone, InterfaceLocale,
-        OptimizerAvailability, OptimizerToggle, can_toggle, format_cache_countdown,
+        OptimizerAvailability, OptimizerToggle, advanced_copy, can_toggle, format_cache_countdown,
         format_saved_noise_bytes, unavailable_reason,
     };
     use std::rc::Rc;
@@ -1230,7 +1224,7 @@ mod tests {
                 (CacheExpiryNotify, Available),
                 (CacheMonitor, Available),
                 (StallRescue, Available),
-                (CliTools, Pending),
+                (CliTools, Available),
             ] {
                 assert_eq!(entry.availability(field), availability, "{id} {field:?}");
                 let available = availability == Available;
@@ -1240,6 +1234,14 @@ mod tests {
                     let reason = unavailable_reason(field, &entry, locale);
                     assert_eq!(reason.is_none(), available, "{id} {field:?} {locale:?}");
                 }
+                if id == "antigravity"
+                    && matches!(field, NoiseFilter | ReadDedup | BlockSensitiveReads)
+                {
+                    assert_eq!(
+                        unavailable_reason(field, &entry, InterfaceLocale::Chinese),
+                        Some("协议适配已完成，待本机登录 Antigravity 完成端到端验证后开放。")
+                    );
+                }
             }
             let settings = &state.current_entry().unwrap().settings;
             assert!(
@@ -1248,7 +1250,7 @@ mod tests {
             );
             assert!(!settings.cache_monitor, "{id}");
             assert!(!settings.stall_rescue, "{id}");
-            assert_eq!(settings.cli_tools, id == "claude-code");
+            assert_eq!(settings.cli_tools, id != "claude-code");
             assert_eq!(settings.noise_filter, interception != Available, "{id}");
             assert_eq!(settings.read_dedup, interception != Available, "{id}");
             assert_eq!(
@@ -1283,9 +1285,16 @@ mod tests {
         let saved = &config.snapshot().unwrap().agents["codex"].settings;
         assert!(saved.noise_filter && saved.read_dedup && saved.block_sensitive_reads);
         assert!(saved.cache_keepalive && !saved.cache_expiry_notify);
-        assert!(!saved.cli_tools);
+        assert!(saved.cli_tools);
         assert_eq!(saved.cache_keepalive_max_per_turn, 3);
         assert_eq!(saved.max_log_bytes, 32_768);
+
+        let copy = advanced_copy(CliTools, InterfaceLocale::Chinese);
+        assert_eq!(copy.recommendation, "重度使用推荐开");
+        assert_eq!(copy.benefit, "大文件和大日志处理更快");
+        assert_eq!(copy.cost, "会在新会话启动提示里加 4 行固定说明");
+        assert_eq!(copy.when_off, "只做简短问答时可以关");
+        assert!(copy.description.contains("对新启动的会话生效"));
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
