@@ -264,7 +264,9 @@ mod view {
         light: bool,
         on_action: impl Fn(DetachedWindowAction, &mut Window, &mut App) + 'static,
     ) -> gpui::AnyElement {
-        detached_window_header_impl(title, locale, status, light, None, on_action)
+        detached_window_header_with_notification(
+            title, locale, status, light, None, None, on_action,
+        )
     }
 
     /// Append the native caption controls at the right edge on Windows.
@@ -277,20 +279,30 @@ mod view {
         maximized: bool,
         on_action: impl Fn(DetachedWindowAction, &mut Window, &mut App) + 'static,
     ) -> gpui::AnyElement {
-        detached_window_header_impl(title, locale, status, light, Some(maximized), on_action)
+        detached_window_header_with_notification(
+            title,
+            locale,
+            status,
+            light,
+            Some(maximized),
+            None,
+            on_action,
+        )
     }
 
-    fn detached_window_header_impl(
+    pub fn detached_window_header_with_notification(
         title: impl Into<SharedString>,
         locale: InterfaceLocale,
         status: DetachedHeaderStatus,
         light: bool,
         maximized: Option<bool>,
+        notification_badge: Option<gpui::AnyElement>,
         on_action: impl Fn(DetachedWindowAction, &mut Window, &mut App) + 'static,
     ) -> gpui::AnyElement {
         let title: SharedString = title.into();
         let copy = detached_placeholder_copy(locale);
         let status = detached_header_status(locale, status);
+        let notified = notification_badge.is_some();
         // Caption controls only replace the right inset on Windows. Keeping the
         // old function signature means its existing callers and probes still
         // measure the original 12pt edge.
@@ -353,9 +365,13 @@ mod view {
                             .font_weight(FontWeight::BOLD)
                             .child(ui_text(title)),
                     )
+                    .children(notification_badge)
                     .child(
                         div()
-                            .flex_none()
+                            .when(!notified, |status| status.flex_none())
+                            .when(notified, |status| {
+                                status.min_w_0().overflow_hidden().text_ellipsis()
+                            })
                             .whitespace_nowrap()
                             .text_size(px(10.))
                             .text_color(status_color)
@@ -409,7 +425,9 @@ mod view {
 
 #[cfg(target_os = "windows")]
 pub use view::detached_window_header_with_caption;
-pub use view::{detached_placeholder, detached_window_header};
+pub use view::{
+    detached_placeholder, detached_window_header, detached_window_header_with_notification,
+};
 
 #[cfg(debug_assertions)]
 pub use view::probe_detached_header;
