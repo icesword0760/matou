@@ -15,8 +15,15 @@ const DSH_BIN = process.env.DSH_BIN || 'dsh';
 const AGY_BIN = process.env.AGY_BIN || 'agy';
 const AGY_RESULT_EXIT_MS = Number(process.env.FOREMAN_AGY_RESULT_EXIT_MS) || 10_000;
 const AGY_QUOTA = /RESOURCE_EXHAUSTED|quota|Resets in|额度/i;
+const AGY_SERIES = ['hydrogen', 'argon', 'carbon', 'neon', 'flash'];
+const AGY_EFFORT_FAMILIES = ['claude-opus-5-5', 'claude-sonnet-5-5'];
+const AGENT_IDS = ['codex', 'dsh', 'agy'];
+const CODEX_SPEEDS = ['default', 'fast', 'ultrafast', 'priority', 'flex'];
 
 const DEFAULTS = { askWaitMin: 10, model: 'sol', effort: 'high', idleMin: 10, warnMin: 3, maxMin: 45, retries: 3, backoffMin: [2, 5, 10] };
+const validMinutes = (value) => typeof value === 'number' && Number.isFinite(value) && value > 0 && value <= 600;
+const validRetries = (value) => Number.isInteger(value) && value >= 0 && value <= 5;
+const SUPERVISION_FIELDS = ['idleMin', 'maxMin', 'askWaitMin', 'retries'];
 
 function readDefaultsConfig() {
   const result = { path: CONFIG, exists: fs.existsSync(CONFIG), defaults: {}, ignored: [] };
@@ -30,13 +37,12 @@ function readDefaultsConfig() {
     ignore('defaults', config.defaults);
     return result;
   }
-  const minutes = (value) => typeof value === 'number' && Number.isFinite(value) && value > 0 && value <= 600;
   const validators = {
-    agent: (value) => ['codex', 'agy', 'dsh'].includes(value),
+    agent: (value) => AGENT_IDS.includes(value),
     model: (value) => typeof value === 'string' && value.length > 0 && value.length <= 64 && !/\s/u.test(value),
     effort: (value) => ['low', 'medium', 'high', 'xhigh'].includes(value),
-    idleMin: minutes, maxMin: minutes, askWaitMin: minutes,
-    retries: (value) => Number.isInteger(value) && value >= 0 && value <= 5,
+    idleMin: validMinutes, maxMin: validMinutes, askWaitMin: validMinutes,
+    retries: validRetries,
   };
   for (const [field, value] of Object.entries(config.defaults)) {
     if (Object.hasOwn(validators, field) && validators[field](value)) result.defaults[field] = value;
@@ -45,17 +51,32 @@ function readDefaultsConfig() {
   return result;
 }
 
-function readMatouRolesConfig() {
+function readMatouRolesConfig(legacyAgent) {
   const file = process.env.MATOU_FOREMAN_ROLES_FILE;
-  if (!file || !fs.existsSync(file)) return null;
+  if (!file) return null;
   try {
     const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
     if (!parsed || parsed.version !== 1 || !Array.isArray(parsed.agents)) return null;
-    return {
+    const agents = parsed.agents.filter((item) => item && typeof item.id === 'string' && item.id.trim());
+    const enabled = (id) => {
+      const agent = agents.find((entry) => entry.id === id);
+      return agent && agent.enabled !== false;
+    };
+    const roles = {
       path: file,
       allowSubDispatch: parsed.allowSubDispatch !== false,
-      agents: parsed.agents.filter((item) => item && typeof item.id === 'string' && item.id.trim()),
+      agents,
     };
+    // Older roles files defer to a saved external default Agent.
+    if (Object.hasOwn(parsed, 'defaultAgent') || !legacyAgent) {
+      roles.defaultAgent = AGENT_IDS.includes(parsed.defaultAgent) && enabled(parsed.defaultAgent)
+        ? parsed.defaultAgent : AGENT_IDS.find(enabled) ?? 'codex';
+    }
+    for (const key of SUPERVISION_FIELDS) {
+      const validate = key === 'retries' ? validRetries : validMinutes;
+      if (validate(parsed[key])) roles[key] = parsed[key];
+    }
+    return roles;
   } catch {
     return null;
   }
@@ -64,28 +85,60 @@ function readMatouRolesConfig() {
 function formatMatouRolesMarkdown(roles, defaultAgent = 'codex') {
   if (!roles) return '';
   const names = { codex: 'Codex', dsh: 'DSH', agy: 'Antigravity（反重力）' };
-  const modes = { auto: '按职责自动派', explicit: '仅点名时派' };
   const efforts = { off: '关闭', low: '低', medium: '中', high: '高', xhigh: '超高', max: '最高' };
-  const speeds = { default: '普通', fast: '快速', ultrafast: '超快', priority: '优先', flex: '弹性' };
+  const speeds = { fast: '快速', ultrafast: '超快', priority: '优先', flex: '弹性' };
   const enabled = roles.agents.filter((a) => a.enabled !== false);
   const disabled = roles.agents.filter((a) => a.enabled === false);
   const lines = ['## 用户自定义 Agent 生态位与默认配置（以本节为准）', ''];
   for (const a of enabled) {
-    const label = names[a.id] || a.id;
-    const tag = a.id === defaultAgent ? '默认兜底主力' : (modes[a.mode] || '按职责自动派');
-    const effortFixed = a.id === 'agy' && a.model === 'gemini-pro-orchestrator';
+    const label = Object.hasOwn(names, a.id) ? names[a.id] : a.id;
+    const tag = a.id === defaultAgent ? '默认兜底主力' : (a.mode === 'explicit' ? '仅点名时派' : '按职责自动派');
+    const model = typeof a.model === 'string' ? a.model : '';
+    const effortFixed = a.id === 'agy' && /orchestrator/i.test(model);
+    const suffix = a.id === 'agy' ? /-(low|medium|high|xhigh)$/i.exec(model)?.[1].toLowerCase() : null;
+    const effort = suffix || (typeof a.effort === 'string' ? a.effort : '');
+    const speed = a.id === 'codex' && typeof a.speed === 'string' && a.speed !== 'default' ? a.speed : '';
     const specs = [
-      a.model ? `模型: ${a.model}` : null,
-      effortFixed ? '无推理档位' : (a.effort ? `推理: ${efforts[a.effort] || a.effort}` : null),
-      a.speed ? `速度: ${speeds[a.speed] || a.speed}` : null,
+      model ? `模型: ${model}` : null,
+      effortFixed ? '无推理档位' : (effort ? `推理: ${Object.hasOwn(efforts, effort) ? efforts[effort] : effort}` : null),
+      speed ? `速度: ${Object.hasOwn(speeds, speed) ? speeds[speed] : speed}` : null,
     ].filter(Boolean).join(' · ');
-    lines.push(`- **${label}**（${tag}${specs ? ` | ${specs}` : ''}）：${a.role || '按默认职责执行。'}`);
+    const role = typeof a.role === 'object' ? '' : a.role;
+    const roleText = String(role || '').replace(/\r\n?/g, '\n').trim().replace(/\n/g, '\n  ');
+    lines.push(`- **${label}**（${tag}${specs ? ` | ${specs}` : ''}）：${roleText || '按默认职责执行。'}`);
   }
   if (disabled.length) {
-    lines.push(`- **已停用（禁止派活）**：${disabled.map((a) => names[a.id] || a.id).join('、')}`);
+    lines.push(`- **已停用（禁止派活）**：${disabled.map((a) => Object.hasOwn(names, a.id) ? names[a.id] : a.id).join('、')}`);
   }
-  lines.push(`- **二次转包策略**：${roles.allowSubDispatch ? '允许执行者按其他「启用 + 按职责自动派」Agent 的职责转派 1 层子任务' : '已关闭（所有执行者禁止二次转包，只允许顶层监工派活）'}`);
+  const autoPeers = enabled.filter((a) => a.mode === 'auto').map((a) => Object.hasOwn(names, a.id) ? names[a.id] : a.id);
+  if (!roles.allowSubDispatch) {
+    lines.push('- **二次转包策略**：已关闭（所有执行者禁止二次转包，只允许顶层监工派活；Orchestrator 模型内部自带的并行子代理不受影响）');
+  } else if (enabled.length < 2 || autoPeers.length === 0) {
+    lines.push('- **二次转包策略**：当前无可转派协作者（需至少启用两个执行者且目标协作者处于「按职责自动派」，当前仅由顶层监工直接派活）');
+  } else {
+    lines.push(`- **二次转包策略**：允许当前执行者遇到其他「启用 + 按职责自动派」协作者（${autoPeers.join('、')}）职责范围内的子任务时，跨执行者转派 1 层子任务`);
+  }
   return lines.join('\n');
+}
+
+function isAutoDispatchRole(role) {
+  return Boolean(role && role.enabled !== false && role.mode === 'auto');
+}
+
+function configuredSubDispatchPeers(roles, agent) {
+  if (!roles.allowSubDispatch) return [];
+  return AGENT_IDS.filter((id) => id !== agent)
+    .map((id) => roles.agents.find((role) => role.id === id))
+    .filter(isAutoDispatchRole)
+    .map(({ id, role }) => ({
+      id,
+      name: agentName({ agent: id }),
+      role: typeof role === 'string' ? role.replace(/\r\n?/g, '\n').trim().replace(/\n/g, '\n  ') : '',
+    }));
+}
+
+function codexRoleSpeed(role) {
+  return typeof role?.speed === 'string' ? role.speed.trim() || undefined : undefined;
 }
 
 function configuredDefaults(defaults, agent, ignored = [], roles = null) {
@@ -98,6 +151,7 @@ function configuredDefaults(defaults, agent, ignored = [], roles = null) {
   const resolved = { ...DEFAULTS,
     ...(agent === 'dsh' ? { model: 'deepseek-flash' } : agent === 'agy' ? { model: 'gemini-pro-orchestrator' } : {}),
     ...rest, ...(model != null && agent !== 'dsh' ? { model } : {}) };
+  for (const key of SUPERVISION_FIELDS) if (roles?.[key] != null) resolved[key] = roles[key];
   if (agentRole) {
     if (typeof agentRole.model === 'string' && agentRole.model.trim()) resolved.model = agentRole.model.trim();
     if (typeof agentRole.effort === 'string' && agentRole.effort.trim()) {
@@ -106,9 +160,8 @@ function configuredDefaults(defaults, agent, ignored = [], roles = null) {
         : ['low', 'medium', 'high', 'xhigh'].includes(agentRole.effort);
       if (ok) resolved.effort = agentRole.effort;
     }
-    if (agent === 'codex' && typeof agentRole.speed === 'string' && agentRole.speed.trim()) {
-      resolved.serviceTier = agentRole.speed.trim();
-    }
+    const speed = agent === 'codex' ? codexRoleSpeed(agentRole) : undefined;
+    if (speed) resolved.serviceTier = speed;
   }
   return resolved;
 }
@@ -120,7 +173,7 @@ const RETRYABLE = /capacity|\b429\b|\b5\d\d\b|overloaded|rate.?limit|reconnect|s
 const usage = `Usage:
   mt-foreman guide [brief|parallel|reference]
   mt-foreman roles
-  mt-foreman config
+  mt-foreman config  (outside Matou: node scripts/foreman.mjs config)
   mt-foreman models [--model M] [--effort E] [--refresh-models]
   mt-foreman start  商城-购物车-01 --cd <dir> [--brief <file>] [options]
   mt-foreman send   商城-购物车-01 [--message <file>] [options] (resume is an alias)
@@ -133,7 +186,7 @@ const usage = `Usage:
   mt-foreman note   商城-购物车-01 (监工; note from stdin)
 (在 Matou 托管终端中可直接使用 mt-foreman，与 node scripts/foreman.mjs 等价)
 Omit --brief / --message to read the prompt from stdin.
-会加载用户的 Codex 配置（MCP、插件、记忆等），速度档固定为普通。
+会加载用户的 Codex 配置（MCP、插件、记忆等）。
 配置里有自定义指令文件时拒绝派活。
 Exit code 7: Codex 正在等回答。
 Exit code 8: 跟踪到期，任务继续运行。
@@ -141,7 +194,10 @@ Options:
   默认值可写在 ${CONFIG}，命令行参数优先。
   FOREMAN_RUN_DIR overrides ~/.claude/agent-foreman/runs for all commands.
   --agent codex|dsh|agy (codex; start). DSH_BIN / AGY_BIN override dsh / agy from PATH.
-  agy defaults: --model gemini-pro-orchestrator (fixed; no effort levels). --model hydrogen|argon|carbon picks the newest at --effort low|medium|high|xhigh (high); --effort needs one of these.
+  agy defaults: --model gemini-pro-orchestrator (fixed; no effort levels).
+  --model hydrogen|argon|carbon|neon|flash picks the newest at --effort low|medium|high|xhigh (high).
+  --model claude-opus-5-5|claude-sonnet-5-5 picks a family model at the requested effort.
+  --speed default|fast|ultrafast|priority|flex (Codex; start/send/resume)
   --ask-wait-min N (10; start/send)
   --no-watch  --watch-min N (29)  --warn-min N (3)
   --model M (sol；系列最新版，可选 best/astra/sol/terra/luna 或型号)  --effort E (high)  --idle-min N (10)  --max-min N (45)
@@ -184,6 +240,11 @@ function parseArgs(argv) {
       case '--agent': opts.agent = next(); break;
       case '--model': opts.model = next(); break;
       case '--effort': opts.effort = next(); break;
+      case '--speed':
+        if (!['start', 'send', 'resume'].includes(cmd)) throw new Error(usage);
+        opts.speed = next();
+        if (!CODEX_SPEEDS.includes(opts.speed)) throw new Error(usage);
+        break;
       case '--_stop':
         if (cmd !== '_supervise') throw new Error(usage);
         opts.internalStop = true; break;
@@ -225,6 +286,13 @@ const agentName = (state) => ({ dsh: 'DSH', agy: 'Antigravity' }[state.agent] ||
 const networkNote = (state) => state.networkSampling ? '（网络也没有数据）' : '';
 const quietDuration = (ms) => ms < 60_000 ? `${Math.floor(ms / 1000)} 秒` : `${Math.floor(ms / 60_000)} 分钟`;
 
+function resolveCodexServiceTier(options, env = process.env) {
+  if (options.speedOverride) return options.speedOverride;
+  const envTier = typeof env?.CODEX_SERVICE_TIER === 'string' ? env.CODEX_SERVICE_TIER.trim() : '';
+  if (envTier && envTier !== 'default') return envTier;
+  return options.serviceTier && options.serviceTier !== 'default' ? options.serviceTier : 'default';
+}
+
 function displayEffort(state) {
   return state.agent === 'agy' ? /-(low|medium|high|xhigh)$/.exec(state.options.model)?.[1] ?? null : state.options.effort;
 }
@@ -263,8 +331,7 @@ function writeAgentStatus(state) {
     const effortName = new Map([['off', '关闭'], ['minimal', '最低档'], ['low', '低档'], ['medium', '中档'], ['high', '高档'], ['xhigh', '超高档'], ['max', '最高档']]).get(effort) ?? effort;
     const model = state.options.model;
     const agent = agentName(state);
-    // Codex service tier (speed) is read from the same env the runner forwards; default stays implicit.
-    const tier = agent === 'Codex' ? (state.options.serviceTier || process.env?.CODEX_SERVICE_TIER || 'default') : null;
+    const tier = agent === 'Codex' ? resolveCodexServiceTier(state.options, process.env) : null;
     const tierName = new Map([['fast', '快速'], ['ultrafast', '超快'], ['priority', '优先'], ['flex', '弹性']]).get(tier) ?? (tier && tier !== 'default' ? tier : null);
     const label = `${agent}：${state.task}（${[model && model !== 'best' ? model : '', effort ? `${effortName}推理` : '', tierName].filter(Boolean).join(' · ')}）`;
     const file = path.join(dir, `${id}.json`);
@@ -565,12 +632,29 @@ function heal(state) {
   return true;
 }
 
-function dshAvailable(cwd) {
-  const candidates = DSH_BIN.includes(path.sep) ? [path.resolve(cwd, DSH_BIN)]
-    : (process.env.PATH ?? '/usr/bin:/bin').split(path.delimiter).map((dir) => path.resolve(cwd, dir, DSH_BIN));
+function agentCliAvailable(agentId, cwd) {
+  const bin = { codex: CODEX_BIN, dsh: DSH_BIN, agy: AGY_BIN }[agentId];
+  if (!bin) return false;
+  const candidates = bin.includes('/') || bin.includes(path.sep) ? [path.resolve(cwd, bin)]
+    : (process.env.PATH ?? '/usr/bin:/bin').split(path.delimiter).map((dir) => path.resolve(cwd, dir, bin));
   return candidates.some((file) => {
     try { fs.accessSync(file, fs.constants.X_OK); return fs.statSync(file).isFile(); } catch { return false; }
   });
+}
+
+function peerDispatchInstructions(state, peers) {
+  return peers.map((peer) => {
+    const suffix = `-${peer.id}-01`;
+    const taskName = Array.from(state.task);
+    const hash = taskName.length + suffix.length > 40 ? `-${createHash('sha1').update(state.task).digest('hex').slice(0, 6)}` : '';
+    const task = `${taskName.slice(0, 40 - suffix.length - hash.length).join('')}${hash}${suffix}`;
+    return `
+遇到 ${peer.name} 职责范围内的部分（${peer.role || '按默认职责执行。'}），交给 ${peer.name} 子代理。用下面的命令派活（命令超时设为 10 分钟，退出码 7 表示它正在提问，退出码 8 时按提示继续跟踪）：
+  FOREMAN_RUN_DIR="${RUNS}" node "${SCRIPT}" start ${shellTask(task)} --agent ${peer.id} --cd <工作目录> <<'EOF'
+  交代：用户的目标、已定的决定、允许修改的文件、验收标准和交回内容。
+  EOF
+多次转派时递增序号。待子任务交回后核对结果，再整合改动。`;
+  }).join('\n');
 }
 
 // Appended to every prompt so each brief does not have to restate the run protocol.
@@ -579,13 +663,20 @@ function protocolFooter(state) {
   const progress = path.join(dir, 'progress.log');
   const isAgyOrchestrator = state.agent === 'agy' && /orchestrator/i.test(state.options.model ?? '');
   const askWaitMin = state.options.askWaitMin ?? DEFAULTS.askWaitMin;
+  const topLevel = (Number(process.env.MATOU_FOREMAN_DEPTH) || 0) === 0;
+  const peers = topLevel ? (state.options.subDispatchPeers ?? []).filter((peer) => agentCliAvailable(peer.id, state.options.cd)) : [];
+  const legacyDsh = state.options.subDispatchPeers == null && !['dsh', 'agy'].includes(state.agent)
+    && state.options.allowDshSubDispatch !== false && agentCliAvailable('dsh', state.options.cd);
+  const dispatchRule = peers.length
+    ? `不要使用 agent-foreman 技能。外部协作只使用下面的 foreman start 命令。${state.agent === 'codex' && state.options.terraModel ? '内部子代理仅按下方 terra 约定使用。' : state.agent !== 'agy' ? '内部子代理禁用。' : ''}`
+    : `不要使用 agent-foreman 技能，不要再启动 codex${isAgyOrchestrator ? '。' : state.agent !== 'agy' && state.options.terraModel ? '；只允许下述 terra 界面操作子代理，不要派生其他子 Agent。' : '，也不要派生子 Agent。'}`;
   return `
 
 ---
 ## 运行约定（由监督脚本附加）
 - 你是执行者，负责把本任务交代的目标落地。创意方向、产品取舍和审美以交代为准；交代没写到、又会影响用户看到的结果或产品走向的地方，先提问，不要自行发挥。
 - 交代没提到、做的过程中却发现必须新加存储、依赖或抽象，改核心结构或接口，或者做不可逆的迁移时，先提问：说明为什么需要、有没有更简单的做法，得到回答再动手。
-- 不要使用 agent-foreman 技能，不要再启动 codex${isAgyOrchestrator ? '。' : state.agent !== 'agy' && state.options.terraModel ? '；只允许下述 terra 界面操作子代理，不要派生其他子 Agent。' : '，也不要派生子 Agent。'}
+- ${dispatchRule}
 - 需要的工具（如某个 MCP 服务）一开始没出现时，先等 30 秒再查一次，仍然没有才算没有；不要一看不到就下结论或改用别的办法。
 - 只在工作目录 ${state.options.cd} 内写文件${state.options.addDirs.length ? `（另允许：${state.options.addDirs.join('、')}）` : ''}；不要修改其他位置，不要执行 git push；只有交代书明确要求时才 git commit，并且只提交到交代书指定的分支。
 - 提问：遇到必须先确认才能继续的问题，运行下面的命令（把命令超时设为 ${askWaitMin + 5} 分钟，即 ${(askWaitMin + 5) * 60_000} 毫秒）：
@@ -598,18 +689,20 @@ function protocolFooter(state) {
 - 进度：每完成一个步骤，向 ${progress} 追加一行「时间 步骤 结果」。
 - 长命令（安装、渲染、录屏等超过 1 分钟的命令）把输出 tee 到 ${path.join(dir, 'logs')}/ 下的日志文件，例如 \`cmd 2>&1 | tee ${path.join(dir, 'logs')}/render.log\`。
 - 自己做的取舍随时追加到 ${path.join(dir, 'decisions.md')}，每条写清决定和理由。
-- 到达交代中写明的关卡时停下。最终回复依次写：完成了什么、产物路径、自检结果、「我自己做的决定」（逐条列出，没有就写「无」）、未解决的问题。不要越过关卡继续做。${['dsh', 'agy'].includes(state.agent) ? '' : `
-- 派任何子代理（DSH 子任务、spawn_agent 子代理）时，防止意图在转述中丢失：交代开头写明「先读完原始交代 ${dir}/run-*.prompt.md（按序号全部读完），其中的用户意图、已定的决定和范围同样约束你」，再写这次交给它的具体部分：写清原因、方案（改哪些地方、用什么做法）和已定的决定，具体怎么写由它定，只有你已确切知道做法时才写到步骤；方案要先调研才定得下来的，先让它只交调研结果和方案建议，你定了再让它做；要求它交回自己做的决定。它交回后，你先对照原始交代里的用户意图检查有没有偏，再整合；它做的决定要并入你最终回复的「我自己做的决定」，注明来自哪个子代理。`}${['dsh', 'agy'].includes(state.agent) || state.options.allowDshSubDispatch === false || !dshAvailable(state.options.cd) ? '' : `
+- 到达交代中写明的关卡时停下。最终回复依次写：完成了什么、产物路径、自检结果、「我自己做的决定」（逐条列出，没有就写「无」）、未解决的问题。不要越过关卡继续做。${peers.length || !['dsh', 'agy'].includes(state.agent) ? `
+- 派任何子代理（${peers.length ? 'Foreman 子任务或允许的内部子代理' : 'DSH 子任务、spawn_agent 子代理'}）时，防止意图在转述中丢失：交代开头写明「先读完原始交代 ${dir}/run-*.prompt.md（按序号全部读完），其中的用户意图、已定的决定和范围同样约束你」，再写这次交给它的具体部分：写清原因、方案（改哪些地方、用什么做法）和已定的决定，具体怎么写由它定，只有你已确切知道做法时才写到步骤；方案要先调研才定得下来的，先让它只交调研结果和方案建议，你定了再让它做；要求它交回自己做的决定。它交回后，你先对照原始交代里的用户意图检查有没有偏，再整合；它做的决定要并入你最终回复的「我自己做的决定」，注明来自哪个子代理。` : ''}${peerDispatchInstructions(state, peers)}${legacyDsh ? `
 前端 UI 设计的部分（页面和组件的视觉设计、布局、样式、交互外观，以及把它们实现成前端界面代码）交给 DSH 子代理：运行下面的命令派活（命令超时设为 10 分钟；它跟踪满 29 分钟会以退出码 8 交回，按最后一行的命令继续跟踪；退出码 7 表示它在提问，按提示回答后继续跟踪）：
   FOREMAN_RUN_DIR="${RUNS}" node "${SCRIPT}" start ${shellTask(state.task)}-界面-01 --agent dsh --cd <工作目录> <<'EOF'
   交代：用户要什么、已定的设计决定（配色、字号、间距、文案原文等）、要改哪些文件、不能碰什么、做完交回什么（截图或样稿路径）
   EOF
-多次派活把序号 01 递增。它在改的文件，你等它交回后再动。交回后你检查结果、整合进其余代码；其余工作（逻辑、数据、后端、测试、构建）你自己做。`}${state.agent !== 'agy' && state.options.terraModel ? `
+多次派活把序号 01 递增。它在改的文件，你等它交回后再动。交回后你检查结果、整合进其余代码；其余工作（逻辑、数据、后端、测试、构建）你自己做。` : ''}${state.agent !== 'agy' && state.options.terraModel ? `
 操作电脑界面的部分（computer use：点按软件界面、操作桌面应用，包括 Blender 建模）不要自己做，交给 terra 子代理：用 spawn_agent 派子代理完成，参数 model="${state.options.terraModel}"、reasoning_effort="${state.options.effort}"、fork_turns="none"（必须是 none，否则模型设置不生效）。在任务说明里写清它需要的全部上下文、要操作什么、做完交回什么；它做完后由你检查结果再继续。其余工作（写代码、跑命令、读写文件、生成）你自己做。` : ''}${state.agent === 'agy' ? `
 - 工作目录（也就是当前目录）是 ${state.options.cd}，交代里的相对路径都按它算；运行目录 ${dir} 只用来写进度、日志和决定清单。
 - 提问一律用上面的 ask 命令，不要用 ask_question 工具：这里没有人能在界面上回答它。
 - ask 命令会一直等到有回答，最长 ${askWaitMin} 分钟。它如果被转到后台运行，用 command_status 等它结束、拿到输出里的回答后再继续，不要没等到就往下做。
-${isAgyOrchestrator ? `- 可以按需要派子代理（define_subagent、invoke_subagent 等）并行做，一两步就能做完的活自己做。派子代理时，防止意图在转述中丢失：交代开头写明「先读完原始交代 ${dir}/run-*.prompt.md（按序号全部读完），其中的用户意图、已定的决定和范围同样约束你」，再写这次交给它的具体部分和要交回的东西；要求它每完成一步向 ${progress} 追加一行「时间 子代理名 步骤 结果」，只在工作目录内写文件，遇到要确认的问题交回给你、不要用 ask_question，并交回自己做的决定。它交回后，你先对照原始交代里的用户意图检查有没有偏，再整合；它做的决定要并入你最终回复的「我自己做的决定」，注明来自哪个子代理。` : '- 不要派生子代理（browser_subagent、invoke_subagent、define_subagent 等），全部自己做。'}` : ''}`;
+${isAgyOrchestrator ? `- 可以按需要派子代理（define_subagent、invoke_subagent 等）并行做，一两步就能做完的活自己做。派子代理时，防止意图在转述中丢失：交代开头写明「先读完原始交代 ${dir}/run-*.prompt.md（按序号全部读完），其中的用户意图、已定的决定和范围同样约束你」，再写这次交给它的具体部分和要交回的东西；要求它每完成一步向 ${progress} 追加一行「时间 子代理名 步骤 结果」，只在工作目录内写文件，遇到要确认的问题交回给你、不要用 ask_question，并交回自己做的决定。它交回后，你先对照原始交代里的用户意图检查有没有偏，再整合；它做的决定要并入你最终回复的「我自己做的决定」，注明来自哪个子代理。` : peers.length
+    ? '- Antigravity 的内部子代理（browser_subagent、invoke_subagent、define_subagent 等）禁用。外部协作使用上面的 Foreman 命令。'
+    : '- 不要派生子代理（browser_subagent、invoke_subagent、define_subagent 等），全部自己做。'}` : ''}`;
 
 }
 
@@ -774,7 +867,7 @@ function buildArgs(state, lastFile, resume) {
   const args = [
     'exec', '--skip-git-repo-check', '--disable', 'unbounded_connection_retries', '--json',
     '-s', o.fullAccess ? 'danger-full-access' : 'workspace-write', '-C', o.cd, '-m', o.model, '-c', `model_reasoning_effort="${o.effort}"`,
-    '-c', `service_tier="${o.serviceTier || process.env.CODEX_SERVICE_TIER || 'default'}"`,
+    '-c', `service_tier="${resolveCodexServiceTier(o, process.env)}"`,
     // Codex auto-approves MCP permission prompts with full access + never (including per-tool prompt mode).
     '-c', 'approval_policy="never"',
     '--add-dir', physicalPath(runDir(state.task)), '-o', physicalPath(lastFile),
@@ -808,11 +901,12 @@ function buildDshArgs(state, resume) {
 async function configureAgy(state, request, resolveSeries = false) {
   const o = state.options;
   if (!['low', 'medium', 'high', 'xhigh'].includes(o.effort)) throw new Error('Antigravity --effort must be low, medium, high or xhigh');
-  delete o.modelRequest;
+  if (request != null || !AGY_EFFORT_FAMILIES.includes(o.modelRequest)) delete o.modelRequest;
   delete o.terraModel;
   if (request == null) return; // send inherits the resolved model without another catalog request.
   const series = request.toLowerCase();
-  if (!resolveSeries && !['hydrogen', 'argon', 'carbon'].includes(series)) { o.model = request; return; }
+  const family = AGY_EFFORT_FAMILIES.includes(series);
+  if (!resolveSeries && !family && !AGY_SERIES.includes(series)) { o.model = request; return; }
   const output = await new Promise((resolve, reject) => {
     const child = execFile(AGY_BIN, ['models'], { cwd: o.cd, encoding: 'utf8', timeout: 20_000, killSignal: 'SIGKILL' },
       (err, stdout, stderr) => {
@@ -822,6 +916,14 @@ async function configureAgy(state, request, resolveSeries = false) {
       });
     child.stdin.end();
   });
+  if (family) {
+    const model = `${series}-${o.effort}`;
+    if (!new RegExp(`\\b${model}\\b`).test(output)) throw new Error(`没有可用的 ${request} 模型（推理档位 ${o.effort}）`);
+    o.model = model;
+    o.modelRequest = series;
+    feed(state, `${series} → ${o.model}（推理档位 ${o.effort}）`);
+    return;
+  }
   const models = [...output.matchAll(/\bgemini-(\d+(?:\.\d+)*)-([a-z0-9]+(?:-[a-z0-9]+)*)-(low|medium|high|xhigh)\b/g)]
     .filter((match) => match[2] === series && match[3] === o.effort)
     .map((match) => ({ slug: match[0], version: match[1] }))
@@ -1447,8 +1549,14 @@ async function main() {
   const { cmd, task, opts } = parseArgs(process.argv.slice(2));
   if (cmd === 'config') {
     const config = readDefaultsConfig();
-    const agent = config.defaults.agent ?? 'codex';
-    console.log(JSON.stringify({ ...config, defaults: { agent, ...configuredDefaults(config.defaults, agent, config.ignored) } }, null, 2));
+    const roles = readMatouRolesConfig(config.defaults.agent);
+    const agent = roles?.defaultAgent ?? config.defaults.agent ?? 'codex';
+    const defaults = { agent, ...configuredDefaults(config.defaults, agent, config.ignored, roles) };
+    if (roles) {
+      defaults.allowSubDispatch = roles.allowSubDispatch;
+      if (agent === 'codex') defaults.serviceTier = resolveCodexServiceTier(defaults, process.env);
+    }
+    console.log(JSON.stringify({ ...config, defaults, ...(roles ? { matouRolesPath: roles.path } : {}) }, null, 2));
     return 0;
   }
   if (cmd === 'models') {
@@ -1472,13 +1580,13 @@ async function main() {
     return 0;
   }
   if (cmd === 'roles') {
-    const roles = readMatouRolesConfig();
-    const defaultAgent = readDefaultsConfig().defaults.agent || 'codex';
+    const legacyAgent = readDefaultsConfig().defaults.agent;
+    const roles = readMatouRolesConfig(legacyAgent);
     if (!roles) {
       console.log('当前未配置 Matou 自定义 Agent 生态位，按内置 SKILL.md 默认分工执行。');
       return 0;
     }
-    console.log(formatMatouRolesMarkdown(roles, defaultAgent));
+    console.log(formatMatouRolesMarkdown(roles, roles.defaultAgent || legacyAgent || 'codex'));
     return 0;
   }
   if (cmd === 'guide') {
@@ -1491,9 +1599,10 @@ async function main() {
     const file = task ? files[task] : 'SKILL.md';
     let content = fs.readFileSync(path.join(skillDir, file), 'utf8');
     if (!task) {
-      const roles = readMatouRolesConfig();
+      const legacyAgent = readDefaultsConfig().defaults.agent;
+      const roles = readMatouRolesConfig(legacyAgent);
       if (roles) {
-        const defaultAgent = readDefaultsConfig().defaults.agent || 'codex';
+        const defaultAgent = roles.defaultAgent || legacyAgent || 'codex';
         content = `${content.trimEnd()}\n\n${formatMatouRolesMarkdown(roles, defaultAgent)}\n`;
       }
     }
@@ -1558,8 +1667,8 @@ async function main() {
   const previousState = cmd === 'start' ? null : loadState(task);
   if (previousState) heal(previousState);
   const configDefaults = cmd === 'start' ? readDefaultsConfig().defaults : {};
-  const roles = cmd === 'start' ? readMatouRolesConfig() : null;
-  const agent = cmd === 'start' ? opts.agent ?? configDefaults.agent ?? 'codex' : previousState.agent || 'codex';
+  const roles = readMatouRolesConfig(configDefaults.agent);
+  const agent = cmd === 'start' ? opts.agent ?? roles?.defaultAgent ?? configDefaults.agent ?? 'codex' : previousState.agent || 'codex';
   if (cmd === 'start') {
     const targetRole = roles?.agents?.find((a) => a.id === agent);
     if (targetRole && targetRole.enabled === false) {
@@ -1567,11 +1676,10 @@ async function main() {
     }
     const depth = Number(process.env.MATOU_FOREMAN_DEPTH) || 0;
     const parentAgent = process.env.MATOU_FOREMAN_PARENT_AGENT || '';
-    const dshRole = roles?.agents?.find((a) => a.id === 'dsh');
-    const subDispatchEnabled = roles?.allowSubDispatch !== false;
-    const dshAutoAllowed = !dshRole || (dshRole.enabled !== false && dshRole.mode === 'auto');
-    const allowedDshSubtask = subDispatchEnabled && depth === 1 && parentAgent === 'codex' && agent === 'dsh' && dshAutoAllowed;
-    if (depth >= 1 && !allowedDshSubtask) {
+    const canReceiveSubtask = roles
+      ? roles.allowSubDispatch && Boolean(parentAgent) && agent !== parentAgent && isAutoDispatchRole(targetRole)
+      : parentAgent === 'codex' && agent === 'dsh';
+    if (depth >= 1 && (depth !== 1 || !canReceiveSubtask)) {
       throw new Error('当前会话是 foreman 派出的执行者，禁止再次派活（防止递归套娃或已关闭二次转包）。');
     }
   }
@@ -1583,17 +1691,26 @@ async function main() {
     if (!opts.cd) throw new Error(usage);
     if (!fs.existsSync(opts.cd) || !fs.statSync(opts.cd).isDirectory()) throw new Error(`Work dir does not exist: ${opts.cd}`);
     if (fs.existsSync(statePath(task))) throw new Error(`Task ${task} already exists; use resume or pick a new name.`);
-    const { brief, message, agent: _agent, ...rest } = opts;
-    const dshRole = roles?.agents?.find((a) => a.id === 'dsh');
-    const allowDshSubDispatch = roles?.allowSubDispatch !== false && (!dshRole || (dshRole.enabled !== false && dshRole.mode === 'auto'));
-    state = { task, agent, createdAt: now(), status: 'new', threadId: null, pid: null, turns: [], options: { ...configuredDefaults(configDefaults, agent, [], roles), fullAccess: true, allowDshSubDispatch, ...rest } };
+    const { brief, message, speed, agent: _agent, ...rest } = opts;
+    state = { task, agent, createdAt: now(), status: 'new', threadId: null, pid: null, turns: [], options: {
+      ...configuredDefaults(configDefaults, agent, [], roles), fullAccess: true, ...rest,
+    } };
+    if (!roles) state.options.allowDshSubDispatch = true;
+    if (agent === 'codex' && speed != null) state.options.speedOverride = speed;
     try { state.options.gitRoot = execFileSync('git', ['-C', opts.cd, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { state.options.gitRoot = null; }
     prompt = await readPrompt(brief);
   } else if (cmd === 'resume' || cmd === 'send') {
     state = previousState;
     if (pidAlive(state.supervisorPid) || pidAlive(state.pid)) throw new Error(`Task ${task} 仍在运行 (still running).`);
     if (!state.threadId) throw new Error(`Task ${task} has no thread id yet; start it again under a new name.`);
-    for (const k of ['idleMin', 'maxMin', 'warnMin', 'retries', 'backoffMin', 'askWaitMin', 'model', 'effort']) if (opts[k] != null) state.options[k] = opts[k];
+    if (roles) {
+      for (const key of SUPERVISION_FIELDS) if (roles[key] != null) state.options[key] = roles[key];
+    }
+    for (const k of [...SUPERVISION_FIELDS, 'warnMin', 'backoffMin', 'model', 'effort']) if (opts[k] != null) state.options[k] = opts[k];
+    if (agent === 'codex') {
+      if (roles) state.options.serviceTier = codexRoleSpeed(roles.agents.find((a) => a.id === 'codex'));
+      if (opts.speed != null) state.options.speedOverride = opts.speed;
+    }
     if (opts.model != null) delete state.options.modelRequest;
     if (opts.fullAccess != null) state.options.fullAccess = opts.fullAccess;
     prompt = await readPrompt(opts.message);
@@ -1601,6 +1718,8 @@ async function main() {
     throw new Error(usage);
   }
   state.agent = agent;
+  if (roles) state.options.subDispatchPeers = configuredSubDispatchPeers(roles, agent);
+  else delete state.options.subDispatchPeers;
   const agentStatusDir = process.env.MATOU_AGENT_STATUS_DIR;
   if (agentStatusDir && path.isAbsolute(agentStatusDir)) state.options.agentStatusDir = agentStatusDir;
   fs.mkdirSync(path.join(runDir(task), 'logs'), { recursive: true });
@@ -1609,10 +1728,12 @@ async function main() {
   else if (agent === 'agy') {
     let request = cmd === 'start' ? state.options.model : opts.model;
     let resolveSeries = false;
-    const effortError = () => new Error(`${state.options.model} 没有可单独指定的推理档位；要指定档位请同时写 --model hydrogen、argon 或 carbon`);
-    if (opts.effort != null && request != null && !['hydrogen', 'argon', 'carbon'].includes(request.toLowerCase())) throw effortError();
+    const effortError = () => new Error(`${state.options.model} 没有可单独指定的推理档位；要指定档位请同时写 --model hydrogen、argon 或 carbon，也支持 neon、flash、claude-opus-5-5 和 claude-sonnet-5-5`);
+    if (opts.effort != null && request != null && ![...AGY_SERIES, ...AGY_EFFORT_FAMILIES].includes(request.toLowerCase())) throw effortError();
     if (cmd !== 'start' && request == null && opts.effort != null) {
-      request = /^gemini-\d+(?:\.\d+)*-([a-z0-9]+(?:-[a-z0-9]+)*)-(?:low|medium|high|xhigh)$/.exec(state.options.model)?.[1];
+      const previousFamily = state.options.modelRequest;
+      request = AGY_EFFORT_FAMILIES.includes(previousFamily) ? previousFamily
+        : /^gemini-\d+(?:\.\d+)*-([a-z0-9]+(?:-[a-z0-9]+)*)-(?:low|medium|high|xhigh)$/.exec(state.options.model)?.[1];
       if (!request) throw effortError();
       resolveSeries = true;
     }
