@@ -447,6 +447,15 @@ pub fn session_card_hit(bounds: &Bounds<Pixels>, position: Point<Pixels>) -> boo
     dx * dx + dy * dy <= f32::from(radius).powi(2)
 }
 
+fn click_requires_confirm(
+    focused: Option<&str>,
+    pointer_in_carousel: bool,
+    pointer_card: Option<&str>,
+    clicked: &str,
+) -> bool {
+    focused != Some(clicked) && pointer_in_carousel && pointer_card != Some(clicked)
+}
+
 struct WorkspaceDragMotion {
     scale: Transition,
     opacity: Transition,
@@ -2557,6 +2566,8 @@ pub struct Workspace {
     pending_close: Option<String>,
     carousel_scroll: ScrollHandle,
     carousel_drag: Option<(Point<Pixels>, Pixels)>,
+    pointer_card: Option<String>,
+    pointer_in_carousel: bool,
     motion_clock: Instant,
     #[cfg(debug_assertions)]
     motion_trace: Option<MotionTrace>,
@@ -3677,6 +3688,8 @@ impl Workspace {
             pending_close: None,
             carousel_scroll: ScrollHandle::new(),
             carousel_drag: None,
+            pointer_card: None,
+            pointer_in_carousel: false,
             motion_clock: Instant::now(),
             #[cfg(debug_assertions)]
             motion_trace: open_motion_trace(),
@@ -6746,6 +6759,8 @@ impl Workspace {
     }
 
     fn leave_carousel(&mut self, cx: &mut Context<Self>) {
+        self.pointer_card = None;
+        self.pointer_in_carousel = false;
         self.pointer_position = None;
         if self.hovered_child_badge.take().is_some() || self.edge_direction != 0 {
             cx.notify();
@@ -6921,6 +6936,7 @@ impl Workspace {
         let next = f64::from(f32::from(offset)).clamp(-max_scroll, 0.);
         self.carousel_scroll
             .set_offset(point(px(next as f32), px(0.)));
+        self.record_carousel_pointer(position);
         if let Some(focused) = self
             .geometry_focus()
             .filter(|id| self.order.iter().any(|card| card == id))
@@ -6936,6 +6952,11 @@ impl Workspace {
             None
         };
         cx.notify();
+    }
+
+    fn record_carousel_pointer(&mut self, position: Point<Pixels>) {
+        self.pointer_in_carousel = self.carousel_scroll.bounds().contains(&position);
+        self.pointer_card = self.carousel_hit(position, false);
     }
 
     fn stop_edge_browse(&mut self, block: bool) {
@@ -18130,6 +18151,10 @@ impl Render for Workspace {
         let layout = CarouselLayout::for_viewport(viewport_width);
         let narrow = layout.narrow;
         let in_split = split_tree.is_some();
+        if in_split {
+            self.pointer_card = None;
+            self.pointer_in_carousel = false;
+        }
         if narrow || in_split {
             self.hovered = None;
             self.hover_follow_until = None;
@@ -18684,6 +18709,20 @@ impl Render for Workspace {
                             return;
                         }
                         if !in_split
+                            && click_requires_confirm(
+                                this.level_focus(),
+                                this.pointer_in_carousel,
+                                this.pointer_card.as_deref(),
+                                &capture_session,
+                            )
+                        {
+                            // Confirm the card under the stationary pointer without focusing it.
+                            this.pointer_card = Some(capture_session.clone());
+                            this.carousel_drag = None;
+                            cx.stop_propagation();
+                            return;
+                        }
+                        if !in_split
                             && !capture_terminal.as_ref().is_some_and(|surface| {
                                 surface.read(cx).contains_position(event.position)
                             })
@@ -19169,6 +19208,7 @@ impl Render for Workspace {
                         } else if event.pressed_button.is_none() && bounds.contains(&event.position)
                             && !this.carousel_has_overlay(window)
                         {
+                            this.record_carousel_pointer(event.position);
                             if this.carousel_viewport_width(window) >= 720. {
                                 this.edge_intent(event.position, window, cx);
                             }
@@ -21374,9 +21414,52 @@ mod icon_tests {
 
 #[cfg(test)]
 mod carousel_tests {
-    use super::{CardElevation, CardMotion, Curve, card_shadows, session_card_hit, shadow};
+    use super::{
+        CardElevation, CardMotion, Curve, card_shadows, click_requires_confirm, session_card_hit,
+        shadow,
+    };
     use CardElevation::{Focused, Preview, Resting};
     use gpui::{Bounds, Rgba, point, px, rgb, size};
+
+    #[test]
+    fn clicking_focused_card_never_requires_confirmation() {
+        assert!(!click_requires_confirm(
+            Some("focused"),
+            true,
+            Some("other"),
+            "focused"
+        ));
+    }
+
+    #[test]
+    fn clicking_without_a_pointer_in_the_carousel_never_requires_confirmation() {
+        assert!(!click_requires_confirm(Some("focused"), false, None, "other"));
+    }
+
+    #[test]
+    fn clicking_the_recorded_card_does_not_require_confirmation() {
+        assert!(!click_requires_confirm(
+            Some("focused"),
+            true,
+            Some("other"),
+            "other"
+        ));
+    }
+
+    #[test]
+    fn clicking_a_replacement_card_requires_confirmation() {
+        assert!(click_requires_confirm(
+            Some("focused"),
+            true,
+            Some("focused"),
+            "other"
+        ));
+    }
+
+    #[test]
+    fn clicking_a_card_that_moved_into_a_gap_requires_confirmation() {
+        assert!(click_requires_confirm(Some("focused"), true, None, "other"));
+    }
 
     #[test]
     fn card_shadow_layers_match_the_reference_profiles() {
