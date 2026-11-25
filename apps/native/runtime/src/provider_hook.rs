@@ -15,12 +15,16 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use matou_native_core::pty::{LaunchProfile, ShellLaunch};
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
 use crate::codex_events;
-use crate::context_guard::interceptor::{HookEvaluation, HookInterceptor};
+use crate::context_guard::{
+    interceptor::{HookEvaluation, HookInterceptor},
+    managed_cli_instructions,
+};
 
 pub(crate) const IDENTITY_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const HOOK_QUEUE_CAPACITY: usize = 128;
@@ -30,13 +34,14 @@ const SHUTDOWN_DRAIN: Duration = Duration::from_millis(100);
 const MAX_HOOK_BYTES: usize = 1024 * 1024;
 const MAX_HEADERS: usize = 16 * 1024;
 const MAX_CONNECTIONS: usize = 8;
-const EVENTS: [(&str, u8); 9] = [
+const EVENTS: [(&str, u8); 10] = [
     ("SessionStart", 5),
     ("SessionEnd", 3),
     ("UserPromptSubmit", 5),
     ("PreToolUse", 10),
     ("PostToolUse", 10),
     ("PostToolUseFailure", 5),
+    ("PostCompact", 5),
     ("PermissionRequest", 10),
     ("Stop", 5),
     ("Notification", 5),
@@ -376,16 +381,25 @@ pub(crate) fn compose_managed_instructions(
     base: &str,
     foreman_available: bool,
     roles_markdown: Option<&str>,
+    context_instructions: Option<&str>,
 ) -> String {
-    if !foreman_available {
-        return base.to_owned();
+    let mut instructions = base.to_owned();
+    if foreman_available {
+        append_instruction_section(&mut instructions, FOREMAN_CAPABILITY_INDEX);
+        if let Some(roles) = roles_markdown {
+            append_instruction_section(&mut instructions, roles);
+        }
     }
-    let mut instructions = format!("{}\n\n{}", base.trim_end(), FOREMAN_CAPABILITY_INDEX);
-    if let Some(roles) = roles_markdown {
-        instructions.push_str("\n\n");
-        instructions.push_str(roles);
+    if let Some(context) = context_instructions {
+        append_instruction_section(&mut instructions, context);
     }
     instructions
+}
+
+fn append_instruction_section(instructions: &mut String, section: &str) {
+    instructions.truncate(instructions.trim_end().len());
+    instructions.push_str("\n\n");
+    instructions.push_str(section);
 }
 
 pub(crate) struct Registration {
@@ -393,6 +407,7 @@ pub(crate) struct Registration {
     registry: Registry,
     pub settings_path: PathBuf,
     script_path: PathBuf,
+    data_root: PathBuf,
     url: String,
     provider_assets: Option<tempfile::TempDir>,
 }
@@ -430,6 +445,7 @@ impl Registration {
             include_str!("../../../runtime/control-assets/providers/dsh-system-message.md"),
             foreman_available,
             roles_markdown,
+            managed_cli_instructions(&self.data_root, "dsh"),
         );
         write_private(
             &assets.path().join("dsh-system-message.md"),
@@ -464,6 +480,7 @@ impl Registration {
             include_str!("../../../runtime/control-assets/providers/antigravity-system-message.md"),
             foreman_available,
             roles_markdown,
+            managed_cli_instructions(&self.data_root, "antigravity"),
         );
         write_private(&path, system_message.as_bytes(), 0o600)?;
         self.provider_assets = Some(assets);
@@ -502,6 +519,7 @@ impl Registration {
             ),
             foreman_available,
             roles_markdown,
+            managed_cli_instructions(&self.data_root, "codex"),
         );
         let command = json!(callback_command(&self.url, &self.script_path)?);
         let status = if launch
@@ -607,8 +625,14 @@ impl ProviderHookServer {
             temporary: directory.join(format!("{token}.settings.json.tmp")),
         };
         if scope.profile == LaunchProfile::Antigravity {
+            let status_url = format!("{url}?kind=statusline");
+            let command = if cfg!(windows) {
+                windows_notification_command(&status_url)
+            } else {
+                callback_command(&status_url, &files.script)?
+            };
             let settings = json!({"statusLine": {
-                "type": "command", "command": callback_command(&format!("{url}?kind=statusline"), &files.script)?,
+                "type": "command", "command": command,
                 "stack_with_default": true,
             }});
             write_private(
@@ -635,10 +659,8 @@ impl ProviderHookServer {
                 LaunchProfile::Antigravity => format!(
                     "#!/bin/sh\npayload=$(cat)\n(printf '%s' \"$payload\" | /usr/bin/curl --noproxy '*' --silent --max-time 2 --request POST --header 'content-type: application/json' --data-binary @- '{url}?kind=statusline') </dev/null >/dev/null 2>&1 &\n"
                 ),
-                LaunchProfile::Codex => format!(
-                    "#!/bin/sh\n/usr/bin/curl --noproxy '*' --silent --show-error --max-time 2 --request POST --header 'content-type: application/json' --data-binary @- '{url}' >/dev/null 2>&1 || true\n"
-                ),
-                _ => status_script(&url),
+                LaunchProfile::Codex => synchronous_callback_script(&url),
+                _ => synchronous_callback_script(&format!("{url}?kind=statusline")),
             };
             write_private(&files.script, script.as_bytes(), 0o700)
                 .context("write provider hook script")?;
@@ -660,6 +682,7 @@ impl ProviderHookServer {
             registry: Arc::clone(&self.registry),
             settings_path,
             script_path,
+            data_root: data_root.to_path_buf(),
             url,
             provider_assets: None,
         })
@@ -734,8 +757,39 @@ fn callback_command_for_platform(url: &str, script: &Path, windows: bool) -> Res
 }
 
 fn windows_callback_command(url: &str) -> String {
-    // The URL is generated from the loopback port, token and optional callback kind.
-    // Double quotes work in both cmd and PowerShell. curl reads the original stdin.
+    // Codex uses cmd.exe by default. Encode PowerShell's command so neither
+    // shell interprets it. Inherit raw stdin and publish stdout only on success.
+    let script = format!(
+        r#"
+$ErrorActionPreference = 'Stop'
+try {{
+    $start = New-Object System.Diagnostics.ProcessStartInfo
+    $start.FileName = 'curl.exe'
+    $start.Arguments = '--disable --silent --fail --noproxy "*" --max-time 2 --request POST --header "content-type: application/json" --data-binary "@-" "{url}"'
+    $start.UseShellExecute = $false
+    $start.RedirectStandardOutput = $true
+    $process = [System.Diagnostics.Process]::Start($start)
+    $body = New-Object System.IO.MemoryStream
+    $process.StandardOutput.BaseStream.CopyTo($body)
+    $process.WaitForExit()
+    if ($process.ExitCode -eq 0) {{
+        $body.Position = 0
+        $body.CopyTo([Console]::OpenStandardOutput())
+    }}
+}} catch {{}}
+exit 0
+"#
+    );
+    let encoded = STANDARD.encode(
+        script
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>(),
+    );
+    format!("powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand {encoded}")
+}
+
+fn windows_notification_command(url: &str) -> String {
     format!(
         r#"curl.exe --disable --silent --noproxy "*" --max-time 2 --output NUL --request POST --header "content-type: application/json" --data-binary "@-" "{url}""#
     )
@@ -908,7 +962,7 @@ fn settings(url: &str, script: &Path) -> Result<Value> {
         .collect();
     // Claude Code dispatches SessionStart to command hooks only.
     let session_start = if cfg!(windows) {
-        windows_callback_command(url)
+        windows_notification_command(url)
     } else {
         format!(
             "/usr/bin/curl --disable --silent --noproxy '*' --max-time 2 --output /dev/null --header 'content-type: application/json' --data-binary @- '{url}'"
@@ -931,9 +985,9 @@ fn settings(url: &str, script: &Path) -> Result<Value> {
 }
 
 #[cfg(not(windows))]
-fn status_script(url: &str) -> String {
+fn synchronous_callback_script(url: &str) -> String {
     format!(
-        "#!/bin/sh\n/usr/bin/curl --silent --show-error --max-time 2 --request POST --header 'content-type: application/json' --data-binary @- '{url}?kind=statusline' >/dev/null 2>&1 || true\n"
+        "#!/bin/sh\nresponse=$(/usr/bin/curl --disable --silent --fail --noproxy '*' --max-time 2 --request POST --header 'content-type: application/json' --data-binary @- '{url}' 2>/dev/null && printf '.') || exit 0\nprintf '%s' \"${{response%.}}\"\n"
     )
 }
 
@@ -1061,11 +1115,7 @@ fn evaluate_hook_fail_open(
     if spawned.is_err() {
         return HookEvaluation::allow();
     }
-    let wait = if profile == LaunchProfile::ClaudeCode {
-        deadline.saturating_duration_since(Instant::now())
-    } else {
-        budget
-    };
+    let wait = deadline.saturating_duration_since(Instant::now());
     rx.recv_timeout(wait)
         .unwrap_or_else(|_| HookEvaluation::allow())
 }
@@ -1125,10 +1175,12 @@ fn read_request(
         .ok_or(NOT_FOUND)?;
     let (token, kind) = path.split_once('?').unwrap_or((path, ""));
     let statusline = kind == "kind=statusline";
-    let pre_tool_use = kind == "kind=pre-tool-use";
-    if !kind.is_empty() && !statusline && !pre_tool_use {
-        return Err(NOT_FOUND);
-    }
+    let tool_event = match kind {
+        "kind=pre-tool-use" => Some("PreToolUse"),
+        "kind=post-tool-use" => Some("PostToolUse"),
+        "" | "kind=statusline" => None,
+        _ => return Err(NOT_FOUND),
+    };
     if !matches!(fields.next(), Some("HTTP/1.0" | "HTTP/1.1")) || fields.next().is_some() {
         return Err(BAD_REQUEST);
     }
@@ -1185,7 +1237,7 @@ fn read_request(
     } else {
         append_body(&mut reader, &mut body, length.ok_or(BAD_REQUEST)?)?;
     }
-    let payload: Map<String, Value> = match serde_json::from_slice(&body) {
+    let mut payload: Map<String, Value> = match serde_json::from_slice(&body) {
         Ok(payload) => payload,
         Err(_) if profile == LaunchProfile::ClaudeCode && !statusline => {
             return Ok((HookEvaluation::allow(), None));
@@ -1194,6 +1246,23 @@ fn read_request(
     };
     let mut registry = registry.lock().unwrap();
     let record = registry.get_mut(token).ok_or(NOT_FOUND)?;
+    if let Some(event) = tool_event {
+        if record.scope.profile != LaunchProfile::Antigravity {
+            return Err(NOT_FOUND);
+        }
+        payload.remove("hook_event_name");
+        payload.insert("hookEventName".to_owned(), json!(event));
+    }
+    let agy_pre_tool_use = record.scope.profile == LaunchProfile::Antigravity
+        && payload.get("hookEventName").and_then(Value::as_str) == Some("PreToolUse");
+    let provider_response = |mut evaluation: HookEvaluation| {
+        if agy_pre_tool_use && evaluation.response_json == "{}" {
+            // The native response requires a decision. Allow leaves approval to
+            // the next hook or Antigravity's default permission policy.
+            evaluation.response_json = r#"{"decision":"allow"}"#.to_owned();
+        }
+        evaluation
+    };
     if record.retired.is_some() {
         if !record.reported_retirement
             && send
@@ -1202,12 +1271,9 @@ fn read_request(
         {
             record.reported_retirement = true;
         }
-        return Ok((HookEvaluation::allow(), None));
+        return Ok((provider_response(HookEvaluation::allow()), None));
     }
     let received_at = Instant::now();
-    if pre_tool_use && record.scope.profile != LaunchProfile::Antigravity {
-        return Err(NOT_FOUND);
-    }
     let eval_scope = (!statusline).then(|| {
         (
             record.data_root.clone(),
@@ -1249,7 +1315,9 @@ fn read_request(
     match send.try_send(message) {
         Ok(()) => {
             let Some((data_root, profile, session_id, payload_val)) = eval_scope else {
-                return Ok((HookEvaluation::allow(), None));
+                let mut response = HookEvaluation::allow();
+                response.response_json.clear();
+                return Ok((response, None));
             };
             let decision = evaluate_hook_fail_open(
                 interceptor,
@@ -1260,9 +1328,12 @@ fn read_request(
                 HOOK_DECISION_BUDGET,
             );
             Ok((
-                decision,
-                // Only the Claude route currently consumes these response shapes.
-                (profile == LaunchProfile::ClaudeCode).then_some((data_root, session_id)),
+                provider_response(decision),
+                matches!(
+                    profile,
+                    LaunchProfile::ClaudeCode | LaunchProfile::Antigravity
+                )
+                .then_some((data_root, session_id)),
             ))
         }
         Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
@@ -1372,6 +1443,253 @@ mod tests {
             .context("HTTP response headers")?
             .1
             .to_owned())
+    }
+
+    fn replay_callback(
+        command: &mut std::process::Command,
+        payload: &str,
+    ) -> Result<std::process::Output> {
+        use std::process::Stdio;
+
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        child
+            .stdin
+            .take()
+            .context("callback stdin")?
+            .write_all(payload.as_bytes())?;
+        Ok(child.wait_with_output()?)
+    }
+
+    fn callback_fixture(
+        listener: TcpListener,
+        response: &'static str,
+        stall_after_body: Option<Duration>,
+    ) -> JoinHandle<Result<(String, String)>> {
+        thread::spawn(move || {
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_secs(3)))?;
+            let mut reader = BufReader::new(&mut socket);
+            let mut request = String::new();
+            reader.read_line(&mut request)?;
+            let mut length = 0;
+            loop {
+                let mut header = String::new();
+                ensure!(
+                    reader.read_line(&mut header)? > 0,
+                    "missing callback headers"
+                );
+                if header == "\r\n" {
+                    break;
+                }
+                if let Some(value) = header.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse::<usize>()?;
+                }
+            }
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body)?;
+            write!(
+                socket,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",
+                response.len() + usize::from(stall_after_body.is_some())
+            )?;
+            if let Some(delay) = stall_after_body {
+                thread::sleep(delay);
+            }
+            Ok((request, String::from_utf8(body)?))
+        })
+    }
+
+    #[test]
+    fn codex_callback_preserves_raw_decision_and_fails_open_on_connection_errors() -> Result<()> {
+        use std::process::Command;
+
+        let root = tempfile::tempdir()?;
+        let payload = "{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Read\"}\n";
+        let decision = "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"决策\"}}\n\n";
+        for (case, stall) in [
+            ("success", None),
+            ("timeout", Some(Duration::from_millis(2300))),
+            ("unreachable", None),
+        ] {
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+            let url = format!("http://{}/hooks/fixture", listener.local_addr()?);
+            let fixture = if case == "unreachable" {
+                drop(listener);
+                None
+            } else {
+                Some(callback_fixture(listener, decision, stall))
+            };
+            let script = root.path().join(format!("{case}.sh"));
+            #[cfg(unix)]
+            let mut command = {
+                write_private(&script, synchronous_callback_script(&url).as_bytes(), 0o700)?;
+                let mut shell = Command::new("/bin/sh");
+                shell.args(["-c", &callback_command(&url, &script)?]);
+                shell
+            };
+            #[cfg(windows)]
+            let mut command = {
+                use std::os::windows::process::CommandExt;
+                let callback = callback_command(&url, &script)?;
+                let mut shell = Command::new("cmd.exe");
+                shell.args(["/D", "/C"]).raw_arg(format!(r#""{callback}""#));
+                shell
+            };
+            let output = replay_callback(&mut command, payload)?;
+            let expected = if case == "success" { decision } else { "" };
+            assert!(output.status.success(), "{case}: {:?}", output);
+            assert_eq!(output.stdout, expected.as_bytes(), "{case}");
+            assert!(output.stderr.is_empty(), "{case}: {:?}", output);
+            if let Some(worker) = fixture {
+                let (request, raw_body) = worker.join().unwrap()?;
+                assert_eq!(request, "POST /hooks/fixture HTTP/1.1\r\n");
+                assert_eq!(raw_body, payload);
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn antigravity_script_routes_tool_events_without_waiting_for_post_tool_use() -> Result<()> {
+        use std::process::Command;
+
+        let temporary = tempfile::tempdir()?;
+        let plugin = temporary.path().canonicalize()?.join("matou");
+        crate::antigravity_launch::ensure_plugin_installed(&plugin)?;
+        let hooks: Value = serde_json::from_reader(File::open(plugin.join("hooks.json"))?)?;
+        let decision = "{\"decision\":\"allow\",\"overwrite\":{\"CommandLine\":\"mt ctx exec -- git status\"}}\n\n";
+        let nested = "{\"toolCall\":{\"name\":\"run_command\",\"args\":{\"CommandLine\":\"git status\",\"WaitMsBeforeAsync\":5000}}}\n";
+        let old = "{\"hookEventName\":  \"PreToolUse\"}\n";
+        for (command, kind, payload, stall) in [
+            (
+                hooks["matou"]["PreToolUse"][0]["hooks"][0]["command"]
+                    .as_str()
+                    .unwrap(),
+                "pre-tool-use",
+                nested,
+                None,
+            ),
+            (
+                hooks["matou"]["PostToolUse"][0]["hooks"][0]["command"]
+                    .as_str()
+                    .unwrap(),
+                "post-tool-use",
+                old,
+                Some(Duration::from_millis(750)),
+            ),
+            ("./hooks/matou-hook.sh", "pre-tool-use", old, None),
+            (
+                "./hooks/matou-hook.sh pre-tool-use",
+                "pre-tool-use",
+                nested,
+                Some(Duration::from_millis(1300)),
+            ),
+        ] {
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+            let url = format!("http://{}/hooks/fixture", listener.local_addr()?);
+            let fixture = callback_fixture(listener, decision, stall);
+            let started = Instant::now();
+            let output = replay_callback(
+                Command::new("/bin/sh")
+                    .args(["-c", command])
+                    .current_dir(&plugin)
+                    .env("MATOU_PROVIDER_HOOK_URL", url)
+                    .env("MATOU_PROVIDER_HOOK_TOKEN", "test"),
+                payload,
+            )?;
+            let elapsed = started.elapsed();
+            let expected = if stall.is_none() { decision } else { "" };
+            assert!(output.status.success());
+            assert_eq!(output.stdout, expected.as_bytes());
+            if kind == "post-tool-use" {
+                assert!(
+                    elapsed < Duration::from_millis(750),
+                    "async hook took {elapsed:?}"
+                );
+            } else if stall.is_some() {
+                assert!(
+                    (Duration::from_millis(850)..Duration::from_millis(1300)).contains(&elapsed),
+                    "timeout took {elapsed:?}"
+                );
+            }
+            let (request, raw_body) = fixture.join().unwrap()?;
+            assert_eq!(
+                request,
+                format!("POST /hooks/fixture?kind={kind} HTTP/1.1\r\n")
+            );
+            assert_eq!(raw_body, payload);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn antigravity_ingress_accepts_event_hint_and_records_delivered_read_savings() -> Result<()> {
+        use crate::context_guard::store::get_saved_stats;
+        use matou_native_core::context_optimizer_config::{
+            AgentOptimizerSettings, ContextOptimizerConfig,
+        };
+
+        let root = tempfile::tempdir()?;
+        ContextOptimizerConfig::for_data_root(root.path()).set_agent_settings(
+            "antigravity",
+            AgentOptimizerSettings {
+                read_dedup: true,
+                block_sensitive_reads: true,
+                ..Default::default()
+            },
+        )?;
+        let path = root.path().join("source.txt");
+        let content = "repeatable for deduplication\n".repeat(350);
+        fs::write(&path, &content)?;
+        let server = ProviderHookServer::start()?;
+        let registration = server.register(
+            root.path(),
+            Scope {
+                profile: LaunchProfile::Antigravity,
+                ..scope("agy")
+            },
+        )?;
+        let post = |kind: &str, payload: &Value| -> Result<Value> {
+            let body = payload.to_string();
+            let mut socket = TcpStream::connect((Ipv4Addr::LOCALHOST, server.port))?;
+            socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+            write!(
+                socket,
+                "POST /hooks/{}?kind={kind} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{body}",
+                registration.token,
+                body.len()
+            )?;
+            let mut response = String::new();
+            socket.read_to_string(&mut response)?;
+            ensure!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+            Ok(serde_json::from_str(
+                response.split_once("\r\n\r\n").context("response")?.1,
+            )?)
+        };
+        let read = |path: &Path, step| json!({"toolCall":{"name":"view_file","args":{"AbsolutePath":path}}, "conversationId":"agy-host", "stepIdx":step});
+        assert_eq!(
+            post("pre-tool-use", &read(&path, 19))?,
+            json!({"decision":"allow"})
+        );
+        assert_eq!(post("post-tool-use", &read(&path, 19))?, json!({}));
+        let response = post("pre-tool-use", &read(&path, 20))?;
+        assert_eq!(response["decision"], "deny");
+        assert_eq!(server.saved_noise_bytes("session"), content.len() as u64);
+        let stats = serde_json::to_value(get_saved_stats(root.path(), SystemTime::now()))?;
+        assert_eq!(
+            stats["agents"]["antigravity"],
+            json!({"bytes7d":content.len(), "events7d":1})
+        );
+        assert_eq!(
+            post("pre-tool-use", &read(&root.path().join(".env"), 21))?["decision"],
+            "deny"
+        );
+        Ok(())
     }
 
     #[test]
@@ -1695,13 +2013,22 @@ mod tests {
         let endpoint = "http://127.0.0.1:9000/hooks/token";
         for url in [endpoint.to_owned(), format!("{endpoint}?kind=statusline")] {
             let command = callback_command_for_platform(&url, script, true)?;
-            assert_eq!(
-                command,
-                format!(
-                    r#"curl.exe --disable --silent --noproxy "*" --max-time 2 --output NUL --request POST --header "content-type: application/json" --data-binary "@-" "{url}""#
-                )
-            );
+            let encoded = command
+                .strip_prefix("powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ")
+                .context("shell-neutral Windows callback")?;
+            let bytes = STANDARD.decode(encoded)?;
+            let script = String::from_utf16(
+                &bytes
+                    .chunks_exact(2)
+                    .map(|word| u16::from_le_bytes([word[0], word[1]]))
+                    .collect::<Vec<_>>(),
+            )?;
+            assert!(script.contains(&format!(r#"--data-binary "@-" "{url}""#)));
+            assert!(script.contains("--fail --noproxy \"*\" --max-time 2"));
+            assert!(!script.contains("RedirectStandardInput"));
+            assert!(!script.contains("--output NUL"));
         }
+        assert!(windows_notification_command(endpoint).contains("--output NUL"));
         Ok(())
     }
 
@@ -1797,10 +2124,10 @@ mod tests {
 
         let base = "Base host instructions.\n";
         assert_eq!(
-            compose_managed_instructions(base, false, Some("roles")),
+            compose_managed_instructions(base, false, Some("roles"), None),
             base
         );
-        let composed = compose_managed_instructions(base, true, Some("roles"));
+        let composed = compose_managed_instructions(base, true, Some("roles"), None);
         assert!(composed.starts_with("Base host instructions.\n\n"));
         assert!(composed.contains("mt-foreman guide"));
         assert!(composed.contains("MATOU_FOREMAN_DEPTH"));
@@ -1834,7 +2161,96 @@ mod tests {
         for path in [agy_file, directory.join("dsh-system-message.md")] {
             let message = fs::read_to_string(path)?;
             assert!(message.contains(FOREMAN_CAPABILITY_INDEX));
-            assert!(message.ends_with(&expected));
+            assert!(message.contains(&expected));
+            assert!(message.ends_with(managed_cli_instructions(root.path(), "dsh").unwrap()));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn managed_context_instructions_follow_each_provider_switch() -> Result<()> {
+        use matou_native_core::context_optimizer_config::{
+            AgentOptimizerSettings, ContextOptimizerConfig,
+        };
+
+        let root = tempfile::tempdir()?;
+        let config = ContextOptimizerConfig::for_data_root(root.path());
+        let server = ProviderHookServer::start()?;
+        let agy_base =
+            include_str!("../../../runtime/control-assets/providers/antigravity-system-message.md");
+        let codex_base = include_str!(
+            "../../../runtime/control-assets/providers/codex-developer-instructions.md"
+        );
+        let dsh_base =
+            include_str!("../../../runtime/control-assets/providers/dsh-system-message.md");
+        for (enabled, cli_tools) in [(true, true), (true, false), (false, true)] {
+            for agent in ["antigravity", "codex", "dsh"] {
+                config.set_agent_settings(
+                    agent,
+                    AgentOptimizerSettings {
+                        enabled,
+                        cli_tools,
+                        ..Default::default()
+                    },
+                )?;
+            }
+            let register = |profile| {
+                server.register(
+                    root.path(),
+                    Scope {
+                        profile,
+                        ..scope("instructions")
+                    },
+                )
+            };
+            let mut agy = register(LaunchProfile::Antigravity)?;
+            let mut dsh = register(LaunchProfile::Dsh)?;
+            let codex = register(LaunchProfile::Codex)?;
+            let agy_message =
+                fs::read_to_string(agy.attach_antigravity_instructions(false, None)?)?;
+            let dsh_patch = dsh.attach_dsh(
+                "- id: dsh-tui\n  config:\n    model: offline\n",
+                "dsh",
+                false,
+                None,
+            )?;
+            let dsh_message =
+                fs::read_to_string(dsh_patch.with_file_name("dsh-system-message.md"))?;
+            let mut launch = ShellLaunch {
+                profile: LaunchProfile::Codex,
+                executable: PathBuf::from("codex"),
+                argv: Vec::new(),
+                cwd: root.path().to_path_buf(),
+                data_root: root.path().to_path_buf(),
+                inherited_env: Default::default(),
+                env: Default::default(),
+                cols: 80,
+                rows: 24,
+            };
+            codex.attach_codex(&mut launch, false, None)?;
+            let codex_message: String = serde_json::from_str(
+                launch.argv[1]
+                    .strip_prefix("developer_instructions=")
+                    .unwrap(),
+            )?;
+            assert!(launch.argv[3].contains("PostCompact = ["));
+            for (agent, message, base) in [
+                ("antigravity", agy_message, agy_base),
+                ("codex", codex_message, codex_base),
+                ("dsh", dsh_message, dsh_base),
+            ] {
+                if enabled && cli_tools {
+                    let note = managed_cli_instructions(root.path(), agent).unwrap();
+                    assert!(note.contains("mt ctx outline"));
+                    assert_eq!(
+                        note.lines().filter(|line| line.starts_with("- ")).count(),
+                        4
+                    );
+                    assert_eq!(message, format!("{}\n\n{note}", base.trim_end()));
+                } else {
+                    assert_eq!(message, base);
+                }
+            }
         }
         Ok(())
     }
@@ -1856,13 +2272,14 @@ mod tests {
                 .all(|byte| byte.is_ascii_alphanumeric() || b"-_".contains(&byte))
         );
         assert!(b"AEIMQUYcgkosw048".contains(&run.token.as_bytes()[42]));
-        assert_eq!(config["hooks"].as_object().unwrap().len(), 9);
+        assert_eq!(config["hooks"].as_object().unwrap().len(), EVENTS.len());
         for (event, timeout) in [
             ("SessionEnd", 3),
             ("UserPromptSubmit", 5),
             ("PreToolUse", 10),
             ("PostToolUse", 10),
             ("PostToolUseFailure", 5),
+            ("PostCompact", 5),
             ("PermissionRequest", 10),
             ("Stop", 5),
             ("Notification", 5),
@@ -1890,9 +2307,7 @@ mod tests {
             );
             assert_eq!(
                 fs::read_to_string(&script)?,
-                format!(
-                    "#!/bin/sh\n/usr/bin/curl --silent --show-error --max-time 2 --request POST --header 'content-type: application/json' --data-binary @- '{url}?kind=statusline' >/dev/null 2>&1 || true\n"
-                )
+                synchronous_callback_script(&format!("{url}?kind=statusline"))
             );
             assert_eq!(fs::read_dir(script.parent().unwrap())?.count(), 2);
         }

@@ -4,6 +4,49 @@ vi.mock('node:fs', () => ({ statSync: () => ({ size: 1, isFile: () => true }),
   readFileSync: () => JSON.stringify(ledger.rows) }))
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); vi.unstubAllEnvs() })
 
+it('reports only a matching, successful compaction and strips summary and error content', async () => {
+  vi.useFakeTimers()
+  const rows: { event_type: string; event_data: unknown }[] = []
+  vi.stubGlobal('fetch', vi.fn(async (_url: URL, init: { body: string }) => {
+    rows.push(JSON.parse(init.body))
+    return { ok: true }
+  }))
+  const bridge = await import(new URL('../../control-assets/providers/dsh/bridge.mjs', import.meta.url).href)
+  const main = { session: { id: 'main' }, status: 'running' }
+  const other = { session: { id: 'other' }, status: 'idle' }
+  ledger.rows = [{ pid: process.pid, sessionId: 'main' }]
+  const handlers = new Map<string, (...args: any[]) => unknown>()
+  let dispose = () => {}
+  bridge.apply({
+    on: (name: string, handler: (...args: any[]) => unknown) => { handlers.set(name, handler); return () => handlers.delete(name) },
+    get: () => ({ list: () => [main, other] }), provide: () => () => {},
+    effect: (factory: () => () => void) => { dispose = factory() }
+  }, { hookUrl: 'http://127.0.0.1:1/hooks/fixture', runId: 'run' })
+  try {
+    const event = handlers.get('session/event')!
+    event(other.session, { type: 'compaction/summary', data: { id: 'other-agent', summary: 'private parked summary' } })
+    event(main.session, { type: 'compaction/end', data: { id: 'other-agent', completed: true } })
+    event(main.session, { type: 'compaction/summary', data: { compactionId: 'success', summary: 'private summary', name: 'private name' } })
+    event(main.session, { type: 'compaction/end', data: { id: 'unmatched' } })
+    event(main.session, { type: 'compaction/end', data: { id: 'success' } })
+    event(main.session, { type: 'compaction/end', data: { id: 'success' } })
+    event(main.session, { type: 'compaction/summary', data: { id: 'failure', summary: 'private summary' } })
+    event(main.session, { type: 'compaction/end', data: { compactionId: 'failure', error: 'private error' } })
+    event(main.session, { type: 'compaction/end', data: { compactionId: 'failure' } })
+    await vi.advanceTimersByTimeAsync(1)
+    expect(rows.filter(row => row.event_type.startsWith('compaction/')).map(row => [row.event_type, row.event_data])).toEqual([
+      ['compaction/end', { compactionId: 'other-agent', completed: false }],
+      ['compaction/summary', { compactionId: 'success' }],
+      ['compaction/end', { compactionId: 'unmatched', completed: false }],
+      ['compaction/end', { compactionId: 'success', completed: true }],
+      ['compaction/end', { compactionId: 'success', completed: false }],
+      ['compaction/summary', { compactionId: 'failure' }],
+      ['compaction/end', { compactionId: 'failure', completed: false }],
+      ['compaction/end', { compactionId: 'failure', completed: false }]
+    ])
+  } finally { dispose() }
+})
+
 it('revokes background ownership before the next poll and never forwards the previous session after a switch', async () => {
   vi.useFakeTimers()
   const fetch = vi.fn(async () => ({ ok: true }))
