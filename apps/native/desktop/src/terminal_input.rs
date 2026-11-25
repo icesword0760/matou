@@ -128,8 +128,6 @@ pub(crate) fn encode_paste(text: &str, modes: InputModes) -> Vec<u8> {
     bytes
 }
 
-pub(crate) const CLAUDE_SCROLL_TO_BOTTOM: &[u8] = b"\x1b[1;5F";
-
 /// Printable characters are committed by the platform text handler.
 pub(crate) fn terminal_key(
     key: &str,
