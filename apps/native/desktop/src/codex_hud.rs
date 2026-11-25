@@ -16,7 +16,7 @@ use serde_json::Value;
 use super::InterfaceLocale;
 use super::{
     CardTooltip, card_tooltip_box, footer_bounds_probe, footer_text, footer_token_count,
-    popover_colors,
+    popover_colors, shadow,
 };
 use crate::ui_text::ui_text;
 
@@ -25,22 +25,12 @@ pub(super) const MODEL_HIDE_BELOW: f32 = 210.;
 /// `.status-priority-7` hides the context ring at 250pt or less.
 pub(super) const CONTEXT_HIDE_BELOW: f32 = 250.;
 
-const RING_SIZE: f32 = 14.;
+const RING_SIZE: f32 = 11.;
 const RING_GAP: f32 = 4.;
-const RING_LABEL_SIZE: f32 = 11.;
-const RING_LABEL_LINE_HEIGHT: f32 = 14.;
-/// SVG `circle r=8` in a 20 viewBox at 14pt, and `stroke-width: 2.5`.
-const RING_RADIUS: f32 = RING_SIZE * 8. / 20.;
-const RING_STROKE: f32 = 2.5 * RING_SIZE / 20.;
-const RING_TRACK: u32 = 0x21262d;
-const CONTEXT_GREEN: u32 = 0x3fb950;
-const CONTEXT_YELLOW: u32 = 0xd29922;
+const RING_RADIUS: f32 = 4.5;
+const RING_STROKE: f32 = 2.;
 const CONTEXT_RED: u32 = 0xf85149;
-const TOOL_DETAIL_COLOR: u32 = 0x8b949e;
-const TOOL_DETAIL_HOVER_COLOR: u32 = 0x57606a;
-const TOOL_DETAIL_HOVER_BG: u32 = 0x1f28370f;
-const DETAIL_MAX_WIDTH: f32 = 320.;
-const DETAIL_MIN_WIDTH: f32 = 156.;
+const AGENT_NEUTRAL_COLOR: u32 = 0x8b949e;
 /// `.hud-agents-tooltip` clamps both bounds against `calc(100vw - 24px)`.
 const AGENTS_MIN_WIDTH: f32 = 180.;
 const AGENTS_MAX_WIDTH: f32 = 440.;
@@ -60,16 +50,6 @@ const AGENT_DETAIL_INDENT: f32 = AGENT_DOT_COLUMN + AGENT_COLUMN_GAP;
 /// `.hud-agents-tooltip .hud-agent-list { gap: 6px }`; other slots keep 3pt.
 const AGENT_LIST_GAP: f32 = 6.;
 
-struct RunningTool {
-    name: SharedString,
-    target: Option<SharedString>,
-}
-
-struct ToolCount {
-    name: SharedString,
-    count: u64,
-}
-
 /// Optional `node["codexHud"]` payload. Every field stands alone; the model
 /// falls back to `node["model"]` only when the payload object is absent.
 pub(super) struct CodexHud {
@@ -78,8 +58,6 @@ pub(super) struct CodexHud {
     effort: Option<SharedString>,
     context_percent: Option<f64>,
     context_window: Option<f64>,
-    running_tools: Vec<RunningTool>,
-    tool_counts: Vec<ToolCount>,
 }
 
 impl CodexHud {
@@ -119,42 +97,12 @@ impl CodexHud {
         let context_window = payload
             .and_then(|payload| payload["contextWindowSize"].as_f64())
             .filter(|window| window.is_finite() && *window > 0.);
-        let running_tools = payload
-            .and_then(|payload| payload["runningTools"].as_array())
-            .map(|tools| {
-                tools
-                    .iter()
-                    .filter_map(|tool| {
-                        Some(RunningTool {
-                            name: clean_text(&tool["name"])?,
-                            target: clean_text(&tool["target"]),
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let tool_counts = payload
-            .and_then(|payload| payload["toolCounts"].as_array())
-            .map(|counts| {
-                counts
-                    .iter()
-                    .filter_map(|tool| {
-                        Some(ToolCount {
-                            name: clean_text(&tool["name"])?,
-                            count: nonnegative_count(&tool["count"])?,
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
         Self {
             model,
             full_model,
             effort,
             context_percent,
             context_window,
-            running_tools,
-            tool_counts,
         }
     }
 
@@ -188,57 +136,6 @@ impl CodexHud {
 
     pub(super) fn context_percent(&self) -> Option<f64> {
         self.context_percent
-    }
-
-    fn tool_total(&self) -> u64 {
-        let running = self.running_tools.len() as u64;
-        self.tool_counts
-            .iter()
-            .fold(running, |total, tool| total.saturating_add(tool.count))
-    }
-
-    fn tool_details(&self, locale: InterfaceLocale) -> Vec<SharedString> {
-        let running = locale.text("运行中", "Running");
-        self.running_tools
-            .iter()
-            .map(|tool| {
-                let mut item = format!("{} · {running}", tool.name);
-                if let Some(target) = &tool.target {
-                    item.push_str(&format!(" · {target}"));
-                }
-                SharedString::from(item)
-            })
-            .chain(
-                self.tool_counts
-                    .iter()
-                    .filter(|tool| tool.count > 0)
-                    .map(|tool| {
-                        SharedString::from(match locale {
-                            InterfaceLocale::Chinese => {
-                                format!("{} · {} 次", tool.name, tool.count)
-                            }
-                            InterfaceLocale::English => format!(
-                                "{} · {} {}",
-                                tool.name,
-                                tool.count,
-                                if tool.count == 1 { "call" } else { "calls" }
-                            ),
-                        })
-                    }),
-            )
-            .collect()
-    }
-
-    pub(super) fn tools_detail(&self, locale: InterfaceLocale) -> Option<Detail> {
-        let total = self.tool_total();
-        (total > 0).then(|| Detail {
-            id: "tools",
-            label: format!("{total} Tools"),
-            progress: None,
-            title: locale.text("工具调用", "Tool calls"),
-            rows: DetailRows::Plain(self.tool_details(locale)),
-            color: rgb(TOOL_DETAIL_COLOR),
-        })
     }
 }
 
@@ -276,8 +173,13 @@ pub(super) fn model_slot(
         .tooltip(move |_, cx| cx.new(|_| CardTooltip(tooltip.clone())).into())
 }
 
-/// Frozen `ContextRing`: 14pt ring, a 4pt gap, and an 11pt percentage label.
-pub(super) fn context_ring(percent: f64, tokens: Option<(u64, u64)>) -> Stateful<Div> {
+/// Match the footer mockup's 11pt ring and 4pt gap to the percentage label.
+pub(super) fn context_ring(
+    percent: f64,
+    tokens: Option<(u64, u64)>,
+    palette: FooterPalette,
+    dark: bool,
+) -> Stateful<Div> {
     let label = format_context_percent(percent);
     let mut tooltip = format!("Context: {label}");
     if let Some((used, window)) = tokens {
@@ -288,7 +190,8 @@ pub(super) fn context_ring(percent: f64, tokens: Option<(u64, u64)>) -> Stateful
         ));
     }
     let tooltip = SharedString::from(tooltip);
-    let color = context_color(percent);
+    let (ring, text) = context_colors(percent, palette, dark);
+    let track = rgb(if dark { 0x363636 } else { 0xdadce0 });
     div()
         .id("footer-context")
         .flex_none()
@@ -296,18 +199,12 @@ pub(super) fn context_ring(percent: f64, tokens: Option<(u64, u64)>) -> Stateful
         .items_center()
         .gap(px(RING_GAP))
         .children(footer_bounds_probe("context"))
-        .child(context_ring_canvas(percent, color))
-        .child(
-            div()
-                .text_size(px(RING_LABEL_SIZE))
-                .line_height(px(RING_LABEL_LINE_HEIGHT))
-                .text_color(rgb(color))
-                .child(footer_text("context", label)),
-        )
+        .child(context_ring_canvas(percent, ring, track))
+        .child(div().text_color(text).child(footer_text("context", label)))
         .tooltip(move |_, cx| cx.new(|_| CardTooltip(tooltip.clone())).into())
 }
 
-fn context_ring_canvas(percent: f64, color: u32) -> impl IntoElement {
+fn context_ring_canvas(percent: f64, color: Rgba, track: Rgba) -> impl IntoElement {
     canvas(
         |_, _, _| (),
         move |bounds, _, window, _| {
@@ -319,7 +216,7 @@ fn context_ring_canvas(percent: f64, color: u32) -> impl IntoElement {
                 radius,
                 -std::f32::consts::FRAC_PI_2,
                 std::f32::consts::TAU,
-                RING_TRACK,
+                track,
             );
             let fraction = (percent / 100.).clamp(0., 1.) as f32;
             if fraction > 0. {
@@ -344,7 +241,7 @@ fn paint_ring(
     radius: Pixels,
     start: f32,
     sweep: f32,
-    color: u32,
+    color: Rgba,
 ) {
     if !(sweep > 0.) {
         return;
@@ -366,17 +263,19 @@ fn paint_ring(
         );
     }
     if let Ok(path) = path.build() {
-        window.paint_path(path, rgb(color));
+        window.paint_path(path, color);
     }
 }
 
-fn context_color(percent: f64) -> u32 {
-    if percent >= 85. {
-        CONTEXT_RED
-    } else if percent >= 70. {
-        CONTEXT_YELLOW
+fn context_colors(percent: f64, palette: FooterPalette, dark: bool) -> (Rgba, Rgba) {
+    if percent >= 68. {
+        let danger = rgb(if dark { CONTEXT_RED } else { 0xcf222e });
+        (danger, danger)
     } else {
-        CONTEXT_GREEN
+        (
+            rgba(palette.model),
+            rgb(if dark { 0x8b949e } else { 0x57606a }),
+        )
     }
 }
 
@@ -419,28 +318,6 @@ fn nonnegative_count(value: &Value) -> Option<u64> {
     })
 }
 
-#[derive(Clone)]
-enum DetailRows {
-    Plain(Vec<SharedString>),
-    Agents(Vec<AgentRow>),
-}
-
-impl DetailRows {
-    fn is_empty(&self) -> bool {
-        match self {
-            Self::Plain(rows) => rows.is_empty(),
-            Self::Agents(rows) => rows.is_empty(),
-        }
-    }
-
-    fn uses_live_duration(&self) -> bool {
-        match self {
-            Self::Plain(_) => false,
-            Self::Agents(rows) => rows.iter().any(|row| row.started_at.is_some()),
-        }
-    }
-}
-
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum AgentState {
     Other,
@@ -466,7 +343,7 @@ impl AgentState {
             Self::Running => rgb(if dark { 0x79c0ff } else { 0x0969da }),
             Self::Warning => rgb(if dark { 0xd29922 } else { 0x9a6700 }),
             Self::Error => rgb(if dark { 0xf47067 } else { 0xcf222e }),
-            Self::Waiting | Self::Other => rgb(TOOL_DETAIL_COLOR),
+            Self::Waiting | Self::Other => rgb(AGENT_NEUTRAL_COLOR),
         }
     }
 
@@ -536,96 +413,10 @@ impl AgentRow {
     }
 }
 
-pub(super) struct Detail {
-    id: &'static str,
-    label: String,
-    progress: Option<String>,
-    title: &'static str,
-    rows: DetailRows,
-    color: Rgba,
-}
-
-impl Detail {
-    pub(super) fn id(&self) -> &'static str {
-        self.id
-    }
-
-    pub(super) fn slot(self, locale: InterfaceLocale, dark: bool) -> Stateful<Div> {
-        let id = self.id;
-        let tooltip = DetailTooltip {
-            title: self.title,
-            rows: self.rows,
-            locale,
-            dark,
-        };
-        div()
-            .id(SharedString::from(format!("footer-{id}")))
-            .flex_shrink_0()
-            .min_w_0()
-            .max_w(px(if id == "todos" { 220. } else { 108. }))
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .text_ellipsis()
-            .children(footer_bounds_probe(id))
-            .px(px(3.))
-            .py(px(1.))
-            .rounded(px(4.))
-            .text_color(self.color)
-            .flex()
-            .items_center()
-            .gap(px(4.))
-            .child(
-                div()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .child(footer_text(id, self.label)),
-            )
-            .children(
-                self.progress
-                    .map(|progress| div().flex_none().child(ui_text(progress))),
-            )
-            .hover(move |style| {
-                if dark {
-                    style.bg(Rgba {
-                        a: 0.08,
-                        ..rgb(0xffffff)
-                    })
-                } else {
-                    let style = style.bg(rgba(TOOL_DETAIL_HOVER_BG));
-                    if self.color == rgb(TOOL_DETAIL_COLOR) {
-                        style.text_color(rgb(TOOL_DETAIL_HOVER_COLOR))
-                    } else {
-                        style
-                    }
-                }
-            })
-            .hoverable_tooltip(move |_, cx| {
-                cx.new(|cx: &mut Context<DetailTooltip>| {
-                    if tooltip.rows.uses_live_duration() {
-                        cx.spawn(async move |view, cx| {
-                            loop {
-                                cx.background_executor()
-                                    .timer(std::time::Duration::from_secs(1))
-                                    .await;
-                                if view.update(cx, |_, cx| cx.notify()).is_err() {
-                                    break;
-                                }
-                            }
-                        })
-                        .detach();
-                    }
-                    tooltip.clone()
-                })
-                .into()
-            })
-    }
-}
-
 #[derive(Clone)]
-struct DetailTooltip {
+struct AgentsTooltip {
     title: &'static str,
-    rows: DetailRows,
+    rows: Vec<AgentRow>,
     locale: InterfaceLocale,
     dark: bool,
 }
@@ -650,73 +441,42 @@ fn duration(milliseconds: f64, locale: InterfaceLocale) -> String {
     }
 }
 
-impl Render for DetailTooltip {
+impl Render for AgentsTooltip {
     fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let now = now_ms();
         let tooltip_strong = popover_colors(self.dark).tooltip_strong;
         let title = div()
             .mb(px(5.))
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(tooltip_strong)
             .child(ui_text(self.title));
-        let rows_empty = self.rows.is_empty();
-        match &self.rows {
-            DetailRows::Agents(items) => {
-                let layout = agent_tooltip_layout(window, self.title, items, now, self.locale);
-                let AgentTooltipLayout {
-                    width,
-                    duration_font,
-                    rows,
-                } = layout;
-                let list = div()
-                    .id("footer-detail-rows")
-                    .flex()
-                    .flex_col()
-                    .gap(px(AGENT_LIST_GAP))
-                    .max_h(px(220.))
-                    .overflow_y_scroll()
-                    .when(rows_empty, |list| {
-                        list.child(ui_text(self.locale.text("暂无明细", "Details pending")))
-                    })
-                    .children(rows.iter().map(|row| {
-                        agent_tooltip_row(row, self.dark, tooltip_strong, &duration_font)
-                    }));
-                card_tooltip_box(self.dark)
-                    .w(px(width))
-                    .px(px(AGENT_PANEL_PADDING_X))
-                    .py(px(9.))
-                    .rounded(px(8.))
-                    .text_size(px(AGENT_FONT_SIZE))
-                    .line_height(px(AGENT_LINE_HEIGHT))
-                    .child(title)
-                    .child(list)
-            }
-            DetailRows::Plain(items) => {
-                let list = div()
-                    .id("footer-detail-rows")
-                    .flex()
-                    .flex_col()
-                    .gap(px(3.))
-                    .max_h(px(220.))
-                    .overflow_y_scroll()
-                    .when(rows_empty, |list| {
-                        list.child(ui_text(self.locale.text("暂无明细", "Details pending")))
-                    })
-                    .children(items.iter().map(|row| {
-                        div()
-                            .flex_none()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .child(ui_text(row.clone()))
-                    }));
-                card_tooltip_box(self.dark)
-                    .min_w(px(DETAIL_MIN_WIDTH))
-                    .max_w(px(DETAIL_MAX_WIDTH))
-                    .child(title)
-                    .child(list)
-            }
-        }
+        let AgentTooltipLayout {
+            width,
+            duration_font,
+            rows,
+        } = agent_tooltip_layout(window, self.title, &self.rows, now_ms(), self.locale);
+        let list = div()
+            .id("footer-detail-rows")
+            .flex()
+            .flex_col()
+            .gap(px(AGENT_LIST_GAP))
+            .max_h(px(220.))
+            .overflow_y_scroll()
+            .when(self.rows.is_empty(), |list| {
+                list.child(ui_text(self.locale.text("暂无明细", "Details pending")))
+            })
+            .children(
+                rows.iter()
+                    .map(|row| agent_tooltip_row(row, self.dark, tooltip_strong, &duration_font)),
+            );
+        card_tooltip_box(self.dark)
+            .w(px(width))
+            .px(px(AGENT_PANEL_PADDING_X))
+            .py(px(9.))
+            .rounded(px(8.))
+            .text_size(px(AGENT_FONT_SIZE))
+            .line_height(px(AGENT_LINE_HEIGHT))
+            .child(title)
+            .child(list)
     }
 }
 
@@ -1002,102 +762,49 @@ pub(super) fn stats_title(locale: InterfaceLocale) -> &'static str {
     locale.text("会话统计", "Session stats")
 }
 
-pub(super) fn stats_panel(stats: &[Detail], locale: InterfaceLocale, dark: bool) -> Div {
-    const MAX_ROWS: usize = 6;
-    card_tooltip_box(dark)
-        .w(px(335.))
-        .max_w_full()
-        .flex()
-        .flex_col()
-        .max_h(px(360.))
-        .child(
-            div()
-                .flex_none()
-                .pb(px(6.))
-                .font_weight(FontWeight::SEMIBOLD)
-                .child(ui_text(stats_title(locale))),
-        )
-        .child(
-            div()
-                .id("footer-stats-rows")
-                .min_h_0()
-                .overflow_y_scroll()
-                .flex()
-                .flex_col()
-                .gap(px(8.))
-                .children(stats.iter().filter_map(|stat| {
-                    let DetailRows::Plain(rows) = &stat.rows else {
-                        return None;
-                    };
-                    let count = match stat.id {
-                        "mcp-errors" => Some(("mcp-error-count", rows.len().to_string())),
-                        _ => stat.progress.clone().map(|count| ("todo-count", count)),
-                    };
-                    Some(
-                        div()
-                            .flex_none()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .gap(px(3.))
-                            .child(
-                                div()
-                                    .flex()
-                                    .gap(px(8.))
-                                    .items_center()
-                                    .justify_between()
-                                    .child(
-                                        div()
-                                            .flex_none()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .child(ui_text(stat.title)),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .min_w_0()
-                                            .gap(px(4.))
-                                            .text_color(stat.color)
-                                            .child(
-                                                div().min_w_0().truncate().child(footer_text(
-                                                    stat.id,
-                                                    stat.label.clone(),
-                                                )),
-                                            )
-                                            .children(count.map(|(key, count)| {
-                                                div().flex_none().child(footer_text(key, count))
-                                            })),
-                                    ),
-                            )
-                            .children(
-                                rows.iter()
-                                    .take(MAX_ROWS)
-                                    .map(|row| div().truncate().child(ui_text(row.clone()))),
-                            )
-                            .children((rows.len() > MAX_ROWS).then(|| {
-                                footer_text("stats-overflow", format!("+{}", rows.len() - MAX_ROWS))
-                            })),
-                    )
-                })),
-        )
+#[derive(Debug, Default, PartialEq)]
+pub(super) struct StatsSummary {
+    pub(super) tools: Option<u64>,
+    pub(super) hooks: Option<u64>,
+    pub(super) mcp: Option<(u64, usize)>,
+    pub(super) todos: Option<(usize, usize)>,
+    pub(super) context: Option<(u64, u64)>,
+    pub(super) cache_hit_percent: Option<f64>,
 }
 
-pub(super) fn statistics(
-    hud: &Value,
-    node: &Value,
-    locale: InterfaceLocale,
-    dark: bool,
-) -> Vec<Detail> {
+impl StatsSummary {
+    pub(super) fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+pub(super) fn stats_summary(hud: &Value, node: &Value, _locale: InterfaceLocale) -> StatsSummary {
     let counts = &hud["configCounts"];
     let legacy_counts = &node["configCounts"];
-    let count = |key: &str| {
-        counts[key]
-            .as_u64()
-            .or_else(|| legacy_counts[key].as_u64())
-            .unwrap_or_default()
+    let tool_hud = if hud["runningTools"].is_array() || hud["toolCounts"].is_array() {
+        hud
+    } else {
+        &node["codexHud"]
     };
-    let neutral = rgb(TOOL_DETAIL_COLOR);
-    let mut slots = Vec::new();
+    let tool_total = || {
+        let running = array(&tool_hud["runningTools"])
+            .iter()
+            .filter(|tool| clean_text(&tool["name"]).is_some())
+            .count() as u64;
+        array(&tool_hud["toolCounts"])
+            .iter()
+            .filter(|tool| clean_text(&tool["name"]).is_some())
+            .filter_map(|tool| nonnegative_count(&tool["count"]))
+            .fold(running, u64::saturating_add)
+    };
+    let tools = hud["toolCount"]
+        .as_u64()
+        .filter(|&total| total > 0)
+        .unwrap_or_else(tool_total);
+    let hooks = counts["hooks"]
+        .as_u64()
+        .or_else(|| legacy_counts["hooks"].as_u64())
+        .unwrap_or_default();
     let mcps = [counts, legacy_counts]
         .into_iter()
         .find_map(|counts| {
@@ -1106,16 +813,196 @@ pub(super) fn statistics(
                 .or_else(|| counts["mcpServers"].as_u64())
         })
         .unwrap_or_default();
-    if mcps > 0 {
-        slots.push(Detail {
-            id: "mcps",
-            label: format!("{mcps} MCPs"),
-            progress: None,
-            title: locale.text("MCP 服务器", "MCP servers"),
-            rows: DetailRows::Plain(strings(&counts["mcpServerNames"])),
-            color: neutral,
-        });
+    let errors = array(&hud["mcpErrors"])
+        .iter()
+        .filter(|value| clean_text(value).is_some())
+        .count();
+    let todos = array(&hud["todos"]);
+    StatsSummary {
+        tools: (tools > 0).then_some(tools),
+        hooks: (hooks > 0).then_some(hooks),
+        mcp: (mcps > 0 || errors > 0).then_some((mcps, errors)),
+        todos: (!todos.is_empty()).then(|| {
+            let done = todos
+                .iter()
+                .filter(|todo| todo["status"] == "completed")
+                .count();
+            (done, todos.len())
+        }),
+        context: hud["contextUsedTokens"]
+            .as_u64()
+            .zip(hud["contextWindowSize"].as_u64()),
+        cache_hit_percent: hud["contextGuard"]["cache"]["hitRatioPercent"]
+            .as_f64()
+            .filter(|percent| percent.is_finite())
+            .map(|percent| percent.clamp(0., 100.)),
     }
+}
+
+pub(super) fn stats_panel(summary: &StatsSummary, locale: InterfaceLocale, dark: bool) -> Div {
+    let (background, border, divider, muted, body) = if dark {
+        (
+            rgb(0x1b1d21),
+            rgb(0x2d3035),
+            rgb(0x26282d),
+            rgb(0x6e7681),
+            rgb(0xe7e9ec),
+        )
+    } else {
+        (
+            rgb(0xffffff),
+            rgba(0x0000001a),
+            rgba(0x00000014),
+            rgb(0x6b7280),
+            rgb(0x1f2328),
+        )
+    };
+    let numeric_features = FontFeatures(std::sync::Arc::new(vec![("tnum".to_owned(), 1)]));
+    let cell = |id, label, value, color| {
+        let mut number = div()
+            .whitespace_nowrap()
+            .text_color(color)
+            .child(footer_text(id, value));
+        number
+            .text_style()
+            .get_or_insert_with(Default::default)
+            .font_features = Some(numeric_features.clone());
+        div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .items_baseline()
+            .justify_between()
+            .gap(px(10.))
+            .text_size(px(12.))
+            .line_height(px(19.2))
+            .children(footer_bounds_probe(id))
+            .child(
+                div()
+                    .whitespace_nowrap()
+                    .text_color(muted)
+                    .child(ui_text(label)),
+            )
+            .child(number)
+    };
+    let cells = [
+        summary.tools.map(|tools| {
+            cell(
+                "tools",
+                locale.text("工具", "Tools"),
+                tools.to_string(),
+                body,
+            )
+        }),
+        summary
+            .hooks
+            .map(|hooks| cell("hooks", "Hooks", hooks.to_string(), body)),
+        summary.mcp.map(|(mcps, errors)| {
+            let errors_label = locale.text("错误", "errors");
+            let color = if errors > 0 {
+                AgentState::Error.badge_color(dark)
+            } else {
+                body
+            };
+            cell(
+                "mcps",
+                "MCP",
+                format!("{mcps} · {errors} {errors_label}"),
+                color,
+            )
+        }),
+        summary.todos.map(|(done, total)| {
+            cell(
+                "todos",
+                locale.text("待办", "Todos"),
+                format!("{done} / {total}"),
+                body,
+            )
+        }),
+        summary.context.map(|(used, window)| {
+            cell(
+                "stats-context",
+                locale.text("上下文", "Context"),
+                format!(
+                    "{} / {}",
+                    footer_token_count(used),
+                    footer_token_count(window)
+                ),
+                body,
+            )
+        }),
+        summary.cache_hit_percent.map(|percent| {
+            cell(
+                "stats-cache-hit",
+                locale.text("命中", "Cache hit"),
+                format!("{percent:.0}%"),
+                body,
+            )
+        }),
+    ];
+    let mut grid = div().flex().flex_col().gap(px(7.));
+    let mut cells = cells.into_iter().flatten();
+    while let Some(left) = cells.next() {
+        grid = grid.child(
+            div()
+                .flex()
+                .w_full()
+                .gap(px(18.))
+                .child(left)
+                .child(cells.next().unwrap_or_else(|| div().flex_1().min_w_0())),
+        );
+    }
+    div()
+        .w(px(360.))
+        .max_w_full()
+        .px(px(14.))
+        .py(px(12.))
+        .rounded(px(10.))
+        .border_1()
+        .border_color(border)
+        .bg(background)
+        .shadow(vec![if dark {
+            shadow(0x000000, 0.55, 18., 44.)
+        } else {
+            popover_colors(false).tooltip_shadow()
+        }])
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .mb(px(9.))
+                .text_size(px(10.5))
+                .line_height(px(16.8))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(muted)
+                .child(footer_text("stats-title", stats_title(locale))),
+        )
+        .child(grid)
+        .child(
+            div()
+                .mt(px(10.))
+                .pt(px(8.))
+                .border_t_1()
+                .border_color(divider)
+                .text_size(px(11.))
+                .line_height(px(17.6))
+                .whitespace_normal()
+                .text_color(muted)
+                .child(footer_text(
+                    "stats-note",
+                    locale.text(
+                        "68% 时环变红；缓存剩 10 分钟内由蓝转黄并进常驻位。",
+                        "Ring turns red at 68%; cache pill turns amber and stays visible within 10 min.",
+                    ),
+                )),
+        )
+}
+
+fn agents_tooltip(
+    hud: &Value,
+    locale: InterfaceLocale,
+    dark: bool,
+) -> Option<(String, Rgba, AgentsTooltip)> {
     let agents = hud["agents"].as_array();
     let rows: Vec<_> = if let Some(agents) = agents {
         agents
@@ -1134,112 +1021,99 @@ pub(super) fn statistics(
             })
             .collect()
     };
-    let agent_count = if let Some(agents) = agents {
+    let count = if let Some(agents) = agents {
         agents.len() as u64
     } else {
         hud["subagentCount"].as_u64().unwrap_or(rows.len() as u64)
     };
-    if agent_count > 0 {
-        let state = rows
-            .iter()
-            .map(|row| row.state)
-            .max()
-            .unwrap_or(AgentState::Other);
-        let warning = if state >= AgentState::Warning {
-            "⚠ "
-        } else {
-            ""
-        };
-        slots.push(Detail {
-            id: "agents",
-            label: format!(
-                "{warning}{agent_count} {}",
-                if agent_count == 1 { "Agent" } else { "Agents" }
-            ),
-            progress: None,
-            title: locale.text("子代理", "Agents"),
-            rows: DetailRows::Agents(rows),
-            color: state.badge_color(dark),
-        });
-    }
-    let hooks = count("hooks");
-    if hooks > 0 {
-        slots.push(Detail {
-            id: "hooks",
-            label: format!("{hooks} hooks"),
-            progress: None,
-            title: "Hooks",
-            rows: DetailRows::Plain(strings(
-                hud.get("hookNames").unwrap_or(&counts["hookNames"]),
-            )),
-            color: neutral,
-        });
-    }
-    let errors = strings(&hud["mcpErrors"]);
-    if !errors.is_empty() {
-        slots.push(Detail {
-            id: "mcp-errors",
-            label: format!("⚠ {}", errors[0]),
-            progress: None,
-            title: locale.text("MCP 错误", "MCP errors"),
-            rows: DetailRows::Plain(errors),
-            color: AgentState::Error.badge_color(dark),
-        });
-    }
-    if let Some(todo) = todo_detail(hud, locale, dark) {
-        slots.push(todo);
-    }
-    slots
-}
-
-fn todo_detail(hud: &Value, locale: InterfaceLocale, dark: bool) -> Option<Detail> {
-    let todos = array(&hud["todos"]);
-    if todos.is_empty() {
+    if count == 0 {
         return None;
     }
-    let done = todos
+    let state = rows
         .iter()
-        .filter(|todo| todo["status"] == "completed")
-        .count();
-    let complete = done == todos.len();
-    let current = todos
-        .iter()
-        .find(|todo| todo["status"] == "in_progress")
-        .and_then(|todo| clean_text(&todo["content"]))
-        .map(|text| text.to_string());
-    let label = if complete {
-        format!("✓ {}", locale.text("全部完成", "All todos complete"))
-    } else if let Some(current) = current {
-        format!("▸ {current}")
+        .map(|row| row.state)
+        .max()
+        .unwrap_or(AgentState::Other);
+    let warning = if state >= AgentState::Warning {
+        "⚠ "
     } else {
-        locale.text("待办事项", "Todos").to_owned()
+        ""
     };
-    let rows = todos
-        .iter()
-        .filter_map(|todo| {
-            let icon = match todo["status"].as_str() {
-                Some("completed") => "✓",
-                Some("in_progress") => "▸",
-                _ => "○",
-            };
-            Some(SharedString::from(format!(
-                "{icon} {}",
-                clean_text(&todo["content"])?
-            )))
-        })
-        .collect();
-    Some(Detail {
-        id: "todos",
-        label,
-        progress: Some(format!("({done}/{})", todos.len())),
-        title: locale.text("待办事项", "Todos"),
-        rows: DetailRows::Plain(rows),
-        color: if complete {
-            rgb(if dark { 0x7ee787 } else { 0x1a7f37 })
-        } else {
-            rgb(TOOL_DETAIL_COLOR)
+    let noun = if count == 1 { "Agent" } else { "Agents" };
+    Some((
+        format!("{warning}{count} {noun}"),
+        state.badge_color(dark),
+        AgentsTooltip {
+            title: locale.text("子代理", "Agents"),
+            rows,
+            locale,
+            dark,
         },
-    })
+    ))
+}
+
+pub(super) fn agents_slot(
+    hud: &Value,
+    locale: InterfaceLocale,
+    dark: bool,
+) -> Option<Stateful<Div>> {
+    let (label, color, tooltip) = agents_tooltip(hud, locale, dark)?;
+    let has_live_duration = tooltip.rows.iter().any(|row| row.started_at.is_some());
+    Some(
+        div()
+            .id("footer-agents")
+            .flex_shrink_0()
+            .min_w_0()
+            .max_w(px(108.))
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .children(footer_bounds_probe("agents"))
+            .px(px(3.))
+            .py(px(1.))
+            .rounded(px(4.))
+            .text_color(color)
+            .flex()
+            .items_center()
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .child(footer_text("agents", label)),
+            )
+            .hover(move |style| {
+                if dark {
+                    style.bg(rgba(0xffffff14))
+                } else {
+                    let style = style.bg(rgba(0x1f28370f));
+                    if color == rgb(AGENT_NEUTRAL_COLOR) {
+                        style.text_color(rgb(0x57606a))
+                    } else {
+                        style
+                    }
+                }
+            })
+            .hoverable_tooltip(move |_, cx| {
+                cx.new(|cx: &mut Context<AgentsTooltip>| {
+                    if has_live_duration {
+                        cx.spawn(async move |view, cx| {
+                            loop {
+                                cx.background_executor()
+                                    .timer(std::time::Duration::from_secs(1))
+                                    .await;
+                                if view.update(cx, |_, cx| cx.notify()).is_err() {
+                                    break;
+                                }
+                            }
+                        })
+                        .detach();
+                    }
+                    tooltip.clone()
+                })
+                .into()
+            }),
+    )
 }
 
 #[derive(Clone)]
@@ -1364,7 +1238,8 @@ mod tests {
     #[::core::prelude::v1::test]
     fn all_interactive_providers_read_the_same_optional_statistics() {
         let hud = json!({
-            "model": "Claude Sonnet", "contextWindowSize": 200_000,
+            "model": "Claude Sonnet", "contextUsedTokens": 136_000, "contextWindowSize": 200_000,
+            "contextGuard": {"cache": {"hitRatioPercent": 91.0}},
             "runningTools": [{"id":"r1","name":"Read","target":"notes.md"}],
             "toolCounts": [{"name":"Find","count":2}, {"name":"Zero","count":0}],
             "agents": [
@@ -1388,42 +1263,24 @@ mod tests {
                 projection.full_model_label().unwrap().as_ref(),
                 "Claude Sonnet (200K context)"
             );
-            assert_eq!(projection.tool_total(), 3);
-            for (locale, running, completed) in [
-                (
-                    InterfaceLocale::English,
-                    "Read · Running · notes.md",
-                    "Find · 2 calls",
-                ),
-                (
-                    InterfaceLocale::Chinese,
-                    "Read · 运行中 · notes.md",
-                    "Find · 2 次",
-                ),
-            ] {
-                let details = projection.tool_details(locale);
-                assert_eq!(details.len(), 2);
-                assert_eq!(details[0].as_ref(), running);
-                assert_eq!(details[1].as_ref(), completed);
+            for locale in [InterfaceLocale::English, InterfaceLocale::Chinese] {
+                assert_eq!(
+                    stats_summary(&hud, &Value::Null, locale),
+                    StatsSummary {
+                        tools: Some(3),
+                        hooks: Some(1),
+                        mcp: Some((2, 2)),
+                        todos: Some((1, 2)),
+                        context: Some((136_000, 200_000)),
+                        cache_hit_percent: Some(91.),
+                    }
+                );
             }
-            let slots = statistics(&hud, &Value::Null, InterfaceLocale::English, true);
-            assert_eq!(
-                slots
-                    .iter()
-                    .map(|slot| (slot.id, slot.label.as_str()))
-                    .collect::<Vec<_>>(),
-                [
-                    ("mcps", "2 MCPs"),
-                    ("agents", "⚠ 4 Agents"),
-                    ("hooks", "1 hooks"),
-                    ("mcp-errors", "⚠ server offline"),
-                    ("todos", "▸ Check results")
-                ]
-            );
-            assert_eq!(slots[1].color, rgb(0xf47067));
-            let DetailRows::Agents(ref rows) = slots[1].rows else {
-                panic!("Agents must use their own rows");
-            };
+            let (label, color, tooltip) =
+                agents_tooltip(&hud, InterfaceLocale::English, true).unwrap();
+            assert_eq!(label, "⚠ 4 Agents");
+            assert_eq!(color, rgb(0xf47067));
+            let rows = &tooltip.rows;
             assert_eq!(rows[0].label.as_ref(), "Reader");
             assert_eq!(
                 rows[0].detail.as_ref().map(|detail| detail.as_ref()),
@@ -1441,18 +1298,68 @@ mod tests {
                     .as_deref(),
                 Some("1m 5s"),
             );
-            assert!(
-                matches!(&slots[2].rows, DetailRows::Plain(rows) if rows[0].as_ref() == "PostToolUse")
-            );
-            assert!(matches!(&slots[3].rows, DetailRows::Plain(rows) if rows.len() == 2));
-            assert!(
-                matches!(&slots[4].rows, DetailRows::Plain(rows) if rows[1].as_ref() == "▸ Check results")
-            );
-            assert_eq!(slots[4].progress.as_deref(), Some("(1/2)"));
         }
-        let blank = CodexHud::from_live(&Value::Null, &json!({"runningTools":[{}]}), "codex");
-        assert_eq!(blank.tool_total(), 0);
-        assert!(statistics(&Value::Null, &Value::Null, InterfaceLocale::English, false).is_empty());
+    }
+
+    #[::core::prelude::v1::test]
+    fn footer_stats_counts_legacy_tools_and_mcp_servers_without_errors() {
+        let node = json!({
+            "codexHud": {
+                "runningTools": [{"name":"Read"}, {"name":" "}],
+                "toolCounts": [{"name":"Find","count":2}, {"name":"Invalid","count":-1}]
+            },
+            "configCounts": {"mcpServers":4, "hooks":11}
+        });
+        let locale = InterfaceLocale::English;
+        assert_eq!(
+            stats_summary(&json!({"toolCount":0}), &node, locale),
+            StatsSummary {
+                tools: Some(3),
+                hooks: Some(11),
+                mcp: Some((4, 0)),
+                ..StatsSummary::default()
+            }
+        );
+        let hud = json!({
+            "toolCount":8294,
+            "toolCounts":[{"name":"Find","count":8}],
+            "mcpErrors":["", "server offline", null],
+            "contextWindowSize":200_000
+        });
+        assert_eq!(
+            stats_summary(&hud, &Value::Null, locale),
+            StatsSummary {
+                tools: Some(8294),
+                mcp: Some((0, 1)),
+                ..StatsSummary::default()
+            }
+        );
+        assert!(
+            stats_summary(
+                &json!({"runningTools":[{}],"agents":[{"name":"Reader"}],"contextPercent":34}),
+                &Value::Null,
+                locale,
+            )
+            .is_empty()
+        );
+    }
+
+    #[::core::prelude::v1::test]
+    fn footer_stats_cache_hit_percent_is_optional_and_clamped() {
+        let locale = InterfaceLocale::English;
+        for (value, expected) in [
+            (json!(91.4), Some(91.4)),
+            (json!(-3.5), Some(0.)),
+            (json!(125.5), Some(100.)),
+            (json!("91"), None),
+            (json!(f64::NAN), None),
+            (Value::Null, None),
+        ] {
+            let hud = json!({"contextGuard": {"cache": {"hitRatioPercent": value}}});
+            let summary = stats_summary(&hud, &Value::Null, locale);
+            assert_eq!(summary.cache_hit_percent, expected);
+            assert_eq!(summary.is_empty(), expected.is_none());
+        }
     }
 
     #[::core::prelude::v1::test]
@@ -1542,17 +1449,18 @@ mod tests {
             "agents": [{"label":"Legacy worker","state":"error","detail":"old shape"}],
             "todos": [{"content":"Test","status":"completed"}]
         });
-        let stats = statistics(&hud, &Value::Null, InterfaceLocale::Chinese, false);
-        let DetailRows::Agents(ref rows) = stats[0].rows else {
-            panic!("Agents must use their own rows");
-        };
+        let locale = InterfaceLocale::Chinese;
+        let (_, _, tooltip) = agents_tooltip(&hud, locale, false).unwrap();
+        let rows = &tooltip.rows;
         assert_eq!(rows[0].label.as_ref(), "Legacy worker");
         assert_eq!(
             rows[0].detail.as_ref().map(|detail| detail.as_ref()),
             Some("old shape")
         );
         assert_eq!(rows[0].state.detail_color(false), rgb(0xcf222e));
-        assert_eq!(stats[1].label, "✓ 全部完成");
-        assert_eq!(stats[1].progress.as_deref(), Some("(1/1)"));
+        assert_eq!(
+            stats_summary(&hud, &Value::Null, locale).todos,
+            Some((1, 1))
+        );
     }
 }

@@ -6952,6 +6952,22 @@ mod probe {
                 assert!(footer_bounds(window, cx, "context").is_none());
                 "上下文折叠".into()
             };
+            if width == 900. {
+                let stats = footer_bounds(window, cx, "stats").unwrap();
+                click(window, cx, stats.center());
+                draw(window, cx);
+                assert_eq!(
+                    footer_bounds(window, cx, "footer-stats-menu").unwrap().size.width,
+                    px(360.)
+                );
+                assert_eq!(
+                    footer_bounds(window, cx, "tools").unwrap().size.width,
+                    px(156.)
+                );
+                press(window, cx, "escape");
+                draw(window, cx);
+                assert!(footer_bounds(window, cx, "footer-stats-menu").is_none());
+            }
             let mut previous = footer_bounds(window, cx, "permission").unwrap();
             for (field, active) in [
                 ("name", show_model),

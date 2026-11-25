@@ -340,7 +340,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        self.footer_menu_trigger_with_stats(button, menu, popup, &[], window, cx)
+        self.footer_menu_trigger_with_stats(button, menu, popup, None, window, cx)
     }
 
     fn footer_menu_trigger_with_stats(
@@ -348,7 +348,7 @@ impl Workspace {
         button: Stateful<Div>,
         menu: FooterMenu,
         popup: Option<&FooterPopover>,
-        stats: &[codex_hud::Detail],
+        stats: Option<&codex_hud::StatsSummary>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
@@ -373,7 +373,7 @@ impl Workspace {
 
     pub(super) fn footer_stats(
         &self,
-        stats: &[codex_hud::Detail],
+        stats: &codex_hud::StatsSummary,
         popup: Option<&FooterPopover>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -390,9 +390,8 @@ impl Workspace {
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(4.))
-            .text_size(px(15.))
-            .line_height(px(18.))
+            .rounded(px(5.))
+            .line_height(px(16.8))
             .hover(move |style| {
                 style
                     .bg(rgba(palette.breadcrumb_hover))
@@ -405,7 +404,7 @@ impl Workspace {
             button,
             FooterMenu::Stats,
             popup,
-            stats,
+            Some(stats),
             window,
             cx,
         ))
@@ -1561,7 +1560,7 @@ impl Workspace {
     fn footer_popover(
         &self,
         popup: &FooterPopover,
-        stats: &[codex_hud::Detail],
+        stats: Option<&codex_hud::StatsSummary>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -1575,7 +1574,11 @@ impl Workspace {
             FooterMenu::Git => ("footer-git-menu", self.git_panel(popup, window, cx, dark)),
             FooterMenu::Stats => (
                 "footer-stats-menu",
-                codex_hud::stats_panel(stats, self.locale, dark),
+                codex_hud::stats_panel(
+                    stats.expect("stats trigger supplies the summary"),
+                    self.locale,
+                    dark,
+                ),
             ),
             FooterMenu::Quota => {
                 let node = self.hud_node(&popup.session).unwrap_or(&Value::Null);
@@ -1630,8 +1633,12 @@ impl Workspace {
                 )
             }
         };
+        let stats_menu = popup.menu == FooterMenu::Stats;
         let panel = div()
             .relative()
+            .when(stats_menu, |panel| {
+                panel.max_w((viewport.width - px(32.)).max(px(0.)))
+            })
             .occlude()
             .child(panel)
             .children(footer_bounds_probe(id));
@@ -1643,9 +1650,10 @@ impl Workspace {
                 .position(point(px(0.), px(0.)))
                 .offset(point(px(0.), px(-PERMISSION_MENU_GAP)))
         } else {
-            anchored()
-                .anchor(Corner::BottomRight)
-                .position(point(viewport.width - px(16.), viewport.height - px(44.)))
+            anchored().anchor(Corner::BottomRight).position(point(
+                viewport.width - px(16.),
+                viewport.height - px(if stats_menu { 46. } else { 44. }),
+            ))
         };
         deferred(anchor.snap_to_window().child(panel)).with_priority(2)
     }
