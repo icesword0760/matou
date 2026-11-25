@@ -133,7 +133,7 @@ pub(super) struct WorkspaceWiring {
     shortcuts: ShortcutPanelState,
     card_menu: Option<(String, Point<Pixels>)>,
     card_menu_index: Option<usize>,
-    splits: HashMap<String, SplitTree>,
+    split: Option<SplitTree>,
     pending_split: Option<PendingSplit>,
     link_opener: Rc<LinkOpener>,
     copy_link: Rc<LinkCopier>,
@@ -278,7 +278,7 @@ impl WorkspaceWiring {
             shortcuts: ShortcutPanelState::default(),
             card_menu: None,
             card_menu_index: None,
-            splits: HashMap::new(),
+            split: None,
             pending_split: None,
             link_opener: Rc::new(launch_link),
             copy_link: Rc::new(|url, cx| {
@@ -516,9 +516,10 @@ impl Workspace {
                 move |change, _, cx| {
                     let _ = view.update(cx, |this, cx| {
                         if this.carousel_owner.as_ref() == Some(&owner)
-                            && let Some(tree) = this.wiring.splits.get_mut(&owner)
+                            && let Some(tree) = this.wiring.split.as_mut()
                             && tree.apply_ratio(change, 0).is_some()
                         {
+                            this.save_split_layout(true, cx);
                             cx.notify();
                         }
                     });
@@ -526,8 +527,71 @@ impl Workspace {
             ))
     }
 
+    pub(super) fn sync_split_layout(&mut self) -> bool {
+        let restored = self
+            .carousel_owner
+            .as_ref()
+            .and_then(|owner| self.geometry.get(owner))
+            .filter(|saved| self.graph["sceneId"].as_str() == Some(saved.scene_id.as_str()))
+            .and_then(|saved| {
+                SplitTree::from_canvas_layout(
+                    &saved.scene_id,
+                    &saved.geometry["splitLayout"],
+                    |id| self.order.iter().any(|card| card == id) && !self.is_stopped_session(id),
+                )
+            });
+        let pruned = self
+            .wiring
+            .split
+            .as_ref()
+            .zip(restored.as_ref())
+            .is_some_and(|(previous, restored)| {
+                previous.ordered_sessions().len() > restored.ordered_sessions().len()
+            });
+        self.wiring.split = restored;
+        pruned
+    }
+
+    fn save_split_layout(&mut self, continuous: bool, cx: &mut Context<Self>) {
+        let Some(owner) = self.carousel_owner.clone() else {
+            return;
+        };
+        let mut geometry = self
+            .geometry
+            .get(&owner)
+            .map_or_else(serde_json::Map::new, |saved| {
+                saved.geometry.as_object().cloned().unwrap_or_default()
+            });
+        if let Some(tree) = &self.wiring.split {
+            geometry.insert("splitLayout".into(), tree.canvas_layout());
+        } else {
+            geometry.insert("splitLayout".into(), Value::Null);
+        }
+        self.queue_canvas_geometry(owner, Value::Object(geometry), continuous, cx);
+        if !continuous {
+            self.flush_geometry(cx);
+        }
+    }
+
+    pub(super) fn restore_split_focus(&mut self, cx: &mut Context<Self>) {
+        if self.is_read_only() || !self.domain_ready || !self.active_path_valid() {
+            return;
+        }
+        if let Some(tree) = &self.wiring.split {
+            let panes = tree.ordered_sessions();
+            if self
+                .active_level_focus()
+                .is_none_or(|id| !panes.contains(&id))
+                && let (Some(scene), Some(id)) = (self.active_scene_id(), panes.first())
+            {
+                let (scene, id) = (scene.to_owned(), (*id).to_owned());
+                self.send_card_focus(&scene, &id, cx);
+            }
+        }
+    }
+
     pub(super) fn active_split_tree(&self) -> Option<&SplitTree> {
-        let tree = self.wiring.splits.get(self.carousel_owner.as_ref()?)?;
+        let tree = self.wiring.split.as_ref()?;
         let panes = tree.ordered_sessions();
         (self.read_only.is_none()
             && self
@@ -622,13 +686,13 @@ impl Workspace {
         }
         let tree = self
             .wiring
-            .splits
-            .entry(request.owner)
-            .or_insert_with(|| SplitTree::single(scene_id.clone(), &request.source));
+            .split
+            .get_or_insert_with(|| SplitTree::single(scene_id.clone(), &request.source));
         if !tree.ordered_sessions().contains(&request.source.as_str()) {
             *tree = SplitTree::single(scene_id, &request.source);
         }
         if tree.split_session(&request.source, &new, request.direction) {
+            self.save_split_layout(false, cx);
             self.stop_edge_browse(true);
             if self.wiring_available()
                 && !self.wiring.board_open
@@ -666,15 +730,15 @@ impl Workspace {
             .then(|| tree.adjacent_session(Some(id), PaneStep::Next))
             .flatten()
             .map(str::to_owned);
-        let Some(owner) = &self.carousel_owner else {
+        let Some(tree) = self.wiring.split.as_mut() else {
             return;
         };
-        let Some(tree) = self.wiring.splits.get_mut(owner) else {
-            return;
-        };
-        if tree.close_session(id) && tree.ordered_sessions().len() == 1 {
-            self.wiring.splits.remove(owner);
-            self.restore_geometry = false;
+        if tree.close_session(id) {
+            if tree.ordered_sessions().len() == 1 {
+                self.wiring.split = None;
+                self.restore_geometry = false;
+            }
+            self.save_split_layout(false, cx);
         }
         if let Some(next) = next {
             self.focus_split_pane(&next, window, cx);
@@ -1104,26 +1168,6 @@ impl Workspace {
         let graph_scene = self.graph["sceneId"].as_str();
         let active_scene = self.hierarchy.as_ref().and_then(|h| h.scene.as_ref());
         if let Some(scene) = active_scene.filter(|scene| graph_scene == Some(scene.id.as_str())) {
-            if let Some(owner) = &self.carousel_owner
-                && let Some(tree) = self.wiring.splits.get_mut(owner)
-            {
-                let nodes = session_levels::nodes(&self.graph);
-                let removed: Vec<_> = tree
-                    .ordered_sessions()
-                    .into_iter()
-                    .filter(|id| {
-                        session_levels::node(nodes, id)
-                            .is_none_or(|node| !node["archivedAt"].is_null())
-                    })
-                    .map(str::to_owned)
-                    .collect();
-                for id in removed {
-                    tree.close_session(&id);
-                }
-                if tree.ordered_sessions().len() < 2 {
-                    self.wiring.splits.remove(owner);
-                }
-            }
             let sessions = session_levels::nodes(&self.graph)
                 .iter()
                 .filter(|node| {
@@ -2070,9 +2114,6 @@ impl Workspace {
         {
             self.wiring.terminal_return = None;
         }
-        self.wiring
-            .splits
-            .retain(|_, tree| !tree.close_session(id) || tree.ordered_sessions().len() > 1);
         self.wiring.detached.discard_session(id);
         if let Some(child) = self.wiring.children.remove(id) {
             self.clear_detached_hud(child.window.into());

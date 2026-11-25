@@ -10,10 +10,10 @@ import tempfile
 from support.instance_channel import instance_channel
 
 
-def run(binary, log_path, root):
+def run(binary, log_path, root, stage=None, capture_dir=None):
     data, home, scratch, workspace = (root / name for name in ('data', 'home', 'tmp', 'workspace'))
     for directory in (data, home, scratch, workspace):
-        directory.mkdir()
+        directory.mkdir(exist_ok=True)
     (data / 'dag-window-probe.fixture').touch()
     env = {
         'HOME': str(home), 'ZDOTDIR': str(home), 'XDG_CONFIG_HOME': str(home),
@@ -23,6 +23,12 @@ def run(binary, log_path, root):
         'HTTP_PROXY': 'http://127.0.0.1:9', 'HTTPS_PROXY': 'http://127.0.0.1:9',
         'ALL_PROXY': 'http://127.0.0.1:9',
     }
+    if stage:
+        env['MATOU_SPLIT_DAG_I18N_PROBE'] = stage
+        env['MATOU_LOCALE'] = 'en'
+        env['RUST_BACKTRACE'] = '1'
+    if capture_dir:
+        env['MATOU_SPLIT_DAG_I18N_CAPTURE'] = str(capture_dir)
     args = [
         str(binary), '--data-root', str(data), '--workspace', str(workspace),
         '--shell-home', str(home), '--shell', '/bin/zsh',
@@ -36,7 +42,7 @@ def run(binary, log_path, root):
             stderr=subprocess.STDOUT, start_new_session=True,
         )
         try:
-            assert process.wait(timeout=80) == 0
+            assert process.wait(timeout=115) == 0
         finally:
             if process.poll() != 0:
                 try:
@@ -53,6 +59,22 @@ def run(binary, log_path, root):
         ))
         for line in output.splitlines()
     ), output
+    if stage:
+        expected = {
+            'record': ['split-drag-saved', 'split-restored-on-canvas-return'],
+            'restore': [
+                'split-restored-on-process-restart',
+                'split-viewport width=720', 'split-viewport width=900', 'split-viewport width=1200',
+                'dag-viewport width=720', 'dag-viewport width=900', 'dag-viewport width=1200',
+                'dag-search-width=720', 'dag-repeat-dismiss-retry', 'dag-reconnecting', 'dag-runtime-recovered',
+                'english-start-failure width=720', 'english-start-failure width=900',
+                'english-start-failure width=1200', 'english-empty-canvas',
+                'split-pruned-missing',
+            ],
+        }
+        for case in expected[stage]:
+            assert f'[split-dag-i18n-probe] {case}' in output, case
+        return
     prefix = '[dag-window-probe] '
     cases = [line[len(prefix):].split()[0] for line in output.splitlines()
              if line.startswith(prefix)]
@@ -70,11 +92,19 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary', type=Path, default=Path('apps/native/target/debug/matou-native-desktop'))
     parser.add_argument('--log', type=Path, required=True)
+    parser.add_argument('--split-dag-i18n', action='store_true')
+    parser.add_argument('--capture-dir', type=Path)
     args = parser.parse_args()
     tmp = Path.cwd() / '.tmp'
     tmp.mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='dw', dir=tmp) as root:
-        run(args.binary.resolve(strict=True), args.log.resolve(), Path(root))
+        binary, log = args.binary.resolve(strict=True), args.log.resolve()
+        if args.split_dag_i18n:
+            capture = args.capture_dir.resolve(strict=True) if args.capture_dir else None
+            run(binary, log.with_stem(f'{log.stem}-record'), Path(root), 'record')
+            run(binary, log.with_stem(f'{log.stem}-restore'), Path(root), 'restore', capture)
+        else:
+            run(binary, log, Path(root))
 
 
 if __name__ == '__main__':
