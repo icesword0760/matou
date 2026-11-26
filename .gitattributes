@@ -1,3 +1,5 @@
-# Native dependency and router patches must keep LF on every checkout.
+# Native dependency, router patches, and byte-exact test fixtures must keep LF on every checkout.
 apps/native/patches/*.patch text eol=lf
 tooling/model-router/patches/*.patch text eol=lf
+apps/native/**/fixtures/*.json text eol=lf
+apps/native/**/fixtures/*.sh text eol=lf

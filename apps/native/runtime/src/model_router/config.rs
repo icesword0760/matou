@@ -466,8 +466,8 @@ pub(super) fn runtime_binary() -> Result<PathBuf> {
         return Ok(executable);
     }
     if cfg!(debug_assertions) {
-        let executable = executable.parent().context("Resolve runtime executable")?;
-        for sibling in [executable.join(name), executable.join("..").join(name)] {
+        for directory in executable.ancestors().skip(1).take(5) {
+            let sibling = directory.join(name);
             if sibling.is_file() {
                 return Ok(sibling.canonicalize()?);
             }

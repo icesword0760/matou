@@ -182,6 +182,17 @@ pub(crate) fn flush_saved_stats() {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn flush_saved_stats_blocking() {
+    let Some(Some(send)) = SAVED_STATS_WORKER.get() else {
+        return;
+    };
+    let (reply, receive) = mpsc::channel();
+    if send.try_send(SavedStatsRequest::Flush(reply)).is_ok() {
+        let _ = receive.recv_timeout(Duration::from_secs(5));
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoredLogRecord {
     pub id: String,

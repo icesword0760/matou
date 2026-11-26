@@ -2396,6 +2396,7 @@ mod tests {
         let response = claude_hook_reply(&server, &run, &read("locked-write"))?;
         assert!(response.contains("\"permissionDecision\":\"deny\""));
         // Keep the DB locked until the worker has attempted the queued write.
+        crate::context_guard::store::flush_saved_stats_blocking();
         assert_eq!(read_stats(7)?, empty);
         conn.execute_batch("ROLLBACK")?;
         assert_eq!(read_stats(8)?, empty);
