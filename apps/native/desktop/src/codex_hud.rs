@@ -88,6 +88,14 @@ impl CodexHud {
         {
             model = Some(rest.trim().to_owned().into());
         }
+        if supports_details(mode)
+            && let Some(name) = &model
+        {
+            let stripped = strip_trailing_effort_label(name.as_ref());
+            if stripped.len() != name.len() {
+                model = Some(stripped.to_owned().into());
+            }
+        }
         let effort = payload
             .filter(|_| matches!(mode, "codex" | "dsh"))
             .and_then(|payload| clean_text(&payload["effort"]));
@@ -141,6 +149,26 @@ impl CodexHud {
 
 pub(super) fn supports_details(mode: &str) -> bool {
     matches!(mode, "claude-code" | "antigravity" | "codex")
+}
+
+fn strip_trailing_effort_label(model: &str) -> &str {
+    let trimmed = model.trim_end();
+    let Some((prefix, suffix)) = trimmed.rsplit_once('(') else {
+        return trimmed;
+    };
+    let Some(inner) = suffix.strip_suffix(')') else {
+        return trimmed;
+    };
+    let level = inner.trim().to_ascii_lowercase();
+    if matches!(
+        level.as_str(),
+        "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "none" | "off"
+    ) && !prefix.trim_end().is_empty()
+    {
+        prefix.trim_end()
+    } else {
+        trimmed
+    }
 }
 
 pub(super) fn shows_model(mode: &str, status_width: f32) -> bool {
@@ -1578,6 +1606,20 @@ mod tests {
         assert_eq!(
             projection.full_model_label().unwrap().as_ref(),
             "Mt-Fable/sol 6.2 (1M context)"
+        );
+
+        let with_effort = json!({
+            "model": "Mt-Haiku/Gemini 4 Neon (High)",
+            "contextWindowSize": 1_000_000
+        });
+        let projection = CodexHud::from_live(&Value::Null, &with_effort, "claude-code");
+        assert_eq!(
+            projection.model_label("claude-code").unwrap().as_ref(),
+            "Mt-Haiku/Gemini 4 Neon"
+        );
+        assert_eq!(
+            projection.full_model_label().unwrap().as_ref(),
+            "Mt-Haiku/Gemini 4 Neon (High) (1M context)"
         );
     }
 }
