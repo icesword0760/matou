@@ -8,6 +8,10 @@ pub use matou_native_desktop::{
 };
 
 #[cfg(all(target_os = "macos", debug_assertions))]
+#[path = "support/window_capture.rs"]
+mod window_capture;
+
+#[cfg(all(target_os = "macos", debug_assertions))]
 #[path = "../src/carousel_motion.rs"]
 mod carousel_motion;
 #[cfg(all(target_os = "macos", debug_assertions))]
@@ -3201,7 +3205,7 @@ mod probe {
     }
 
     async fn capture_visible_window(window: AnyWindowHandle, name: &str, cx: &mut AsyncApp) {
-        use cocoa::{base::id, foundation::NSInteger};
+        use cocoa::base::id;
         use objc::{msg_send, sel, sel_impl};
         use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
@@ -3209,7 +3213,7 @@ mod probe {
         else {
             return;
         };
-        let window_number: NSInteger = window
+        let window_number: isize = window
             .update(cx, |_, window, _| {
                 let RawWindowHandle::AppKit(handle) =
                     HasWindowHandle::window_handle(window).unwrap().as_raw()
@@ -3227,16 +3231,7 @@ mod probe {
             .timer(Duration::from_millis(350))
             .await;
         let output = destination.join(format!("{name}.png"));
-        let status = std::process::Command::new("/usr/sbin/screencapture")
-            .args(["-x", "-o", "-l"])
-            .arg(window_number.to_string())
-            .arg(&output)
-            .status()
-            .unwrap();
-        assert!(
-            status.success() && output.metadata().unwrap().len() > 0,
-            "{output:?}"
-        );
+        crate::window_capture::capture_png(window_number, &output).unwrap();
         println!(
             "Captured GPUI window {window_number} at {}",
             output.display()

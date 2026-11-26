@@ -20438,6 +20438,7 @@ impl Workspace {
     /// `.flat-sidebar__notify` + the frozen red unread indicator, upgraded from
     /// the frozen 6px dot to the numeric badge required by this round.
     fn notification_bell(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let locale = self.locale;
         let palette = self.theme_palette().sidebar;
         let unread = self.notifications.unread().count();
         let badge = (unread > 0).then(|| {
@@ -20482,7 +20483,10 @@ impl Workspace {
             |this, _, cx| this.toggle_notifications(cx),
             cx,
         )
-        .tooltip(|_, cx| cx.new(|_| CardTooltip("通知中心".into())).into())
+        .tooltip(move |_, cx| {
+            cx.new(|_| CardTooltip(locale.text("通知中心", "Notification center").into()))
+                .into()
+        })
     }
 
     /// The panel is mounted by `Render for Workspace` as an absolute root
@@ -20496,6 +20500,7 @@ impl Workspace {
             return None;
         }
 
+        let locale = self.locale;
         let dark = self.theme.effective() == AppTheme::Dark;
         let palette = popover_colors(dark).notification;
         let viewport = window.viewport_size();
@@ -20536,7 +20541,7 @@ impl Workspace {
             .text_size(px(13.))
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(rgb(palette.text))
-            .child("通知")
+            .child(locale.text("通知", "Notifications"))
             .child(
                 div()
                     .id("notification-panel-count")
@@ -20568,7 +20573,10 @@ impl Workspace {
                     |this, _, cx| this.clear_notifications(cx),
                     cx,
                 )
-                .tooltip(|_, cx| cx.new(|_| CardTooltip("清空通知".into())).into()),
+                .tooltip(move |_, cx| {
+                    cx.new(|_| CardTooltip(locale.text("清空通知", "Clear notifications").into()))
+                        .into()
+                }),
             );
         }
         // `.notification-center__close-btn`.
@@ -20602,7 +20610,12 @@ impl Workspace {
                 |this, _, cx| this.close_notifications(cx),
                 cx,
             )
-            .tooltip(|_, cx| cx.new(|_| CardTooltip("关闭通知中心".into())).into()),
+            .tooltip(move |_, cx| {
+                cx.new(|_| {
+                    CardTooltip(locale.text("关闭通知中心", "Close notification center").into())
+                })
+                .into()
+            }),
         );
 
         let header = div()
@@ -20631,7 +20644,7 @@ impl Workspace {
                         .id("notification-empty-text")
                         .text_size(px(13.))
                         .text_color(rgb(palette.empty))
-                        .child("暂无通知"),
+                        .child(locale.text("暂无通知", "No notifications")),
                 )
                 .into_any_element()
         } else {
@@ -20745,7 +20758,7 @@ impl Workspace {
                 div()
                     .text_size(px(12.))
                     .text_color(rgb(palette.muted))
-                    .child("通知声音"),
+                    .child(locale.text("通知声音", "Notification sound")),
             );
         let footer = div()
             .id("notification-footer")
@@ -20830,14 +20843,17 @@ impl Workspace {
                     .find(|workspace| workspace.id.as_str() == id)
             })
             .map_or_else(
-                || "未知工作区".to_string(),
+                || self.locale.text("未知工作区", "Unknown workspace").to_owned(),
                 |workspace| workspace.name.clone(),
             );
         let task_name = entry
             .task_id
             .as_deref()
             .and_then(|id| self.tasks.iter().find(|task| task.id.as_str() == id))
-            .map_or_else(|| "未知工作台".to_string(), |task| task.title.clone());
+            .map_or_else(
+                || self.locale.text("未知工作台", "Unknown task").to_owned(),
+                |task| task.title.clone(),
+            );
 
         let breadcrumb_part = |text: String| {
             div()

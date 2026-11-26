@@ -5,6 +5,10 @@ pub use matou_native_desktop::{
 };
 
 #[cfg(all(target_os = "macos", debug_assertions))]
+#[path = "support/window_capture.rs"]
+mod window_capture;
+
+#[cfg(all(target_os = "macos", debug_assertions))]
 #[path = "../src/carousel_motion.rs"]
 mod carousel_motion;
 #[cfg(all(target_os = "macos", debug_assertions))]
@@ -59,6 +63,18 @@ mod terminal_surface {
                 "divider started a scrollbar drag"
             );
         }
+
+        pub(crate) fn reveal_readme_transcript(&self) {
+            let history = self
+                .session_history
+                .as_ref()
+                .expect("terminal history is open");
+            assert!(history.live() && history.ready);
+            history.list.scroll_to(gpui::ListOffset {
+                item_ix: 0,
+                offset_in_item: px(0.),
+            });
+        }
     }
 }
 #[cfg(all(target_os = "macos", debug_assertions))]
@@ -76,6 +92,10 @@ mod workspace {
 
     mod canvas_cards {
         include!("support/canvas_cards_probe.rs");
+    }
+
+    mod readme_capture {
+        include!("support/readme_capture.rs");
     }
 
     use crate::assets::NativeAssets;
@@ -1788,6 +1808,24 @@ mod workspace {
         units: core_graphics::event::CGScrollEventUnit,
         steps: i32,
     ) {
+        scroll_at(
+            window,
+            cx,
+            position,
+            units,
+            steps,
+            core_graphics::event::CGEventFlags::CGEventFlagCommand,
+        );
+    }
+
+    fn scroll_at(
+        window: AnyWindowHandle,
+        cx: &mut AsyncApp,
+        position: Point<Pixels>,
+        units: core_graphics::event::CGScrollEventUnit,
+        steps: i32,
+        flags: core_graphics::event::CGEventFlags,
+    ) {
         use cocoa::{
             appkit::NSEvent,
             base::{YES, nil},
@@ -1831,7 +1869,7 @@ mod workspace {
                     CGDisplay::main().bounds().size.height - f64::from(size.height - position.y),
                 ),
             );
-            CGEventSetFlags(event, CGEventFlags::CGEventFlagCommand);
+            CGEventSetFlags(event, flags);
             let native = NSEvent::eventWithCGEvent_(nil, event);
             CFRelease(event);
             assert_eq!(
@@ -4538,6 +4576,10 @@ mod workspace {
     }
 
     pub(super) fn run() {
+        if let Some(output) = std::env::var_os("MATOU_README_CAPTURE") {
+            readme_capture::run(output.into());
+            return;
+        }
         if let Ok(mode) = std::env::var("MATOU_CANVAS_CARDS_PROBE") {
             canvas_cards::run(mode);
             return;
