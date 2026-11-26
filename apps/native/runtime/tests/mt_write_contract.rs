@@ -233,14 +233,15 @@ fn str_field<'a>(value: &'a Value, name: &str) -> &'a str {
 fn sends_text_and_keys_to_a_live_pty_and_reads_exact_echo() -> Result<()> {
     let mut fixture = Fixture::new()?;
     #[cfg(unix)]
-    let (message, draft, exit) = ("输入 λ🙂", "key submit", "__exit__");
+    let (message, expected, draft, exit) = ("输入 λ🙂", "ack<输入 λ🙂>", "key submit", "__exit__");
     #[cfg(windows)]
-    let (message, draft, exit) = ("mtAck '输入 λ🙂'", "mtAck 'key submit'", "exit");
+    let (message, expected, draft, exit) =
+        ("mtAck '输入 λ'", "ack<输入 λ>", "mtAck 'key submit'", "exit");
     assert_eq!(
         fixture.mt(&["send", "self", message, "--enter"])?,
         json!({"sent": true})
     );
-    fixture.expect_echo("ack<输入 λ🙂>")?;
+    fixture.expect_echo(expected)?;
     assert_eq!(fixture.mt(&["send", "self", draft])?, json!({"sent": true}));
     let draft = fixture.mt(&["read", "self"])?;
     assert!(!str_field(&draft, "text").contains("ack<key submit>"));

@@ -169,20 +169,32 @@ fn assert_shell_starts_without_git(root: &Path, workspace: PathBuf) -> anyhow::R
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut session_id = None;
     let mut saw_output = false;
+    let mut next_send: Option<Instant> = None;
+    let send_probe = |runtime: &RuntimeHost, id: &str| -> anyhow::Result<()> {
+        let command = if cfg!(windows) {
+            "echo MATOU_NO_GIT_^SHELL\r"
+        } else {
+            "printf 'MATOU_NO_GIT_%s\\n' SHELL\r"
+        };
+        runtime.commands.send(Command::Input {
+            session_id: id.to_owned(),
+            bytes: command.as_bytes().to_vec(),
+            defer_ordering: false,
+        })?;
+        Ok(())
+    };
     while Instant::now() < deadline {
+        if let (Some(id), Some(due)) = (session_id.as_deref(), next_send)
+            && Instant::now() >= due
+        {
+            send_probe(&runtime, id)?;
+            next_send = Some(Instant::now() + Duration::from_millis(500));
+        }
         match runtime.events.try_recv() {
             Ok(Event::Ready { hierarchy, .. }) => {
                 let id = hierarchy.session.context("startup Shell card")?.id;
-                let command = if cfg!(windows) {
-                    "echo MATOU_NO_GIT_^SHELL\r"
-                } else {
-                    "printf 'MATOU_NO_GIT_%s\\n' SHELL\r"
-                };
-                runtime.commands.send(Command::Input {
-                    session_id: id.clone(),
-                    bytes: command.as_bytes().to_vec(),
-                    defer_ordering: false,
-                })?;
+                send_probe(&runtime, &id)?;
+                next_send = Some(Instant::now() + Duration::from_millis(500));
                 session_id = Some(id);
             }
             Ok(Event::Frame {
