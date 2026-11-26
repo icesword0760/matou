@@ -145,6 +145,8 @@ mod workspace {
         }, window, cx);
         for id in [A, B] {
             view.session_frames.insert(id.into());
+            // This fixture starts with shells that have already displayed their first prompt.
+            view.first_frame_content.insert(id.into());
             view.recovery.insert(id.into(), RecoveryState::Ready);
         }
         view.sync_terminal_input(window, cx);
@@ -3191,6 +3193,7 @@ mod workspace {
         let instruction_file = cwd.join("GEMINI.md");
         std::fs::write(&instruction_file, "# Project rules\n").unwrap();
         let (window, sink) = open_probe_at(cx, 1420.);
+        let locale = window.update(cx, |view, _, _| view.locale).unwrap();
         assert!(draw(window.into(), cx).contains_key("remove-session-shell-a"));
         window
             .update(cx, |view, _, cx| {
@@ -3295,8 +3298,8 @@ mod workspace {
         );
         assert!(draw_hud(window.into(), cx).contains_key("footer-stats-menu"));
         for (key, text) in [
-            ("mcps", "2 · 1 错误"),
-            ("tools", "3 次"),
+            ("mcps", locale.text("2 · 1 错误", "2 · 1 errors")),
+            ("tools", locale.text("3 次", "3 calls")),
             ("hooks", "1"),
             ("todos", "0 / 1"),
         ] {
@@ -3345,7 +3348,6 @@ mod workspace {
 
         use matou_native_runtime::host::{GitFailure, GitReply};
 
-        let locale = window.update(cx, |view, _, _| view.locale).unwrap();
         let worktree = cwd.with_file_name("isolated-checkout");
         let git_status = |branch: &str, pending: usize, linked: bool, can_push: bool| {
             let mut branches = vec![
