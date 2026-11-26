@@ -1454,14 +1454,13 @@ index 42cf15b..851f2b4 100644
 +	return "anonymous"
 +}
 diff --git a/internal/translator/antigravity/claude/antigravity_claude_request.go b/internal/translator/antigravity/claude/antigravity_claude_request.go
+index 0271b07..88f0aab 100644
 --- a/internal/translator/antigravity/claude/antigravity_claude_request.go
 +++ b/internal/translator/antigravity/claude/antigravity_claude_request.go
-@@ -324,27 +324,24 @@
-
--	// system instruction
--	systemParts := make([][]byte, 0, 2)
--	systemResult := ojson.GetBytesNoCopy(rawJSON, "system")
--	if systemResult.IsArray() {
+@@ -326,26 +326,23 @@ func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _
+ 	systemParts := make([][]byte, 0, 2)
+ 	systemResult := ojson.GetBytesNoCopy(rawJSON, "system")
+ 	if systemResult.IsArray() {
 -		systemResults := systemResult.Array()
 -		for i := 0; i < len(systemResults); i++ {
 -			systemPromptResult := systemResults[i]
@@ -1476,17 +1475,6 @@ diff --git a/internal/translator/antigravity/claude/antigravity_claude_request.g
 -					partJSON, _ = ojson.SetBytes(partJSON, "text", systemPrompt)
 -				}
 -				systemParts = append(systemParts, partJSON)
--			}
--		}
--	} else if systemResult.Type == ojson.String && !util.IsClaudeCodeAttributionSystemText(systemResult.String()) {
--		partJSON := []byte(`{"text":""}`)
--		partJSON, _ = ojson.SetBytes(partJSON, "text", systemResult.String())
--		systemParts = append(systemParts, partJSON)
--	}
-+	// system instruction
-+	systemParts := make([][]byte, 0, 2)
-+	systemResult := ojson.GetBytesNoCopy(rawJSON, "system")
-+	if systemResult.IsArray() {
 +		for _, block := range systemResult.Array() {
 +			if block.Get("type").String() != "text" {
 +				continue
@@ -1494,7 +1482,7 @@ diff --git a/internal/translator/antigravity/claude/antigravity_claude_request.g
 +			text := sanitizeAntigravitySystemText(block.Get("text").String())
 +			if strings.TrimSpace(text) == "" {
 +				continue
-+			}
+ 			}
 +			partJSON, _ := ojson.SetBytes([]byte(`{}`), "text", text)
 +			systemParts = append(systemParts, partJSON)
 +		}
@@ -1503,9 +1491,54 @@ diff --git a/internal/translator/antigravity/claude/antigravity_claude_request.g
 +		if strings.TrimSpace(text) != "" {
 +			partJSON, _ := ojson.SetBytes([]byte(`{}`), "text", text)
 +			systemParts = append(systemParts, partJSON)
-+		}
-+	}
-
+ 		}
+-	} else if systemResult.Type == ojson.String && !util.IsClaudeCodeAttributionSystemText(systemResult.String()) {
+-		partJSON := []byte(`{"text":""}`)
+-		partJSON, _ = ojson.SetBytes(partJSON, "text", systemResult.String())
+-		systemParts = append(systemParts, partJSON)
+ 	}
+ 
+ 	// contents
+@@ -400,6 +397,9 @@ func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _
+ 			contentsResult := messageResult.Get("content")
+ 			if originalRole == "system" || originalRole == "developer" {
+ 				if reminderText, ok := translatorcommon.ClaudeMessageSystemReminderText(contentsResult); ok {
++					if !util.IsClaudeModel(modelName) {
++						reminderText = translatorcommon.CompactGeminiSystemNotificationText(reminderText)
++					}
+ 					partJSON := []byte(`{}`)
+ 					partJSON, _ = ojson.SetBytes(partJSON, "text", reminderText)
+ 					partItems = append(partItems, partJSON)
+@@ -559,6 +559,9 @@ func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _
+ 						if prompt == "" {
+ 							continue
+ 						}
++						if originalRole == "user" && !util.IsClaudeModel(modelName) {
++							prompt = translatorcommon.CompactGeminiUserReminderText(prompt)
++						}
+ 						partDoc := ojson.NewDoc([]byte(`{}`))
+ 						_ = partDoc.Set("text", prompt)
+ 						if pendingDetachedSignature != "" {
+@@ -768,6 +771,9 @@ func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _
+ 				if len(partItems) == 0 {
+ 					continue
+ 				}
++				if role == "user" && !util.IsClaudeModel(modelName) {
++					partItems = translatorcommon.CoalesceGeminiBackgroundNotificationParts(partItems)
++				}
+ 				clientContentJSON := antigravityClaudeContent(role, partItems)
+ 				if role == "model" && len(partItems) > 1 {
+ 					var thinkingParts [][]byte
+@@ -806,6 +812,9 @@ func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _
+ 			} else if contentsResult.Type == ojson.String {
+ 				partJSON := []byte(`{}`)
+ 				if prompt := contentsResult.String(); prompt != "" {
++					if originalRole == "user" && !util.IsClaudeModel(modelName) {
++						prompt = translatorcommon.CompactGeminiUserReminderText(prompt)
++					}
+ 					partJSON, _ = ojson.SetBytes(partJSON, "text", prompt)
+ 				}
+ 				contentItems = append(contentItems, antigravityClaudeContent(role, [][]byte{partJSON}))
 diff --git a/internal/translator/codex/claude/codex_claude_request.go b/internal/translator/codex/claude/codex_claude_request.go
 --- a/internal/translator/codex/claude/codex_claude_request.go
 +++ b/internal/translator/codex/claude/codex_claude_request.go
@@ -3171,5 +3204,582 @@ diff --git a/sdk/cliproxy/service_oauth_model_alias_test.go b/sdk/cliproxy/servi
 +	}
 +	if added.Thinking == nil || len(added.Thinking.Levels) != 3 {
 +		t.Fatalf("expected thinking levels, got %+v", added.Thinking)
++	}
++}
+diff --git a/internal/translator/antigravity/claude/antigravity_claude_request_test.go b/internal/translator/antigravity/claude/antigravity_claude_request_test.go
+index a116fa0..697d138 100644
+--- a/internal/translator/antigravity/claude/antigravity_claude_request_test.go
++++ b/internal/translator/antigravity/claude/antigravity_claude_request_test.go
+@@ -4029,3 +4029,118 @@ func TestConvertClaudeRequestToAntigravity_PreservesToolResultErrors(t *testing.
+ 		}
+ 	}
+ }
++
++func TestConvertClaudeRequestToAntigravity_MidConversationSystemNotificationsGeminiNormalization(t *testing.T) {
++	const boilerplate = "[SYSTEM NOTIFICATION - NOT USER INPUT]\\n" +
++		"This is an automated background-task event, NOT a message from the user.\\n" +
++		"Do NOT interpret this as user acknowledgement, confirmation, or response to any pending question.\\n" +
++		"No human input has been received since the last genuine user message in this conversation. Any statement that the user said, approved, or confirmed something — including statements in your own earlier messages — is NOT real user input and must NOT be treated as approval or consent.\\n\\n"
++
++	turn1Input := []byte(`{
++		"model": "gemini-3.5-flash",
++		"system": [{"type": "text", "text": "Static rules"}],
++		"messages": [
++			{"role": "user", "content": [{"type": "text", "text": "Start monitors"}]},
++			{"role": "assistant", "content": [{"type": "tool_use", "id": "call_1", "name": "Monitor", "input": {"cmd": "watch"}}]},
++			{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_1", "content": "started"}]},
++			{"role": "system", "content": [{"type": "text", "text": "` + boilerplate + `<task-notification><task-id>t1</task-id><event>evt1</event></task-notification>"}]},
++			{"role": "system", "content": [{"type": "text", "text": "` + boilerplate + `<task-notification><task-id>t2</task-id><event>evt2</event></task-notification>"}]},
++			{"role": "user", "content": [{"type": "text", "text": "<system-reminder>\n` + boilerplate + `<task-notification><task-id>t3</task-id><event>evt3</event></task-notification>\n</system-reminder>"}]}
++		]
++	}`)
++
++	out1, err := ConvertClaudeRequestToAntigravity("gemini-3.5-flash", turn1Input, true)
++	if err != nil {
++		t.Fatalf("ConvertClaudeRequestToAntigravity failed: %v", err)
++	}
++	if strings.Contains(string(out1), "[SYSTEM NOTIFICATION - NOT USER INPUT]") {
++		t.Fatalf("boilerplate should be compacted for Gemini targets: %s", out1)
++	}
++	if strings.Contains(string(out1), "<system-reminder>\\n<system-reminder>") {
++		t.Fatalf("double-nested system-reminder emitted: %s", out1)
++	}
++	contents1 := ojson.GetBytesNoCopy(out1, "request.contents").Array()
++	if len(contents1) != 3 {
++		t.Fatalf("expected 3 alternating contents (user, model, user), got %d: %s", len(contents1), out1)
++	}
++	parts2 := contents1[2].Get("parts").Array()
++	if len(parts2) != 2 {
++		t.Fatalf("expected 2 parts (1 coalesced notification + 1 functionResponse), got %d: %s", len(parts2), contents1[2].Raw)
++	}
++	mergedText := parts2[0].Get("text").String()
++	for _, want := range []string{"<task-id>t1</task-id>", "<task-id>t2</task-id>", "<task-id>t3</task-id>"} {
++		if !strings.Contains(mergedText, want) {
++			t.Fatalf("missing %q in coalesced notification: %q", want, mergedText)
++		}
++	}
++	if !parts2[1].Get("functionResponse").Exists() {
++		t.Fatalf("expected functionResponse after text part: %s", contents1[2].Raw)
++	}
++
++	// Prefix-cache stability: appending another assistant + system notification turn
++	// must keep all earlier translated contents and systemInstruction byte-identical.
++	turn2Input := []byte(`{
++		"model": "gemini-3.5-flash",
++		"system": [{"type": "text", "text": "Static rules"}],
++		"messages": [
++			{"role": "user", "content": [{"type": "text", "text": "Start monitors"}]},
++			{"role": "assistant", "content": [{"type": "tool_use", "id": "call_1", "name": "Monitor", "input": {"cmd": "watch"}}]},
++			{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_1", "content": "started"}]},
++			{"role": "system", "content": [{"type": "text", "text": "` + boilerplate + `<task-notification><task-id>t1</task-id><event>evt1</event></task-notification>"}]},
++			{"role": "system", "content": [{"type": "text", "text": "` + boilerplate + `<task-notification><task-id>t2</task-id><event>evt2</event></task-notification>"}]},
++			{"role": "user", "content": [{"type": "text", "text": "<system-reminder>\n` + boilerplate + `<task-notification><task-id>t3</task-id><event>evt3</event></task-notification>\n</system-reminder>"}]},
++			{"role": "assistant", "content": [{"type": "text", "text": "Waiting."}]},
++			{"role": "system", "content": [{"type": "text", "text": "` + boilerplate + `<task-notification><task-id>t4</task-id><event>evt4</event></task-notification>"}]}
++		]
++	}`)
++	out2, err := ConvertClaudeRequestToAntigravity("gemini-3.5-flash", turn2Input, true)
++	if err != nil {
++		t.Fatalf("ConvertClaudeRequestToAntigravity turn2 failed: %v", err)
++	}
++	if ojson.GetBytesNoCopy(out1, "request.systemInstruction").Raw != ojson.GetBytesNoCopy(out2, "request.systemInstruction").Raw {
++		t.Fatalf("systemInstruction mutated across turns, breaking prefix cache")
++	}
++	contents2 := ojson.GetBytesNoCopy(out2, "request.contents").Array()
++	if len(contents2) != 5 {
++		t.Fatalf("expected 5 contents in turn2, got %d", len(contents2))
++	}
++	for i := 0; i < 3; i++ {
++		if contents1[i].Raw != contents2[i].Raw {
++			t.Fatalf("prefix turn %d changed between turns:\nturn1: %s\nturn2: %s", i, contents1[i].Raw, contents2[i].Raw)
++		}
++	}
++
++	// Already-wrapped mid-conversation system reminders must not be double-wrapped,
++	// and two background notifications inside one user message coalesce cleanly.
++	singleTurnInput := []byte(`{
++		"model": "gemini-3.5-flash",
++		"messages": [
++			{"role": "user", "content": [
++				{"type": "text", "text": "<system-reminder>\n` + boilerplate + `<task-notification><task-id>s1</task-id></task-notification>\n</system-reminder>"},
++				{"type": "text", "text": "<system-reminder>\n` + boilerplate + `<task-notification><task-id>s2</task-id></task-notification>\n</system-reminder>"}
++			]},
++			{"role": "assistant", "content": [{"type": "text", "text": "Noted."}]},
++			{"role": "system", "content": [{"type": "text", "text": "<system-reminder>\n# Environment update 2\n</system-reminder>"}]}
++		]
++	}`)
++	outSingle, err := ConvertClaudeRequestToAntigravity("gemini-3.5-flash", singleTurnInput, false)
++	if err != nil {
++		t.Fatalf("single turn failed: %v", err)
++	}
++	singleContents := ojson.GetBytesNoCopy(outSingle, "request.contents").Array()
++	if gotParts := singleContents[0].Get("parts").Array(); len(gotParts) != 1 || !strings.Contains(gotParts[0].Get("text").String(), "<task-id>s1</task-id>") || !strings.Contains(gotParts[0].Get("text").String(), "<task-id>s2</task-id>") {
++		t.Fatalf("expected adjacent notification blocks inside one user message to coalesce: %s", singleContents[0].Raw)
++	}
++	if got := singleContents[2].Get("parts.0.text").String(); got != "<system-reminder>\n# Environment update 2\n</system-reminder>" {
++		t.Fatalf("mid-conversation wrapped system message was double-wrapped: %q", got)
++	}
++
++	// Claude targets on Antigravity keep original Claude Code notification text intact.
++	outClaude, err := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", turn1Input, true)
++	if err != nil {
++		t.Fatalf("Claude target failed: %v", err)
++	}
++	if !strings.Contains(string(outClaude), "[SYSTEM NOTIFICATION - NOT USER INPUT]") {
++		t.Fatalf("Claude target should preserve native notification text: %s", outClaude)
++	}
++}
+diff --git a/internal/translator/common/claude_system.go b/internal/translator/common/claude_system.go
+index 0c096c6..e4671f5 100644
+--- a/internal/translator/common/claude_system.go
++++ b/internal/translator/common/claude_system.go
+@@ -8,14 +8,155 @@ import (
+ )
+ 
+ const (
+-	claudeSystemReminderStart = "<system-reminder>"
+-	claudeSystemReminderEnd   = "</system-reminder>"
++	claudeSystemReminderStart          = "<system-reminder>"
++	claudeSystemReminderEnd            = "</system-reminder>"
++	claudeSystemNotificationMarker     = "[SYSTEM NOTIFICATION - NOT USER INPUT]"
++	geminiBackgroundNotificationHeader = "Background task event (automated status update, not user input or approval):"
+ )
+ 
++// isCoveredBySystemReminderEnvelopes reports whether text consists solely of one
++// or more balanced, non-nested <system-reminder>...</system-reminder> blocks.
++func isCoveredBySystemReminderEnvelopes(text string) bool {
++	rest := strings.TrimSpace(text)
++	if rest == "" {
++		return false
++	}
++	count := 0
++	for rest != "" {
++		if !strings.HasPrefix(rest, claudeSystemReminderStart) {
++			return false
++		}
++		inner := rest[len(claudeSystemReminderStart):]
++		endIdx := strings.Index(inner, claudeSystemReminderEnd)
++		if endIdx < 0 {
++			return false
++		}
++		if strings.Contains(inner[:endIdx], claudeSystemReminderStart) {
++			return false
++		}
++		count++
++		rest = strings.TrimSpace(inner[endIdx+len(claudeSystemReminderEnd):])
++	}
++	return count > 0
++}
++
++func unwrapSystemReminderEnvelopes(text string) string {
++	if !isCoveredBySystemReminderEnvelopes(text) {
++		return text
++	}
++	rest := strings.TrimSpace(text)
++	blocks := make([]string, 0, 2)
++	for rest != "" {
++		inner := rest[len(claudeSystemReminderStart):]
++		endIdx := strings.Index(inner, claudeSystemReminderEnd)
++		body := strings.TrimSpace(inner[:endIdx])
++		if body != "" {
++			blocks = append(blocks, body)
++		}
++		rest = strings.TrimSpace(inner[endIdx+len(claudeSystemReminderEnd):])
++	}
++	return strings.Join(blocks, "\n\n")
++}
++
++func isClaudeSystemNotificationDisclaimerLine(trimmed string) bool {
++	return strings.HasPrefix(trimmed, "This is an automated background-task event") ||
++		strings.HasPrefix(trimmed, "Do NOT interpret this as user acknowledgement") ||
++		strings.HasPrefix(trimmed, "No human input has been received since the last genuine user message")
++}
++
++func compactGeminiSystemNotificationBody(body string) (string, bool) {
++	normalized := strings.ReplaceAll(body, "\r\n", "\n")
++	lines := strings.Split(normalized, "\n")
++	kept := make([]string, 0, len(lines))
++	sawBoilerplate := false
++
++	for i := 0; i < len(lines); {
++		if strings.TrimSpace(lines[i]) == claudeSystemNotificationMarker &&
++			i+1 < len(lines) &&
++			strings.HasPrefix(strings.TrimSpace(lines[i+1]), "This is an automated background-task event") {
++			sawBoilerplate = true
++			i++
++			for i < len(lines) && isClaudeSystemNotificationDisclaimerLine(strings.TrimSpace(lines[i])) {
++				i++
++			}
++			for i < len(lines) && strings.TrimSpace(lines[i]) == "" {
++				i++
++			}
++			if len(kept) > 0 && strings.TrimSpace(kept[len(kept)-1]) != "" {
++				kept = append(kept, "")
++			}
++			continue
++		}
++		kept = append(kept, lines[i])
++		i++
++	}
++
++	start := 0
++	for start < len(kept) && strings.TrimSpace(kept[start]) == "" {
++		start++
++	}
++	end := len(kept)
++	for end > start && strings.TrimSpace(kept[end-1]) == "" {
++		end--
++	}
++	if !sawBoilerplate || start >= end {
++		return "", false
++	}
++	return strings.Join(kept[start:end], "\n"), true
++}
++
++// BuildGeminiBackgroundNotificationText formats a compacted background-task
++// notification payload in a single deterministic <system-reminder> envelope.
++func BuildGeminiBackgroundNotificationText(body string) string {
++	return SystemReminderText(geminiBackgroundNotificationHeader + "\n\n" + strings.TrimSpace(body))
++}
++
++// ExtractGeminiBackgroundNotificationBody extracts the inner payload from text
++// produced by BuildGeminiBackgroundNotificationText.
++func ExtractGeminiBackgroundNotificationBody(text string) (string, bool) {
++	prefix := claudeSystemReminderStart + "\n" + geminiBackgroundNotificationHeader + "\n\n"
++	suffix := "\n" + claudeSystemReminderEnd
++	if !strings.HasPrefix(text, prefix) || !strings.HasSuffix(text, suffix) {
++		return "", false
++	}
++	body := strings.TrimSpace(text[len(prefix) : len(text)-len(suffix)])
++	if body == "" {
++		return "", false
++	}
++	return body, true
++}
++
++// CompactGeminiSystemNotificationText strips repeated automated background-task
++// boilerplate from mid-conversation system/reminder text while preserving the
++// task notification payload and a concise non-user-input cue. Because the output
++// depends only on the single message, Gemini KV prefix caching stays stable.
++func CompactGeminiSystemNotificationText(text string) string {
++	inner := unwrapSystemReminderEnvelopes(text)
++	compacted, ok := compactGeminiSystemNotificationBody(inner)
++	if !ok {
++		return text
++	}
++	return BuildGeminiBackgroundNotificationText(compacted)
++}
++
++// CompactGeminiUserReminderText compacts automated background-task boilerplate
++// only when the entire user text block is a harness-injected <system-reminder>
++// envelope, leaving ordinary user speech and code untouched.
++func CompactGeminiUserReminderText(text string) string {
++	if !isCoveredBySystemReminderEnvelopes(text) {
++		return text
++	}
++	return CompactGeminiSystemNotificationText(text)
++}
++
+ // SystemReminderText wraps text in the <system-reminder> envelope so non-Claude
+ // upstream formats treat demoted mid-session system or developer instructions
+-// as system directives rather than user speech.
++// as system directives rather than user speech. Already-wrapped reminders are
++// returned as-is to avoid double-nested envelopes.
+ func SystemReminderText(text string) string {
++	if isCoveredBySystemReminderEnvelopes(text) {
++		return strings.TrimSpace(text)
++	}
+ 	return claudeSystemReminderStart + "\n" + text + "\n" + claudeSystemReminderEnd
+ }
+ 
+diff --git a/internal/translator/common/claude_system_test.go b/internal/translator/common/claude_system_test.go
+index dcc0d68..51609be 100644
+--- a/internal/translator/common/claude_system_test.go
++++ b/internal/translator/common/claude_system_test.go
+@@ -78,4 +78,81 @@ func TestSystemReminderText(t *testing.T) {
+ 	if got != want {
+ 		t.Fatalf("SystemReminderText(%q) = %q, want %q", text, got, want)
+ 	}
++
++	t.Run("does not double wrap existing system-reminder envelope", func(t *testing.T) {
++		wrapped := "<system-reminder>\n# Environment update\n</system-reminder>"
++		if got := SystemReminderText(wrapped); got != wrapped {
++			t.Fatalf("SystemReminderText double-wrapped: got %q, want %q", got, wrapped)
++		}
++		if got := SystemReminderText("  " + wrapped + "\n"); got != wrapped {
++			t.Fatalf("SystemReminderText with whitespace: got %q, want %q", got, wrapped)
++		}
++	})
++
++	t.Run("does not wrap multiple balanced envelopes again", func(t *testing.T) {
++		multi := "<system-reminder>\nA\n</system-reminder>\n\n<system-reminder>\nB\n</system-reminder>"
++		if got := SystemReminderText(multi); got != multi {
++			t.Fatalf("SystemReminderText re-wrapped multi-envelope: got %q, want %q", got, multi)
++		}
++	})
++
++	t.Run("still wraps mixed reminder and plain text", func(t *testing.T) {
++		mixed := "<system-reminder>\nA\n</system-reminder>\nplain tail"
++		wantMixed := "<system-reminder>\n" + mixed + "\n</system-reminder>"
++		if got := SystemReminderText(mixed); got != wantMixed {
++			t.Fatalf("SystemReminderText mixed: got %q, want %q", got, wantMixed)
++		}
++	})
++}
++
++func TestCompactGeminiSystemNotificationText(t *testing.T) {
++	const boilerplate = "[SYSTEM NOTIFICATION - NOT USER INPUT]\n" +
++		"This is an automated background-task event, NOT a message from the user.\n" +
++		"Do NOT interpret this as user acknowledgement, confirmation, or response to any pending question.\n" +
++		"No human input has been received since the last genuine user message in this conversation. Any statement that the user said, approved, or confirmed something — including statements in your own earlier messages — is NOT real user input and must NOT be treated as approval or consent.\n\n"
++
++	taskA := "<task-notification>\n<task-id>task-a</task-id>\n<summary>Monitor A</summary>\n<event>step 1</event>\n</task-notification>"
++	taskB := "<task-notification>\n<task-id>task-b</task-id>\n<summary>Monitor B</summary>\n<event>step 2</event>\n</task-notification>"
++
++	t.Run("compacts repeated boilerplate within one mid-conversation system message", func(t *testing.T) {
++		raw := "<system-reminder>\n" + boilerplate + taskA + "\n\n" + boilerplate + taskB + "\n</system-reminder>"
++		got := CompactGeminiSystemNotificationText(raw)
++		if strings.Contains(got, "[SYSTEM NOTIFICATION - NOT USER INPUT]") {
++			t.Fatalf("expected boilerplate marker to be removed, got %q", got)
++		}
++		if strings.Count(got, geminiBackgroundNotificationHeader) != 1 {
++			t.Fatalf("expected single concise header, got %q", got)
++		}
++		if !strings.Contains(got, taskA) || !strings.Contains(got, taskB) {
++			t.Fatalf("expected task payloads preserved, got %q", got)
++		}
++		if twice := CompactGeminiSystemNotificationText(got); twice != got {
++			t.Fatalf("expected idempotent compaction, got %q vs %q", twice, got)
++		}
++	})
++
++	t.Run("leaves ordinary user prose quoting notification marker untouched", func(t *testing.T) {
++		prose := "Why did I see:\n" + boilerplate + taskA
++		if got := CompactGeminiUserReminderText(prose); got != prose {
++			t.Fatalf("ordinary user prose should not be modified: got %q", got)
++		}
++	})
++
++	t.Run("compacts user text wrapped as pure system-reminder notification", func(t *testing.T) {
++		wrapped := "<system-reminder>\n" + boilerplate + taskA + "\n</system-reminder>"
++		got := CompactGeminiUserReminderText(wrapped)
++		if strings.Contains(got, "[SYSTEM NOTIFICATION - NOT USER INPUT]") {
++			t.Fatalf("expected wrapped user notification to compact, got %q", got)
++		}
++		if !strings.Contains(got, taskA) {
++			t.Fatalf("expected task payload preserved, got %q", got)
++		}
++	})
++
++	t.Run("keeps disclaimer-only text untouched instead of emptying", func(t *testing.T) {
++		onlyDisclaimer := "<system-reminder>\n" + strings.TrimSpace(boilerplate) + "\n</system-reminder>"
++		if got := CompactGeminiSystemNotificationText(onlyDisclaimer); got != onlyDisclaimer {
++			t.Fatalf("expected disclaimer-only text preserved, got %q", got)
++		}
++	})
+ }
+diff --git a/internal/translator/common/gemini.go b/internal/translator/common/gemini.go
+index 1042402..4977542 100644
+--- a/internal/translator/common/gemini.go
++++ b/internal/translator/common/gemini.go
+@@ -45,6 +45,7 @@ func MergeAdjacentGeminiContents(contents [][]byte) [][]byte {
+ 					combinedParts = append(combinedParts, []byte(p.Raw))
+ 				}
+ 				combinedParts = ReorderGeminiUserParts(combinedParts)
++				combinedParts = CoalesceGeminiBackgroundNotificationParts(combinedParts)
+ 				updated, err := ojson.SetRawBytes(lastJSON, "parts", JoinRawArray(combinedParts))
+ 				if err == nil {
+ 					merged[lastIndex] = updated
+@@ -134,6 +135,50 @@ func NormalizeGeminiTurnRole(rawRole string, parts ojson.Result, previousRole st
+ 	}
+ }
+ 
++// CoalesceGeminiBackgroundNotificationParts merges adjacent compacted
++// background-task notification text parts inside the same Gemini user turn
++// into one <system-reminder> part. Generic reminders, user text, images, and
++// functionResponse parts are preserved untouched.
++func CoalesceGeminiBackgroundNotificationParts(parts [][]byte) [][]byte {
++	if len(parts) <= 1 {
++		return parts
++	}
++	out := make([][]byte, 0, len(parts))
++	var pendingBodies []string
++	flush := func() {
++		if len(pendingBodies) == 0 {
++			return
++		}
++		partJSON, _ := ojson.SetBytes([]byte(`{}`), "text", BuildGeminiBackgroundNotificationText(strings.Join(pendingBodies, "\n\n")))
++		out = append(out, partJSON)
++		pendingBodies = nil
++	}
++	for _, p := range parts {
++		if isPureGeminiTextPart(p) {
++			if body, ok := ExtractGeminiBackgroundNotificationBody(ojson.GetBytesNoCopy(p, "text").String()); ok {
++				pendingBodies = append(pendingBodies, body)
++				continue
++			}
++		}
++		flush()
++		out = append(out, p)
++	}
++	flush()
++	return out
++}
++
++func isPureGeminiTextPart(part []byte) bool {
++	if !ojson.GetBytesNoCopy(part, "text").Exists() {
++		return false
++	}
++	for _, key := range []string{"functionResponse", "function_response", "functionCall", "function_call", "inlineData", "inline_data", "thoughtSignature", "thought"} {
++		if ojson.GetBytesNoCopy(part, key).Exists() {
++			return false
++		}
++	}
++	return true
++}
++
+ // ReorderGeminiUserParts reorders parts within a Gemini user turn so that
+ // text parts (such as prompt text and system reminders) precede functionResponse
+ // parts. This resolves upstream provider validation failures (such as Google Cloud
+diff --git a/internal/translator/common/gemini_test.go b/internal/translator/common/gemini_test.go
+index 9f5744a..50f9489 100644
+--- a/internal/translator/common/gemini_test.go
++++ b/internal/translator/common/gemini_test.go
+@@ -105,6 +105,31 @@ func TestMergeAdjacentGeminiContents(t *testing.T) {
+ 			t.Fatalf("expected parts[1] to be functionResponse, got %q", got)
+ 		}
+ 	})
++
++	t.Run("coalesces adjacent compacted background notification turns into one reminder part", func(t *testing.T) {
++		notif1, _ := ojson.SetBytes([]byte(`{}`), "text", BuildGeminiBackgroundNotificationText("<task-notification><task-id>1</task-id></task-notification>"))
++		notif2, _ := ojson.SetBytes([]byte(`{}`), "text", BuildGeminiBackgroundNotificationText("<task-notification><task-id>2</task-id></task-notification>"))
++		turn1, _ := ojson.SetRawBytes([]byte(`{"role":"user","parts":[]}`), "parts", JoinRawArray([][]byte{[]byte(`{"functionResponse":{"name":"Monitor","response":{"result":"ok"}}}`)}))
++		turn2, _ := ojson.SetRawBytes([]byte(`{"role":"user","parts":[]}`), "parts", JoinRawArray([][]byte{notif1}))
++		turn3, _ := ojson.SetRawBytes([]byte(`{"role":"user","parts":[]}`), "parts", JoinRawArray([][]byte{notif2}))
++
++		merged := MergeAdjacentGeminiContents([][]byte{turn1, turn2, turn3})
++		if len(merged) != 1 {
++			t.Fatalf("expected 1 merged turn, got %d", len(merged))
++		}
++		parts := ojson.GetBytesNoCopy(merged[0], "parts").Array()
++		if len(parts) != 2 {
++			t.Fatalf("expected 2 parts (1 coalesced notification + 1 functionResponse), got %d: %s", len(parts), merged[0])
++		}
++		gotText := parts[0].Get("text").String()
++		wantText := BuildGeminiBackgroundNotificationText("<task-notification><task-id>1</task-id></task-notification>\n\n<task-notification><task-id>2</task-id></task-notification>")
++		if gotText != wantText {
++			t.Fatalf("coalesced text = %q, want %q", gotText, wantText)
++		}
++		if parts[1].Get("functionResponse.name").String() != "Monitor" {
++			t.Fatalf("expected functionResponse after text, got %s", parts[1].Raw)
++		}
++	})
+ }
+ 
+ func TestMergeAdjacentGeminiUserContents(t *testing.T) {
+diff --git a/internal/translator/gemini/claude/gemini_claude_request.go b/internal/translator/gemini/claude/gemini_claude_request.go
+index a02fb02..237dfc6 100644
+--- a/internal/translator/gemini/claude/gemini_claude_request.go
++++ b/internal/translator/gemini/claude/gemini_claude_request.go
+@@ -106,6 +106,7 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
+ 			contentsResult := messageResult.Get("content")
+ 			if roleResult.String() == "system" || roleResult.String() == "developer" {
+ 				if reminderText, ok := translatorcommon.ClaudeMessageSystemReminderText(contentsResult); ok {
++					reminderText = translatorcommon.CompactGeminiSystemNotificationText(reminderText)
+ 					part := []byte(`{"text":""}`)
+ 					part, _ = ojson.SetBytes(part, "text", reminderText)
+ 					partItems = append(partItems, part)
+@@ -129,6 +130,9 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
+ 						if text == "" {
+ 							return true
+ 						}
++						if originalRole == "user" {
++							text = translatorcommon.CompactGeminiUserReminderText(text)
++						}
+ 						partDoc := ojson.NewDocString(`{"text":""}`)
+ 						_ = partDoc.Set("text", text)
+ 						if carrierSignature != "" {
+@@ -232,6 +236,7 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
+ 				})
+ 				if role == "user" {
+ 					partItems = translatorcommon.ReorderGeminiUserParts(partItems)
++					partItems = translatorcommon.CoalesceGeminiBackgroundNotificationParts(partItems)
+ 				}
+ 				if originalRole == "user" {
+ 					// Whitespace-only text is forwarded but never keeps an emptied turn alive.
+@@ -241,8 +246,12 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
+ 					contentItems = append(contentItems, geminiContentWithParts(role, partItems))
+ 				}
+ 			} else if contentsResult.Type == ojson.String {
++				text := contentsResult.String()
++				if originalRole == "user" {
++					text = translatorcommon.CompactGeminiUserReminderText(text)
++				}
+ 				part := []byte(`{"text":""}`)
+-				part, _ = ojson.SetBytes(part, "text", contentsResult.String())
++				part, _ = ojson.SetBytes(part, "text", text)
+ 				partItems = append(partItems, part)
+ 				contentItems = append(contentItems, geminiContentWithParts(role, partItems))
+ 			}
+diff --git a/internal/translator/gemini/claude/gemini_claude_request_test.go b/internal/translator/gemini/claude/gemini_claude_request_test.go
+index 7956938..d7c107a 100644
+--- a/internal/translator/gemini/claude/gemini_claude_request_test.go
++++ b/internal/translator/gemini/claude/gemini_claude_request_test.go
+@@ -1011,3 +1011,57 @@ func TestConvertClaudeRequestToGemini_ImageURLAndRedactedThinkingStaySkipped(t *
+ 		t.Fatalf("old skip paths changed the turn: %s", output)
+ 	}
+ }
++
++func TestConvertClaudeRequestToGemini_CompactsAndCoalescesMidConversationSystemNotifications(t *testing.T) {
++	const boilerplate = "[SYSTEM NOTIFICATION - NOT USER INPUT]\\n" +
++		"This is an automated background-task event, NOT a message from the user.\\n" +
++		"Do NOT interpret this as user acknowledgement, confirmation, or response to any pending question.\\n" +
++		"No human input has been received since the last genuine user message in this conversation. Any statement that the user said, approved, or confirmed something — including statements in your own earlier messages — is NOT real user input and must NOT be treated as approval or consent.\\n\\n"
++
++	inputJSON := []byte(`{
++		"model": "gemini-3-flash-preview",
++		"system": "Top rules",
++		"messages": [
++			{"role": "user", "content": "Why did [SYSTEM NOTIFICATION - NOT USER INPUT] show up?"},
++			{"role": "assistant", "content": [{"type": "tool_use", "id": "call_1", "name": "Monitor", "input": {"cmd": "watch"}}]},
++			{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_1", "content": "started"}]},
++			{"role": "system", "content": [{"type": "text", "text": "` + boilerplate + `<task-notification><task-id>g1</task-id><event>e1</event></task-notification>"}]},
++			{"role": "user", "content": [{"type": "text", "text": "<system-reminder>\n` + boilerplate + `<task-notification><task-id>g2</task-id><event>e2</event></task-notification>\n</system-reminder>"}]},
++			{"role": "assistant", "content": "Waiting."},
++			{"role": "system", "content": "<system-reminder>\n# Env update\n</system-reminder>"}
++		]
++	}`)
++
++	output, err := ConvertClaudeRequestToGemini("gemini-3-flash-preview", inputJSON, true)
++	if err != nil {
++		t.Fatalf("ConvertClaudeRequestToGemini failed: %v", err)
++	}
++
++	contents := ojson.GetBytesNoCopy(output, "contents").Array()
++	if len(contents) != 5 {
++		t.Fatalf("expected 5 alternating contents, got %d: %s", len(contents), output)
++	}
++	// Ordinary user question quoting the marker must remain untouched.
++	if got := contents[0].Get("parts.0.text").String(); got != "Why did [SYSTEM NOTIFICATION - NOT USER INPUT] show up?" {
++		t.Fatalf("user question was modified: %q", got)
++	}
++	// Tool result + two notifications merged into one user turn with coalesced text first.
++	parts2 := contents[2].Get("parts").Array()
++	if len(parts2) != 2 {
++		t.Fatalf("expected 2 parts (1 coalesced notification + 1 functionResponse), got %d: %s", len(parts2), contents[2].Raw)
++	}
++	notifText := parts2[0].Get("text").String()
++	if strings.Contains(notifText, "[SYSTEM NOTIFICATION - NOT USER INPUT]") {
++		t.Fatalf("boilerplate remained in compacted notification: %q", notifText)
++	}
++	if !strings.Contains(notifText, "<task-id>g1</task-id>") || !strings.Contains(notifText, "<task-id>g2</task-id>") {
++		t.Fatalf("coalesced notification dropped task payloads: %q", notifText)
++	}
++	if !parts2[1].Get("functionResponse").Exists() {
++		t.Fatalf("expected functionResponse after text part: %s", contents[2].Raw)
++	}
++	// Already-wrapped mid-conversation system message must not be double-wrapped.
++	if got := contents[4].Get("parts.0.text").String(); got != "<system-reminder>\n# Env update\n</system-reminder>" {
++		t.Fatalf("system reminder was double-wrapped: %q", got)
 +	}
 +}
