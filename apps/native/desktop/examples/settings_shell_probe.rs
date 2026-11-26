@@ -874,7 +874,8 @@ mod probe {
         draw(window, cx);
         press(window, "enter", cx);
         draw(window, cx);
-        for key in ["o", "s", "s"] {
+        // A model-specific query stays unique when translated group names also match.
+        for key in ["1", "2", "0", "b"] {
             press(window, key, cx);
         }
         draw(window, cx);
