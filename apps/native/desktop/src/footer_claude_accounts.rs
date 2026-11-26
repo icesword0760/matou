@@ -1274,7 +1274,7 @@ impl Workspace {
                         t("请使用原账户重新授权。", "Authorize the original account.")
                     } else {
                         t(
-                            "将打开独立的临时隐私窗口。请在 Claude 官方页面登录要添加的账户。",
+                            "请在独立隐私窗口的 Claude 官方页面登录。",
                             "Sign in to the account you want to add on the official Claude page in a separate private window.",
                         )
                     }))
