@@ -484,6 +484,7 @@ impl Workspace {
     pub(in crate::workspace) fn footer_account_trigger(
         &self,
         compact: bool,
+        compact_spacing: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
@@ -515,7 +516,9 @@ impl Workspace {
                 .text_color(color)
                 .whitespace_nowrap()
                 .cursor_pointer()
-                .when(compact, |trigger| trigger.ml_0().gap(px(3.)).px(px(3.)))
+                .when(compact || compact_spacing, |trigger| {
+                    trigger.ml_0().gap(px(3.)).px(px(3.))
+                })
                 .when(open, |trigger| trigger.bg(rgba(0x518ef020)))
                 .hover(|style| style.bg(rgba(0x518ef019)).text_color(rgba(0x317bdbff)))
                 .tooltip(move |_, cx| {

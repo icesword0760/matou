@@ -17836,8 +17836,17 @@ impl Workspace {
         } else {
             FOOTER_COMPACT_PADDING_X
         };
+        let show_session_health = agents.is_some() && quota.is_some();
+        let compact_controls = !detached
+            && show_count
+            && show_session_health
+            && sizing.status_estimate < FOOTER_COMPACT_CONTROLS_WIDTH;
         let breadcrumb_padding = if show_count { 8. } else { 3. };
-        let status_padding = if show_count { FOOTER_STATUS_PADDING_LEFT } else { 4. };
+        let status_padding = if show_count && !compact_controls {
+            FOOTER_STATUS_PADDING_LEFT
+        } else {
+            4.
+        };
         let mut sizing = if show_count {
             sizing
         } else {
@@ -17850,12 +17859,13 @@ impl Workspace {
                 true,
             )
         };
-        if child_level && !show_count && (agents.is_some() || quota.is_some()) {
-            // Long parent titles can already ellipsize. Give up some of that
-            // room before the fixed session indicators hit the viewport edge.
-            let available = (sizing.breadcrumb_width - FOOTER_CHILD_BREADCRUMB_MIN_WIDTH).max(0.);
+        let reserve_status_width =
+            !detached && !show_count && (agents.is_some() || quota.is_some());
+        if reserve_status_width {
+            // Let the breadcrumb shorten before the session indicators hit the viewport edge.
+            let available = (sizing.breadcrumb_width - FOOTER_BREADCRUMB_MIN_WIDTH).max(0.);
             let required = (sizing.status_estimate + available)
-                .min(FOOTER_CHILD_STATUS_RESERVE_WIDTH);
+                .min(FOOTER_STATUS_RESERVE_WIDTH);
             let reduction = (required - sizing.status_estimate)
                 .max(0.);
             sizing.breadcrumb_width -= reduction;
@@ -17890,11 +17900,14 @@ impl Workspace {
             "antigravity" => "antigravity",
             _ => "",
         };
-        let show_model = codex_hud::shows_model(mode, status_content_width);
+        let shows_model = move |status_width| {
+            codex_hud::shows_model(mode, status_width)
+                && (!reserve_status_width || status_width >= FOOTER_STATUS_RESERVE_WIDTH)
+        };
+        let show_model = shows_model(status_content_width);
         let show_context = status_content_width > codex_hud::CONTEXT_HIDE_BELOW;
         let compact = !show_count || status_content_width < FOOTER_COMPACT_STATUS_WIDTH;
         let font_size = px(if compact { 10. } else { 10.5 });
-        let show_session_health = agents.is_some() && quota.is_some();
         let status_gap = if !show_count {
             3.
         } else if compact || show_session_health {
@@ -17917,6 +17930,12 @@ impl Workspace {
                     .whitespace_nowrap()
                     .text_ellipsis()
                     .font_weight(FontWeight::SEMIBOLD)
+                    .when(reserve_status_width && label_width > breadcrumb_width, |title| {
+                        let label = label.clone();
+                        title.tooltip(move |_, cx| {
+                            cx.new(|_| CardTooltip(label.clone())).into()
+                        })
+                    })
                     .child(footer_text("label", label.clone())),
             )
             .children(show_count.then(|| {
@@ -17934,7 +17953,7 @@ impl Workspace {
             .flex_none()
             .min_w_0()
             .when(child_level, |breadcrumb| breadcrumb.w(px(breadcrumb_width)))
-            .max_w(px(if child_level {
+            .max_w(px(if child_level || reserve_status_width {
                 breadcrumb_width
             } else {
                 breadcrumb_max
@@ -18005,7 +18024,14 @@ impl Workspace {
             .flex()
             .items_center()
             .px(px(footer_padding))
-            .gap(px(if show_count { FOOTER_GAP } else { FOOTER_GAP / 2. }))
+            .when(compact_controls, |footer| {
+                footer.pl(px(FOOTER_COMPACT_PADDING_X))
+            })
+            .gap(px(if show_count && !compact_controls {
+                FOOTER_GAP
+            } else {
+                FOOTER_GAP / 2.
+            }))
             .border_t_1()
             .border_color(rgba(palette.top_line))
             .bg(background)
@@ -18022,7 +18048,6 @@ impl Workspace {
             );
         }
         let mut fixed = div()
-            .ml_auto()
             .flex_none()
             .h_full()
             .flex()
@@ -18089,7 +18114,12 @@ impl Workspace {
             }
             fixed = fixed.child(self.egress_trigger_for(session, !show_count, window, cx));
             if footer_shows_account(fields.mode) {
-                fixed = fixed.child(self.footer_account_trigger(!show_count, window, cx));
+                fixed = fixed.child(self.footer_account_trigger(
+                    !show_count,
+                    compact_controls,
+                    window,
+                    cx,
+                ));
             }
             fixed = fixed.children(more);
         }
@@ -18120,6 +18150,8 @@ impl Workspace {
             })
             .flex()
             .items_center()
+            // Keep the controls against the right edge while honoring the group gap.
+            .justify_between()
             .gap(px(status_gap))
             .overflow_hidden()
             .whitespace_nowrap()
@@ -18298,7 +18330,7 @@ impl Workspace {
                     let actual_content_width =
                         actual_width - status_padding - if detached { 0. } else { 1. };
                     measure.update(cx, |state, cx| {
-                        let actual_show_model = codex_hud::shows_model(mode, actual_content_width);
+                        let actual_show_model = shows_model(actual_content_width);
                         let actual_show_context =
                             actual_content_width > codex_hud::CONTEXT_HIDE_BELOW;
                         let changed = state
@@ -21016,8 +21048,9 @@ const FOOTER_GAP: f32 = 8.;
 const FOOTER_STATUS_PADDING_LEFT: f32 = 12.;
 const FOOTER_COMPACT_STATUS_WIDTH: f32 = 310.;
 const FOOTER_COUNT_HIDE_BELOW: f32 = 340.;
-const FOOTER_CHILD_BREADCRUMB_MIN_WIDTH: f32 = 42.;
-const FOOTER_CHILD_STATUS_RESERVE_WIDTH: f32 = 400.;
+const FOOTER_COMPACT_CONTROLS_WIDTH: f32 = 560.;
+const FOOTER_BREADCRUMB_MIN_WIDTH: f32 = 42.;
+const FOOTER_STATUS_RESERVE_WIDTH: f32 = 400.;
 const FOOTER_GIT_MAX_WIDTH: f32 = 150.;
 const FOOTER_NAME_MAX_WIDTH: f32 = 180.;
 const FOOTER_ENVIRONMENT_MAX_WIDTH: f32 = 150.;

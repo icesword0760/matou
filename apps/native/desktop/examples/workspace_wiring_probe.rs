@@ -4015,15 +4015,13 @@ mod workspace {
         for key in ["agents", "git", "environment", "egress"] {
             assert!(bounds.contains_key(key), "missing {key} in compact footer");
         }
-        for key in ["name", "context"] {
-            assert!(bounds.contains_key(key), "missing {key} at 720pt");
-            assert!(
-                bounds[key].right() <= bounds["primary"].right(),
-                "{key} {:?} is clipped by primary {:?}",
-                bounds[key],
-                bounds["primary"]
-            );
-        }
+        assert!(bounds.contains_key("context"), "missing context at 720pt");
+        assert!(
+            bounds["context"].right() <= bounds["primary"].right(),
+            "context {:?} is clipped by primary {:?}",
+            bounds["context"],
+            bounds["primary"]
+        );
     }
 
     fn assert_stats_rows(bounds: &HashMap<&'static str, Bounds<Pixels>>) {
@@ -4198,6 +4196,8 @@ mod workspace {
                 assert_eq!(bounds.contains_key("count"), width == 970.);
                 if width == 970. {
                     assert_full_hud_text(handle, cx, "name", model);
+                } else {
+                    assert!(!bounds.contains_key("name"), "{mode}: unreadable compact model");
                 }
                 assert!(!bounds.contains_key("cache"));
                 if mode == "claude-code" && width == 720. {
@@ -4205,6 +4205,11 @@ mod workspace {
                 }
                 assert!(bounds["quota-first"].right() < bounds["quota-second"].left());
                 assert!(bounds["quota-second"].right() <= bounds["quota"].right() + px(0.5));
+                let quota_git_gap = bounds["git"].left() - bounds["quota"].right();
+                assert!(
+                    quota_git_gap >= px(2.5),
+                    "{mode} {width}: quota and Git need more separation: {quota_git_gap:?}"
+                );
                 assert!(
                     bounds["quota"].right() <= bounds["primary"].right() + px(0.5),
                     "{mode} {width}: quota clipped by the primary viewport"
@@ -4291,7 +4296,7 @@ mod workspace {
                 click(handle, cx, MouseButton::Left, point(px(20.), px(90.)));
                 assert!(!draw_hud(handle, cx).contains_key("footer-stats-menu"));
                 println!(
-                    "footer {mode} {width}pt | {agents} | 5h {five_hour} · Weekly {weekly} | 🇺🇸 | stats and quota open and dismiss"
+                    "footer {mode} {width}pt | {agents} | 5h {five_hour} · Weekly {weekly} | 🇺🇸 | quota and Git gap {quota_git_gap:?} | stats and quota open and dismiss"
                 );
                 if mode == "claude-code" && width == 720. {
                     window
