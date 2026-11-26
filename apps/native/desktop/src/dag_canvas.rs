@@ -1896,12 +1896,18 @@ mod view {
 
         pub fn set_locale(&mut self, locale: InterfaceLocale, cx: &mut Context<Self>) {
             self.locale = locale;
-            let placeholder = search_placeholder(locale).to_owned();
-            self.search_input.update(cx, |input, cx| {
-                input.placeholder = placeholder;
-                cx.notify();
-            });
+            #[cfg(not(target_os = "windows"))]
+            self.set_search_placeholder(search_placeholder(locale), cx);
             cx.notify();
+        }
+
+        fn set_search_placeholder(&self, placeholder: &str, cx: &mut Context<Self>) {
+            if self.search_input.read(cx).placeholder != placeholder {
+                self.search_input.update(cx, |input, cx| {
+                    input.placeholder = placeholder.to_owned();
+                    cx.notify();
+                });
+            }
         }
 
         /// Switch between dag.css's dark canvas and its light chrome overrides.
@@ -2272,6 +2278,8 @@ mod view {
             #[cfg(target_os = "windows")]
             let (search_width, legend_max_width) =
                 windows_toolbar_widths(f32::from(window.viewport_size().width));
+            #[cfg(target_os = "windows")]
+            self.set_search_placeholder(windows_search_placeholder(self.locale, search_width), cx);
             #[cfg(target_os = "windows")]
             let compact_legend = legend_max_width < 320.;
             #[cfg(target_os = "macos")]
@@ -3341,6 +3349,15 @@ mod view {
         )
     }
 
+    #[cfg(any(target_os = "windows", test))]
+    fn windows_search_placeholder(locale: InterfaceLocale, search_width: f32) -> &'static str {
+        if search_width < 260. {
+            locale.text("搜索会话…", "Search sessions…")
+        } else {
+            search_placeholder(locale)
+        }
+    }
+
     fn search_empty(locale: InterfaceLocale) -> &'static str {
         locale.text("没有匹配的会话", "No matching sessions")
     }
@@ -3493,6 +3510,81 @@ mod view {
             assert_eq!(style.background, Some(rgba(background).into()));
             assert_eq!(style.border_color, Some(rgb(border).into()));
             assert_eq!(style.text.as_ref().unwrap().color, Some(rgb(text).into()));
+        }
+    }
+
+    #[cfg(test)]
+    #[::core::prelude::v1::test]
+    fn dag_search_placeholder_switches_at_allocated_width_in_both_languages() {
+        let (narrow, _) = windows_toolbar_widths(725.);
+        let (wide, _) = windows_toolbar_widths(1065.);
+        assert_eq!(
+            windows_search_placeholder(InterfaceLocale::Chinese, narrow),
+            "搜索会话…"
+        );
+        assert_eq!(
+            windows_search_placeholder(InterfaceLocale::English, narrow),
+            "Search sessions…"
+        );
+        for locale in [InterfaceLocale::Chinese, InterfaceLocale::English] {
+            assert_eq!(
+                windows_search_placeholder(locale, 260.),
+                search_placeholder(locale)
+            );
+            assert_eq!(
+                windows_search_placeholder(locale, wide),
+                search_placeholder(locale)
+            );
+        }
+    }
+
+    #[cfg(test)]
+    #[::core::prelude::v1::test]
+    fn dag_search_placeholder_preserves_focused_input_and_query() {
+        use gpui::TestAppContext;
+
+        let graph = DagGraph::from_snapshot(&serde_json::json!({
+            "sceneId": "scene",
+            "nodes": [{"sessionId": "root", "title": "Draft", "cwd": "/fixture"}],
+            "edges": [],
+        }))
+        .unwrap();
+        let state = DagCanvas::new(DagLayout::new(graph).unwrap(), "root", None);
+        let mut cx = TestAppContext::single();
+        let (view, cx) =
+            cx.add_window_view(|_, cx| DagCanvasView::new(state, InterfaceLocale::Chinese, cx));
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| view.focus_search(window, cx));
+            window.refresh();
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("d r a f t");
+        let editor = view.read_with(cx, |view, _| view.search_input.clone());
+
+        for (locale, viewport_width) in [
+            (InterfaceLocale::Chinese, 725.),
+            (InterfaceLocale::English, 1065.),
+            (InterfaceLocale::English, 725.),
+        ] {
+            let (search_width, _) = windows_toolbar_widths(viewport_width);
+            let placeholder = windows_search_placeholder(locale, search_width);
+            #[cfg(target_os = "windows")]
+            cx.simulate_resize(size(px(viewport_width), px(600.)));
+            view.update(cx, |view, cx| {
+                view.set_locale(locale, cx);
+                #[cfg(not(target_os = "windows"))]
+                view.set_search_placeholder(placeholder, cx);
+            });
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                let view = view.read(cx);
+                assert!(view.search_input == editor);
+                assert!(view.search_focused(window, cx));
+                assert_eq!(view.search_input.read(cx).placeholder, placeholder);
+                assert_eq!(view.search_input.read(cx).text, "draft");
+                assert_eq!(view.canvas.search.query, "draft");
+            });
         }
     }
 
