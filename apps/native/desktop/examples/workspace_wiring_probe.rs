@@ -1781,8 +1781,17 @@ mod workspace {
         );
     }
 
-    fn scroll_to_zoom(window: AnyWindowHandle, cx: &mut AsyncApp, position: Point<Pixels>) {
-        use cocoa::{appkit::NSEvent, base::nil};
+    fn command_scroll(
+        window: AnyWindowHandle,
+        cx: &mut AsyncApp,
+        position: Point<Pixels>,
+        units: core_graphics::event::CGScrollEventUnit,
+        steps: i32,
+    ) {
+        use cocoa::{
+            appkit::NSEvent,
+            base::{YES, nil},
+        };
         use core_foundation::base::CFRelease;
         use core_graphics::{
             display::CGDisplay,
@@ -1808,9 +1817,9 @@ mod workspace {
         unsafe {
             let event = CGEventCreateScrollWheelEvent2(
                 std::ptr::null(),
-                ScrollEventUnit::PIXEL,
+                units,
                 1,
-                32,
+                steps,
                 0,
                 0,
             );
@@ -1825,6 +1834,10 @@ mod workspace {
             CGEventSetFlags(event, CGEventFlags::CGEventFlagCommand);
             let native = NSEvent::eventWithCGEvent_(nil, event);
             CFRelease(event);
+            assert_eq!(
+                native.hasPreciseScrollingDeltas() == YES,
+                units == ScrollEventUnit::PIXEL
+            );
             assert_eq!(native.locationInWindow().x, f64::from(position.x));
             assert_eq!(
                 native.locationInWindow().y,
@@ -2271,15 +2284,30 @@ mod workspace {
                 pressed_button: None,
             },
         );
-        scroll_to_zoom(native_window, cx, position);
+        use core_graphics::event::ScrollEventUnit;
+        command_scroll(native_window, cx, position, ScrollEventUnit::PIXEL, 32);
+        assert_eq!(metrics(cx), initial);
+        assert_eq!(read_terminal_font_size(root), 11);
+        while sink.try_recv().is_ok() {}
+        command_scroll(native_window, cx, position, ScrollEventUnit::LINE, 1);
         assert_eq!(metrics(cx), zoomed);
-        cx.background_executor()
-            .timer(Duration::from_millis(100))
-            .await;
-        assert!(std::iter::from_fn(|| sink.try_recv().ok()).any(
-            |command| matches!(command, Command::Resize { session_id, cols, rows, .. }
-                if session_id == "new-float" && cols == zoomed.0 && rows == zoomed.1)
-        ));
+        assert_eq!(read_terminal_font_size(root), 12);
+        let resize_deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let resized = std::iter::from_fn(|| sink.try_recv().ok()).any(|command| matches!(
+                command, Command::Resize { session_id, cols, rows, cell_width_px, cell_height_px }
+                if session_id == "new-float"
+                    && (cols, rows, cell_width_px, cell_height_px) == zoomed
+            ));
+            if resized {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < resize_deadline,
+                "Runtime did not receive zoomed terminal dimensions {zoomed:?}"
+            );
+            cx.background_executor().timer(Duration::from_millis(20)).await;
+        }
         press(window, cx, "cmd-0");
         assert_eq!(metrics(cx), initial);
         assert_eq!(read_terminal_font_size(root), 11);
