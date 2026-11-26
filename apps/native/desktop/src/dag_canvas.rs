@@ -2556,12 +2556,18 @@ mod view {
                         .items_start()
                         .gap(px(6.))
                         .w(px(legend_max_width))
-                        .when(cfg!(target_os = "macos"), |legend| {
-                            // The labels wrap at the allocated width. Reserve that height
-                            // before laying them out so their last lines stay on the surface.
-                            let height = if legend_max_width < 160. { 92. } else { 68. };
-                            legend.min_h(px(height)).line_height(px(13.))
-                        })
+                        .when(
+                            cfg!(target_os = "macos")
+                                || (cfg!(target_os = "windows")
+                                    && self.locale == InterfaceLocale::English
+                                    && legend_max_width < 220.),
+                            |legend| {
+                                // Reserve room for wrapped labels so the last line
+                                // stays inside the legend's border.
+                                let height = if legend_max_width < 160. { 92. } else { 68. };
+                                legend.min_h(px(height)).line_height(px(13.))
+                            },
+                        )
                 });
 
             let right = div()
