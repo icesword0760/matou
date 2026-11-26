@@ -1340,6 +1340,9 @@ struct StartFailureCard<'a> {
     blocked: Option<&'static str>,
 }
 
+// The Runtime persists this error in the session graph.
+const ANTIGRAVITY_RESTORE_IDENTITY_MISMATCH: &str = "The context returned by the AI session does not match the session being restored; try restoring again";
+
 enum ProviderRestoreBanner<'a> {
     Restoring {
         title: &'static str,
@@ -1349,6 +1352,7 @@ enum ProviderRestoreBanner<'a> {
         reason: &'a str,
         retry: &'static str,
         fresh: &'static str,
+        stack_text: bool,
         pending: bool,
         retry_blocked: Option<&'static str>,
         fresh_blocked: Option<&'static str>,
@@ -12424,6 +12428,9 @@ impl Workspace {
             });
         }
         let reason = match node["providerRestoreError"].as_str() {
+            Some(ANTIGRAVITY_RESTORE_IDENTITY_MISMATCH) if antigravity => self
+                .locale
+                .text("返回的会话不匹配。", "The session doesn’t match."),
             Some("provider session running in background") if codex => {
                 "此会话仍在 Codex 后台运行。请先停止对应后台会话，再重试恢复；聊天记录会保留。"
             }
@@ -12452,19 +12459,25 @@ impl Workspace {
                 "Claude Code 恢复失败"
             },
             reason,
-            retry: if pending {
+            retry: if antigravity {
+                if pending {
+                    self.locale.text("正在恢复…", "Restoring…")
+                } else {
+                    self.locale.text("重试恢复", "Retry")
+                }
+            } else if pending {
                 "正在恢复…"
             } else {
                 "重试恢复"
             },
             fresh: if antigravity {
-                self.locale
-                    .text("新开 Antigravity", "Start a new Antigravity session")
+                self.locale.text("新开会话", "Start new")
             } else if codex {
                 "新开 Codex"
             } else {
                 "新开 Claude Code"
             },
+            stack_text: antigravity,
             pending,
             retry_blocked,
             fresh_blocked,
@@ -15129,6 +15142,7 @@ impl Workspace {
                 reason,
                 retry,
                 fresh,
+                stack_text,
                 pending,
                 retry_blocked,
                 fresh_blocked,
@@ -15197,8 +15211,8 @@ impl Workspace {
                         .flex()
                         .flex_auto()
                         .min_w_0()
-                        .items_baseline()
-                        .gap(px(8.))
+                        .when(stack_text, |text| text.flex_col().gap(px(2.)))
+                        .when(!stack_text, |text| text.items_baseline().gap(px(8.)))
                         .child(
                             div()
                                 .flex_initial()
@@ -15213,8 +15227,8 @@ impl Workspace {
                         .child(
                             div()
                                 .id(SharedString::from(format!("provider-restore-reason-{id}")))
-                                .flex_1()
-                                .w(px(0.))
+                                .when(stack_text, |reason| reason.w_full())
+                                .when(!stack_text, |reason| reason.flex_1().w(px(0.)))
                                 .min_w_0()
                                 .text_color(reason_color)
                                 .truncate()
@@ -15232,7 +15246,7 @@ impl Workspace {
                         .flex()
                         .flex_none()
                         .max_w_full()
-                        .ml_auto()
+                        .when(!stack_text, |actions| actions.ml_auto())
                         .justify_end()
                         .gap(px(12.))
                         .child(retry_button)

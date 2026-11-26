@@ -1706,6 +1706,7 @@ mod workspace {
                         reason,
                         retry,
                         fresh,
+                        stack_text: false,
                         pending: busy,
                         retry_blocked,
                         fresh_blocked,
