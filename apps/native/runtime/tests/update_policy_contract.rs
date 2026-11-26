@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 use url::Url;
 
 const REFERENCE: &str =
-    include_str!("../../../../tooling/native-parity/fixtures/update-policy-reference.json");
+    include_str!("fixtures/update-policy-reference.json");
 
 #[derive(Deserialize)]
 struct Reference {

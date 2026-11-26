@@ -20,7 +20,7 @@ use ruzstd::encoding::{CompressionLevel, compress_to_vec};
 use serde_json::{Value, json, to_value};
 
 const REFERENCE: &str =
-    include_str!("../../../../tooling/native-parity/fixtures/provider-history-reference.json");
+    include_str!("fixtures/provider-history-reference.json");
 const FIXTURE_CWD: &str = "/__fixture__/workspace";
 
 fn plain_row(row: &Value) -> Vec<u8> {

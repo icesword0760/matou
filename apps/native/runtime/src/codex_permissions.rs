@@ -310,10 +310,15 @@ sandbox_mode = "read-only"
             assert_eq!(plan.permission_mode, mode);
             assert_eq!(plan.permission_warning, None);
             assert_eq!(
-                &plan.launch.argv[..2],
-                ["-c", "check_for_update_on_startup=false"]
+                &plan.launch.argv[..4],
+                [
+                    "-c",
+                    "check_for_update_on_startup=false",
+                    "-c",
+                    r#"tui.status_line=["fast-mode"]"#,
+                ]
             );
-            assert_eq!(&plan.launch.argv[2..], args);
+            assert_eq!(&plan.launch.argv[4..], args);
             assert_eq!(plan.launch.cwd, cwd);
             assert_eq!(plan.launch.env[OsStr::new("CODEX_HOME")], "隔离 配置");
             assert_eq!(plan.launch.env[OsStr::new("TERM")], "xterm-256color");

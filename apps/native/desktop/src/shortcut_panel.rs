@@ -1,17 +1,9 @@
 //! Frozen shortcut artwork, its readable contents, and panel lifecycle.
 
-const DARK_MAC: &[u8] = include_bytes!(
-    "../../../desktop/src/renderer/src/assets/terminal-reference/terminal/shortcuts/dark_mac.png"
-);
-const DARK_WIN: &[u8] = include_bytes!(
-    "../../../desktop/src/renderer/src/assets/terminal-reference/terminal/shortcuts/dark_win.png"
-);
-const LIGHT_MAC: &[u8] = include_bytes!(
-    "../../../desktop/src/renderer/src/assets/terminal-reference/terminal/shortcuts/white_mac.png"
-);
-const LIGHT_WIN: &[u8] = include_bytes!(
-    "../../../desktop/src/renderer/src/assets/terminal-reference/terminal/shortcuts/white_win.png"
-);
+const DARK_MAC: &[u8] = include_bytes!("../assets/shortcuts/dark_mac.png");
+const DARK_WIN: &[u8] = include_bytes!("../assets/shortcuts/dark_win.png");
+const LIGHT_MAC: &[u8] = include_bytes!("../assets/shortcuts/white_mac.png");
+const LIGHT_WIN: &[u8] = include_bytes!("../assets/shortcuts/white_win.png");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShortcutPlatform {

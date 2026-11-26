@@ -2,12 +2,12 @@ import { copyFile, lstat, mkdir, readdir, writeFile } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { checkPe, isMsvcReleaseRuntime } from '../native-parity/package-native-win.mjs'
-import { fileDigests, runTool } from '../native-release-helpers.mjs'
+import { checkPe, isMsvcReleaseRuntime } from '../packaging/package-native-win.mjs'
+import { fileDigests, nativeReleaseConfig, repo, runTool } from '../native-release-helpers.mjs'
 import { windowsPeImports } from './pe-imports.mjs'
 
 const setupScript = fileURLToPath(new URL('./matou.iss', import.meta.url))
-const applicationIcon = fileURLToPath(new URL('../../apps/desktop/build/icon.ico', import.meta.url))
+const applicationIcon = join(repo, (await nativeReleaseConfig()).win.icon)
 const signatureScript = fileURLToPath(new URL('./file-signatures.ps1', import.meta.url))
 const signingScript = fileURLToPath(new URL('./sign-file.ps1', import.meta.url))
 const msvcRuntime = /^(?:msvc[pr]|vcruntime|concrt|vcomp|vcamp|vccorlib)(?:\d{2,3})(?:_\w+)?d?\.dll$/i

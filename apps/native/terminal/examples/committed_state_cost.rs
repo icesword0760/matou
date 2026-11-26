@@ -1,5 +1,5 @@
 //! Isolate the parser/history cost of a protocol state plus a committed display state.
-//! Uses the same 8 MiB payload as tooling/native-parity/output-workload.py.
+//! Uses the same 8 MiB payload as tooling/native/output-workload.py.
 //! This measures parser work, not PTY, persistence, UI latency, or total app memory.
 use std::{hint::black_box, time::Instant};
 

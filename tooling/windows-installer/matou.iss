@@ -32,8 +32,8 @@ RestartApplications=no
 ChangesAssociations=yes
 WizardStyle=modern dynamic
 WizardSizePercent=105,100
-SetupIconFile=..\..\apps\desktop\build\icon.ico
-WizardSmallImageFile=..\..\apps\desktop\build\icon-128.png
+SetupIconFile=..\..\apps\native\packaging\icon.ico
+WizardSmallImageFile=..\..\apps\native\packaging\icon-128.png
 ShowLanguageDialog=no
 #ifdef MatouSigned
 SignTool=matou_release_signing

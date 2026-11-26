@@ -1,31 +1,46 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
-import { desktopConfig } from './native-release-helpers.mjs'
+import { nativeReleaseConfig } from './native-release-helpers.mjs'
 import { generateMacManifest, macReleaseOptions } from './release-native-mac.mjs'
 
-const config = await desktopConfig()
+const config = await nativeReleaseConfig()
 const date = '2026-11-24T11:00:00.000Z'
 const script = fileURLToPath(new URL('./release-native-mac.mjs', import.meta.url))
 
-test('uses the desktop release version, production feed and secure timestamp by default', () => {
+test('uses the native release version, production feed and secure timestamp by default', () => {
   const options = macReleaseOptions([], {}, config)
   assert.equal(options.version, config.version)
   assert.equal(options.arch, 'arm64')
   assert.equal(options.updateBaseUrl, 'https://updates.baize-ailabs.com/stable')
   assert.equal(options.channel, 'stable')
-  assert.equal(options.identity, config.build.mac.identity)
+  assert.equal(options.identity, config.mac.identity)
   assert.equal(options.timestamp, true)
   assert.match(options.outDir, /apps[/\\]native[/\\]release$/)
-  assert.match(options.accountsDirs[0], /package-resources[/\\]claude-accounts[/\\]matou-claude-accounts$/)
-  assert.match(options.accountsDirs[1], /claude-accounts[/\\]dist[/\\]matou-claude-accounts$/)
-  assert.match(options.modelRouterDir, /package-resources[/\\]model-router$/)
+  assert.match(options.accountsDirs[0], /apps[/\\]native[/\\]package-resources[/\\]claude-accounts[/\\]matou-claude-accounts$/)
+  assert.equal(options.accountsDirs.length, 1)
+  assert.match(options.modelRouterDir, /apps[/\\]native[/\\]package-resources[/\\]model-router$/)
+})
+
+test('rejects release metadata that disagrees with the Cargo package version', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'matou-native-release-config-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const desktop = join(root, 'apps/native/desktop')
+  const module = join(root, 'tooling/native-release-helpers.mjs')
+  await Promise.all([mkdir(desktop, { recursive: true }), mkdir(join(root, 'tooling'))])
+  await Promise.all([
+    copyFile(fileURLToPath(new URL('./native-release-helpers.mjs', import.meta.url)), module),
+    writeFile(join(desktop, 'Cargo.toml'), '[package]\nversion = "1.0.0"\n[dependencies]\n'),
+    writeFile(join(root, 'apps/native/release-config.json'), JSON.stringify({ ...config, version: '2.0.0' }))
+  ])
+  const { nativeReleaseConfig: load } = await import(pathToFileURL(module))
+  await assert.rejects(load(), /Native release version 2\.0\.0 must match the desktop Cargo package version \(1\.0\.0\)/)
 })
 
 test('supports environment settings, CLI overrides and explicit offline signing', () => {

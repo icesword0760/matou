@@ -4641,18 +4641,31 @@ exec /bin/sleep 60
         let start = &settings["hooks"]["SessionStart"][0]["hooks"][0];
         assert_eq!(start["type"], "command");
         let command = start["command"].as_str().context("SessionStart command")?;
-        assert!(command.contains("--noproxy '*'"));
-        let mut hook = ProcessCommand::new("/bin/sh")
-            .args(["-c", command])
+        assert_eq!(
+            Path::new(command).canonicalize()?,
+            Path::new(env!("CARGO_BIN_EXE_matou-native-runtime")).canonicalize()?
+        );
+        let args: Vec<String> = serde_json::from_value(start["args"].clone())?;
+        assert_eq!(args, ["--hook", "claude-session-start"]);
+        let url = claude_hook_url(settings_path)?;
+        let (_, token) = url.rsplit_once('/').context("SessionStart hook token")?;
+        let mut hook = ProcessCommand::new(command)
+            .args(args)
             .env_clear()
             .env("ALL_PROXY", "http://127.0.0.1:1")
+            .env("MATOU_PROVIDER_HOOK_URL", &url)
+            .env("MATOU_PROVIDER_HOOK_TOKEN", token)
             .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
             .spawn()?;
         serde_json::to_writer(
             hook.stdin.take().context("SessionStart stdin")?,
             &json!({"hook_event_name":"SessionStart","session_id":id,"permission_mode":"default"}),
         )?;
-        ensure!(hook.wait()?.success(), "SessionStart command failed");
+        let output = hook.wait_with_output()?;
+        ensure!(output.status.success(), "SessionStart command failed");
+        let reply: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(reply["hookSpecificOutput"]["hookEventName"], "SessionStart");
         Ok(())
     };
     send_start(

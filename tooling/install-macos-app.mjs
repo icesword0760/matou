@@ -10,7 +10,7 @@ const appId = 'com.matou.desktop'
 const teamId = 'JAKX72KQ6X'
 const authority = `Developer ID Application: Lu'an Yidayi Electronic Commerce Co.,Ltd. (${teamId})`
 const target = join('/Applications', appName)
-const defaultSource = fileURLToPath(new URL(`../apps/desktop/release/mac-arm64/${appName}`, import.meta.url))
+export const defaultSource = fileURLToPath(new URL(`../apps/native/release/${appName}`, import.meta.url))
 const expectedRequirement = [
   `identifier "${appId}"`,
   'anchor apple generic',

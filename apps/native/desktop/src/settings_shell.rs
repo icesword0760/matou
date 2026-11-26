@@ -11597,7 +11597,7 @@ impl Render for SettingsShell {
 // Escape closes it. The highlighted row is view-local, like a native popup.
 //
 // Frozen copy is transcribed verbatim from
-// `apps/desktop/src/renderer/src/hierarchy/ModelSwitchSettings.tsx`,
+// `archived renderer: hierarchy/ModelSwitchSettings.tsx`,
 // `ClaudeTimeZoneSettings.tsx`, `hierarchyShell.ts`, `common.ts`, and
 // `claude-time-zone-settings.css`.
 

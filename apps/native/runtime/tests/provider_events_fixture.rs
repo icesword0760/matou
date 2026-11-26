@@ -4,7 +4,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 const FIXTURE: &str =
-    include_str!("../../../../tooling/native-parity/fixtures/provider-events-reference.json");
+    include_str!("fixtures/provider-events-reference.json");
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -85,9 +85,10 @@ fn frozen_provider_cases_can_be_loaded_by_native_tests() {
         assert!(!case.source.is_empty(), "{id}: missing frozen provenance");
         for source in &case.source {
             let (file, lines) = source.rsplit_once(':').expect("source must be file:line");
+            let (root, _) = file.split_once('/').expect("source must be repo-relative");
             assert!(
                 file.ends_with(".ts")
-                    && (file.starts_with("apps/") || file.starts_with("packages/"))
+                    && matches!(root, "apps" | "packages")
                     && !file.split('/').any(|part| part.is_empty() || part == ".."),
                 "{id}: invalid source path {file}"
             );

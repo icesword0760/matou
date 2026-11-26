@@ -573,7 +573,7 @@ pnpm build:packages
 pnpm build:runtime
 MATOU_TEST_MODEL_ROUTER=1 pnpm --filter @matou/runtime exec vitest run src/model-router/manager.test.ts
 pnpm --filter @matou/desktop exec vitest run src/main/runtime-host.test.ts
-node tooling/model-router/probe-runtime-owner.mjs
+node tooling/legacy-model-router/probe-runtime-owner.mjs
 pnpm --filter @matou/runtime typecheck
 pnpm --filter @matou/desktop typecheck
 pnpm build:desktop
@@ -831,7 +831,7 @@ pnpm --filter @matou/runtime exec vitest run src/model-router src/provider-confi
   src/session/provider-command-environment.test.ts src/session/provider-launch-plan.test.ts \
   --maxWorkers=1 --testTimeout=15000 --reporter=verbose
 pnpm --filter @matou/desktop exec vitest run src/main/runtime-host.test.ts
-node tooling/model-router/probe-runtime-owner.mjs
+node tooling/legacy-model-router/probe-runtime-owner.mjs
 ```
 
 arm64 命令与原生实测不能替代 Intel 验收。主仓开工/收尾 status 比对一致；本任务无路由/监督/原生测试进程遗留。未修改 renderer、用户配置或正在运行的 Matou，无提交、推送或发布。停在第四关。

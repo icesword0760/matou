@@ -8,7 +8,18 @@ import { promisify } from 'node:util'
 
 export const repo = fileURLToPath(new URL('../', import.meta.url))
 export const defaultUpdateBaseUrl = 'https://updates.baize-ailabs.com/stable'
-export const desktopConfig = () => readFile(new URL('../apps/desktop/package.json', import.meta.url), 'utf8').then(JSON.parse)
+export async function nativeReleaseConfig() {
+  const [config, manifest] = await Promise.all([
+    readFile(join(repo, 'apps/native/release-config.json'), 'utf8').then(JSON.parse),
+    readFile(join(repo, 'apps/native/desktop/Cargo.toml'), 'utf8')
+  ])
+  const packageSection = manifest.split(/^\[/m).find(section => section.startsWith('package]'))
+  const crateVersion = packageSection?.match(/^version\s*=\s*"([^"]+)"\s*$/m)?.[1]
+  if (!/^(0|[1-9]\d*)(\.(0|[1-9]\d*)){2}$/.test(config.version) || crateVersion !== config.version) {
+    throw new Error(`Native release version ${config.version} must match the desktop Cargo package version (${crateVersion ?? 'missing'}) in X.Y.Z form`)
+  }
+  return config
+}
 
 export function formatUpdateConfig(baseUrl, channel) {
   if (!/^https?:\/\//i.test(baseUrl) || !URL.canParse(baseUrl) || /[\s\p{Cc}]/u.test(baseUrl)) {

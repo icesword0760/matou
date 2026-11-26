@@ -5,9 +5,9 @@
 // context ring and session statistics with the existing footer primitives.
 //
 // Frozen sources:
-// - apps/desktop/src/renderer/src/hud/TerminalHud.tsx:182-191,505-517,540-591
-// - apps/desktop/src/renderer/src/i18n/messages/hud.ts:24-36
-// - apps/desktop/src/renderer/src/hierarchy/hierarchy.css:354-419,469-476
+// - archived renderer: hud/TerminalHud.tsx:182-191,505-517,540-591
+// - archived renderer: i18n/messages/hud.ts:24-36
+// - archived renderer: hierarchy/hierarchy.css:354-419,469-476
 
 use gpui::{prelude::*, *};
 use matou_native_desktop::theme_tokens::FooterPalette;

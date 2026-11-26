@@ -228,7 +228,7 @@ pub fn system_instructions(
     run_id: &str,
 ) -> Option<&'static str> {
     has_managed_control(environment, run_id).then_some(include_str!(
-        "../../../runtime/control-assets/providers/dsh-system-message.md"
+        "../control-assets/providers/dsh-system-message.md"
     ))
 }
 

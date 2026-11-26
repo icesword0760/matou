@@ -395,19 +395,14 @@ mod workspace {
         pub(super) fn assert_footer_fields(
             &self,
             expected_name: Option<&str>,
-            expected_cwd: Option<(&str, &str)>,
+            expected_cwd: Option<&str>,
             expected_git: Option<(&str, bool)>,
             expected_environment: Option<&str>,
         ) {
             let fields = self.footer_fields().expect("focused footer fields");
             assert_eq!(fields.name.as_deref(), expected_name);
-            assert_eq!(
-                fields
-                    .cwd
-                    .as_ref()
-                    .map(|(full, short)| (*full, short.as_str())),
-                expected_cwd,
-            );
+            let cwd = self.level_focus().and_then(|id| self.footer_cwd(id));
+            assert_eq!(cwd.as_deref(), expected_cwd.map(std::path::Path::new));
             assert_eq!(
                 fields
                     .git
@@ -597,10 +592,8 @@ mod workspace {
             window: &mut Window,
             cx: &mut Context<Self>,
         ) {
-            let mode = PermissionMode::ALL
-                .into_iter()
-                .find(|entry| entry.value() == mode)
-                .unwrap();
+            let (_, node) = self.permission_node().expect("focused Codex session");
+            let mode = PermissionMode::observed(node, Some(mode));
             self.choose_permission_mode(mode, window, cx);
         }
 
@@ -644,10 +637,10 @@ mod workspace {
             color: u32,
             cx: &mut Context<Self>,
         ) {
-            let mode = PermissionMode::ALL[index];
             let chip = self.permission_chip().unwrap();
+            let mode = chip.modes[index];
             assert_eq!(chip.mode, mode);
-            let mut view = self.permission_chip_view(&chip, cx);
+            let mut view = self.permission_chip_view(&chip, false, cx);
             let style = view.style().text.as_ref().unwrap();
             assert_eq!(style.color, Some(rgb(color).into()));
             assert_eq!(style.font_size, Some(px(10.).into()));
@@ -658,7 +651,7 @@ mod workspace {
             );
             assert_eq!(
                 permission_chip_text(mode).as_ref(),
-                ["D", "A", "AE", "PM", "BP"][index]
+                ["Manual", "Auto", "AE", "PM", "Don't Ask", "BP"][index]
             );
             assert_eq!(PERMISSION_CHIP_TRACKING, 0.2);
             assert_eq!(PERMISSION_MENU_MIN_WIDTH, 180.);
@@ -667,8 +660,8 @@ mod workspace {
             assert_eq!(PERMISSION_MENU_CHECK, "✓");
             let colors = popover_colors(true);
             let mut active = permission_menu_item(mode, mode, colors);
-            let mut inactive =
-                permission_menu_item(PermissionMode::ALL[(index + 1) % 5], mode, colors);
+            let next_mode = chip.modes[(index + 1) % chip.modes.len()];
+            let mut inactive = permission_menu_item(next_mode, mode, colors);
             assert_eq!(
                 active.style().text.as_ref().unwrap().color,
                 Some(rgb(0x58a6ff).into())
@@ -6620,7 +6613,7 @@ mod probe {
                     view.assert_level(None, ROOTS, "根会话", "· 2 个会话", PEER);
                     view.assert_footer_fields(
                         Some(shell),
-                        Some((&long_cwd, &short_cwd)),
+                        Some(&long_cwd),
                         None,
                         Some("Local"),
                     );
@@ -6646,7 +6639,7 @@ mod probe {
                     view.assert_level(None, ROOTS, "根会话", "· 2 个会话", PARENT);
                     view.assert_footer_fields(
                         Some(shell),
-                        Some(("/fixture/alpha", "~/alpha")),
+                        Some("/fixture/alpha"),
                         None,
                         Some("Local"),
                     );
@@ -6814,7 +6807,7 @@ mod probe {
                     .update(cx, |view, _, _| {
                         view.assert_footer_fields(
                             None,
-                            None,
+                            Some("/"),
                             Some(("Git 不可用", false)),
                             Some("Local"),
                         );

@@ -33,7 +33,7 @@ fn sandbox() -> Result<TempDir> {
     fs::create_dir_all(&directory)?;
     Ok(tempfile::Builder::new()
         .prefix("antigravity-contract-")
-        .tempdir_in(directory)?)
+        .tempdir_in(directory.canonicalize()?)?)
 }
 
 fn environment(values: &[(&str, &str)]) -> BTreeMap<OsString, OsString> {
@@ -865,7 +865,7 @@ fn create_summaries(root: &Path) -> Result<rusqlite::Connection> {
 #[test]
 fn antigravity_catalog_replays_provider_history_fixture() -> Result<()> {
     let fixture: Value = serde_json::from_str(include_str!(
-        "../../../../tooling/native-parity/fixtures/provider-history-reference.json"
+        "fixtures/provider-history-reference.json"
     ))?;
     let mut metadata = fixture["datasets"]["antigravity-source"][0]["json"].clone();
     let mut expected = fixture["cases"]

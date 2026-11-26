@@ -7,10 +7,10 @@ use matou_native_runtime::{
 use serde_json::{Value, json};
 
 const EVENTS_FIXTURE: &str =
-    include_str!("../../../../tooling/native-parity/fixtures/provider-events-reference.json");
+    include_str!("fixtures/provider-events-reference.json");
 #[cfg(unix)]
 const HISTORY_FIXTURE: &str =
-    include_str!("../../../../tooling/native-parity/fixtures/provider-history-reference.json");
+    include_str!("fixtures/provider-history-reference.json");
 
 #[test]
 fn dsh_shell_upgrade_matches_only_frozen_forms() {

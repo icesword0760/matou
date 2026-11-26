@@ -21,7 +21,7 @@ const OFFICIAL: &str = "anthropic-official";
 const FILE: &str = "provider-config.json";
 const TEMP: &str = "provider-config.json.tmp";
 const SAMPLE: &[u8] =
-    include_bytes!("../../../../tooling/native-parity/fixtures/provider-config-reference.json");
+    include_bytes!("fixtures/provider-config-reference.json");
 const API_ID: &str = "6c3e5c40-5795-4fdf-968e-a3de83097aa6";
 const SUB_ID: &str = "ee8a641e-f247-48ed-9ad1-3d175c8693d9";
 const KEY: &str = "SYNTHETIC-FIXTURE-ONLY";

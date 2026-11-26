@@ -7,7 +7,8 @@ import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { fileURLToPath } from 'node:url'
 
-import { checkPe } from '../native-parity/package-native-win.mjs'
+import { checkPe } from '../packaging/package-native-win.mjs'
+import { stageModelRouter } from './prepare.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const pinned = JSON.parse(await readFile(new URL('./version.json', import.meta.url), 'utf8'))
@@ -105,7 +106,6 @@ export async function buildPatchedRouter({ platform = 'darwin',
   if (!(windows || platform === 'darwin') || !['arm64', 'x64'].includes(arch)) {
     throw new Error(`Patched router is available for macOS and Windows arm64/x64: ${platform}-${arch}`)
   }
-  if (windows && packageResources) throw new Error('Pass the Windows output directory to package:win --model-router')
   const patchFile = join(root, 'tooling/model-router', pinned.patch.file)
   if (await digest(patchFile) !== pinned.patch.sha256) throw new Error('Pinned router patch checksum mismatch')
   const go = await ensureGo(pinned.patch.go)
@@ -172,12 +172,7 @@ export async function buildPatchedRouter({ platform = 'darwin',
     binarySha256: await digest(join(cache, filename))
   }
   await writeFile(join(cache, 'source.json'), JSON.stringify(metadata, null, 2) + '\n')
-  if (packageResources) {
-    const destination = join(root, 'apps/desktop/package-resources/model-router')
-    await mkdir(destination, { recursive: true })
-    for (const file of ['model-router', 'LICENSE', 'source.json']) await cp(join(cache, file), join(destination, file))
-    await chmod(join(destination, 'model-router'), 0o755)
-  }
+  if (packageResources) await stageModelRouter(cache, { platform })
   return cache
 }
 

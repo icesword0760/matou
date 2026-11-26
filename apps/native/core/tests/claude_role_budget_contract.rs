@@ -5,7 +5,7 @@ use matou_native_core::claude_role_budget::{
 use serde_json::{Value, json};
 
 const FIXTURE: &str =
-    include_str!("../../../../tooling/native-parity/fixtures/provider-assignment-reference.json");
+    include_str!("fixtures/provider-assignment-reference.json");
 
 #[test]
 fn frozen_role_budget_fixtures() -> Result<()> {

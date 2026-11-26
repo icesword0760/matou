@@ -4,7 +4,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 const FIXTURE: &str =
-    include_str!("../../../../tooling/native-parity/fixtures/provider-history-reference.json");
+    include_str!("fixtures/provider-history-reference.json");
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -96,8 +96,14 @@ fn fixture() -> Fixture {
 
 fn assert_source(id: &str, source: &str) {
     let (file, range) = source.rsplit_once(':').expect("source must be file:line");
+    let mut parts = file.split('/');
+    let archived_root = match (parts.next(), parts.next()) {
+        (Some("apps"), Some(_)) => true,
+        (Some("packages"), Some("contracts")) => parts.next().is_some(),
+        _ => false,
+    };
     assert!(
-        (file.starts_with("apps/") || file.starts_with("packages/contracts/"))
+        archived_root
             && (file.ends_with(".ts") || file.ends_with(".tsx"))
             && file.split('/').all(|part| !matches!(part, "" | "." | "..")),
         "{id}: invalid source path {file}"

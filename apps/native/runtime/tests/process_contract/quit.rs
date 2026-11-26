@@ -27,8 +27,7 @@ fn wait_for_fixture(path: &Path, event: &str) -> Result<serde_json::Value> {
 }
 
 fn start_fixture(root: &Path, mode: &str) -> Result<(RuntimeChild, u32, Option<u32>)> {
-    let script = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../tooling/native-parity/quit-real-01-child.py");
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/quit-real-01-child.py");
     let script = script.display().to_string().replace('\'', "'\"'\"'");
     let root_arg = root.display().to_string().replace('\'', "'\"'\"'");
     let run = format!("/usr/bin/python3 -I -B '{script}' {mode} '{root_arg}'",);

@@ -3,8 +3,9 @@ import { cp, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile }
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 
-import { installMacosApp, verifyInstallSource } from './install-macos-app.mjs'
+import { defaultSource, installMacosApp, verifyInstallSource } from './install-macos-app.mjs'
 
 const signature = [
   'Identifier=com.matou.desktop',
@@ -27,6 +28,10 @@ function codeSignDetails(args, details, requirement) {
   if (args.includes('-r-')) return `designated => ${requirement}`
   return ''
 }
+
+test('defaults to the native macOS release bundle', () => {
+  assert.equal(defaultSource, fileURLToPath(new URL('../apps/native/release/码头.app', import.meta.url)))
+})
 
 test('requires the issued Matou Developer ID and its stable designated requirement', async () => {
   const source = '/build/码头.app'

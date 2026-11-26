@@ -555,7 +555,7 @@ fn check_reply(reply: &Value, id: &str, error: Option<&str>) {
 fn frozen_case(name: &str) -> Value {
     let data: Value = serde_json::from_str(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../../tooling/native-parity/fixtures/host-control-reference.json"
+        "/tests/fixtures/host-control-reference.json"
     )))
     .unwrap();
     data["cases"]

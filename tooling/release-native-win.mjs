@@ -6,9 +6,9 @@ import { parseArgs } from 'node:util'
 
 import {
   assembleWindowsDirPackage, planWindowsPackage, windowsArm64UpdateBaseUrl
-} from './native-parity/package-native-win.mjs'
+} from './packaging/package-native-win.mjs'
 import {
-  defaultUpdateBaseUrl, desktopConfig, generateChecksums, generateManifest, nativeBinaries,
+  defaultUpdateBaseUrl, nativeReleaseConfig, generateChecksums, generateManifest, nativeBinaries,
   repo, requireAbsent, runTool, stageRelease
 } from './native-release-helpers.mjs'
 import { buildWindowsInstaller, stageMsvcRuntime, windowsFileVersion } from './windows-installer/build.mjs'
@@ -156,7 +156,7 @@ export async function releaseWindows(options, command = runTool) {
 const invokedPath = process.argv[1] && await realpath(process.argv[1]).catch(() => null)
 if (invokedPath === fileURLToPath(import.meta.url)) {
   try {
-    const options = windowsReleaseOptions(process.argv.slice(2), process.env, await desktopConfig())
+    const options = windowsReleaseOptions(process.argv.slice(2), process.env, await nativeReleaseConfig())
     if (options.help) console.log(usage)
     else {
       validateReleaseOptions(options)

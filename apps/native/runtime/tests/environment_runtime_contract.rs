@@ -400,7 +400,7 @@ fn repair_rejects_foreign_repositories_and_copied_checkout_markers() {
 #[test]
 fn shared_checkout_rules_match_k_fixture_dispositions() {
     let fixture: Value = serde_json::from_str(include_str!(
-        "../../../../tooling/native-parity/fixtures/git-branch-policy-reference.json"
+        "../../core/tests/fixtures/git-branch-policy-reference.json"
     ))
     .unwrap();
     let mut checked = 0;

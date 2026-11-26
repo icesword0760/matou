@@ -19,7 +19,7 @@ from urllib.parse import urlparse
 sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location(
     "native_resume_check",
-    Path(__file__).resolve().parents[4] / "tooling/native-parity/verify-claude-resume.py",
+    Path(__file__).resolve().parents[4] / "tooling/native/verify-claude-resume.py",
 )
 resume = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(resume)

@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 // The same frozen bytes loaded by tests/provider_events_fixture.rs.
 const FIXTURE: &str =
-    include_str!("../../../../tooling/native-parity/fixtures/provider-events-reference.json");
+    include_str!("fixtures/provider-events-reference.json");
 
 #[test]
 fn provider_hook_fixture_replays_every_step_at_the_hud_ingress_boundary() {

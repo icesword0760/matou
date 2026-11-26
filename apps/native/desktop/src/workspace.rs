@@ -21041,10 +21041,10 @@ fn loader_relative_time(updated_at: i64, locale: InterfaceLocale) -> String {
 // Permission chip / menu visuals.
 //
 // Render-only. Frozen sources:
-// - apps/desktop/src/renderer/src/hud/TerminalHud.tsx:137-145,205-260;
-// - apps/desktop/src/renderer/src/i18n/messages/hud.ts:7-18,44-66;
-// - apps/desktop/src/renderer/src/hierarchy/hierarchy.css:317-323,347-362;
-// - apps/desktop/src/renderer/src/hierarchy/hierarchy.css:446-447
+// - archived renderer: hud/TerminalHud.tsx:137-145,205-260;
+// - archived renderer: i18n/messages/hud.ts:7-18,44-66;
+// - archived renderer: hierarchy/hierarchy.css:317-323,347-362;
+// - archived renderer: hierarchy/hierarchy.css:446-447
 //   (`.terminal-toast.is-error`).
 //
 // State and commands stay with the Workspace wiring; these helpers only

@@ -456,21 +456,21 @@ impl Registration {
         for (name, source) in [
             (
                 "bridge.mjs",
-                include_str!("../../../runtime/control-assets/providers/dsh/bridge.mjs"),
+                include_str!("../control-assets/providers/dsh/bridge.mjs"),
             ),
             (
                 "hud.mjs",
-                include_str!("../../../runtime/control-assets/providers/dsh/hud.mjs"),
+                include_str!("../control-assets/providers/dsh/hud.mjs"),
             ),
             (
                 "instructions.mjs",
-                include_str!("../../../runtime/control-assets/providers/dsh/instructions.mjs"),
+                include_str!("../control-assets/providers/dsh/instructions.mjs"),
             ),
         ] {
             write_private(&directory.join(name), source.as_bytes(), 0o600)?;
         }
         let system_message = compose_managed_instructions(
-            include_str!("../../../runtime/control-assets/providers/dsh-system-message.md"),
+            include_str!("../control-assets/providers/dsh-system-message.md"),
             foreman_available,
             roles_markdown,
             managed_cli_instructions(&self.data_root, "dsh"),
@@ -505,7 +505,7 @@ impl Registration {
         )?;
         let path = assets.path().join("antigravity-system-message.json");
         let system_message = compose_managed_instructions(
-            include_str!("../../../runtime/control-assets/providers/antigravity-system-message.md"),
+            include_str!("../control-assets/providers/antigravity-system-message.md"),
             foreman_available,
             roles_markdown,
             managed_cli_instructions(&self.data_root, "antigravity"),
@@ -581,7 +581,7 @@ impl Registration {
     ) -> Result<()> {
         let instructions = compose_managed_instructions(
             include_str!(
-                "../../../runtime/control-assets/providers/codex-developer-instructions.md"
+                "../control-assets/providers/codex-developer-instructions.md"
             ),
             foreman_available,
             roles_markdown,
@@ -2622,12 +2622,12 @@ mod tests {
         let config = ContextOptimizerConfig::for_data_root(root.path());
         let server = ProviderHookServer::start()?;
         let agy_base =
-            include_str!("../../../runtime/control-assets/providers/antigravity-system-message.md");
+            include_str!("../control-assets/providers/antigravity-system-message.md");
         let codex_base = include_str!(
-            "../../../runtime/control-assets/providers/codex-developer-instructions.md"
+            "../control-assets/providers/codex-developer-instructions.md"
         );
         let dsh_base =
-            include_str!("../../../runtime/control-assets/providers/dsh-system-message.md");
+            include_str!("../control-assets/providers/dsh-system-message.md");
         for (enabled, cli_tools) in [(true, true), (true, false), (false, true)] {
             for agent in ["antigravity", "codex", "dsh"] {
                 config.set_agent_settings(

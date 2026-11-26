@@ -1210,7 +1210,7 @@ mod tests {
     #[test]
     fn codex_history_replays_frozen_cases() -> TestResult {
         let frozen: Value = serde_json::from_str(include_str!(
-            "../../../../tooling/native-parity/fixtures/provider-history-reference.json"
+            "../tests/fixtures/provider-history-reference.json"
         ))?;
         for case in frozen["cases"].as_array().unwrap() {
             let name = case["id"].as_str().unwrap();

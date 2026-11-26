@@ -984,29 +984,30 @@ mod tests {
         );
     }
 
+    // Copy and divider expectations extracted from archive/electron-0.2-final (1c2cfd73).
     #[test]
-    fn impact_copy_and_active_card_edge_match_the_frozen_source() {
-        let frozen_messages =
-            include_str!("../../../desktop/src/renderer/src/i18n/messages/hierarchyShell.ts");
-        for locale in [Chinese, English] {
-            let impact = provider_switch_impact(locale, "${app}");
-            assert!(frozen_messages.contains(&format!("`{}`", impact.title)));
-            assert!(frozen_messages.contains(&format!("'{}'", impact.body)));
+    fn impact_copy_and_active_card_edge_match_frozen_values() {
+        for (locale, title, body) in [
+            (
+                Chinese,
+                "切换会影响所有 Matou Test 窗口。",
+                "所有 Claude Code 会话跟随全局供应商；暂缓会话就绪后自动切换，旧会话再次打开时也会应用，历史保留。上下文窗口可在「编辑」中设置。",
+            ),
+            (
+                English,
+                "Switching affects every Matou Test window.",
+                "All Claude Code sessions follow the global provider. Deferred sessions switch when ready, and reopened sessions apply it while preserving history. Configure context windows in Edit.",
+            ),
+        ] {
+            let impact = provider_switch_impact(locale, "Matou Test");
+            assert_eq!(impact.title, title);
+            assert_eq!(impact.body, body);
         }
 
+        assert_eq!(PROVIDER_BOTTOM_EDGE_WIDTH, 1.0);
+        assert_eq!(active_provider_bottom_edge(true, false), Some(0x6aa1ee));
         assert_eq!(active_provider_bottom_edge(false, false), None);
+        assert_eq!(active_provider_bottom_edge(false, true), None);
         assert_eq!(active_provider_bottom_edge(true, true), None);
-        let edge = active_provider_bottom_edge(true, false).unwrap();
-        let css = include_str!("../../../desktop/src/renderer/src/hierarchy/provider-setup.css");
-        assert!(css.lines().any(|line| {
-            line.starts_with(".provider-settings .model-provider.is-current ")
-                && line.contains(&format!("border-color: #{edge:06x}"))
-        }));
-        let css = include_str!("../../../desktop/src/renderer/src/hierarchy/hierarchy.css");
-        assert!(css.lines().any(|line| {
-            line.starts_with(".model-provider {")
-                && line.contains(&format!("border-bottom: {PROVIDER_BOTTOM_EDGE_WIDTH}px"))
-        }));
-        assert!(css.contains(".model-provider:last-child { border-bottom: 0; }"));
     }
 }

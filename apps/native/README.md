@@ -61,7 +61,7 @@ actions and controls, full packaging and platform acceptance remain open.
 ```sh
 python3 apps/native/scripts/prepare-gpui.py
 cargo build --locked --manifest-path apps/native/Cargo.toml -p matou-native-desktop
-python3 tooling/native-parity/launch-native.py --binary apps/native/target/debug/matou-native-desktop
+python3 tooling/native/launch-native.py --binary apps/native/target/debug/matou-native-desktop
 ```
 
 The launcher creates `artifacts/native-parity/native/MatouNative.app`, signs it
@@ -105,16 +105,23 @@ installed library's `matou-build.json`. Windows cross-builds use
 `--target x86_64-pc-windows-msvc`; Mac Intel uses `--target x86_64-apple-darwin`.
 macOS links a uniquely named static archive; Windows uses the matching DLL.
 Do not replace this library with unmodified upstream release binaries.
-`tooling/native-parity/export-terminal-width.mjs` reproduces the checked-in
-width ranges from the frozen JS dependency; it is a development exporter and
-is not part of the native product runtime. MIT attribution is retained beside
-the generated table and installed library.
+The checked-in width ranges were generated from the frozen JS dependency.
+MIT attribution is retained beside the generated table and installed library.
 
-Tests use temporary databases and fixtures emitted by the frozen TypeScript
-services on the captured Electron runtime. Fixture exporters live in
-`tooling/native-parity/export-storage-contract.ts` and
-`tooling/native-parity/export-bootstrap-contract.ts`. The final native product
-will not run those exporters or require the old Node/Electron runtime.
+Tests use temporary databases and checked-in fixtures captured from the
+reference runtime. The original fixture exporters are in the archived source.
+
+## Package native releases
+
+Release metadata lives in `apps/native/release-config.json`. Its default version
+must match the desktop crate's Cargo package version. Run `pnpm package:mac` or
+`pnpm package:win` on the respective platform. The native packaging tools and
+fixtures live under `tooling/packaging/`. On macOS, `pnpm accounts:build` and
+`pnpm router:build` populate `apps/native/package-resources/`. On Windows,
+`pnpm accounts:build` populates `tooling/claude-accounts/dist/` and the release
+takes the matching router output directory through `--model-router`.
+Third-party license notices live under `apps/native/third-party/`.
+
 
 Do not regenerate expected fixtures from Rust, or regenerate the frozen source
 contract merely to make a failing native test pass.

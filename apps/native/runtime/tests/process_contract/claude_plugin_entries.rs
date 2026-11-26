@@ -32,7 +32,7 @@ impl Fixture {
         fs::write(
             metadata.join("plugin.json"),
             include_bytes!(
-                "../../../../runtime/control-assets/providers/claude-plugin/.claude-plugin/plugin.json"
+                "../../control-assets/providers/claude-plugin/.claude-plugin/plugin.json"
             ),
         )?;
 

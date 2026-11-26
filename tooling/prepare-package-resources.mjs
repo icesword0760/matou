@@ -81,6 +81,7 @@ if (process.platform !== 'win32') {
 // Ship the pinned upstream account engine; end users need neither uv nor Python.
 if (process.platform === 'darwin') {
   const { prepareModelRouter } = await import('./model-router/prepare.mjs')
-  await prepareModelRouter({ packageResources: true })
+  await prepareModelRouter({ packageResources: true, destination: join(destination, '..', 'model-router') })
 }
-await import('./claude-accounts/build.mjs')
+const { buildAccountEngine } = await import('./claude-accounts/build.mjs')
+await buildAccountEngine(process.platform === 'win32' ? undefined : join(destination, '..', 'claude-accounts'))

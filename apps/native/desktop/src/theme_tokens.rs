@@ -880,13 +880,6 @@ mod tests {
     use super::*;
     use ThemePreference::{Dark, Light, System};
 
-    const HIERARCHY: &str =
-        include_str!("../../../desktop/src/renderer/src/hierarchy/hierarchy.css");
-    const CANVAS: &str =
-        include_str!("../../../desktop/src/renderer/src/session-canvas/session-canvas.css");
-    const RECOVERY: &str = include_str!("../../../desktop/src/renderer/src/recovery/recovery.css");
-    const PROVIDER: &str =
-        include_str!("../../../desktop/src/renderer/src/hierarchy/provider-setup.css");
     const NATIVE_WORKSPACE: &str = include_str!("workspace.rs");
 
     #[test]
@@ -978,377 +971,169 @@ mod tests {
         Ok(())
     }
 
-    fn rule<'a>(sheet: &'a str, selector: &str) -> &'a str {
-        let anchor = format!("{selector} {{");
-        let start = sheet
-            .match_indices(&anchor)
-            .find(|(index, _)| *index == 0 || sheet.as_bytes()[index - 1] == b'\n')
-            .unwrap_or_else(|| panic!("Missing CSS rule {selector}"))
-            .0;
-        sheet[start + anchor.len()..].split_once('}').unwrap().0
-    }
+    // Color expectations extracted from archive/electron-0.2-final (1c2cfd73).
+    #[test]
+    fn workspace_and_chrome_tokens_match_frozen_colors() {
+        let palette = LIGHT;
+        let w = palette.workspace;
+        assert_eq!(w.canvas, 0xf7f8faff);
+        assert_eq!(w.panel, 0xffffffff);
+        assert_eq!(w.panel_muted, 0xfbfcfdff);
+        assert_eq!(w.line, 0x424b581a);
+        assert_eq!(w.line_strong, 0x424b5829);
+        assert_eq!(w.text, 0x303744ff);
+        assert_eq!(w.muted, 0x7e8794ff);
+        assert_eq!(w.faint, 0xa3aab4ff);
+        assert_eq!(w.accent, 0x347fd6ff);
+        assert_eq!(w.accent_soft, 0x347fd61c);
+        assert_eq!(w.accent_line, 0x347fd647);
+        let c = palette.chrome;
+        assert_eq!(c.shell, 0xf4f5f5ff);
+        assert_eq!(c.stage, 0xf7f8faff);
+        assert_eq!(c.background, 0xffffffff);
+        assert_eq!(c.divider, 0xe8e8e8ff);
+        assert_eq!(c.muted, 0x606572ff);
+        assert_eq!(c.text, 0x2f3547ff);
+        assert_eq!(palette.tabs.active_background, 0xeceef3ff);
+        assert_eq!(palette.tabs.bar, c.background);
+        assert_eq!(palette.footer.background, c.background);
+        assert_eq!(palette.footer.top_line, c.divider);
+        let f = palette.footer;
+        assert_eq!(f.model, 0x79c0ffff);
+        assert_eq!(f.session_name, 0x8b949eff);
+        assert_eq!(f.usage, 0x7f8a99ff);
+        assert_eq!(f.usage_accent, 0x58a6ffff);
 
-    fn value<'a>(rule: &'a str, name: &str) -> &'a str {
-        rule.split(';')
-            .filter_map(|declaration| declaration.split_once(':'))
-            .find(|(key, _)| key.trim() == name)
-            .unwrap_or_else(|| panic!("Missing CSS property {name} in {rule}"))
-            .1
-            .trim()
-            .trim_end_matches(" !important")
-    }
-
-    fn rgba_from_css(css: &str) -> u32 {
-        if css == "white" {
-            return 0xffffffff;
-        }
-        if let Some(hex) = css.strip_prefix('#') {
-            let number = u32::from_str_radix(hex, 16).unwrap();
-            let rgb = if hex.len() == 3 {
-                (number >> 8 & 0xf) * 0x110000
-                    | (number >> 4 & 0xf) * 0x1100
-                    | (number & 0xf) * 0x11
-            } else {
-                number
-            };
-            return rgb << 8 | 0xff;
-        }
-        let mut channels = css
-            .strip_prefix("rgba(")
-            .unwrap()
-            .trim_end_matches(')')
-            .split(',');
-        let mut channel = || channels.next().unwrap().trim().parse::<u32>().unwrap();
-        let rgb = channel() << 16 | channel() << 8 | channel();
-        let alpha = channels.next().unwrap().trim().parse::<f64>().unwrap();
-        rgb << 8 | (alpha * 255.).round() as u32
-    }
-
-    fn assert_colors(colors: &[(u32, &str, &str)], sheet: &str) {
-        for &(actual, selector, property) in colors {
-            let expected = value(rule(sheet, selector), property);
-            assert_eq!(
-                actual,
-                rgba_from_css(expected),
-                "{selector} {property}: {expected}"
-            );
-        }
+        let palette = DARK;
+        let w = palette.workspace;
+        assert_eq!(w.canvas, 0x181a1eff);
+        assert_eq!(w.panel, 0x2c2f35f5);
+        assert_eq!(w.panel_muted, 0x23262be0);
+        assert_eq!(w.line, 0xffffff16);
+        assert_eq!(w.line_strong, 0xffffff26);
+        assert_eq!(w.text, 0xe1e5ebff);
+        assert_eq!(w.muted, 0x8d96a2ff);
+        assert_eq!(w.faint, 0x626b77ff);
+        assert_eq!(w.accent, 0x67a6efff);
+        assert_eq!(w.accent_soft, 0x4a91e224);
+        assert_eq!(w.accent_line, 0x5b9eeb47);
+        let c = palette.chrome;
+        assert_eq!(c.shell, 0xf4f5f5ff);
+        assert_eq!(c.stage, 0x1b1b1bff);
+        assert_eq!(c.background, 0x151515ff);
+        assert_eq!(c.divider, 0x262626ff);
+        assert_eq!(c.muted, 0x7b7b7bff);
+        assert_eq!(c.text, 0xfafafaff);
+        assert_eq!(palette.tabs.active_background, 0x2c2c2cff);
+        assert_eq!(palette.tabs.bar, c.background);
+        assert_eq!(palette.footer.background, c.background);
+        assert_eq!(palette.footer.top_line, c.divider);
+        let f = palette.footer;
+        assert_eq!(f.model, 0x79c0ffff);
+        assert_eq!(f.session_name, 0x8b949eff);
+        assert_eq!(f.usage, 0x7f8a99ff);
+        assert_eq!(f.usage_accent, 0x58a6ffff);
     }
 
     #[test]
-    fn workspace_and_chrome_tokens_match_frozen_css() {
-        let root = rule(HIERARCHY, ":root");
-        let light_rule = rule(HIERARCHY, ".hierarchy-shell[data-theme=\"light\"]");
-        let dark_rule = rule(HIERARCHY, ".hierarchy-shell[data-theme=\"dark\"]");
-        for (palette, workspace, chrome) in [(&LIGHT, root, light_rule), (&DARK, dark_rule, root)] {
-            let w = palette.workspace;
-            for (color, name) in [
-                (w.canvas, "canvas"),
-                (w.panel, "panel"),
-                (w.panel_muted, "panel-muted"),
-                (w.line, "line"),
-                (w.line_strong, "line-strong"),
-                (w.text, "text"),
-                (w.muted, "muted"),
-                (w.faint, "faint"),
-                (w.accent, "accent"),
-                (w.accent_soft, "accent-soft"),
-                (w.accent_line, "accent-line"),
-            ] {
-                let property = format!("--workspace-{name}");
-                assert_eq!(
-                    color,
-                    rgba_from_css(value(workspace, &property)),
-                    "{property}"
-                );
-            }
-
-            let c = palette.chrome;
-            for (color, name) in [
-                (c.shell, "shell-bg"),
-                (c.stage, "bg"),
-                (c.background, "chrome-bg"),
-                (c.divider, "border-color"),
-                (c.muted, "muted-color"),
-                (palette.tabs.active_background, "active-bg"),
-            ] {
-                let property = format!("--terminal-{name}");
-                assert_eq!(color, rgba_from_css(value(chrome, &property)), "{property}");
-            }
-            let footer = palette.footer;
-            assert_eq!(palette.tabs.bar, c.background);
-            assert_eq!(footer.background, c.background);
-            assert_eq!(footer.top_line, c.divider);
-            for (color, name) in [
-                (footer.model, ".status-model"),
-                (footer.session_name, ".status-session-name"),
-                (footer.usage, ".status-usage"),
-                (footer.usage_accent, ".status-usage strong"),
-            ] {
-                assert_colors(&[(color, name, "color")], HIERARCHY);
-            }
-        }
-        assert_eq!(LIGHT.chrome.text, rgba_from_css(value(light_rule, "color")));
-        assert_colors(
-            &[(DARK.chrome.text, ".hierarchy-shell.cli-module", "color")],
-            HIERARCHY,
-        );
-    }
-
-    #[test]
-    fn sidebar_tab_and_bottom_bar_states_match_frozen_css_and_native_light() {
-        let light = ".hierarchy-shell[data-theme=\"light\"]";
+    fn sidebar_tab_and_bottom_bar_states_match_frozen_colors() {
         let s = LIGHT.sidebar;
-        assert_colors(
-            &[
-                (
-                    s.divider,
-                    &format!("{light} .flat-sidebar"),
-                    "border-right-color",
-                ),
-                (
-                    s.heading,
-                    ".detached-terminal-app[data-theme=\"light\"]",
-                    "color",
-                ),
-            ],
-            HIERARCHY,
+        assert_eq!(s.divider, 0x58718b1f);
+        assert_eq!(s.heading, 0x2f3547ff);
+        assert_eq!(
+            LIGHT.sidebar.glass_stops,
+            [0xfbfdff17, 0xebf3f90b, 0xf6fafd12]
         );
-        for (rule_name, colors) in [
-            (
-                format!("{light} .flat-sidebar__glass-material"),
-                [
-                    s.glass_stops[0],
-                    s.glass_stops[1],
-                    s.glass_stops[2],
-                    s.glass_highlight,
-                ],
-            ),
-            (
-                ".flat-sidebar__glass-material".into(),
-                [
-                    DARK.sidebar.glass_stops[0],
-                    DARK.sidebar.glass_stops[1],
-                    DARK.sidebar.glass_stops[2],
-                    DARK.sidebar.glass_highlight,
-                ],
-            ),
-        ] {
-            let gradient = value(rule(HIERARCHY, &rule_name), "background");
-            for (actual, frozen) in colors.into_iter().zip(gradient.split("rgba(").skip(1)) {
-                let css = format!("rgba({})", frozen.split_once(')').unwrap().0);
-                assert_eq!(actual, rgba_from_css(&css), "{rule_name}");
-            }
-            assert_eq!(gradient.matches("rgba(").count(), colors.len());
-        }
-        let light_badge = format!("{light} .workspace-group__badge");
-        let light_task = format!("{light} .flat-sidebar .workbench-item.is-active");
-        assert_colors(
-            &[
-                (
-                    s.new_workspace,
-                    &format!(
-                        "{light} .flat-sidebar__new-workspace,\n{light} .workspace-group.is-active > .workspace-group__header .workspace-group__name"
-                    ),
-                    "color",
-                ),
-                (
-                    s.workspace_name,
-                    &format!(
-                        "{light} .workspace-group__name,\n{light} .workspace-group__toggle,\n{light} .workbench-item"
-                    ),
-                    "color",
-                ),
-                (s.task_active_text, &light_task, "color"),
-                (s.task_active, &light_task, "background"),
-                (s.badge_text, &light_badge, "color"),
-                (s.badge_background, &light_badge, "background"),
-            ],
-            HIERARCHY,
+        assert_eq!(LIGHT.sidebar.glass_highlight, 0xffffff1a);
+        assert_eq!(
+            DARK.sidebar.glass_stops,
+            [0x1b1f2657, 0x14181e38, 0x191e2547]
         );
-        // The native task row now reads the shared palette instead of frozen
-        // literals; the light value still matches the CSS token asserted above.
+        assert_eq!(DARK.sidebar.glass_highlight, 0xffffff17);
+        assert_eq!(s.new_workspace, 0x2f3547ff);
+        assert_eq!(s.workspace_name, 0x656d76ff);
+        assert_eq!(s.task_active_text, 0x2f3547ff);
+        assert_eq!(s.task_active, 0x57657f18);
+        assert_eq!(s.badge_text, 0x91949eff);
+        assert_eq!(s.badge_background, 0xeceef3ff);
+
         assert!(NATIVE_WORKSPACE.contains("sidebar_palette.task_text"));
         assert!(NATIVE_WORKSPACE.contains("rgba(sidebar_palette.task_hover)"));
 
         let s = DARK.sidebar;
-        assert_colors(
-            &[
-                (s.divider, ".flat-sidebar", "border-right-color"),
-                (s.heading, ".workbench-sidebar", "color"),
-                (s.new_workspace, ".flat-sidebar__new-workspace", "color"),
-                (s.workspace_name, ".workspace-group__name", "color"),
-                (s.task_text, ".workbench-item", "color"),
-                (s.task_active_text, ".workbench-item.is-active", "color"),
-                (
-                    s.task_active,
-                    ".flat-sidebar .workbench-item.is-active",
-                    "background",
-                ),
-                (
-                    s.task_hover,
-                    ".workbench-item:hover:not(.is-active)",
-                    "background",
-                ),
-                (s.badge_text, ".workspace-group__badge", "color"),
-                (s.badge_background, ".workspace-group__badge", "background"),
-            ],
-            HIERARCHY,
-        );
+        assert_eq!(s.divider, 0xffffff29);
+        assert_eq!(s.heading, 0xdfdfdfff);
+        assert_eq!(s.new_workspace, 0xe8e8e8ff);
+        assert_eq!(s.workspace_name, 0xdededeff);
+        assert_eq!(s.task_text, 0x898989ff);
+        assert_eq!(s.task_active_text, 0xffffffff);
+        assert_eq!(s.task_active, 0xffffff17);
+        assert_eq!(s.task_hover, 0x1d1d1dff);
+        assert_eq!(s.badge_text, 0x858585ff);
+        assert_eq!(s.badge_background, 0xffffff0f);
 
         let t = LIGHT.tabs;
+        assert_eq!(t.inactive_text, 0x00000066);
+        assert_eq!(t.hover_text, 0x000000a6);
+        assert_eq!(t.active_text, 0x2f3547ff);
+        assert_eq!(t.action_text, 0x606572ff);
+        assert_eq!(t.add_background, 0xeff0f4ff);
+        assert_eq!(t.action_hover_text, 0x2f3547ff);
+        assert_eq!(t.action_hover, 0x00000014);
         let f = LIGHT.footer;
-        let light_hover = format!(
-            "{light} .tab-close:hover,\n{light} .tab-add-btn:hover,\n{light} .tab-overflow-btn:hover,\n{light} .toolbar-btn:hover,\n{light} .pane-close:hover"
-        );
-        assert_colors(
-            &[
-                (t.inactive_text, &format!("{light} .tab-item"), "color"),
-                (t.hover_text, &format!("{light} .tab-item:hover"), "color"),
-                (t.active_text, &format!("{light} .tab-item.active"), "color"),
-                (t.action_text, &format!("{light} .toolbar-btn svg"), "color"),
-                (t.action_hover_text, &light_hover, "color"),
-                (t.action_hover, &light_hover, "background"),
-                (
-                    t.add_background,
-                    &format!("{light} .tab-add-btn"),
-                    "background",
-                ),
-                (f.text, &format!("{light} .status-info"), "color"),
-                (f.divider, &format!("{light} .status-divider"), "background"),
-                (
-                    f.breadcrumb,
-                    &format!("{light} .session-level-breadcrumb"),
-                    "color",
-                ),
-                (
-                    f.breadcrumb_count,
-                    &format!("{light} .session-level-breadcrumb strong + span"),
-                    "color",
-                ),
-                (
-                    f.breadcrumb_hover,
-                    &format!(
-                        "{light} .session-level-breadcrumb button:hover,\n{light} .is-clickable:hover"
-                    ),
-                    "background",
-                ),
-            ],
-            HIERARCHY,
-        );
+        assert_eq!(f.text, 0x606572ff);
+        assert_eq!(f.divider, 0xe8e8e8ff);
+        assert_eq!(f.breadcrumb, 0x000000ad);
+        assert_eq!(f.breadcrumb_count, 0x00000061);
+        assert_eq!(f.breadcrumb_hover, 0x00000014);
+
         let t = DARK.tabs;
+        assert_eq!(t.inactive_text, 0x888888ff);
+        assert_eq!(t.hover_text, 0xffffffbf);
+        assert_eq!(t.active_text, 0xfffffff2);
+        assert_eq!(t.active_background, 0x2c2c2cff);
+        assert_eq!(t.action_text, 0xffffff4d);
+        assert_eq!(t.action_hover_text, 0xffffffff);
+        assert_eq!(t.action_hover, 0xffffff1a);
+        assert_eq!(t.add_background, 0xffffff0a);
         let f = DARK.footer;
-        assert_colors(
-            &[
-                (t.inactive_text, ".tab-item", "color"),
-                (t.hover_text, ".tab-item:hover", "color"),
-                (t.active_text, ".tab-item.active", "color"),
-                (t.active_background, ".tab-item.active", "background"),
-                (t.action_text, ".tab-close", "color"),
-                (t.action_hover_text, ".tab-close:hover", "color"),
-                (t.action_hover, ".tab-close:hover", "background"),
-                (t.add_background, ".tab-add-btn", "background"),
-                (f.text, ".status-info", "color"),
-                (f.divider, ".status-divider", "background"),
-                (f.breadcrumb, ".session-level-breadcrumb", "color"),
-                (
-                    f.breadcrumb_count,
-                    ".session-level-breadcrumb strong + span",
-                    "color",
-                ),
-                (
-                    f.breadcrumb_hover,
-                    ".session-level-breadcrumb button:hover",
-                    "background",
-                ),
-            ],
-            HIERARCHY,
-        );
+        assert_eq!(f.text, 0x6e7681ff);
+        assert_eq!(f.divider, 0x21262dff);
+        assert_eq!(f.breadcrumb, 0xffffffb8);
+        assert_eq!(f.breadcrumb_count, 0xffffff66);
+        assert_eq!(f.breadcrumb_hover, 0xffffff14);
     }
 
     #[test]
-    fn session_card_tokens_match_frozen_canvas_and_native_light_edge() {
-        let light = ".hierarchy-shell[data-theme=\"light\"]";
+    fn session_card_tokens_match_frozen_colors_and_native_light_edge() {
         let l = LIGHT.cards;
+        assert_eq!(l.canvas, 0xe9edf2ff);
+        assert_eq!(l.background, 0xfcfcfdff);
+        assert_eq!(l.header, 0xffffffff);
+        assert_eq!(l.title, 0x303744ff);
+        assert_eq!(l.environment_text, 0x8a919bff);
+        assert_eq!(l.compact_text, 0x6b7482ff);
+        assert_eq!(l.compact_title, 0x364050ff);
+        assert_eq!(l.child_badge_text, 0x2666b1ff);
+        assert_eq!(l.child_badge_background, 0xe8f2ffff);
+        assert_eq!(l.child_badge_line, 0xb9d6ffff);
+        assert_eq!(l.fork_text, 0x5f7898ff);
+        assert_eq!(l.compact_background, 0xf2f4f7ff);
+
         let d = DARK.cards;
-        let compact = ".session-carousel.is-narrow .session-card-slot:not(.is-focused) .session-compact-summary";
-        let header = ".session-card .terminal-pane-header.split-pane-header";
-        let environment = ".session-card .pane-environment-badge:not(.is-shared)";
-        let badge = ".session-card .child-session-badge";
-        assert_colors(
-            &[
-                (
-                    l.canvas,
-                    &format!("{light} .session-carousel"),
-                    "background",
-                ),
-                (
-                    l.background,
-                    &format!("{light} .session-card"),
-                    "background",
-                ),
-                (l.header, &format!("{light} {header}"), "background"),
-                (
-                    l.title,
-                    &format!("{light} .session-card .pane-title"),
-                    "color",
-                ),
-                (
-                    l.environment_text,
-                    &format!("{light} {environment}"),
-                    "color",
-                ),
-                (
-                    l.compact_background,
-                    &format!("{light} {compact}"),
-                    "background",
-                ),
-                (l.compact_text, &format!("{light} {compact}"), "color"),
-                (
-                    l.compact_title,
-                    &format!("{light} .session-compact-summary strong"),
-                    "color",
-                ),
-                (l.child_badge_text, &format!("{light} {badge}"), "color"),
-                (
-                    l.child_badge_background,
-                    &format!("{light} {badge}"),
-                    "background",
-                ),
-                (
-                    l.child_badge_line,
-                    &format!("{light} {badge}"),
-                    "border-color",
-                ),
-                (
-                    l.fork_text,
-                    &format!("{light} .session-card .pane-fork"),
-                    "color",
-                ),
-                (d.canvas, ".session-canvas", "background"),
-                (d.background, ".session-card", "background"),
-                (d.header, header, "background"),
-                (d.title, ".session-card .pane-title", "color"),
-                (d.environment_text, environment, "color"),
-                (d.compact_text, compact, "color"),
-                (d.compact_title, ".session-compact-summary strong", "color"),
-                (d.child_badge_text, badge, "color"),
-                (d.child_badge_background, badge, "background"),
-                (d.child_badge_line, badge, "border-color"),
-                (d.fork_text, ".session-card .pane-fork", "color"),
-                (d.edge_intent, ".session-edge-intent", "background"),
-                (
-                    d.edge_intent_progress,
-                    ".session-edge-intent::after",
-                    "background",
-                ),
-            ],
-            CANVAS,
-        );
-        assert_eq!(
-            value(rule(CANVAS, compact), "background"),
-            "var(--terminal-chrome-bg)"
-        );
+        assert_eq!(d.canvas, 0x111317ff);
+        assert_eq!(d.background, 0x191c21ff);
+        assert_eq!(d.header, 0x1d2025ff);
+        assert_eq!(d.title, 0xffffffdb);
+        assert_eq!(d.environment_text, 0xffffff61);
+        assert_eq!(d.compact_text, 0xffffff8f);
+        assert_eq!(d.compact_title, 0xffffffd1);
+        assert_eq!(d.child_badge_text, 0x78b3f4ff);
+        assert_eq!(d.child_badge_background, 0x5b9de91a);
+        assert_eq!(d.child_badge_line, 0x5b9de96b);
+        assert_eq!(d.fork_text, 0x97b9e0b8);
+        assert_eq!(d.edge_intent, 0x6faaf024);
+        assert_eq!(d.edge_intent_progress, 0x6faaf0ff);
         assert_eq!(d.compact_background, DARK.chrome.background);
         assert!(NATIVE_WORKSPACE.contains(&format!("fill(track, rgba(0x{:08x}))", l.edge_intent)));
         assert!(NATIVE_WORKSPACE.contains(&format!(
@@ -1359,230 +1144,91 @@ mod tests {
 
     #[test]
     fn settings_colors_match_the_frozen_cascade() {
-        let dark = ".hierarchy-shell[data-theme=\"dark\"]";
         let s = LIGHT.settings;
-        assert_colors(
-            &[
-                (s.nav_text << 8 | 0xff, ".model-settings__nav-item", "color"),
-                (s.tabs, ".model-settings__tabs", "background"),
-                (
-                    s.selected_tab,
-                    ".model-settings__tabs button.is-active",
-                    "background",
-                ),
-                (s.current_summary, ".model-settings__current", "background"),
-                (s.provider_hover, ".model-provider:hover", "background"),
-                (
-                    s.provider_text,
-                    ".model-provider__name strong,.model-provider__model strong",
-                    "color",
-                ),
-                (
-                    s.provider_action_text,
-                    ".model-provider__actions button",
-                    "color",
-                ),
-                (
-                    s.provider_action_background,
-                    ".model-provider__actions button",
-                    "background",
-                ),
-                (
-                    s.provider_disabled_background,
-                    ".model-provider__actions button:disabled",
-                    "background",
-                ),
-                (
-                    s.language_text,
-                    ".model-settings__language-options label",
-                    "color",
-                ),
-                (
-                    s.language_hover,
-                    ".model-settings__language-options label:hover",
-                    "background",
-                ),
-                (
-                    s.language_selected,
-                    ".model-settings__language-options label.is-active",
-                    "background",
-                ),
-                (s.impact_title, ".model-settings__impact b", "color"),
-            ],
-            HIERARCHY,
-        );
-        assert_colors(
-            &[
-                (
-                    s.provider_selected,
-                    ".provider-settings .model-provider.is-current",
-                    "background",
-                ),
-                (s.dialog, ".provider-setup", "background"),
-                (s.dialog_label, ".provider-setup", "color"),
-                (s.input_text, ".provider-setup input", "color"),
-                (s.input_background, ".provider-setup input", "background"),
-                (
-                    s.input_focus_line,
-                    ".provider-setup input:focus",
-                    "border-color",
-                ),
-            ],
-            PROVIDER,
-        );
-        let ring = value(rule(PROVIDER, ".provider-setup input:focus"), "box-shadow");
-        assert_eq!(
-            s.input_focus_ring,
-            rgba_from_css(ring.split_whitespace().last().unwrap())
-        );
-        for (actual, selector) in [
-            (s.nav, ".model-settings__nav"),
-            (s.providers, ".model-settings__providers"),
-            (s.language_list, ".model-settings__language-options"),
-        ] {
-            assert_eq!(
-                value(rule(HIERARCHY, selector), "background"),
-                "var(--workspace-panel-muted)"
-            );
-            assert_eq!(actual, LIGHT.workspace.panel_muted);
-        }
+        assert_eq!(s.tabs, 0xf0f2f5ff);
+        assert_eq!(s.selected_tab, 0xfffffff0);
+        assert_eq!(s.current_summary, 0xf3f7fdff);
+        assert_eq!(s.provider_hover, 0xffffffff);
+        assert_eq!(s.provider_text, 0x414a57ff);
+        assert_eq!(s.provider_action_text, 0x525d6aff);
+        assert_eq!(s.provider_action_background, 0xffffffd1);
+        assert_eq!(s.provider_disabled_background, 0xdee2e894);
+        assert_eq!(s.language_text, 0x414a57ff);
+        assert_eq!(s.language_hover, 0xffffffff);
+        assert_eq!(s.language_selected, 0xf5f8fcff);
+        assert_eq!(s.impact_title, 0x6a7481ff);
+        assert_eq!(s.nav_text, 0x5f6976);
+        assert_eq!(s.provider_selected, 0xedf5ffff);
+        assert_eq!(s.dialog, 0xffffffff);
+        assert_eq!(s.dialog_label, 0x344257ff);
+        assert_eq!(s.input_text, 0x344257ff);
+        assert_eq!(s.input_background, 0xffffffff);
+        assert_eq!(s.input_focus_line, 0x5c9cedff);
+        assert_eq!(s.input_focus_ring, 0xe8f1ffff);
+        assert_eq!(s.nav, LIGHT.workspace.panel_muted);
+        assert_eq!(s.providers, LIGHT.workspace.panel_muted);
+        assert_eq!(s.language_list, LIGHT.workspace.panel_muted);
         assert_eq!(s.provider_disabled_text, LIGHT.workspace.faint);
-        assert_eq!(
-            value(
-                rule(HIERARCHY, ".model-provider__actions button:disabled"),
-                "color"
-            ),
-            "var(--workspace-faint)"
-        );
 
         let s = DARK.settings;
-        for (actual, selector, property) in [
-            (s.nav, ".model-settings__nav", "background"),
-            (s.nav_text << 8 | 0xff, ".model-settings__nav-item", "color"),
-            (s.tabs, ".model-settings__tabs", "background"),
-            (
-                s.selected_tab,
-                ".model-settings__tabs button.is-active",
-                "background",
-            ),
-            (s.current_summary, ".model-settings__current", "background"),
-            (s.providers, ".model-settings__providers", "background"),
-            (s.provider_hover, ".model-provider:hover", "background"),
-            (
-                s.provider_selected,
-                ".model-provider.is-current",
-                "background",
-            ),
-            (
-                s.provider_text,
-                ".model-provider__name strong,.model-provider__model strong",
-                "color",
-            ),
-            (
-                s.provider_action_text,
-                ".model-provider__actions button",
-                "color",
-            ),
-            (
-                s.provider_action_background,
-                ".model-provider__actions button",
-                "background",
-            ),
-            (
-                s.provider_disabled_text,
-                ".model-provider__actions button:disabled",
-                "color",
-            ),
-            (
-                s.provider_disabled_background,
-                ".model-provider__actions button:disabled",
-                "background",
-            ),
-            (
-                s.language_list,
-                ".model-settings__language-options",
-                "background",
-            ),
-            (
-                s.language_text,
-                ".model-settings__language-options label",
-                "color",
-            ),
-            (
-                s.language_hover,
-                ".model-settings__language-options label:hover",
-                "background",
-            ),
-            (
-                s.language_selected,
-                ".model-settings__language-options label.is-active",
-                "background",
-            ),
-            (s.impact_title, ".model-settings__impact b", "color"),
-            (s.dialog, ".provider-dialog", "background"),
-            (s.dialog_label, ".provider-dialog__body label", "color"),
-            (s.input_text, ".provider-dialog__body input", "color"),
-            (
-                s.input_background,
-                ".provider-dialog__body input",
-                "background",
-            ),
-        ] {
-            let selector = format!("{dark} {}", selector.replace(',', &format!(",{dark} ")));
-            assert_colors(&[(actual, &selector, property)], HIERARCHY);
-        }
-        let focus = rule(HIERARCHY, ".provider-dialog__body input:focus");
-        assert_eq!(value(focus, "border-color"), "var(--workspace-accent-line)");
-        assert!(value(focus, "box-shadow").ends_with("var(--workspace-accent-soft)"));
+        assert_eq!(s.tabs, 0xffffff0e);
+        assert_eq!(s.selected_tab, 0xffffff18);
+        assert_eq!(s.current_summary, 0x2c496b57);
+        assert_eq!(s.provider_hover, 0xffffff09);
+        assert_eq!(s.provider_text, 0xdde2e8ff);
+        assert_eq!(s.provider_action_text, 0xcbd1d9ff);
+        assert_eq!(s.provider_action_background, 0xffffff0b);
+        assert_eq!(s.provider_disabled_background, 0xffffff0a);
+        assert_eq!(s.language_text, 0xdde2e8ff);
+        assert_eq!(s.language_hover, 0xffffff09);
+        assert_eq!(s.language_selected, 0x2c496b38);
+        assert_eq!(s.impact_title, 0xa3abb5ff);
+        assert_eq!(s.nav, 0x1f2227b8);
+        assert_eq!(s.providers, 0x25282dc7);
+        assert_eq!(s.provider_selected, 0x2c496b38);
+        assert_eq!(s.provider_disabled_text, 0x6e7782ff);
+        assert_eq!(s.language_list, 0x25282dc7);
+        assert_eq!(s.dialog, 0x25282dfa);
+        assert_eq!(s.dialog_label, 0xa8b0bbff);
+        assert_eq!(s.input_text, 0xe2e6ecff);
+        assert_eq!(s.input_background, 0xffffff0b);
+        assert_eq!(s.nav_text, 0x9aa3ae);
         assert_eq!(s.input_focus_line, DARK.workspace.accent_line);
         assert_eq!(s.input_focus_ring, DARK.workspace.accent_soft);
     }
 
     #[test]
-    fn recovery_water_and_database_recovery_match_frozen_styles() {
-        let light = ".hierarchy-shell[data-theme=\"light\"]";
-        for (w, selector, base) in [
-            (
-                LIGHT.recovery_water,
-                format!("{light} .session-recovery-water"),
-                "#fafcff",
-            ),
-            (
-                DARK.recovery_water,
-                ".terminal-pane > .session-recovery-water".into(),
-                "var(--terminal-bg)",
-            ),
-        ] {
-            let gradient = value(rule(HIERARCHY, &selector), "background");
-            let r = w.tint_rgb >> 16;
-            let g = w.tint_rgb >> 8 & 0xff;
-            let b = w.tint_rgb & 0xff;
-            let [x, y] = w.center.map(|fraction| fraction * 100.);
-            let stop = w.fade_end * 100.;
-            let alpha = w.tint_alpha.to_string();
-            let alpha = alpha.trim_start_matches('0');
-            assert_eq!(
-                gradient,
-                format!(
-                    "radial-gradient(circle at {x}% {y}%,rgba({r},{g},{b},{alpha}),transparent {stop}%),{base}"
-                )
-            );
-            for (actual, chunk) in [w.inner_border, w.inner_shadow].into_iter().zip(
-                value(
-                    rule(HIERARCHY, ".session-recovery-water::after"),
-                    "box-shadow",
-                )
-                .split("rgba(")
-                .skip(1),
-            ) {
-                assert_eq!(
-                    actual,
-                    rgba_from_css(&format!("rgba({})", chunk.split_once(')').unwrap().0))
-                );
-            }
+    fn recovery_water_and_database_recovery_match_frozen_colors() {
+        let w = LIGHT.recovery_water;
+        assert_eq!(w.tint_rgb, 0x5699db);
+        assert_eq!(w.center, [0.5, 0.35]);
+        assert_eq!(w.fade_end, 0.48);
+        assert_eq!(w.tint_alpha, 0.055);
+        assert_eq!(w.base, 0xfafcffff);
+        assert_eq!(w.overlay, 0xf4f7fbeb);
+        assert_eq!(w.overlay_text, 0x29364aff);
+        assert_eq!(w.overlay_failed, 0xfff6f5f0);
+        assert_eq!(w.panel, 0xfffffffa);
+        assert_eq!(w.panel_muted, 0x617086ff);
+        assert_eq!(w.panel_line, 0xc8d4e3ff);
+
+        let w = DARK.recovery_water;
+        assert_eq!(w.tint_rgb, 0x4793de);
+        assert_eq!(w.center, [0.5, 0.35]);
+        assert_eq!(w.fade_end, 0.48);
+        assert_eq!(w.tint_alpha, 0.05);
+        assert_eq!(w.base, DARK.chrome.stage);
+        assert_eq!(w.overlay, 0x0d1117e0);
+        assert_eq!(w.overlay_text, 0xdbe6f5ff);
+        assert_eq!(w.overlay_failed, 0x190e0fe6);
+        assert_eq!(w.panel, 0x181f29f5);
+        assert_eq!(w.panel_muted, 0x93a2b7ff);
+        assert_eq!(w.panel_line, 0x7da1d14d);
+
+        for w in [LIGHT.recovery_water, DARK.recovery_water] {
+            assert_eq!(w.inner_border, 0xb5d8ff0e);
+            assert_eq!(w.inner_shadow, 0x135c9f0e);
         }
-        assert_eq!(LIGHT.recovery_water.base, rgba_from_css("#fafcff"));
-        assert_eq!(DARK.recovery_water.base, DARK.chrome.stage);
         assert_eq!(
             DARK.recovery_water.native_base,
             DARK.terminal.background << 8 | 0xff
@@ -1593,135 +1239,52 @@ mod tests {
             crate::recovery_water_macos::water_base_color(Theme::LIGHT) << 8 | 0xff
         );
 
-        for (qualifier, w) in [
-            (format!("{light} "), LIGHT.recovery_water),
-            (String::new(), DARK.recovery_water),
-        ] {
-            let overlay = format!("{qualifier}.session-recovery-overlay");
-            let panel = format!("{overlay}__content");
-            assert_colors(
-                &[
-                    (w.overlay, &overlay, "background"),
-                    (w.overlay_text, &overlay, "color"),
-                    (
-                        w.overlay_failed,
-                        &format!("{overlay}.state-failed"),
-                        "background",
-                    ),
-                    (w.panel, &panel, "background"),
-                    (w.panel_muted, &format!("{panel} p"), "color"),
-                ],
-                HIERARCHY,
-            );
-            let border = rule(HIERARCHY, &panel);
-            let color = if qualifier.is_empty() {
-                value(border, "border").strip_prefix("1px solid ").unwrap()
-            } else {
-                value(border, "border-color")
-            };
-            assert_eq!(w.panel_line, rgba_from_css(color));
-        }
-
         let r = LIGHT.recovery_page;
+        assert_eq!(r.page, 0xf4f6f9ff);
+        assert_eq!(r.text, 0x20242dff);
+        assert_eq!(r.card, 0xffffffff);
+        assert_eq!(r.muted, 0x606a78ff);
+        assert_eq!(r.accent, 0x3478f6ff);
+        assert_eq!(r.error_text, 0xa12525ff);
+        assert_eq!(r.error_background, 0xfff0efff);
+        assert_eq!(r.success_text, 0x17653aff);
+        assert_eq!(r.success_background, 0xedf9f1ff);
+        assert_eq!(r.progress_text, 0x275da8ff);
+        assert_eq!(r.progress_background, 0xedf4ffff);
+        assert_eq!(r.card_line, 0xdce1e8ff);
         assert_eq!(DARK.recovery_page, r);
-        assert_colors(
-            &[
-                (r.page, ".database-recovery-page", "background"),
-                (r.text, ".database-recovery-page", "color"),
-                (r.card, ".database-recovery-card", "background"),
-                (
-                    r.muted,
-                    ".database-recovery-card header > p:last-child",
-                    "color",
-                ),
-                (r.accent, ".database-recovery-eyebrow", "color"),
-                (r.error_text, ".database-recovery-error", "color"),
-                (r.error_background, ".database-recovery-error", "background"),
-                (r.success_text, ".database-recovery-success", "color"),
-                (
-                    r.success_background,
-                    ".database-recovery-success",
-                    "background",
-                ),
-                (r.progress_text, ".database-recovery-progress", "color"),
-                (
-                    r.progress_background,
-                    ".database-recovery-progress",
-                    "background",
-                ),
-            ],
-            RECOVERY,
-        );
-        assert_eq!(
-            r.card_line,
-            rgba_from_css(
-                value(rule(RECOVERY, ".database-recovery-card"), "border")
-                    .strip_prefix("1px solid ")
-                    .unwrap()
-            )
-        );
     }
 
     #[test]
     fn terminal_colors_reuse_the_native_palette_and_match_frozen_tokens() {
-        let terminal =
-            include_str!("../../../desktop/src/renderer/src/terminal/terminal-themes.ts");
-        for (theme, palette, native) in [
-            ("light", &LIGHT, Theme::LIGHT),
-            ("dark", &DARK, Theme::DARK),
-        ] {
-            assert_eq!(palette.terminal, native);
-            let source = terminal
-                .split_once(&format!("{theme}: {{"))
-                .unwrap()
-                .1
-                .split_once('}')
-                .unwrap()
-                .0;
-            let props = [
-                "background",
-                "foreground",
-                "cursor",
-                "cursorAccent",
-                "selectionBackground",
-                "black",
-                "red",
-                "green",
-                "yellow",
-                "blue",
-                "magenta",
-                "cyan",
-                "white",
-                "brightBlack",
-                "brightRed",
-                "brightGreen",
-                "brightYellow",
-                "brightBlue",
-                "brightMagenta",
-                "brightCyan",
-                "brightWhite",
-            ];
-            let colors = [
-                native.background,
-                native.foreground,
-                native.cursor,
-                native.cursor_accent,
-                native.selection_background,
-            ];
-            for (property, color) in props.into_iter().zip(colors.into_iter().chain(native.ansi)) {
-                let value = source
-                    .split_once(&format!("{property}: '"))
-                    .unwrap()
-                    .1
-                    .split_once('\'')
-                    .unwrap()
-                    .0;
-                assert_eq!(
-                    color << 8 | 0xff,
-                    rgba_from_css(value),
-                    "{theme} {property}"
-                );
-            }
-        }
+        let native = Theme::LIGHT;
+        assert_eq!(LIGHT.terminal, native);
+        assert_eq!(native.background, 0xFCFCFD);
+        assert_eq!(native.foreground, 0x2F3547);
+        assert_eq!(native.cursor, 0xFF7809);
+        assert_eq!(native.cursor_accent, 0xFFFFFF);
+        assert_eq!(native.selection_background, 0xbfceff);
+        assert_eq!(
+            native.ansi,
+            [
+                0x383a42, 0xe45649, 0x50a14f, 0xc18401, 0x4078f2, 0xa626a4, 0x0184bc, 0xa0a1a7,
+                0x4f525e, 0xe06c75, 0x98c379, 0xe5c07b, 0x61afef, 0xc678dd, 0x56b6c2, 0x383a42,
+            ]
+        );
+
+        let native = Theme::DARK;
+        assert_eq!(DARK.terminal, native);
+        assert_eq!(native.background, 0x1B1B1B);
+        assert_eq!(native.foreground, 0xFAFAFA);
+        assert_eq!(native.cursor, 0xFF7809);
+        assert_eq!(native.cursor_accent, 0x0d1117);
+        assert_eq!(native.selection_background, 0x264f78);
+        assert_eq!(
+            native.ansi,
+            [
+                0x484f58, 0xff7b72, 0x3fb950, 0xd29922, 0x58a6ff, 0xbc8cff, 0x39d353, 0xb1bac4,
+                0x6e7681, 0xffa198, 0x56d364, 0xe3b341, 0x79c0ff, 0xd2a8ff, 0x56d364, 0xf0f6fc,
+            ]
+        );
     }
 }

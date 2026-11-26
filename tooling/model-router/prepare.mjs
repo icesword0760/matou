@@ -24,13 +24,21 @@ async function download(url, file) {
     await rename(temporary, file)
   } finally { await rm(temporary, { force: true }) }
 }
-async function copyPackaged(cache) {
-  const destination = join(root, 'apps/desktop/package-resources/model-router')
+export async function stageModelRouter(cache, {
+  platform = 'darwin', destination = join(root, 'apps/native/package-resources/model-router')
+} = {}) {
+  const windows = platform === 'win32'
+  const filename = windows ? 'model-router.exe' : 'model-router'
   await mkdir(destination, { recursive: true })
-  for (const file of ['model-router', 'LICENSE', 'source.json']) await copyFile(join(cache, file), join(destination, file))
-  await chmod(join(destination, 'model-router'), 0o755)
+  for (const file of [filename, 'LICENSE', 'source.json']) {
+    await copyFile(join(cache, file), join(destination, file))
+  }
+  if (!windows) await chmod(join(destination, filename), 0o755)
 }
-export async function prepareModelRouter({ arch = process.env.MATOU_MAC_ARCH || process.arch, packageResources = false } = {}) {
+
+export async function prepareModelRouter({
+  arch = process.env.MATOU_MAC_ARCH || process.arch, packageResources = false, destination
+} = {}) {
   const asset = pinnedRouter.assets[arch]
   if (!asset) throw new Error(`Model router is available only for macOS arm64/x64: ${arch}`)
   const cache = join(root, '.cache/model-router', pinnedRouter.version, `darwin-${arch}`)
@@ -44,7 +52,7 @@ export async function prepareModelRouter({ arch = process.env.MATOU_MAC_ARCH || 
           info.patchSha256 === pinnedRouter.patch?.sha256 && typeof info.patchSha256 === 'string' &&
           info.arch === arch && typeof info.binarySha256 === 'string' &&
           await digest(join(cache, 'model-router')) === info.binarySha256) {
-        if (packageResources) await copyPackaged(cache)
+        if (packageResources) await stageModelRouter(cache, { destination })
         return cache
       }
     } catch { /* No patched build: fall through to the pinned release. */ }
@@ -75,7 +83,7 @@ export async function prepareModelRouter({ arch = process.env.MATOU_MAC_ARCH || 
     await copyFile(join(extraction, 'LICENSE'), join(cache, 'LICENSE'))
     await writeFile(join(cache, 'source.json'), JSON.stringify({ version: pinnedRouter.version, commit: pinnedRouter.commit, repository: pinnedRouter.repository, arch, archive: asset.name, archiveSha256: published, binarySha256: await digest(binary) }, null, 2) + '\n')
   } finally { await rm(extraction, { recursive: true, force: true }) }
-  if (packageResources) await copyPackaged(cache)
+  if (packageResources) await stageModelRouter(cache, { destination })
   return cache
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

@@ -1144,12 +1144,34 @@ mod install_tests {
                     .unwrap_err();
                 assert!(error.to_string().contains(reason), "{error:#}");
             }
-            let expected = installer.canonicalize()?;
             manager.state.lock().unwrap().manual_path = Some(installer.clone());
-            manager.open_downloaded_installer(root.path(), |path| {
-                assert_eq!(path, expected);
-                Ok(())
-            })?;
+            if matches!(platform, Platform::Darwin) {
+                let expected = installer.canonicalize()?;
+                manager.open_downloaded_installer(root.path(), |path| {
+                    assert_eq!(path, expected);
+                    Ok(())
+                })?;
+            } else {
+                let reject = || {
+                    manager
+                        .open_downloaded_installer(root.path(), |_| {
+                            panic!("unverified installer opened")
+                        })
+                        .unwrap_err()
+                };
+                assert!(
+                    reject()
+                        .to_string()
+                        .contains("verification metadata is unavailable")
+                );
+                manager.state.lock().unwrap().manual_download = Some(ManualDownload {
+                    url: Url::parse("https://updates.example.invalid/Matou.exe")?,
+                    size: None,
+                    expected_sha256: None,
+                    expected_sha512: None,
+                });
+                assert!(reject().to_string().contains("not a valid PE executable"));
+            }
             #[cfg(unix)]
             {
                 std::fs::remove_file(&installer)?;

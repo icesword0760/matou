@@ -1,18 +1,16 @@
 import { access, lstat, mkdir, readFile, realpath, symlink, writeFile } from 'node:fs/promises'
-import { createRequire } from 'node:module'
 import { basename, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
 import { macAccountEngineCode, macAccountEngineDirectory, refreshAccountEngineManifestAfterSigning, verifyAccountEngineManifest } from './claude-accounts/artifact.mjs'
 
 import {
-  defaultUpdateBaseUrl, desktopConfig, fileDigests, formatUpdateConfig, generateChecksums, generateManifest,
+  defaultUpdateBaseUrl, nativeReleaseConfig, fileDigests, formatUpdateConfig, generateChecksums, generateManifest,
   nativeBinaries, repo, requireAbsent, runTool, stageRelease
 } from './native-release-helpers.mjs'
 
-const packager = join(repo, 'tooling/native-parity/package-native-mac.mjs')
-const desktopProject = join(repo, 'apps/desktop')
-const resourcesSource = join(desktopProject, 'package-resources')
+const packager = join(repo, 'tooling/packaging/package-native-mac.mjs')
+const resourcesSource = join(repo, 'apps/native/package-resources')
 const accountEngine = 'matou-claude-accounts'
 const codesign = '/usr/bin/codesign'
 const architectures = { arm64: 'aarch64', x64: 'x86_64' }
@@ -21,12 +19,11 @@ const usage = `Usage: pnpm package:mac [--version X.Y.Z] [--arch arm64|x64] [--o
   [--desktop-bin file] [--runtime-bin file] [--claude-accounts-engine directory] [--model-router directory]
   [--update-base-url URL] [--update-channel channel] [--identity Developer-ID] [--no-timestamp]
 
-The default inputs are under apps/desktop/package-resources. Override them with
+The default inputs are under apps/native/package-resources. Override them with
 the flags above or MATOU_CLAUDE_ACCOUNTS_ENGINE and MATOU_MODEL_ROUTER_DIR.
 Build the complete account engine with pnpm accounts:build before packaging.
 MATOU_MAC_ARCH, MATOU_UPDATE_BASE_URL, MATOU_UPDATE_CHANNEL and CARGO_TARGET_DIR
-set the respective defaults. The output directory defaults to apps/native/release.
-Set MATOU_APP_BUILDER to an existing app-builder binary to generate blockmaps.`
+set the respective defaults. The output directory defaults to apps/native/release.`
 
 export function macReleaseOptions(args, env, config) {
   const options = ['version', 'arch', 'out-dir', 'desktop-bin', 'runtime-bin', 'claude-accounts-engine',
@@ -50,12 +47,9 @@ export function macReleaseOptions(args, env, config) {
     outDir: values['out-dir'] ?? join(repo, 'apps/native/release'),
     desktopBin: values['desktop-bin'],
     runtimeBin: values['runtime-bin'],
-    accountsDirs: accountsDir ? [resolve(accountsDir)] : [
-      join(resourcesSource, 'claude-accounts', accountEngine),
-      join(repo, 'tooling/claude-accounts/dist', accountEngine)
-    ],
+    accountsDirs: [accountsDir ? resolve(accountsDir) : join(resourcesSource, 'claude-accounts', accountEngine)],
     modelRouterDir: resolve(values['model-router'] ?? env.MATOU_MODEL_ROUTER_DIR ?? join(resourcesSource, 'model-router')),
-    identity: values.identity ?? config.build.mac.identity,
+    identity: values.identity ?? config.mac.identity,
     timestamp: !values['no-timestamp']
   }
 }
@@ -79,11 +73,11 @@ async function resolveAccounts(paths) {
 async function signApp(app, options, config, accountCode) {
   const contents = join(app, 'Contents')
   const resources = join(contents, 'Resources')
-  const entitlements = join(desktopProject, config.build.mac.entitlements)
+  const entitlements = join(repo, config.mac.entitlements)
   const flags = ['--force', '--sign', options.identity, '--options', 'runtime',
     options.timestamp ? '--timestamp' : '--timestamp=none']
   const sign = (path, args = []) => runTool(codesign, [...flags, ...args, path])
-  const inherited = ['--entitlements', join(desktopProject, config.build.mac.entitlementsInherit)]
+  const inherited = ['--entitlements', join(repo, config.mac.entitlementsInherit)]
 
   const engine = accountCode.get(accountEngine)
   for (const binary of accountCode.values()) {
@@ -93,7 +87,7 @@ async function signApp(app, options, config, accountCode) {
   await refreshAccountEngineManifestAfterSigning(macAccountEngineDirectory(contents), accountCode)
 
   const router = join(contents, 'MacOS', 'model-router')
-  await sign(router, ['--identifier', `${config.build.appId}.model-router`])
+  await sign(router, ['--identifier', `${config.appId}.model-router`])
   // Signing changes the executable bytes. Update the existing resource seal
   // before signing the bundle that contains both files.
   const manifestPath = join(resources, 'model-router', 'source.json')
@@ -118,39 +112,6 @@ async function verifyApp(app, timestamp) {
     `designated => ${signatures.app.designatedRequirement}\nTimestamp=${secureTimestamp ?? 'none'}`)
 }
 
-function installedAppBuilder() {
-  const require = createRequire(import.meta.url)
-  try {
-    return require('app-builder-bin').appBuilderPath
-  } catch (error) {
-    if (error.code !== 'MODULE_NOT_FOUND') throw error
-  }
-  try {
-    const builderRequire = createRequire(require.resolve('electron-builder'))
-    const libRequire = createRequire(builderRequire.resolve('app-builder-lib'))
-    return libRequire('app-builder-bin').appBuilderPath
-  } catch (error) {
-    if (error.code !== 'MODULE_NOT_FOUND') throw error
-  }
-}
-
-async function blockmaps(artifacts) {
-  try {
-    const command = process.env.MATOU_APP_BUILDER || installedAppBuilder() || 'app-builder'
-    await runTool(command, ['--version'])
-    const maps = []
-    for (const artifact of artifacts) {
-      const path = artifact + '.blockmap'
-      await runTool(command, ['blockmap', '--input', artifact, '--output', path, '--compression', 'gzip'])
-      maps.push(path)
-    }
-    return maps
-  } catch (error) {
-    console.warn(`Skipping blockmaps: app-builder unavailable or unsuccessful.\n${error.message}`)
-    return []
-  }
-}
-
 async function releaseMac(options, config) {
   const { version, arch, outDir, modelRouterDir, updateBaseUrl, channel, timestamp } = options
   const accounts = await resolveAccounts(options.accountsDirs)
@@ -161,8 +122,7 @@ async function releaseMac(options, config) {
   const manifestName = `${channel}-mac.yml`
   const checksumName = `SHA256SUMS-${version}-mac-${arch}.txt`
   return stageRelease(outDir, 'mac', async (staging, output) => {
-    for (const name of [appName, stem + '.zip', stem + '.dmg', stem + '.zip.blockmap',
-      stem + '.dmg.blockmap', manifestName, checksumName]) await requireAbsent(join(output, name))
+    for (const name of [appName, stem + '.zip', stem + '.dmg', manifestName, checksumName]) await requireAbsent(join(output, name))
     const targetArch = architectures[arch]
     const [desktopBin, runtimeBin] = await nativeBinaries({ ...options, target: `${targetArch}-apple-darwin` })
     const { stdout } = await runTool(process.execPath, [packager, '--desktop-bin', desktopBin, '--runtime-bin',
@@ -202,7 +162,7 @@ async function releaseMac(options, config) {
       await runTool('/usr/bin/hdiutil', ['detach', mounted])
     }
 
-    const artifacts = [zip, dmg, ...await blockmaps([zip, dmg])]
+    const artifacts = [zip, dmg]
     const manifest = join(staging, manifestName)
     await writeFile(manifest, await generateMacManifest({ version, zip, dmg }))
     artifacts.push(manifest)
@@ -214,7 +174,7 @@ async function releaseMac(options, config) {
 const invokedPath = process.argv[1] && await realpath(process.argv[1]).catch(() => null)
 if (invokedPath === fileURLToPath(import.meta.url)) {
   try {
-    const config = await desktopConfig()
+    const config = await nativeReleaseConfig()
     const options = macReleaseOptions(process.argv.slice(2), process.env, config)
     if (options.help) console.log(usage)
     else {

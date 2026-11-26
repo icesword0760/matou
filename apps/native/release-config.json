@@ -1,0 +1,30 @@
+{
+  "version": "0.3.0",
+  "productName": "码头",
+  "appId": "com.matou.desktop",
+  "mac": {
+    "category": "public.app-category.developer-tools",
+    "identity": "Lu'an Yidayi Electronic Commerce Co.,Ltd. (JAKX72KQ6X)",
+    "entitlements": "apps/native/packaging/entitlements.mac.plist",
+    "entitlementsInherit": "apps/native/packaging/entitlements.mac.plist",
+    "icon": "apps/native/packaging/icon.icns",
+    "extendInfo": {
+      "CFBundleDocumentTypes": [
+        {
+          "CFBundleTypeName": "Folder",
+          "CFBundleTypeRole": "Viewer",
+          "LSHandlerRank": "Alternate",
+          "LSItemContentTypes": ["public.folder"]
+        }
+      ]
+    },
+    "finderQuickAction": {
+      "from": "apps/native/packaging/finder-quick-action/进入码头.workflow",
+      "to": "finder-quick-action/进入码头.workflow"
+    }
+  },
+  "win": {
+    "icon": "apps/native/packaging/icon.ico",
+    "wizardSmallImage": "apps/native/packaging/icon-128.png"
+  }
+}

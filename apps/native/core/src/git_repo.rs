@@ -1710,7 +1710,7 @@ mod tests {
 
     fn cases(operation: &str) -> impl Iterator<Item = Value> + '_ {
         let fixture: Value = serde_json::from_str(include_str!(
-            "../../../../tooling/native-parity/fixtures/git-branch-policy-reference.json"
+            "../tests/fixtures/git-branch-policy-reference.json"
         ))
         .unwrap();
         fixture["cases"]

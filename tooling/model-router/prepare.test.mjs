@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -15,7 +15,7 @@ async function fixture(t) {
   const moduleDirectory = join(root, 'tooling/model-router')
   await mkdir(moduleDirectory, { recursive: true })
   for (const file of ['prepare.mjs', 'version.json']) await copyFile(join(directory, file), join(moduleDirectory, file))
-  const { pinnedRouter, prepareModelRouter } = await import(pathToFileURL(join(moduleDirectory, 'prepare.mjs')).href)
+  const { pinnedRouter, prepareModelRouter, stageModelRouter } = await import(pathToFileURL(join(moduleDirectory, 'prepare.mjs')).href)
   const cache = join(root, '.cache/model-router', pinnedRouter.version, 'darwin-arm64')
   await mkdir(cache, { recursive: true })
   const binary = Buffer.from('isolated router fixture')
@@ -34,7 +34,7 @@ async function fixture(t) {
     if (upstream === undefined) delete process.env.MATOU_ROUTER_UPSTREAM
     else process.env.MATOU_ROUTER_UPSTREAM = upstream
   })
-  return { root, cache, metadata, info, binary, prepareModelRouter }
+  return { root, cache, metadata, info, binary, prepareModelRouter, stageModelRouter }
 }
 
 test('current patched cache is reused and the verified bytes are packaged', async t => {
@@ -42,8 +42,24 @@ test('current patched cache is reused and the verified bytes are packaged', asyn
   assert.equal(await f.prepareModelRouter({ arch: 'arm64' }), f.cache)
   assert.equal(await f.prepareModelRouter({ arch: 'arm64', packageResources: true }), f.cache)
   for (const file of ['model-router', 'source.json', 'LICENSE']) {
-    assert.deepEqual(await readFile(join(f.root, 'apps/desktop/package-resources/model-router', file)), await readFile(join(f.cache, file)))
+    assert.deepEqual(await readFile(join(f.root, 'apps/native/package-resources/model-router', file)), await readFile(join(f.cache, file)))
   }
+})
+
+test('Windows packaging copies the .exe and its metadata without setting execute bits', async t => {
+  const { root, cache, stageModelRouter } = await fixture(t)
+  const executable = join(cache, 'model-router.exe')
+  await writeFile(executable, 'Windows model router fixture')
+  if (process.platform !== 'win32') await chmod(executable, 0o644)
+  await rm(join(cache, 'model-router'))
+  await stageModelRouter(cache, { platform: 'win32' })
+  const output = join(root, 'apps/native/package-resources/model-router')
+  const files = ['LICENSE', 'model-router.exe', 'source.json']
+  assert.deepEqual((await readdir(output)).sort(), files)
+  for (const file of files) {
+    assert.deepEqual(await readFile(join(output, file)), await readFile(join(cache, file)))
+  }
+  if (process.platform !== 'win32') assert.equal((await stat(join(output, 'model-router.exe'))).mode & 0o777, 0o644)
 })
 
 for (const field of ['commit', 'patchSha256', 'arch', 'patched', 'binarySha256']) {
@@ -59,7 +75,7 @@ for (const field of ['commit', 'patchSha256', 'arch', 'patched', 'binarySha256']
     assert.equal(downloads, 0)
     assert.deepEqual(await readFile(f.metadata), before)
     assert.deepEqual(await readFile(join(f.cache, 'model-router')), f.binary)
-    await assert.rejects(readFile(join(f.root, 'apps/desktop/package-resources/model-router/model-router')), { code: 'ENOENT' })
+    await assert.rejects(readFile(join(f.root, 'apps/native/package-resources/model-router/model-router')), { code: 'ENOENT' })
   })
 }
 

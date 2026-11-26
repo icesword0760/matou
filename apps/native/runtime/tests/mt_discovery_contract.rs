@@ -25,7 +25,7 @@ use tempfile::TempDir;
 const RUNTIME: &str = env!("CARGO_BIN_EXE_matou-native-runtime");
 const FIXTURE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../../tooling/native-parity/fixtures/host-control-reference.json"
+    "/tests/fixtures/host-control-reference.json"
 ));
 const MAX_FRAME: u32 = 2 * 1024 * 1024;
 

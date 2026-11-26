@@ -1543,10 +1543,10 @@ mod view {
     use crate::workspace::card_tooltip_box;
 
     // Frozen visual values:
-    // - apps/desktop/src/renderer/src/dag/dag.css:2-94 (dark palette and light overrides)
-    // - apps/desktop/src/renderer/src/dag/DagCanvas.tsx:173-285 (toolbar/cards)
-    // - apps/desktop/src/renderer/src/dag/DagSearch.tsx:22-41 (search dropdown)
-    // - apps/desktop/src/renderer/src/i18n/messages/dag.ts (bilingual copy)
+    // - archived renderer: dag/dag.css:2-94 (dark palette and light overrides)
+    // - archived renderer: dag/DagCanvas.tsx:173-285 (toolbar/cards)
+    // - archived renderer: dag/DagSearch.tsx:22-41 (search dropdown)
+    // - archived renderer: i18n/messages/dag.ts (bilingual copy)
     const FORK_EDGE: u32 = 0x5c91cf;
     const DERIVED_EDGE: u32 = 0x4d6076;
     const ARROW_EDGE: u32 = 0x57708b;

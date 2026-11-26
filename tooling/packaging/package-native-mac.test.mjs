@@ -1,0 +1,487 @@
+import assert from 'node:assert/strict'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import {
+  appendFile, chmod, copyFile, cp, lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rm, symlink, writeFile
+} from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { after, before, test } from 'node:test'
+import { macAccountEngineCode, refreshAccountEngineManifestAfterSigning, writeAccountEngineManifest } from '../claude-accounts/artifact.mjs'
+
+const repo = fileURLToPath(new URL('../../', import.meta.url))
+const appName = '码头.app'
+const runtimePath = 'Contents/MacOS/matou-native-runtime'
+const infoPath = 'Contents/Info.plist'
+const iconPath = 'Contents/Resources/icon.icns'
+const entitlementsPath = 'Contents/Resources/entitlements.mac.plist'
+const workflowPath = 'Contents/Resources/finder-quick-action/进入码头.workflow/Contents/Resources/document.wflow'
+const pluginPath = 'Contents/Resources/control-assets/providers/claude-plugin'
+const modelRouterPath = 'Contents/Resources/model-router'
+const modelRouterExecutablePath = 'Contents/MacOS/model-router'
+const accountEngineName = 'matou-claude-accounts'
+const accountEnginePath = join('Contents/Resources/claude-accounts', accountEngineName)
+const accountEngineExecutablePath = join('Contents/MacOS', accountEngineName)
+const skip = process.platform !== 'darwin' && 'macOS bundle verification requires macOS'
+const releaseIdentity = process.env.MATOU_NATIVE_TEST_DEVELOPER_ID
+
+let root
+let checkout
+let thin
+let universal
+let accountLibrary
+const routers = {}
+
+async function writeRouterManifest(directory, version = '8.0.69', executable = join(directory, 'model-router')) {
+  const binary = await readFile(executable)
+  const binarySha256 = createHash('sha256').update(binary).digest('hex')
+  await writeFile(join(directory, 'source.json'), JSON.stringify({ version, binarySha256 }))
+}
+
+async function routerFixture(name, binary = thin) {
+  const directory = join(root, name)
+  await mkdir(directory)
+  await copyFile(binary, join(directory, 'model-router'))
+  await writeFile(join(directory, 'LICENSE'), 'Fixture license\n')
+  await writeRouterManifest(directory)
+  return directory
+}
+
+async function accountFixture(name, binary = thin) {
+  const directory = join(root, name)
+  await mkdir(join(directory, '_internal'), { recursive: true })
+  await copyFile(binary, join(directory, accountEngineName))
+  await copyFile(accountLibrary, join(directory, '_internal', 'account-fixture.dylib'))
+  await writeFile(join(directory, '_internal/base_library.zip'), 'account engine fixture')
+  await writeFile(join(directory, '_internal/extra-library'), 'another account engine file')
+  await copyFile(fileURLToPath(new URL('../claude-accounts/UPSTREAM-LICENSE', import.meta.url)),
+    join(directory, 'UPSTREAM-LICENSE'))
+  await writeAccountEngineManifest(directory)
+  return directory
+}
+
+before(async () => {
+  if (skip) return
+  root = await mkdtemp(join(await realpath(tmpdir()), 'matou-native-mac-test-'))
+  // Run the packaging CLI with only its native inputs and its own sidecar defaults.
+  checkout = join(root, 'native-only')
+  const inputs = [
+    'apps/native/desktop/Cargo.toml',
+    'apps/native/release-config.json',
+    'apps/native/packaging',
+    'apps/native/runtime/control-assets',
+    'tooling/packaging/package-native-mac.mjs',
+    'tooling/packaging/claude-plugin.mjs',
+    'tooling/native-release-helpers.mjs',
+    'tooling/install-macos-app.mjs',
+    ...['artifact.mjs', 'bridge.py', 'isolated_browser.py', 'local_engine.py',
+      'pyproject.toml', 'uv.lock', 'build.mjs'].map(name => `tooling/claude-accounts/${name}`)
+  ]
+  await Promise.all(inputs.map(path => cp(join(repo, path), join(checkout, path), { recursive: true })))
+  const source = join(root, 'main.c')
+  await writeFile(source, 'int main(void) { return 0; }\n')
+  const compile = arch => {
+    const path = join(root, arch)
+    execFileSync('/usr/bin/clang', [
+      '-target', `${arch}-apple-macos12`, '-Wl,-no_adhoc_codesign', source, '-o', path
+    ], { env: { ...process.env, TMPDIR: root } })
+    return path
+  }
+  thin = compile('x86_64')
+  const arm64 = compile('arm64')
+  universal = join(root, 'universal')
+  execFileSync('/usr/bin/lipo', ['-create', thin, arm64, '-output', universal])
+  accountLibrary = join(root, 'account-fixture.dylib')
+  execFileSync('/usr/bin/clang', ['-arch', 'x86_64', '-arch', 'arm64', '-dynamiclib', source, '-o', accountLibrary])
+  routers.thin = await routerFixture('thin router')
+  routers.universal = await routerFixture('universal router', universal)
+})
+after(async () => {
+  if (root) await rm(root, { recursive: true, force: true })
+})
+
+function cli(args) {
+  const result = spawnSync(process.execPath, [join(checkout, 'tooling/packaging/package-native-mac.mjs'), ...args], { encoding: 'utf8' })
+  assert.ifError(result.error)
+  return result
+}
+
+function success(result) {
+  assert.equal(result.status, 0, result.stderr)
+  return JSON.parse(result.stdout)
+}
+
+function failure(result, message) {
+  assert.equal(result.status, 1, result.stdout || result.stderr)
+  assert.match(result.stderr, message)
+}
+
+function assemble(out, { desktop = thin, runtime = thin, router = routers.thin, extra = [] } = {}) {
+  return cli([
+    '--desktop-bin', desktop, '--runtime-bin', runtime,
+    '--out-dir', out, '--version', '0.2.24', '--unsigned', '--model-router', router, ...extra
+  ])
+}
+
+test('assembles and verifies an app with frozen metadata and universal Mach-O payloads', { skip }, async () => {
+  const out = join(root, 'complete output')
+  const app = join(out, appName)
+  const result = success(assemble(out, { desktop: universal, runtime: universal, router: routers.universal }))
+  assert.equal(result.bundleId, 'com.matou.desktop')
+  assert.equal(result.version, '0.2.24')
+  assert.deepEqual(await readdir(out), [appName])
+  const sourcePlugin = fileURLToPath(new URL('../../apps/native/runtime/control-assets/providers/claude-plugin/', import.meta.url))
+  for (const path of ['.claude-plugin/plugin.json', 'skills/mt-terminal/SKILL.md',
+    'skills/agent-foreman/SKILL.md', 'skills/agent-foreman/reference.md']) {
+    assert.deepEqual(await readFile(join(app, pluginPath, path)), await readFile(join(sourcePlugin, path)))
+  }
+  await assert.rejects(lstat(join(app, pluginPath, 'hooks')), { code: 'ENOENT' })
+  await assert.rejects(lstat(join(app, pluginPath, 'skills/agent-foreman/scripts')), { code: 'ENOENT' })
+  for (const name of ['matou-native-desktop', 'matou-native-runtime']) {
+    assert.equal((await lstat(join(app, 'Contents', 'MacOS', name))).mode & 0o7777, 0o755)
+  }
+
+  const verified = success(cli(['--verify', app]))
+  assert.deepEqual(verified.info.CFBundleDocumentTypes, [{
+    CFBundleTypeName: 'Folder',
+    CFBundleTypeRole: 'Viewer',
+    LSHandlerRank: 'Alternate',
+    LSItemContentTypes: ['public.folder']
+  }])
+  for (const [key, value] of Object.entries({
+    CFBundleIdentifier: 'com.matou.desktop',
+    CFBundleExecutable: 'matou-native-desktop',
+    CFBundleName: '码头',
+    CFBundleVersion: '0.2.24',
+    CFBundleShortVersionString: '0.2.24',
+    LSMinimumSystemVersion: '12.0',
+    NSHighResolutionCapable: true
+  })) assert.equal(verified.info[key], value, key)
+  assert.deepEqual(verified.architectures.desktop.toSorted(), ['arm64', 'x86_64'])
+  assert.deepEqual(verified.architectures.runtime.toSorted(), ['arm64', 'x86_64'])
+  assert.deepEqual(verified.architectures.modelRouter.toSorted(), ['arm64', 'x86_64'])
+  const router = join(app, modelRouterPath)
+  assert.deepEqual((await readdir(router)).sort(), ['LICENSE', 'source.json'])
+  for (const name of await readdir(router)) {
+    assert.deepEqual(await readFile(join(router, name)), await readFile(join(routers.universal, name)))
+  }
+  assert.deepEqual(await readFile(join(app, modelRouterExecutablePath)), await readFile(join(routers.universal, 'model-router')))
+  assert.equal(verified.signatures.modelRouter.status, 'unsigned')
+  assert.equal(verified.signatures.app.status, 'unsigned')
+  assert.equal(verified.signatures.runtime.status, 'unsigned')
+
+  const explicit = await accountFixture('explicit engine')
+  const explicitBundle = success(assemble(join(root, 'bundle with engine'), {
+    extra: ['--claude-accounts-engine', explicit]
+  })).path
+  const packaged = join(explicitBundle, accountEnginePath)
+  assert.equal(await readFile(join(packaged, '_internal/extra-library'), 'utf8'), 'another account engine file')
+  assert.deepEqual(await readFile(join(packaged, 'UPSTREAM-LICENSE')), await readFile(join(explicit, 'UPSTREAM-LICENSE')))
+  const framework = join(explicitBundle, 'Contents/Frameworks')
+  assert.equal(await readlink(join(framework, 'base_library.zip')), `../Resources/claude-accounts/${accountEngineName}/_internal/base_library.zip`)
+  assert.deepEqual(await readFile(join(framework, 'account-fixture.dylib')), await readFile(accountLibrary))
+  await assert.rejects(lstat(join(packaged, '_internal/account-fixture.dylib')), { code: 'ENOENT' })
+  assert.equal(success(cli(['--verify', explicitBundle])).signatures.claudeAccounts.status, 'unsigned')
+  await rm(join(explicitBundle, accountEngineExecutablePath))
+  failure(cli(['--verify', explicitBundle]), /Missing account engine/)
+})
+
+test('verification rejects missing skills and legacy Claude plugin entries', { skip }, async () => {
+  const app = success(assemble(join(root, 'plugin verification'))).path
+  const plugin = join(app, pluginPath)
+  const skill = join(plugin, 'skills/mt-terminal/SKILL.md')
+  const contents = await readFile(skill)
+  await rm(skill)
+  failure(cli(['--verify', app]), /Missing Claude plugin asset/)
+  await writeFile(skill, contents)
+  for (const name of ['hooks', 'skills/agent-foreman/scripts']) {
+    await mkdir(join(plugin, name))
+    failure(cli(['--verify', app]), /Unexpected Claude plugin assets/)
+    await rm(join(plugin, name), { recursive: true })
+  }
+})
+
+test('rejects stale or incomplete account distributions and permits an engine-free development bundle', { skip }, async () => {
+  const dev = success(assemble(join(root, 'development without account engine'))).path
+  assert.equal(success(cli(['--verify', dev])).signatures.claudeAccounts, undefined)
+  failure(cli(['--verify', dev, '--require-release-signature']), /requires a bundled account engine/)
+
+  const engine = await accountFixture('account input validation')
+  const explicit = ['--claude-accounts-engine', engine]
+  const out = join(root, 'rejected account engine')
+  const manifest = join(engine, 'source.json')
+  const original = await readFile(manifest, 'utf8')
+  await rm(manifest)
+  failure(assemble(out, { extra: explicit }), /Invalid account engine source manifest.*pnpm accounts:build/)
+  await writeFile(manifest, JSON.stringify({ ...JSON.parse(original), sourceSha256: 'outdated' }))
+  failure(assemble(out, { extra: explicit }), /Stale account engine distribution.*pnpm accounts:build/)
+  await writeFile(manifest, original)
+  await rm(join(engine, '_internal/extra-library'))
+  failure(assemble(out, { extra: explicit }), /Account engine distribution SHA-256 mismatch/)
+  await rm(join(engine, '_internal/base_library.zip'))
+  failure(assemble(out, { extra: explicit }), /Missing account engine distribution file/)
+
+  const thinAccount = await accountFixture('account arch input')
+  failure(assemble(out, { desktop: universal, runtime: universal, router: routers.universal,
+    extra: ['--claude-accounts-engine', thinAccount] }), /Account engine architecture mismatch/)
+})
+
+test('assembles from the native checkout’s default companion directories', { skip }, async t => {
+  const resources = join(checkout, 'apps/native/package-resources')
+  t.after(() => rm(resources, { recursive: true, force: true }))
+  const engine = await accountFixture('default engine')
+  await Promise.all([
+    cp(engine, join(resources, 'claude-accounts', accountEngineName), { recursive: true }),
+    cp(routers.thin, join(resources, 'model-router'), { recursive: true })
+  ])
+  const app = success(cli(['--desktop-bin', thin, '--runtime-bin', thin,
+    '--out-dir', join(root, 'default companions'), '--version', '0.3.0'])).path
+  const { architectures, signatures } = success(cli(['--verify', app]))
+  assert.equal(signatures.claudeAccounts.status, 'unsigned')
+  assert.deepEqual(architectures.modelRouter, ['x86_64'])
+})
+
+test('writes a generic update configuration and rejects malformed configurations on verification', { skip }, async () => {
+  const base = 'https://updates.example.test/beta'
+  for (const [name, extra] of [['stable', []], ['beta', ['--update-channel', 'beta']]]) {
+    const app = success(assemble(join(root, `update ${name}`), {
+      extra: ['--update-base-url', base, ...extra]
+    })).path
+    const path = join(app, 'Contents/Resources/app-update.yml')
+    assert.equal(await readFile(path, 'utf8'), `provider: generic\nurl: ${base}\nchannel: ${name}\n`)
+    success(cli(['--verify', app]))
+    await appendFile(path, 'url: https://other.example.test\n')
+    failure(cli(['--verify', app]), /Invalid app-update.yml/)
+  }
+  failure(assemble(join(root, 'broken update'), {
+    extra: ['--update-base-url', 'file:///tmp/stable']
+  }), /absolute HTTP\(S\) URL/)
+})
+
+test('copies custom entitlements and audits the requested bundle ID', { skip }, async () => {
+  const out = join(root, 'custom')
+  const entitlements = join(root, 'custom.plist')
+  const override = fileURLToPath(new URL('../../apps/native/packaging/entitlements.mac.plist', import.meta.url))
+  const plist = (await readFile(override, 'utf8')).replaceAll('<true/>', '<false/>')
+  await writeFile(entitlements, plist)
+  const app = join(out, appName)
+  const bundleId = 'com.matou.native-parity'
+  success(assemble(out, { extra: ['--bundle-id', bundleId, '--entitlements', entitlements] }))
+  assert.equal(await readFile(join(app, entitlementsPath), 'utf8'), plist)
+  failure(cli(['--verify', app]), /CFBundleIdentifier/)
+  assert.equal(success(cli(['--verify', app, '--bundle-id', bundleId])).info.CFBundleIdentifier, bundleId)
+})
+
+test('assembles and verifies the separately named beta app and Finder workflow', { skip }, async () => {
+  const out = join(root, 'beta')
+  const name = '码头测试版'
+  const bundleId = 'com.matou.desktop.beta'
+  const app = join(out, `${name}.app`)
+  const identity = ['--app-name', name, '--bundle-id', bundleId]
+  const engine = await accountFixture('beta account fixture')
+  const result = success(assemble(out, { extra: [...identity, '--claude-accounts-engine', engine] }))
+  assert.equal(result.path, await realpath(app))
+  assert.equal(result.bundleId, bundleId)
+  assert.deepEqual(await readdir(out), [`${name}.app`])
+  assert.deepEqual((await readdir(join(app, 'Contents/MacOS'))).sort(),
+    [accountEngineName, 'matou-native-runtime', 'model-router', name].sort())
+  assert.equal((await lstat(join(app, 'Contents/MacOS', name))).mode & 0o7777, 0o755)
+
+  const verified = success(cli(['--verify', app, ...identity]))
+  assert.equal(verified.info.CFBundleIdentifier, bundleId)
+  for (const field of ['CFBundleName', 'CFBundleDisplayName', 'CFBundleExecutable']) {
+    assert.equal(verified.info[field], name, field)
+  }
+  assert.deepEqual(success(cli(['--verify', app, '--bundle-id', bundleId])).info, verified.info)
+  failure(cli(['--verify', app, '--app-name', '码头', '--bundle-id', bundleId]), /CFBundleExecutable|CFBundleName/)
+  failure(cli(['--verify', app, '--app-name', name]), /CFBundleIdentifier/)
+  failure(cli(['--verify', app, ...identity, '--require-release-signature']), /Developer ID signature .*unsigned/)
+
+  const workflow = join(app, 'Contents/Resources/finder-quick-action', `进入${name}.workflow`)
+  const plist = JSON.parse(execFileSync('/usr/bin/plutil', [
+    '-convert', 'json', '-o', '-', '--', join(workflow, infoPath)
+  ], { encoding: 'utf8' }))
+  assert.equal(plist.CFBundleIdentifier, `${bundleId}.finder-open-workspace`)
+  assert.equal(plist.CFBundleName, `进入${name}`)
+  assert.equal(plist.NSServices[0].NSMenuItem.default, `进入${name}`)
+  const document = join(workflow, 'Contents/Resources/document.wflow')
+  const original = await readFile(document, 'utf8')
+  assert.ok(original.includes(`/usr/bin/open -b ${bundleId} "$target"`))
+  await writeFile(document, original.replace(bundleId, 'com.matou.desktop'))
+  failure(cli(['--verify', app, ...identity]), /Invalid Finder workflow name or bundle ID/)
+})
+
+test('rejects missing input files and removes bundles that fail staged validation', { skip }, async () => {
+  const out = join(root, 'failed')
+  const missing = join(root, 'absent')
+  const nonExecutable = join(root, 'non-executable')
+  const notMachO = join(root, 'not-mach-o')
+  const badPlist = join(root, 'bad.plist')
+  await mkdir(out)
+  await writeFile(nonExecutable, await readFile(thin), { mode: 0o644 })
+  await writeFile(notMachO, '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+  await writeFile(badPlist, 'not a plist')
+
+  for (const [options, error] of [
+    [{ extra: ['--app-name', '../escape'] }, /Invalid --app-name/],
+    [{ desktop: missing }, /Missing desktop binary/],
+    [{ runtime: missing }, /Missing runtime binary/],
+    [{ extra: ['--entitlements', missing] }, /Missing entitlements resource/],
+    [{ runtime: nonExecutable }, /runtime binary must be executable/],
+    [{ desktop: notMachO }, /Mach-O executable/],
+    [{ extra: ['--entitlements', badPlist] }, /Invalid plist dictionary/]
+  ]) {
+    failure(assemble(out, options), error)
+    assert.deepEqual(await readdir(out), [])
+  }
+})
+
+test('rejects damaged bundle metadata, required resources and executable permissions', { skip }, async () => {
+  const out = join(root, 'damaged')
+  const app = join(out, appName)
+  success(assemble(out))
+  const info = await readFile(join(app, infoPath), 'utf8')
+  await writeFile(join(app, infoPath), info.replace('public.folder', 'public.text'))
+  failure(cli(['--verify', app]), /CFBundleDocumentTypes/)
+  await writeFile(join(app, infoPath), info)
+  await chmod(join(app, runtimePath), 0o644)
+  failure(cli(['--verify', app]), /runtime binary must have mode 0755/)
+  await chmod(join(app, runtimePath), 0o755)
+  for (const [path, error] of [
+    [iconPath, /Missing icon resource/],
+    [entitlementsPath, /Missing entitlements resource/],
+    [workflowPath, /Missing Finder workflow resource/],
+    [runtimePath, /Missing runtime binary/]
+  ]) {
+    const target = join(app, path)
+    const bytes = await readFile(target)
+    const { mode } = await lstat(target)
+    await rm(target)
+    failure(cli(['--verify', app]), error)
+    await writeFile(target, bytes, { mode })
+  }
+})
+
+test('requires Developer ID for release verification and reports unsigned and ad-hoc signatures', { skip }, async () => {
+  const out = join(root, 'signatures')
+  const app = join(out, appName)
+  const engine = await accountFixture('signatures account fixture')
+  success(assemble(out, { extra: ['--claude-accounts-engine', engine] }))
+  const strict = ['--verify', app, '--require-release-signature']
+  failure(cli(strict), /app requires the Matou Developer ID signature \(Team JAKX72KQ6X\); found unsigned/)
+
+  // All signing in this test explicitly uses the ad-hoc identity on disposable files.
+  const accountCode = await macAccountEngineCode(join(app, 'Contents'))
+  for (const target of [join(app, runtimePath), join(app, modelRouterExecutablePath), ...accountCode.values()]) {
+    execFileSync('/usr/bin/codesign', ['--force', '--sign', '-', target])
+  }
+  await writeRouterManifest(join(app, modelRouterPath), undefined, join(app, modelRouterExecutablePath))
+  await refreshAccountEngineManifestAfterSigning(join(app, accountEnginePath), accountCode)
+  execFileSync('/usr/bin/codesign', ['--force', '--sign', '-', app])
+  const { signatures } = success(cli(['--verify', app]))
+  assert.equal(signatures.app.status, 'ad-hoc')
+  assert.equal(signatures.runtime.status, 'ad-hoc')
+  assert.equal(signatures.app.identifier, 'com.matou.desktop')
+  assert.match(signatures.app.designatedRequirement, /^cdhash /)
+  failure(cli(strict), /app requires the Matou Developer ID signature \(Team JAKX72KQ6X\); found ad-hoc/)
+})
+
+test('rejects missing, mismatched and tampered model-router inputs and bundles', { skip }, async () => {
+  const output = join(root, 'router rejected')
+  const source = await routerFixture('router validation')
+  const app = success(assemble(join(root, 'router tampering'), { router: source })).path
+  const packaged = join(app, modelRouterPath)
+  const verify = ['--verify', app]
+  for (const name of ['model-router', 'LICENSE', 'source.json']) {
+    const error = /Missing model-router/
+    for (const directory of [source, packaged]) {
+      const path = directory === packaged && name === 'model-router'
+        ? join(app, modelRouterExecutablePath) : join(directory, name)
+      const { mode } = await lstat(path)
+      const data = await readFile(path)
+      await rm(path)
+      failure(directory === source ? assemble(output, { router: source }) : cli(verify), error)
+      await writeFile(path, data, { mode })
+    }
+  }
+  failure(assemble(output, { desktop: universal, router: source }), /model-router architecture mismatch/)
+  await writeRouterManifest(source, '8.0.68')
+  failure(assemble(output, { router: source }), /source.json version must be 8\.0\.69/)
+  await writeFile(join(source, 'source.json'), '{')
+  failure(assemble(output, { router: source }), /Invalid model-router source.json/)
+  await writeRouterManifest(source)
+  for (const directory of [source, packaged]) {
+    await appendFile(directory === packaged ? join(app, modelRouterExecutablePath) : join(directory, 'model-router'), 'tampered')
+    failure(directory === source ? assemble(output, { router: source }) : cli(verify), /binarySha256 mismatch/)
+  }
+  failure(cli([...verify, '--allow-missing-model-router']), /binarySha256 mismatch/)
+  await rm(packaged, { recursive: true })
+  failure(cli(verify), /Missing model-router directory/)
+  await rm(join(app, modelRouterExecutablePath))
+  assert.equal(success(cli([...verify, '--allow-missing-model-router'])).signatures.modelRouter, undefined)
+  failure(cli([...verify, '--allow-missing-model-router', '--require-release-signature']), /requires model-router/)
+  assert.deepEqual(await readdir(output), [])
+})
+
+test('verifies the signed model-router seal and stable Developer ID requirement', {
+  skip: skip || (!releaseIdentity && 'set MATOU_NATIVE_TEST_DEVELOPER_ID to run with the release certificate')
+}, async () => {
+  const source = await routerFixture('release router', universal)
+  const engine = await accountFixture('release account fixture', universal)
+  const identifier = 'com.matou.desktop.model-router'
+  const sign = (path, ...options) => execFileSync('/usr/bin/codesign', [
+    '--force', '--sign', releaseIdentity, '--timestamp=none', ...options, path
+  ], { stdio: 'pipe' })
+  sign(join(source, 'model-router'), '--identifier', identifier)
+  await writeRouterManifest(source)
+  const app = success(assemble(join(root, 'signed router bundle'), {
+    desktop: universal, runtime: universal, router: source, extra: ['--claude-accounts-engine', engine]
+  })).path
+  const strict = ['--verify', app, '--require-release-signature']
+  sign(join(app, runtimePath))
+  const packagedEngine = join(app, accountEnginePath)
+  const accountCode = await macAccountEngineCode(join(app, 'Contents'))
+  for (const binary of accountCode.values()) sign(binary)
+  await refreshAccountEngineManifestAfterSigning(packagedEngine, accountCode)
+  sign(app)
+  const { signatures } = success(cli(strict))
+  assert.equal(signatures.modelRouter.status, 'developer-id')
+  assert.equal(signatures.modelRouter.teamIdentifier, 'JAKX72KQ6X')
+  assert.equal(signatures.modelRouter.identifier, identifier)
+  assert.match(signatures.modelRouter.designatedRequirement, /anchor apple generic/)
+
+  const packaged = join(app, modelRouterPath)
+  const binary = join(app, modelRouterExecutablePath)
+  sign(binary, '--identifier', identifier, '--requirements', `=designated => identifier "${identifier}"`)
+  failure(cli(strict), /binarySha256 mismatch/)
+  await writeRouterManifest(packaged, undefined, binary)
+  sign(app)
+  failure(cli(strict), /modelRouter .*requires the designated requirement/)
+
+  execFileSync('/usr/bin/codesign', ['--force', '--sign', '-', binary], { stdio: 'pipe' })
+  await writeRouterManifest(packaged, undefined, binary)
+  sign(app)
+  failure(cli(strict), /modelRouter requires the Matou Developer ID signature .*ad-hoc/)
+})
+
+test('rejects /Applications and its aliases before creating output', { skip }, async () => {
+  const alias = join(root, 'application-directory-alias')
+  await symlink('/Applications', alias)
+  for (const path of [
+    '/Applications',
+    '/Applications/码头.app',
+    '/System/Volumes/Data/Applications',
+    join(alias, 'must-not-create')
+  ]) failure(assemble(path), /--out-dir cannot write to \/Applications/)
+})
+
+test('refuses to overwrite an existing bundle', { skip }, async () => {
+  const out = join(root, 'existing')
+  success(assemble(out))
+  const info = join(out, appName, infoPath)
+  const original = await readFile(info, 'utf8')
+  failure(assemble(out), /Output bundle already exists/)
+  assert.equal(await readFile(info, 'utf8'), original)
+  assert.deepEqual(await readdir(out), [appName])
+})

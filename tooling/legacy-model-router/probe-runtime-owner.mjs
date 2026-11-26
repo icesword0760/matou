@@ -8,7 +8,7 @@ import { build } from 'tsup'
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const output = join(root, 'output/model-router-stage2')
 await build({
-  entry: { 'runtime-owner-probe': join(root, 'tooling/model-router/runtime-owner-probe.ts'), 'runtime-fixture': join(root, 'tooling/model-router/runtime-fixture.ts') },
+  entry: { 'runtime-owner-probe': join(root, 'tooling/legacy-model-router/runtime-owner-probe.ts'), 'runtime-fixture': join(root, 'tooling/legacy-model-router/runtime-fixture.ts') },
   outDir: output, format: ['cjs'], outExtension: () => ({ js: '.cjs' }),
   platform: 'node', target: 'node22', external: ['electron'], noExternal: ['@matou/contracts'],
   clean: false

@@ -5,8 +5,8 @@ import { tmpdir } from 'node:os'
 import { basename, join, sep } from 'node:path'
 import { test } from 'node:test'
 
-import { verifyWindowsDirPackage } from './native-parity/package-native-win.mjs'
-import { runTool } from './native-release-helpers.mjs'
+import { verifyWindowsDirPackage } from './packaging/package-native-win.mjs'
+import { nativeReleaseConfig, runTool } from './native-release-helpers.mjs'
 import { releaseWindows, windowsReleaseOptions } from './release-native-win.mjs'
 
 const version = '1.2.3'
@@ -169,6 +169,15 @@ test('internal x64 installer uses a separate artifact and update channel with no
   assert.deepEqual((await readdir(options.outDir)).sort(), [
     `Matou-${version}-win-x64-internal.exe`, `SHA256SUMS-${version}-win-x64-internal.txt`
   ])
+})
+
+test('uses the native product metadata by default', async () => {
+  const config = await nativeReleaseConfig()
+  for (const arch of ['x64', 'arm64']) {
+    const plan = windowsReleaseOptions(['--arch', arch], {}, config)
+    assert.equal(plan.version, config.version)
+    assert.equal(plan.applicationExecutable, config.productName + '.exe')
+  }
 })
 
 test('publishes an ARM64 payload on its own stable feed with the Inno x64 loader', async t => {

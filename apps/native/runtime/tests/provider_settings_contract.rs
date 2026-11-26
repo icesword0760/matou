@@ -29,7 +29,7 @@ const KEY: &str = "SYNTHETIC-FIXTURE-ONLY";
 const QUEUED_KEY: &str = "SYNTHETIC-QUEUED-PROVIDER-ONLY";
 const CREDENTIAL: &str = "fixture-only.json";
 const FROZEN: &str =
-    include_str!("../../../../tooling/native-parity/fixtures/provider-config-reference.json");
+    include_str!("../../core/tests/fixtures/provider-config-reference.json");
 
 struct RuntimeChild {
     child: Child,

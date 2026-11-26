@@ -19,16 +19,16 @@ mod mail;
 mod process;
 
 const SKILL: &str = include_str!(
-    "../../../runtime/control-assets/providers/claude-plugin/skills/agent-foreman/SKILL.md"
+    "../control-assets/providers/claude-plugin/skills/agent-foreman/SKILL.md"
 );
 const BRIEF: &str = include_str!(
-    "../../../runtime/control-assets/providers/claude-plugin/skills/agent-foreman/brief-template.md"
+    "../control-assets/providers/claude-plugin/skills/agent-foreman/brief-template.md"
 );
 const PARALLEL: &str = include_str!(
-    "../../../runtime/control-assets/providers/claude-plugin/skills/agent-foreman/parallel.md"
+    "../control-assets/providers/claude-plugin/skills/agent-foreman/parallel.md"
 );
 const REFERENCE: &str = include_str!(
-    "../../../runtime/control-assets/providers/claude-plugin/skills/agent-foreman/reference.md"
+    "../control-assets/providers/claude-plugin/skills/agent-foreman/reference.md"
 );
 const USAGE: &str = "Usage:
   mt-foreman guide [brief|parallel|reference]
