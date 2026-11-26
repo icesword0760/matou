@@ -1224,6 +1224,12 @@ impl ShellOwner {
         hook.hud
             .set_context_guard(hook.context_guard.project_hud(time, &optimizer_settings));
         let mut hud = json!(hook.hud.snapshot_with_agents(time, agents));
+        if let Some(gateway) = shell.gateway.as_ref() {
+            let (model_id, model_label) = hook.hud.raw_model_candidates();
+            if let Some(resolved) = gateway.resolve_hud_model(model_id, model_label) {
+                hud["model"] = json!(resolved);
+            }
+        }
         if let Some(percent) = context_percent {
             hud["contextPercent"] = json!(percent.round());
         } else if let Some(hud) = hud.as_object_mut() {

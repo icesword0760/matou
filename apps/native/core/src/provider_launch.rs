@@ -581,6 +581,7 @@ pub struct ClaudeGatewayProjection {
     pub stream_keep_alive: bool,
     source_model: String,
     source_context_windows: BTreeMap<String, u64>,
+    source_display_names: BTreeMap<String, String>,
     source_provider_id: String,
     source_models: [Option<String>; ROLES.len()],
     source_efforts: [Option<String>; ROLES.len()],
@@ -709,18 +710,19 @@ impl ClaudeLaunch {
     pub fn apply_subscription_launch(&mut self, projection: PreparedSubscriptionLaunch) {
         let gateway = self.gateway.as_mut().expect("managed subscription gateway");
         for (index, model) in projection.models.into_iter().enumerate() {
-            if let Some(window) = gateway.source_models[index]
-                .as_deref()
-                .and_then(|raw| {
+            if let Some(raw) = gateway.source_models[index].as_deref() {
+                let raw_key = without_context_suffix(raw);
+                let model_key = without_context_suffix(&model);
+                if let Some(window) = gateway.source_context_windows.get(raw_key).copied() {
                     gateway
                         .source_context_windows
-                        .get(without_context_suffix(raw))
-                })
-                .copied()
-            {
-                gateway
-                    .source_context_windows
-                    .insert(without_context_suffix(&model).to_owned(), window);
+                        .insert(model_key.to_owned(), window);
+                }
+                if let Some(display_name) = gateway.source_display_names.get(raw_key).cloned() {
+                    gateway
+                        .source_display_names
+                        .insert(model_key.to_owned(), display_name);
+                }
             }
             gateway.source_models[index] = Some(model);
         }
@@ -750,6 +752,7 @@ pub struct ClaudeGatewayRole {
     pub connection: ClaudeGatewayConnection,
     pub model: String,
     catalog_model: String,
+    display_name: Option<String>,
     provider_id: String,
     pub provider_name: String,
     pub effort: Option<String>,
@@ -1032,6 +1035,121 @@ impl ClaudeGatewayProjection {
         self.role_target(index)
             .map_or(ROLES[index], |target| &target.model)
     }
+
+    pub fn resolve_hud_model(
+        &self,
+        model_id: Option<&str>,
+        model_label: Option<&str>,
+    ) -> Option<String> {
+        let id = model_id.map(str::trim).filter(|value| !value.is_empty());
+        let label = model_label.map(str::trim).filter(|value| !value.is_empty());
+        let role_index = id
+            .and_then(|value| self.hud_role_index(value))
+            .or_else(|| label.and_then(|value| self.hud_role_index(value)));
+        if let Some(index) = role_index
+            && let Some(target) = self.hud_role_target_name(index)
+        {
+            return Some(format!("Mt-{}/{target}", CLAUDE_ROLE_LABELS[index]));
+        }
+        id.or(label).and_then(|candidate| self.clean_internal_model(candidate))
+    }
+
+    fn hud_role_index(&self, candidate: &str) -> Option<usize> {
+        let plain = without_context_suffix(candidate.trim());
+        if plain.is_empty() {
+            return None;
+        }
+        if let Some(index) = self.request_role(plain) {
+            return Some(index);
+        }
+        if let Some(alias) = startup_role_alias(plain) {
+            return ROLES.iter().position(|role| *role == alias);
+        }
+        if !self.has_role_assignments
+            && let Some(index) = self.source_models.iter().position(|mapped| {
+                mapped
+                    .as_deref()
+                    .is_some_and(|id| without_context_suffix(id) == plain)
+            })
+        {
+            return Some(index);
+        }
+        hud_role_alias(plain)
+    }
+
+    fn hud_role_target_name(&self, index: usize) -> Option<String> {
+        if self.has_role_assignments {
+            let target = self.role_target(index)?;
+            return target
+                .display_name
+                .as_deref()
+                .filter(|name| !name.is_empty())
+                .or_else(|| clean_hud_model_name(&target.catalog_model))
+                .or_else(|| clean_hud_model_name(&target.model))
+                .map(str::to_owned);
+        }
+        let raw = self.source_models[index]
+            .as_deref()
+            .filter(|model| !model.trim().is_empty())
+            .or_else(|| {
+                (ROLES[index] == "fable")
+                    .then(|| {
+                        self.source_models[0]
+                            .as_deref()
+                            .filter(|model| !model.trim().is_empty())
+                    })
+                    .flatten()
+            })?;
+        self.source_display_name(raw)
+            .or_else(|| clean_hud_model_name(raw))
+            .map(str::to_owned)
+    }
+
+    fn source_display_name(&self, raw: &str) -> Option<&str> {
+        let plain = without_context_suffix(raw.trim());
+        self.source_display_names
+            .get(plain)
+            .map(String::as_str)
+            .or_else(|| {
+                strip_internal_model_prefix(plain)
+                    .and_then(|stripped| self.source_display_names.get(stripped))
+                    .map(String::as_str)
+            })
+            .filter(|name| !name.is_empty())
+    }
+
+    fn clean_internal_model(&self, candidate: &str) -> Option<String> {
+        let plain = without_context_suffix(candidate.trim());
+        let stripped = strip_internal_model_prefix(plain)?;
+        self.source_display_name(plain)
+            .or((!stripped.is_empty()).then_some(stripped))
+            .map(str::to_owned)
+    }
+}
+
+fn strip_internal_model_prefix(model: &str) -> Option<&str> {
+    ["matou-chatgpt/", "matou-antigravity/", "matou-role/", "matou-api/"]
+        .into_iter()
+        .find_map(|prefix| model.strip_prefix(prefix))
+}
+
+fn clean_hud_model_name(raw: &str) -> Option<&str> {
+    let plain = without_context_suffix(raw.trim());
+    let cleaned = strip_internal_model_prefix(plain).unwrap_or(plain).trim();
+    (!cleaned.is_empty()).then_some(cleaned)
+}
+
+fn hud_role_alias(model: &str) -> Option<usize> {
+    let lower = model.trim().to_ascii_lowercase();
+    let rest = lower
+        .strip_prefix("claude ")
+        .or_else(|| lower.strip_prefix("claude-"))
+        .unwrap_or(&lower)
+        .trim_start();
+    let token = rest
+        .split(|ch: char| ch.is_whitespace() || matches!(ch, '-' | '/' | '(' | '['))
+        .next()?;
+    ROLES.iter().position(|role| *role == token)
 }
 
 impl ClaudeLaunch {
@@ -1757,6 +1875,7 @@ fn api_projection(config: &Value, source: &Provider) -> ClaudeGatewayProjection 
             .any(|model| is_gemini_model(model)),
         source_model: source.model.clone(),
         source_context_windows: source_context_windows(config, &source.id, None),
+        source_display_names: source_display_names(config, &source.id),
         source_provider_id: source.id.clone(),
         source_models: ROLES.map(|role| effective_role_model(source, role).map(str::to_owned)),
         source_efforts: ROLES.map(|role| {
@@ -1807,6 +1926,23 @@ fn source_context_windows(
         .collect()
 }
 
+fn source_display_names(config: &Value, provider_id: &str) -> BTreeMap<String, String> {
+    provider_entry(config, provider_id)
+        .and_then(|provider| {
+            provider["subscription"]["modelMetadata"]
+                .as_array()
+                .or_else(|| provider["modelMetadata"].as_array())
+        })
+        .into_iter()
+        .flatten()
+        .filter_map(|metadata| {
+            let id = metadata["id"].as_str()?.trim();
+            let name = metadata["displayName"].as_str()?.trim();
+            (!id.is_empty() && !name.is_empty()).then(|| (id.to_owned(), name.to_owned()))
+        })
+        .collect()
+}
+
 fn gateway_target(
     mut connection: ClaudeGatewayConnection,
     provider: &Provider,
@@ -1842,6 +1978,11 @@ fn gateway_target(
         connection,
         model,
         catalog_model: catalog_model.into(),
+        display_name: metadata
+            .and_then(|item| item["displayName"].as_str())
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned),
         provider_id: provider.id.clone(),
         provider_name: provider_name.into(),
         effort,
@@ -3557,6 +3698,101 @@ mod tests {
         assert_eq!(
             launch.launch.argv,
             ["--model", "matou-role/opus", "--effort", "xhigh"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_hud_model_formats_mapped_role_and_clean_target_name() -> Result<()> {
+        let config = json!({
+            "version": 1,
+            "activeProviderIds": {"claude-code": "sub"},
+            "providers": {
+                "claude-code": [
+                    {
+                        "id": "sub",
+                        "name": "ChatGPT",
+                        "apiKey": "secret",
+                        "endpoint": "https://api.example.com",
+                        "model": "gpt-6.2-sol",
+                        "modelMapping": {
+                            "opus": "gpt-6.2-sol",
+                            "fable": "gpt-6.2-sol",
+                            "sonnet": "gpt-5.4-mini",
+                            "haiku": "gpt-5.4-nano"
+                        },
+                        "subscription": {
+                            "provider": "chatgpt",
+                            "modelMetadata": [
+                                {"id": "gpt-6.2-sol", "displayName": "sol 6.2"},
+                                {"id": "gpt-5.4-mini", "displayName": "GPT 5.4 Mini"}
+                            ]
+                        }
+                    }
+                ]
+            }
+        });
+        let provider: Provider =
+            serde_json::from_value(config["providers"]["claude-code"][0].clone())?;
+        let mut projection = api_projection(&config, &provider);
+
+        // Single-provider mapping (including subscription prefix stripping).
+        assert_eq!(
+            projection.resolve_hud_model(Some("claude-fable-5[1m]"), Some("Fable 5")),
+            Some("Mt-Fable/sol 6.2".into())
+        );
+        assert_eq!(
+            projection.resolve_hud_model(None, Some("Fable 5")),
+            Some("Mt-Fable/sol 6.2".into())
+        );
+        assert_eq!(
+            projection.resolve_hud_model(Some("matou-api/sonnet"), Some("Sonnet 4.6")),
+            Some("Mt-Sonnet/GPT 5.4 Mini".into())
+        );
+        assert_eq!(
+            projection.resolve_hud_model(Some("matou-api/haiku"), Some("Haiku 4.5")),
+            Some("Mt-Haiku/gpt-5.4-nano".into())
+        );
+
+        // Role assignments mode.
+        let api_provider: Provider = serde_json::from_value(json!({
+            "id": "api",
+            "apiKey": "secret",
+            "endpoint": "https://api.example.com",
+            "model": "gpt-6.2-sol"
+        }))?;
+        projection.has_role_assignments = true;
+        projection.roles[0] = gateway_target(
+            gateway_connection(&api_provider).unwrap(),
+            &api_provider,
+            "ChatGPT",
+            "gpt-6.2-sol",
+            Some(&json!({"id": "gpt-6.2-sol", "displayName": "sol 6.2"})),
+            Some("opus"),
+            None,
+        );
+        projection.roles[1] = None; // fable falls back to opus target
+        projection.roles[2] = gateway_target(
+            gateway_connection(&api_provider).unwrap(),
+            &api_provider,
+            "ChatGPT",
+            "matou-chatgpt/gpt-5.4-mini",
+            None,
+            Some("sonnet"),
+            None,
+        );
+
+        assert_eq!(
+            projection.resolve_hud_model(Some("matou-role/fable"), Some("Fable 5")),
+            Some("Mt-Fable/sol 6.2".into())
+        );
+        assert_eq!(
+            projection.resolve_hud_model(Some("matou-role/sonnet"), Some("Sonnet")),
+            Some("Mt-Sonnet/gpt-5.4-mini".into())
+        );
+        assert_eq!(
+            projection.resolve_hud_model(Some("matou-chatgpt/gpt-6.2-sol"), None),
+            Some("sol 6.2".into())
         );
         Ok(())
     }

@@ -86,6 +86,8 @@ pub(crate) type ReadContextUsage =
 pub(crate) struct Gateway {
     base_url: String,
     token_usage: Arc<Mutex<deepseek_token_usage::Tracker>>,
+    hud_projection: Arc<Mutex<(u64, Arc<ClaudeGatewayProjection>)>>,
+    hud_refresh: Option<(Arc<ClaudeGatewayRefresh>, PathBuf)>,
     stopped: Arc<AtomicBool>,
     stop: Option<(oneshot::Sender<()>, thread::JoinHandle<()>)>,
 }
@@ -168,6 +170,8 @@ impl Gateway {
         }
         let stopped = Arc::new(AtomicBool::new(false));
         let token_usage = Arc::default();
+        let hud_projection = Arc::clone(&projection.hud_projection);
+        let hud_refresh = projection.refresh.clone();
         let state = Arc::new(State {
             prefix,
             projection,
@@ -223,6 +227,8 @@ impl Gateway {
         Ok(Self {
             base_url,
             token_usage,
+            hud_projection,
+            hud_refresh,
             stopped,
             stop: Some((stop, serving_thread)),
         })
@@ -241,6 +247,44 @@ impl Gateway {
 
     pub(crate) fn context_usage(&self) -> Option<ContextUsageSample> {
         self.token_usage.lock().unwrap().context_usage()
+    }
+
+    pub(crate) fn resolve_hud_model(
+        &self,
+        model_id: Option<&str>,
+        model_label: Option<&str>,
+    ) -> Option<String> {
+        let projection = self.current_hud_projection();
+        projection.resolve_hud_model(model_id, model_label)
+    }
+
+    fn current_hud_projection(&self) -> Arc<ClaudeGatewayProjection> {
+        let (cached_revision, current) = {
+            let guard = self.hud_projection.lock().unwrap();
+            (guard.0, Arc::clone(&guard.1))
+        };
+        let Some((context, data_root)) = &self.hud_refresh else {
+            return current;
+        };
+        let revision = role_assignments_revision();
+        if cached_revision == revision {
+            return current;
+        }
+        let preferences = load_role_preferences(data_root);
+        let updated = if !preferences.assignments.is_empty()
+            && current.role_assignments() != &preferences.assignments
+        {
+            context
+                .refresh_roles(&current, &preferences, &native_role_catalog)
+                .map(Arc::new)
+        } else {
+            None
+        };
+        let mut guard = self.hud_projection.lock().unwrap();
+        let next = updated.unwrap_or_else(|| Arc::clone(&guard.1));
+        guard.0 = revision;
+        guard.1 = Arc::clone(&next);
+        next
     }
 }
 
@@ -301,6 +345,7 @@ impl GatewayRoutes {
 
 struct ProjectionSlot {
     cache: AsyncMutex<ProjectionCache>,
+    hud_projection: Arc<Mutex<(u64, Arc<ClaudeGatewayProjection>)>>,
     refresh: Option<(Arc<ClaudeGatewayRefresh>, PathBuf)>,
 }
 
@@ -315,6 +360,7 @@ impl ProjectionSlot {
         subscriptions: Option<SessionSubscriptions>,
         refresh: Option<(ClaudeGatewayRefresh, PathBuf)>,
     ) -> Self {
+        let hud_projection = Arc::new(Mutex::new((0, Arc::clone(&projection))));
         Self {
             // A save can finish between launch planning and listener bind.
             // Compare the database with the launch assignments on the first request.
@@ -325,6 +371,7 @@ impl ProjectionSlot {
                     subscriptions,
                 }),
             }),
+            hud_projection,
             refresh: refresh.map(|(context, data_root)| (Arc::new(context), data_root)),
         }
     }
@@ -341,8 +388,15 @@ impl ProjectionSlot {
             let data_root = data_root.clone();
             let next = tokio::task::spawn_blocking(move || current.refresh(&context, &data_root));
             match next.await {
-                Ok(Ok(Some(routes))) => cached.routes = Arc::new(routes),
-                Ok(Ok(None)) => {}
+                Ok(Ok(Some(routes))) => {
+                    let routes = Arc::new(routes);
+                    *self.hud_projection.lock().unwrap() =
+                        (revision, Arc::clone(&routes.projection));
+                    cached.routes = routes;
+                }
+                Ok(Ok(None)) => {
+                    self.hud_projection.lock().unwrap().0 = revision;
+                }
                 _ => eprintln!(
                     "[claude-request-gateway] Kept previous role assignments after refresh failed (revision {revision})"
                 ),

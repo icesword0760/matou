@@ -322,6 +322,7 @@ pub struct AgentHudProjection {
     permission_observed: bool,
     pending_permission: Option<&'static str>,
     model_observed: bool,
+    model_id: Option<String>,
     cycle_mode_observed: bool,
     dsh_identity: Option<String>,
 }
@@ -386,6 +387,7 @@ impl AgentHudProjection {
             permission_observed: false,
             pending_permission: None,
             model_observed: false,
+            model_id: None,
             cycle_mode_observed: false,
             dsh_identity: None,
         }
@@ -401,6 +403,7 @@ impl AgentHudProjection {
     ) {
         self.hud.cwd = cwd.filter(|value| !value.is_empty()).map(str::to_owned);
         self.hud.model = model.filter(|value| !value.is_empty()).map(str::to_owned);
+        self.model_id = self.hud.model.clone();
         self.hud.resumable = resumable;
         if self.hud.provider != HudProvider::Dsh {
             self.hud.permission_mode = permission_mode
@@ -442,6 +445,10 @@ impl AgentHudProjection {
             self.context_used_tokens,
             self.hud.context_window_size.map(|size| size as u64),
         )
+    }
+
+    pub(crate) fn raw_model_candidates(&self) -> (Option<&str>, Option<&str>) {
+        (self.model_id.as_deref(), self.hud.model.as_deref())
     }
 
     fn status_usage_after_compaction(&self) -> bool {
@@ -832,6 +839,10 @@ impl AgentHudProjection {
         let model = &payload["model"];
         if antigravity && !model.is_null() {
             self.quota_model_id = first_text(model, &["id", "modelId"]).map(str::to_owned);
+        }
+        if let Some(reported_id) = first_text(model, &["id", "modelId"]).or_else(|| nonempty(model))
+        {
+            self.model_id = Some(reported_id.to_owned());
         }
         let base_model = if self.hud.provider == HudProvider::Codex || antigravity {
             nonempty(model)

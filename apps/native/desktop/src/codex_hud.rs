@@ -1563,4 +1563,21 @@ mod tests {
             Some((1, 1))
         );
     }
+
+    #[::core::prelude::v1::test]
+    fn mapped_claude_model_keeps_prefix_in_footer_and_tooltip() {
+        let hud = json!({
+            "model": "Mt-Fable/sol 6.2",
+            "contextWindowSize": 1_000_000
+        });
+        let projection = CodexHud::from_live(&Value::Null, &hud, "claude-code");
+        assert_eq!(
+            projection.model_label("claude-code").unwrap().as_ref(),
+            "Mt-Fable/sol 6.2"
+        );
+        assert_eq!(
+            projection.full_model_label().unwrap().as_ref(),
+            "Mt-Fable/sol 6.2 (1M context)"
+        );
+    }
 }
