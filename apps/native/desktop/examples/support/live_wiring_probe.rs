@@ -426,6 +426,38 @@ done
         self.window.update(cx, action).unwrap();
     }
 
+    fn submit_remote_loader(&self, cx: &mut AsyncApp, target: &str, provider: &str) {
+        let needs_confirmation = self
+            .window
+            .update(cx, |view, window, cx| {
+                let Some(TabDialog::SessionLoader(loader)) = &view.dialog else {
+                    panic!("expected the {provider} loader for {target}");
+                };
+                assert_eq!(loader.session_id, target);
+                assert_eq!(loader.provider, provider);
+                view.submit_session_loader(window, cx);
+                !view.pending_loader_loads.contains_key(target)
+                    && matches!(&view.dialog, Some(TabDialog::SessionLoader(loader))
+                        if loader.session_id == target && loader.confirm_running)
+            })
+            .unwrap();
+        if needs_confirmation {
+            // A Shell waiting at its prompt asks for confirmation on the same button.
+            self.update(cx, |view, window, _| window.focus(&view.dialog_controls[2]));
+            draw(self.window.into(), cx);
+            press(self.window, cx, "enter");
+            println!("live {provider}: confirmed replacing the current Shell run");
+        }
+        self.update(cx, |view, _, _| {
+            assert!(
+                view.pending_loader_loads.get(target).is_some_and(|load| {
+                    load.provider == provider && load.request_id.is_some()
+                }),
+                "{provider} load for {target} was not submitted",
+            );
+        });
+    }
+
     fn input(&self, id: &str, bytes: &[u8]) {
         self.send(Command::Input {
             session_id: id.into(),
@@ -1222,9 +1254,7 @@ pub(super) async fn verify(cx: &mut AsyncApp, root: PathBuf) {
             _ => None,
         })
         .await;
-    fixture.update(cx, |view, window, cx| {
-        view.submit_session_loader(window, cx)
-    });
+    fixture.submit_remote_loader(cx, &shell, "dsh");
     assert_eq!(
         fixture.reply(cx, "dshSessionLoadResult").await["result"]["status"],
         "queued"
@@ -1468,9 +1498,7 @@ async fn verify_antigravity(
             .then_some(())
         })
         .await;
-    fixture.update(cx, |view, window, cx| {
-        view.submit_session_loader(window, cx)
-    });
+    fixture.submit_remote_loader(cx, &target, "antigravity");
     let receipt = fixture.reply(cx, "antigravitySessionLoadResult").await;
     assert_eq!(receipt["result"]["status"], "restoring", "{receipt}");
     assert_eq!(receipt["result"]["sessionId"], target);
