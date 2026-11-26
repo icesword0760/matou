@@ -146,10 +146,10 @@ index b097ce4..caba5f0 100644
              lock.callbacks.close.take()
 diff --git a/src/platform/windows/touchpad.rs b/src/platform/windows/touchpad.rs
 new file mode 100644
-index 0000000..cad33be
+index 0000000..2a890df
 --- /dev/null
 +++ b/src/platform/windows/touchpad.rs
-@@ -0,0 +1,295 @@
+@@ -0,0 +1,346 @@
 +//! Turn Windows Precision Touchpad transforms into GPUI events. The native
 +//! viewport follows an opt-in hitbox and never enrolls mouse or touch input.
 +#![deny(unsafe_op_in_unsafe_fn)]
@@ -158,10 +158,13 @@ index 0000000..cad33be
 +
 +use windows::{
 +    Win32::{
-+        Foundation::{HWND, RECT},
-+        Graphics::DirectManipulation::*,
++        Foundation::{HWND, POINT, RECT},
++        Graphics::{DirectManipulation::*, Gdi::ScreenToClient},
 +        System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance},
-+        UI::WindowsAndMessaging::{KillTimer, SetTimer},
++        UI::{
++            HiDpi::GetDpiForWindow,
++            WindowsAndMessaging::{GetCursorPos, KillTimer, SetTimer, USER_DEFAULT_SCREEN_DPI},
++        },
 +    },
 +    core::{Ref, Result, implement},
 +};
@@ -323,6 +326,16 @@ index 0000000..cad33be
 +        current: DIRECTMANIPULATION_STATUS,
 +        previous: DIRECTMANIPULATION_STATUS,
 +    ) -> Result<()> {
++        if current == DIRECTMANIPULATION_RUNNING && previous == DIRECTMANIPULATION_INERTIA {
++            // Direct Manipulation can capture a new touch while still moving
++            // without sending another hit test. Only this new sequence reanchors.
++            let hwnd = HWND(self.hwnd as *mut _);
++            let anchor = viewport
++                .as_ref()
++                .and_then(|viewport| cursor_anchor(hwnd, viewport));
++            self.gesture.lock().unwrap().restart(anchor);
++            return Ok(());
++        }
 +        if current == DIRECTMANIPULATION_READY
 +            && matches!(
 +                previous,
@@ -366,9 +379,31 @@ index 0000000..cad33be
 +    }
 +}
 +
++fn cursor_anchor(
++    hwnd: HWND,
++    viewport: &IDirectManipulationViewport,
++) -> Option<(Point<Pixels>, f32)> {
++    let mut cursor = POINT::default();
++    let (region, dpi) = unsafe {
++        GetCursorPos(&mut cursor).ok()?;
++        ScreenToClient(hwnd, &mut cursor).ok().ok()?;
++        (viewport.GetViewportRect().ok()?, GetDpiForWindow(hwnd))
++    };
++    // The viewport is set from the opted-in hitbox in client device pixels.
++    if dpi == 0
++        || !(region.left..region.right).contains(&cursor.x)
++        || !(region.top..region.bottom).contains(&cursor.y)
++    {
++        return None;
++    }
++    let dpi = dpi as f32 / USER_DEFAULT_SCREEN_DPI as f32;
++    Some((logical_point(cursor.x as f32, cursor.y as f32, dpi), dpi))
++}
++
 +struct Gesture {
 +    anchor: Option<(Point<Pixels>, f32)>,
 +    last: (f32, f32, f32),
++    restart_scale: Option<f32>,
 +    kind: Option<GestureKind>,
 +    pending: Vec<PlatformInput>,
 +}
@@ -384,6 +419,7 @@ index 0000000..cad33be
 +        Self {
 +            anchor: None,
 +            last: (1.0, 0.0, 0.0),
++            restart_scale: None,
 +            kind: None,
 +            pending: Vec::new(),
 +        }
@@ -391,18 +427,32 @@ index 0000000..cad33be
 +}
 +
 +impl Gesture {
++    fn restart(&mut self, anchor: Option<(Point<Pixels>, f32)>) {
++        self.anchor = anchor;
++        self.kind = None;
++        self.restart_scale = Some(self.last.0);
++    }
++
 +    fn apply(&mut self, scale: f32, x: f32, y: f32) {
-+        let Some((position, dpi)) = self.anchor else {
-+            return;
-+        };
 +        if !scale.is_finite() || scale <= 0.0 || !x.is_finite() || !y.is_finite() {
 +            return;
 +        }
++        let Some((position, dpi)) = self.anchor else {
++            // Track a rejected recontact without dispatching it. Ignore ordinary
++            // idle callbacks, including the transform reset after READY.
++            if self.restart_scale.is_some() {
++                self.last = (scale, x, y);
++            }
++            return;
++        };
 +        let (last_scale, last_x, last_y) = self.last;
++        self.last.1 = x;
++        self.last.2 = y;
 +        let modifiers = current_modifiers();
 +        // Once scaling begins, the native translation includes zoom-centre
 +        // motion. DAG already zooms about the pointer, so omit those offsets.
-+        if self.kind == Some(GestureKind::Pinch) || (scale - 1.0).abs() > TRANSFORM_EPSILON {
++        let scale_from_start = scale / self.restart_scale.unwrap_or(1.0) - 1.0;
++        if self.kind == Some(GestureKind::Pinch) || scale_from_start.abs() > TRANSFORM_EPSILON {
 +            let magnification = scale / last_scale - 1.0;
 +            if magnification.abs() <= TRANSFORM_EPSILON {
 +                return;
@@ -428,7 +478,7 @@ index 0000000..cad33be
 +                    touch_phase,
 +                }));
 +        }
-+        self.last = (scale, x, y);
++        self.last.0 = scale;
 +    }
 +
 +    fn phase_for(&mut self, kind: GestureKind) -> TouchPhase {
@@ -441,6 +491,7 @@ index 0000000..cad33be
 +
 +    fn finish(&mut self) -> bool {
 +        self.anchor = None;
++        self.restart_scale = None;
 +        self.kind = None;
 +        std::mem::replace(&mut self.last, (1.0, 0.0, 0.0)) != (1.0, 0.0, 0.0)
 +    }

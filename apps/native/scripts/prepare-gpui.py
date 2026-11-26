@@ -24,7 +24,7 @@ FONT_SOURCE = Path("src/platform/mac/text_system.rs")
 ATLAS_SOURCE = Path("src/platform/mac/metal_atlas.rs")
 PATCHED_SHA256 = {
     "src/platform/windows.rs": "91c7f49b891cd82aa09b64ff4fe4ba67fb0ac8e6bc23bd0e6628bdc2c1b2f50d",
-    "src/platform/windows/touchpad.rs": "de130cbc964f307d8cddfe26950fc99719ae196322eccf2226737803bfb39312",
+    "src/platform/windows/touchpad.rs": "5a472a1a39606d7d985daa6534dabc4bb840df6d78af918d93091d9d626e9b2d",
     "Cargo.toml": "39fe2b5b8e078c2ee3919fd9868c11e596e45e4ded74786e3cde3f64c2ec1294",
     "src/text_system/line_wrapper.rs": "14dc21e1551608e7346ee408adc4ecf87f7de7503d01d5117fc71ffb0b9e7bac",
     "src/elements/text.rs": "0b98368c20454743a9ffe821fac1d2de2b9e1740c062fe6ff24faef9a9dabfe2",
@@ -61,6 +61,9 @@ ORIGINAL_SHA256 = {
     "src/platform/windows/window.rs": "e8d8ce5c589e72ed3d6b86d8008b8e1cc0d4c471c272fd8e6c6f38351a714493",
 }
 PREVIOUS_SHA256 = {
+    "src/platform/windows/touchpad.rs": (
+        "de130cbc964f307d8cddfe26950fc99719ae196322eccf2226737803bfb39312",
+    ),
     "src/platform.rs": (
         "a7a8075608b61796ba7871aa118f4c2c3efab97c3bc3ec0553ad4de32547b24c",
     ),
