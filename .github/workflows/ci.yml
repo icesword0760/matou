@@ -75,6 +75,8 @@ jobs:
       - run: cargo fetch --manifest-path apps/native/Cargo.toml --locked
       - run: cargo build --manifest-path apps/native/Cargo.toml --offline --locked -p matou-native-runtime
       - run: cargo test --manifest-path apps/native/Cargo.toml --offline --locked
+        env:
+          RUST_TEST_THREADS: '2'
 
   native-windows:
     name: Native tests (Windows x64)
@@ -114,3 +116,5 @@ jobs:
       - run: cargo fetch --manifest-path apps/native/Cargo.toml --locked
       - run: cargo build --manifest-path apps/native/Cargo.toml --offline --locked -p matou-native-runtime
       - run: cargo test --manifest-path apps/native/Cargo.toml --offline --locked
+        env:
+          RUST_TEST_THREADS: '2'

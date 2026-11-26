@@ -1652,7 +1652,10 @@ mod tests {
         let detail = catalog
             .detail_in_project(&linked, &scope, "main", DetailOptions::default())
             .unwrap();
-        assert_eq!(detail.summary.cwd, main.to_string_lossy());
+        assert_eq!(
+            detail.summary.cwd,
+            main.to_string_lossy().trim_start_matches(r"\\?\")
+        );
         assert!(detail.events[0].text.contains("needle conversation main"));
         assert_eq!(
             catalog
