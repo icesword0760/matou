@@ -138,7 +138,9 @@ mod tests {
             ui.show_error(Reply::Login);
             assert!(ui.page == expected);
             assert_eq!(ui.state.error.as_deref(), Some("browser-missing"));
-            assert!(account_error(InterfaceLocale::Chinese, "browser-missing").contains("Chrome"));
+            let message = account_error(InterfaceLocale::Chinese, "browser-missing");
+            assert!(message.contains("Chrome") && message.contains("Edge"));
+            assert_eq!(message.contains("Brave"), !cfg!(target_os = "windows"));
         }
     }
 }
@@ -183,6 +185,18 @@ impl Colors {
                 active_border: rgba(0xd3e3f8ff),
             }
         }
+    }
+}
+
+enum AccountButtonStyle {
+    Plain(Rgba),
+    Primary,
+    Destructive,
+}
+
+impl From<Rgba> for AccountButtonStyle {
+    fn from(color: Rgba) -> Self {
+        Self::Plain(color)
     }
 }
 
@@ -737,7 +751,7 @@ impl Workspace {
         &self,
         id: impl Into<SharedString>,
         label: impl Into<SharedString>,
-        color: Rgba,
+        appearance: impl Into<AccountButtonStyle>,
         window: &mut Window,
         cx: &mut Context<Self>,
         activate: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
@@ -748,6 +762,19 @@ impl Workspace {
             .read(cx)
             .clone();
         let disabled = self.wiring.accounts.button_disabled(id.as_ref());
+        let (color, fill, hover) = match appearance.into() {
+            AccountButtonStyle::Plain(color) => (color, None, rgba(0x518ef01a)),
+            AccountButtonStyle::Primary => (
+                rgba(0xffffffff),
+                Some(rgba(0x2b72d0ff)),
+                rgba(0x245facff),
+            ),
+            AccountButtonStyle::Destructive => (
+                rgba(0xffffffff),
+                Some(rgba(0xb85452ff)),
+                rgba(0xa94b4aff),
+            ),
+        };
         let button = div()
             .id(id.clone())
             .relative()
@@ -758,6 +785,7 @@ impl Workspace {
             .py(px(6.))
             .rounded(px(7.))
             .text_color(color)
+            .when_some(fill, |button, fill| button.justify_center().bg(fill))
             .children(wiring_probe_bounds(id.to_string()))
             .when(id.as_ref() == "claude-account-refresh", |button| {
                 button.gap(px(6.)).child(account_refresh_icon(color))
@@ -769,7 +797,7 @@ impl Workspace {
             self.button(
                 button
                     .cursor_pointer()
-                    .hover(|style| style.bg(rgba(0x518ef01a))),
+                    .hover(move |style| style.bg(hover)),
                 &focus,
                 activate,
                 cx,
@@ -1154,11 +1182,6 @@ impl Workspace {
                 .child(ui_text(label))
         };
         let paragraph = |label: &'static str| div().text_color(colors.muted).child(ui_text(label));
-        let primary = |btn: Stateful<Div>| {
-            btn.justify_center()
-                .bg(rgba(0x3284edff))
-                .text_color(rgba(0xffffffff))
-        };
         let back = |this: &mut Self, _: &mut Window, cx: &mut Context<Self>| {
             this.account_page(Page::List, None, "", cx)
         };
@@ -1241,16 +1264,37 @@ impl Workspace {
             }
             Page::Add | Page::Reauth => {
                 let reauth = ui.page == Page::Reauth;
-                form = form.child(heading(if let Some(a) = selected {
-                    format!("{}「{}」", t("重新登录", "Sign in again "), a.name)
-                } else { t("添加 Claude 账户", "Add a Claude account").into() }))
-                    .child(paragraph(if reauth { t("请使用原账户重新授权。", "Authorize the original account.") }
-                        else { t("将打开独立的临时隐私窗口。请在 Claude 官方页面登录要添加的账户。",
-                            "Sign in to the account you want to add on the official Claude page in a separate private window.") }))
-                    .child(primary(self.ca_button("claude-start-login", if reauth {
-                        t("打开隐私窗口重新登录", "Open private window to sign in again")
-                    } else { t("打开独立隐私窗口", "Open private sign-in window") }, colors.blue, window, cx,
-                        move |this, _, cx| this.request_claude_account(Action::Login { replace_id: reauth.then(|| id.clone()) }, cx))));
+                form = form
+                    .child(heading(if let Some(account) = selected {
+                        format!("{}「{}」", t("重新登录", "Sign in again "), account.name)
+                    } else {
+                        t("添加 Claude 账户", "Add a Claude account").into()
+                    }))
+                    .child(paragraph(if reauth {
+                        t("请使用原账户重新授权。", "Authorize the original account.")
+                    } else {
+                        t(
+                            "将打开独立的临时隐私窗口。请在 Claude 官方页面登录要添加的账户。",
+                            "Sign in to the account you want to add on the official Claude page in a separate private window.",
+                        )
+                    }))
+                    .child(self.ca_button(
+                        "claude-start-login",
+                        if reauth {
+                            t("打开隐私窗口重新登录", "Open private window to sign in again")
+                        } else {
+                            t("打开独立隐私窗口", "Open private sign-in window")
+                        },
+                        AccountButtonStyle::Primary,
+                        window,
+                        cx,
+                        move |this, _, cx| {
+                            this.request_claude_account(
+                                Action::Login { replace_id: reauth.then(|| id.clone()) },
+                                cx,
+                            );
+                        },
+                    ));
             }
             Page::Login => {
                 form = form
@@ -1268,14 +1312,14 @@ impl Workspace {
                         "Code submitted. Checking the account…",
                     )));
                 } else {
-                    form = form.child(primary(self.ca_button(
+                    form = form.child(self.ca_button(
                         "claude-submit-code",
                         t("提交授权码", "Submit code"),
-                        colors.blue,
+                        AccountButtonStyle::Primary,
                         window,
                         cx,
                         |this, _, cx| this.submit_account_input(cx),
-                    )));
+                    ));
                 }
                 form = form.child(self.ca_button(
                     "claude-cancel-login",
@@ -1301,18 +1345,18 @@ impl Workspace {
                             .child(ui_text(a.email.clone()))
                     }))
                     .children((!repairing).then_some(input).flatten())
-                    .child(primary(self.ca_button(
+                    .child(self.ca_button(
                         "claude-save-name",
                         if repairing {
                             t("保存新登录", "Save renewed sign-in")
                         } else {
                             t("保存账户", "Save account")
                         },
-                        colors.blue,
+                        AccountButtonStyle::Primary,
                         window,
                         cx,
                         |this, _, cx| this.submit_account_input(cx),
-                    )));
+                    ));
                 if ui.page == Page::Draft {
                     form = form.child(self.ca_button(
                         "claude-discard-login",
@@ -1403,7 +1447,7 @@ impl Workspace {
                             back,
                         ))
                         .child(
-                            primary(self.ca_button(
+                            self.ca_button(
                                 "claude-confirm-action",
                                 if is_remove {
                                     t("确认移除", "Remove account")
@@ -1412,7 +1456,11 @@ impl Workspace {
                                 } else {
                                     t("立即切换", "Switch now")
                                 },
-                                colors.blue,
+                                if is_remove {
+                                    AccountButtonStyle::Destructive
+                                } else {
+                                    AccountButtonStyle::Primary
+                                },
                                 window,
                                 cx,
                                 move |this, _, cx| {
@@ -1429,8 +1477,7 @@ impl Workspace {
                                     };
                                     this.request_claude_account(action, cx);
                                 },
-                            ))
-                            .when(is_remove, |button| button.bg(rgba(0xc05a58ff))),
+                            ),
                         ),
                 );
             }
@@ -1642,6 +1689,10 @@ fn account_error(locale: InterfaceLocale, error: &str) -> &'static str {
         "browser-closed" => (
             "登录窗口已关闭。可以重新开始本次登录。",
             "The sign-in window was closed. Try signing in again.",
+        ),
+        "browser-missing" if cfg!(target_os = "windows") => (
+            "账户登录需要 Chrome 或 Edge。安装其中一个后重试。",
+            "Install Chrome or Edge to add an account in an isolated window.",
         ),
         "browser-missing" => (
             "账户登录需要 Chrome、Edge 或 Brave。安装其中一个后重试。",
