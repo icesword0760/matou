@@ -13465,8 +13465,7 @@ impl Workspace {
                 {
                     self.keyboard_focus = true;
                     settings.update(cx, |settings, cx| {
-                        settings.dismiss_time_zone_menu(cx);
-                        settings.dismiss_dispatch_menu(window, cx);
+                        settings.prepare_tab_focus(window, cx);
                     });
                     if mods.shift {
                         window.focus_prev();

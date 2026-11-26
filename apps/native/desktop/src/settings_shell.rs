@@ -4163,18 +4163,23 @@ impl SettingsShell {
             .is_some_and(|panel| panel.read(cx).composing(cx))
     }
 
-    pub(crate) fn dismiss_dispatch_menu(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
+    pub(crate) fn prepare_tab_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.keyboard_focus {
+            self.keyboard_focus = true;
+            cx.notify();
+        }
+        self.dismiss_time_zone_menu(cx);
+        self.dismiss_dispatch_menu(window, cx);
+    }
+
+    fn dismiss_dispatch_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         self.dispatch_panel
             .as_ref()
             .and_then(|panel| panel.as_ref().ok())
             .is_some_and(|panel| panel.update(cx, |panel, cx| panel.close_menu(window, cx)))
     }
 
-    pub(crate) fn dismiss_time_zone_menu(&mut self, cx: &mut Context<Self>) -> bool {
+    fn dismiss_time_zone_menu(&mut self, cx: &mut Context<Self>) -> bool {
         let open = std::mem::take(&mut self.time_zone_menu_open);
         if open {
             cx.notify();
