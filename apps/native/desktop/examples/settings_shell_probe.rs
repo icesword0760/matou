@@ -47,7 +47,12 @@ mod workspace {
     include!("../src/workspace.rs");
 
     impl Workspace {
-        pub(super) fn expose_settings_fixture(&mut self) {
+        pub(super) fn expose_settings_fixture(&mut self, hidden: bool) {
+            if hidden {
+                // Give hidden assertions a stable locale while keeping language changes enabled.
+                self.locale_preference = LocalePreference::Chinese;
+                self.locale = current_interface_locale(self.locale_preference);
+            }
             self.runtime_generation = 1;
             self.transport_connected = true;
             self.domain_ready = true;
@@ -699,7 +704,7 @@ mod probe {
                 |window, cx| {
                     cx.new(|cx| {
                         let mut workspace = Workspace::new(commands, incoming, window, cx);
-                        workspace.expose_settings_fixture();
+                        workspace.expose_settings_fixture(visible_state.is_none());
                         workspace
                     })
                 },
