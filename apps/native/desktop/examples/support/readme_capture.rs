@@ -34,7 +34,7 @@ impl Demo {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("notification-system"), b"0").unwrap();
         std::fs::write(root.join("notification-sound"), b"0").unwrap();
-        write_theme_preference(&root, ThemePreference::Dark).unwrap();
+        write_theme_preference(&root, ThemePreference::Light).unwrap();
         let mut dispatch = DispatchRolesConfig::default();
         let roles = [
             self.text(
@@ -279,7 +279,7 @@ impl Demo {
 
     fn feed(&self, view: &mut Workspace, id: &str, index: usize, cx: &mut Context<Workspace>) {
         let providers = ["Claude Code", "Codex", "Antigravity", "DSH"];
-        let accent = [215, 117, 147, 80][index];
+        let accent = [35, 34, 36, 32][index];
         let lines = match index {
             0 => [
                 self.text(
@@ -323,7 +323,7 @@ impl Demo {
         })
         .unwrap();
         let banner = format!(
-            "\x1b[1;38;5;{accent}m{}\x1b[0m\r\n\x1b[38;5;245mpay-service\x1b[0m\r\n\r\n\x1b[1;38;5;253m{}\x1b[0m\r\n\r\n\x1b[38;5;111m  {}\x1b[0m\r\n\r\n\x1b[38;5;114m  ✓\x1b[0m {}\r\n\x1b[38;5;114m  ✓\x1b[0m {}\r\n\r\n\x1b[38;5;{accent}m  ●\x1b[0m {}\r\n\r\n\x1b[38;5;111m❯\x1b[0m {}",
+            "\x1b[1m{}\x1b[0m\r\n\x1b[90mpay-service\x1b[0m\r\n\r\n\x1b[1m{}\x1b[0m\r\n\r\n\x1b[90m  {}\x1b[0m\r\n\r\n\x1b[32m  ✓\x1b[0m {}\r\n\x1b[32m  ✓\x1b[0m {}\r\n\r\n\x1b[{accent}m  ●\x1b[0m {}\r\n\r\n\x1b[30m❯\x1b[0m {}",
             providers[index], lines[0], lines[1], lines[2], lines[3], lines[4], lines[5],
         );
         terminal.feed(banner.as_bytes());
@@ -1014,7 +1014,10 @@ impl Demo {
                 geometry:json!({"panX":(1200. - layout.width * scale) / 2.,
                     "panY":45. + (692. - layout.height * scale) / 2., "zoom":scale}),
             };
-            let dag = DagWindow::open(&graph, CLAUDE, Some(&viewport), view.locale, true, false, window, cx).unwrap();
+            let dag = DagWindow::open(
+                &graph, CLAUDE, Some(&viewport), view.locale,
+                view.theme.effective() == AppTheme::Dark, false, window, cx,
+            ).unwrap();
             dag.update(cx, |_, window, _| window.resize(size(px(1200.),px(737.)))).unwrap();
             dag
         }).unwrap();
@@ -1103,10 +1106,10 @@ impl Demo {
                     ..TerminalOptions::new(72, 50, 9, 18)
                 })
                 .unwrap();
-                terminal.feed(b"\x1b[?1049h\x1b[48;2;43;52;69m\x1b[2K");
+                terminal.feed(b"\x1b[?1049h");
                 terminal.feed(
                     format!(
-                        "❯ {}\x1b[0m\x1b[48;1H\x1b[38;5;111m❯\x1b[0m {}",
+                        "\x1b[30m❯\x1b[0m {}\x1b[48;1H\x1b[30m❯\x1b[0m {}",
                         self.text("打开预发布请求日志", "Open the staging request log"),
                         self.text("继续检查退款边界", "Continue with refund edge cases"),
                     )

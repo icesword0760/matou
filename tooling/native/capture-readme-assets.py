@@ -76,7 +76,7 @@ def encode(frames, output):
             ffmpeg(
                 "-i", str(source), "-vf",
                 "scale=1200:738:force_original_aspect_ratio=decrease:flags=lanczos,"
-                "pad=1200:738:(ow-iw)/2:(oh-ih)/2:color=0x161820,setsar=1,format=rgb24",
+                "pad=1200:738:(ow-iw)/2:(oh-ih)/2:color=0xf7f8fa,setsar=1,format=rgb24",
                 "-frames:v", "1", str(frame),
             )
             files.append(frame)
