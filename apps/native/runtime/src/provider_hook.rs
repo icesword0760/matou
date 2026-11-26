@@ -521,13 +521,7 @@ impl Registration {
         &self,
         system_message_file: Option<&Path>,
     ) -> std::collections::BTreeMap<std::ffi::OsString, std::ffi::OsString> {
-        let mut env = std::collections::BTreeMap::from([
-            ("MATOU_PROVIDER_HOOK_URL".into(), self.url.clone().into()),
-            (
-                "MATOU_PROVIDER_HOOK_TOKEN".into(),
-                self.token.clone().into(),
-            ),
-        ]);
+        let mut env = self.hook_environment();
         if let Some(path) = system_message_file {
             env.insert(
                 "MATOU_ANTIGRAVITY_SYSTEM_MESSAGE_FILE".into(),
@@ -535,6 +529,48 @@ impl Registration {
             );
         }
         env
+    }
+
+    pub fn hook_environment(
+        &self,
+    ) -> std::collections::BTreeMap<std::ffi::OsString, std::ffi::OsString> {
+        std::collections::BTreeMap::from([
+            ("MATOU_PROVIDER_HOOK_URL".into(), self.url.clone().into()),
+            (
+                "MATOU_PROVIDER_HOOK_TOKEN".into(),
+                self.token.clone().into(),
+            ),
+        ])
+    }
+
+    pub fn claude_plugin(&mut self, source: PathBuf) -> Result<PathBuf> {
+        if !source.join("hooks/hooks.json").is_file() {
+            return Ok(source);
+        }
+        // Source checkouts can point at shared legacy assets. The native
+        // session supplies its own hook and only loads the manifest and skills.
+        fn copy_directory(source: &Path, dest: &Path) -> io::Result<()> {
+            fs::create_dir(dest)?;
+            for entry in fs::read_dir(source)? {
+                let entry = entry?;
+                let target = dest.join(entry.file_name());
+                if entry.file_type()?.is_dir() {
+                    copy_directory(&entry.path(), &target)?;
+                } else if entry.file_type()?.is_file() {
+                    fs::copy(entry.path(), target)?;
+                }
+            }
+            Ok(())
+        }
+        let assets = tempfile::Builder::new().prefix("claude-").tempdir_in(
+            self.settings_path.parent().context("Claude hook directory")?,
+        )?;
+        for name in [".claude-plugin", "skills"] {
+            copy_directory(&source.join(name), &assets.path().join(name))?;
+        }
+        let path = assets.path().to_owned();
+        self.provider_assets = Some(assets);
+        Ok(path)
     }
 
     pub fn attach_codex(
@@ -655,12 +691,9 @@ impl ProviderHookServer {
             temporary: directory.join(format!("{token}.settings.json.tmp")),
         };
         if scope.profile == LaunchProfile::Antigravity {
-            let status_url = format!("{url}?kind=statusline");
-            let command = if cfg!(windows) {
-                windows_notification_command(&status_url)
-            } else {
-                callback_command(&status_url, &files.script)?
-            };
+            let command = crate::native_hooks::antigravity_command(
+                &std::env::current_exe()?, "statusline",
+            )?;
             let settings = json!({"statusLine": {
                 "type": "command", "command": command,
                 "stack_with_default": true,
@@ -683,12 +716,9 @@ impl ProviderHookServer {
             File::open(&files.settings).context("read provider settings")?;
         }
         #[cfg(not(windows))]
-        {
+        if scope.profile != LaunchProfile::Antigravity {
             let script = match scope.profile {
                 LaunchProfile::Dsh => String::new(),
-                LaunchProfile::Antigravity => format!(
-                    "#!/bin/sh\npayload=$(cat)\n(printf '%s' \"$payload\" | /usr/bin/curl --noproxy '*' --silent --max-time 2 --request POST --header 'content-type: application/json' --data-binary @- '{url}?kind=statusline') </dev/null >/dev/null 2>&1 &\n"
-                ),
                 LaunchProfile::Codex => synchronous_callback_script(&url),
                 _ => synchronous_callback_script(&format!("{url}?kind=statusline")),
             };
@@ -819,11 +849,6 @@ exit 0
     format!("powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand {encoded}")
 }
 
-fn windows_notification_command(url: &str) -> String {
-    format!(
-        r#"curl.exe --disable --silent --noproxy "*" --max-time 2 --output NUL --request POST --header "content-type: application/json" --data-binary "@-" "{url}""#
-    )
-}
 
 fn bundled_control_assets_candidates(
     executable: Option<&Path>,
@@ -868,19 +893,6 @@ pub(crate) fn bundled_claude_plugin(
                 .join(".claude-plugin/plugin.json")
                 .is_file()
                 .then_some(plugin)
-        })
-}
-
-pub(crate) fn bundled_foreman_script(
-    executable: Option<&Path>,
-    control_asset_root: Option<&Path>,
-) -> Option<PathBuf> {
-    bundled_control_assets_candidates(executable, control_asset_root)
-        .into_iter()
-        .find_map(|root| {
-            let script =
-                root.join("providers/claude-plugin/skills/agent-foreman/scripts/foreman.mjs");
-            script.is_file().then_some(script)
         })
 }
 
@@ -966,8 +978,35 @@ pub(crate) fn claude_config_counts(cwd: &Path, config: &Path) -> Value {
     if let Some(projects) = claude_json["projects"].as_object() {
         let project_at =
             |path: &Path| projects.get(path.to_str()?).filter(|entry| entry.is_object());
-        let local = project_at(cwd)
-            .or_else(|| fs::canonicalize(cwd).ok().and_then(|path| project_at(&path)));
+        let local = project_at(cwd).or_else(|| {
+            let canonical = fs::canonicalize(cwd).ok()?;
+            project_at(&canonical).or_else(|| {
+                #[cfg(windows)]
+                {
+                    fn path_spelling(path: &str) -> String {
+                        let path = path.replace('\\', "/");
+                        if let Some(unc) = path.strip_prefix("//?/UNC/") {
+                            format!("//{unc}")
+                        } else {
+                            path.strip_prefix("//?/").unwrap_or(&path).to_owned()
+                        }
+                    }
+                    let canonical_spelling = path_spelling(canonical.to_str()?);
+                    projects.iter().find_map(|(key, entry)| {
+                        let path = Path::new(key);
+                        if !entry.is_object() || !path.is_absolute()
+                            || !path_spelling(key).eq_ignore_ascii_case(&canonical_spelling)
+                        {
+                            return None;
+                        }
+                        let physical = fs::canonicalize(path).ok()?;
+                        (physical == canonical).then_some(entry)
+                    })
+                }
+                #[cfg(not(windows))]
+                None
+            })
+        });
         if let Some(local) = local {
             add_config(
                 &mut project_mcp,
@@ -1002,17 +1041,13 @@ fn settings(url: &str, script: &Path) -> Result<Value> {
         })
         .collect();
     // Claude Code dispatches SessionStart to command hooks only.
-    let session_start = if cfg!(windows) {
-        windows_notification_command(url)
-    } else {
-        format!(
-            "/usr/bin/curl --disable --silent --noproxy '*' --max-time 2 --output /dev/null --header 'content-type: application/json' --data-binary @- '{url}'"
-        )
-    };
+    let runtime = std::env::current_exe().context("resolve native hook executable")?;
     hooks.insert(
         "SessionStart".into(),
         json!([{
-            "hooks": [{"type": "command", "command": session_start, "timeout": 5}]
+            "matcher": "startup|resume|clear|compact",
+            "hooks": [{"type": "command", "command": runtime,
+                       "args": [crate::native_hooks::MODE, "claude-session-start"], "timeout": 5}]
         }]),
     );
     Ok(json!({
@@ -1438,7 +1473,7 @@ fn is_disallowed_shell_char(ch: char) -> bool {
     matches!(
         ch,
         ';' | '|' | '`' | '$' | '(' | ')' | '<' | '>' | '{' | '}' | '&' | '\r' | '\n' | '\0'
-    )
+    ) || (cfg!(windows) && matches!(ch, '%' | '!' | '^'))
 }
 
 fn matches_control_binary(word: &str, bin_dir: &Path, name: &str) -> bool {
@@ -1772,80 +1807,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn antigravity_script_routes_tool_events_without_waiting_for_post_tool_use() -> Result<()> {
-        use std::process::Command;
-
-        let temporary = tempfile::tempdir()?;
-        let plugin = temporary.path().canonicalize()?.join("matou");
-        crate::antigravity_launch::ensure_plugin_installed(&plugin)?;
-        let hooks: Value = serde_json::from_reader(File::open(plugin.join("hooks.json"))?)?;
-        let decision = "{\"decision\":\"allow\",\"overwrite\":{\"CommandLine\":\"mt ctx exec -- git status\"}}\n\n";
-        let nested = "{\"toolCall\":{\"name\":\"run_command\",\"args\":{\"CommandLine\":\"git status\",\"WaitMsBeforeAsync\":5000}}}\n";
-        let old = "{\"hookEventName\":  \"PreToolUse\"}\n";
-        for (command, kind, payload, stall) in [
-            (
-                hooks["matou"]["PreToolUse"][0]["hooks"][0]["command"]
-                    .as_str()
-                    .unwrap(),
-                "pre-tool-use",
-                nested,
-                None,
-            ),
-            (
-                hooks["matou"]["PostToolUse"][0]["hooks"][0]["command"]
-                    .as_str()
-                    .unwrap(),
-                "post-tool-use",
-                old,
-                Some(Duration::from_millis(750)),
-            ),
-            ("./hooks/matou-hook.sh", "pre-tool-use", old, None),
-            (
-                "./hooks/matou-hook.sh pre-tool-use",
-                "pre-tool-use",
-                nested,
-                Some(Duration::from_millis(1300)),
-            ),
-        ] {
-            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
-            let url = format!("http://{}/hooks/fixture", listener.local_addr()?);
-            let fixture = callback_fixture(listener, decision, stall);
-            let started = Instant::now();
-            let output = replay_callback(
-                Command::new("/bin/sh")
-                    .args(["-c", command])
-                    .current_dir(&plugin)
-                    .env("MATOU_PROVIDER_HOOK_URL", url)
-                    .env("MATOU_PROVIDER_HOOK_TOKEN", "test"),
-                payload,
-            )?;
-            let elapsed = started.elapsed();
-            let expected = if stall.is_none() { decision } else { "" };
-            assert!(output.status.success());
-            assert_eq!(output.stdout, expected.as_bytes());
-            if kind == "post-tool-use" {
-                assert!(
-                    elapsed < Duration::from_millis(750),
-                    "async hook took {elapsed:?}"
-                );
-            } else if stall.is_some() {
-                assert!(
-                    (Duration::from_millis(850)..Duration::from_millis(1300)).contains(&elapsed),
-                    "timeout took {elapsed:?}"
-                );
-            }
-            let (request, raw_body) = fixture.join().unwrap()?;
-            assert_eq!(
-                request,
-                format!("POST /hooks/fixture?kind={kind} HTTP/1.1\r\n")
-            );
-            assert_eq!(raw_body, payload);
-        }
-        Ok(())
-    }
-
     #[test]
     fn antigravity_ingress_accepts_event_hint_and_records_delivered_read_savings() -> Result<()> {
         use crate::context_guard::store::get_saved_stats;
@@ -2097,9 +2058,10 @@ mod tests {
 
         let bypass = json!({"decision":"allow","overwrite":{"BypassSandbox":true}});
         let allow_only = json!({"decision":"allow"});
+        let shim = if cfg!(windows) { "mt.cmd" } else { "mt" };
         let abs_mt = format!(
-            "{} list --json",
-            root.path().join("control/bin/mt").display()
+            "\"{}\" list --json",
+            root.path().join("control/bin").join(shim).display()
         );
 
         for command in [
@@ -2506,7 +2468,6 @@ mod tests {
             assert!(!script.contains("RedirectStandardInput"));
             assert!(!script.contains("--output NUL"));
         }
-        assert!(windows_notification_command(endpoint).contains("--output NUL"));
         Ok(())
     }
 
@@ -2562,44 +2523,36 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(windows)]
     #[test]
-    fn bundled_foreman_script_and_composed_instructions_work() -> Result<()> {
+    fn claude_mcp_project_prefers_exact_path_and_accepts_physical_windows_aliases() -> Result<()> {
         let root = tempfile::tempdir()?;
-        let explicit = root.path().join("explicit assets");
-        let explicit_script =
-            explicit.join("providers/claude-plugin/skills/agent-foreman/scripts/foreman.mjs");
-        fs::create_dir_all(explicit_script.parent().unwrap())?;
-        fs::write(&explicit_script, "// foreman")?;
-        assert_eq!(
-            bundled_foreman_script(None, Some(&explicit)),
-            Some(explicit_script.clone()),
-        );
-        for (executable, resources) in [
-            (
-                root.path().join("Matou package/matou-native-runtime.exe"),
-                root.path().join("Matou package/resources"),
-            ),
-            (
-                root.path()
-                    .join("Matou.app/Contents/MacOS/matou-native-runtime"),
-                root.path().join("Matou.app/Contents/Resources"),
-            ),
-        ] {
-            let script = resources.join(
-                "control-assets/providers/claude-plugin/skills/agent-foreman/scripts/foreman.mjs",
-            );
-            fs::create_dir_all(script.parent().unwrap())?;
-            fs::write(&script, "// bundled")?;
-            assert_eq!(
-                bundled_foreman_script(Some(&executable), None),
-                Some(script),
-            );
-            assert_eq!(
-                bundled_foreman_script(Some(&executable), Some(&explicit)),
-                Some(explicit_script.clone()),
-            );
-        }
+        let config_directory = root.path().join(".claude");
+        let project = root.path().join("工作区 Project");
+        let other = root.path().join("其他 Project");
+        fs::create_dir(&config_directory)?;
+        fs::create_dir(&project)?;
+        fs::create_dir(&other)?;
+        let cwd = fs::canonicalize(&project)?;
+        let canonical = cwd.to_str().unwrap();
+        let ordinary = canonical.trim_start_matches(r"\\?\").replace('\\', "/");
+        let lowercase_drive = format!("{}{}", ordinary[..1].to_ascii_lowercase(), &ordinary[1..]);
+        let path = root.path().join(".claude.json");
+        let config = |entries: &[(&str, &str)]| {
+            let projects: Map<String, Value> = entries.iter().map(|(key, server)| {
+                ((*key).to_owned(), json!({"mcpServers": {(*server): {"command": "fixture"}}}))
+            }).collect();
+            fs::write(&path, serde_json::to_vec(&json!({"projects": projects})).unwrap())
+        };
+        config(&[(&lowercase_drive, "alias"), (other.to_str().unwrap(), "other")])?;
+        assert_eq!(claude_config_counts(&cwd, &config_directory)["mcpServerNames"], json!(["alias"]));
+        config(&[(&lowercase_drive, "alias"), (canonical, "exact")])?;
+        assert_eq!(claude_config_counts(&cwd, &config_directory)["mcpServerNames"], json!(["exact"]));
+        Ok(())
+    }
 
+    #[test]
+    fn composed_instructions_keep_the_runtime_capabilities() -> Result<()> {
         let base = "Base host instructions.\n";
         assert_eq!(
             compose_managed_instructions(base, false, Some("roles"), None),
@@ -2784,13 +2737,9 @@ mod tests {
         let session_start = &config["hooks"]["SessionStart"][0]["hooks"][0];
         assert_eq!(session_start["type"], "command");
         assert_eq!(session_start["timeout"], 5);
-        let callback = session_start["command"].as_str().unwrap();
-        assert!(callback.contains(&url));
-        assert!(callback.contains(if cfg!(windows) {
-            r#"--noproxy "*""#
-        } else {
-            "--noproxy '*'"
-        }));
+        assert_eq!(session_start["command"], json!(std::env::current_exe()?));
+        assert_eq!(session_start["args"], json!(["--hook", "claude-session-start"]));
+        assert_eq!(config["hooks"]["SessionStart"][0]["matcher"], "startup|resume|clear|compact");
         #[cfg(not(windows))]
         {
             assert_eq!(

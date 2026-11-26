@@ -2082,6 +2082,7 @@ const NOTIFICATION_COOLDOWN_MS: u64 = 5_000;
 const NOTIFICATION_LIMIT: usize = 1_000;
 const NOTIFICATION_READ_RETENTION_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
 
+#[cfg_attr(windows, derive(Clone))]
 struct NotificationEntry {
     id: u64,
     event_id: String,
@@ -2864,6 +2865,7 @@ pub struct Workspace {
     locale: InterfaceLocale,
     locale_preference: LocalePreference,
     data_root: Option<PathBuf>,
+    agent_readiness: Option<Vec<matou_native_runtime::agent_readiness::AgentStatus>>,
     terminal_font_size: u8,
     shortcut_alt_down: bool,
     last_shortcut_alt: Option<Instant>,
@@ -2910,6 +2912,8 @@ pub struct Workspace {
     sidebar_overflow: bool,
     pub(crate) sidebar_scrollbar: SidebarScrollbarState,
     notifications: Notifications,
+    #[cfg(windows)]
+    system_notification_targets: std::collections::VecDeque<NotificationEntry>,
     notification_open: bool,
     notification_scene_sessions: HashMap<String, (String, HashSet<String>)>,
     task_toast: Option<String>,
@@ -4041,6 +4045,7 @@ impl Workspace {
             }),
             locale_preference,
             data_root,
+            agent_readiness: None,
             terminal_font_size,
             shortcut_alt_down: false,
             last_shortcut_alt: None,
@@ -4091,6 +4096,8 @@ impl Workspace {
             sidebar_overflow: false,
             sidebar_scrollbar: SidebarScrollbarState::default(),
             notifications,
+            #[cfg(windows)]
+            system_notification_targets: std::collections::VecDeque::new(),
             notification_open: false,
             notification_scene_sessions: HashMap::new(),
             task_toast: None,
@@ -4295,6 +4302,7 @@ impl Workspace {
             settings.configure_theme(self.theme, cx);
             settings.configure_system_notifications(self.notifications.system_enabled);
             settings.configure_diagnostics_cwd(diagnostics_cwd);
+            settings.configure_agent_readiness(self.agent_readiness.clone());
             settings.configure_data_root(self.data_root.clone());
             settings
         });
@@ -4329,6 +4337,10 @@ impl Workspace {
                             window,
                             cx,
                         );
+                    }
+                    SettingsShellEvent::AgentReadinessChanged(readings) => {
+                        this.agent_readiness = Some(readings.clone());
+                        cx.notify();
                     }
                 },
             );
@@ -4719,7 +4731,8 @@ impl Workspace {
             let system_enabled =
                 self.notifications.system_enabled && system_notifications::is_available();
             let app_active = !system_enabled || system_notifications::app_is_active();
-            let authorized = system_notifications::authorization() == Authorization::Authorized;
+            let authorized = cfg!(windows)
+                || system_notifications::authorization() == Authorization::Authorized;
             let sound_enabled = self.notifications.sound_enabled;
             let mut play_sound = false;
             let mut system_requests = Vec::new();
@@ -4729,7 +4742,8 @@ impl Workspace {
                 else {
                     continue;
                 };
-                play_sound |= receipt.plays_sound(event, sound_enabled);
+                let event_sound = receipt.plays_sound(event, sound_enabled);
+                play_sound |= event_sound;
                 if !should_post_system(receipt.unread, system_enabled, app_active, authorized) {
                     continue;
                 }
@@ -4741,7 +4755,7 @@ impl Workspace {
                 else {
                     continue;
                 };
-                system_requests.extend(system_notifications::post(SystemRequest {
+                let system_request = system_notifications::post(SystemRequest {
                     identifier: system_notifications::notification_identifier(
                         entry.session_id.as_deref(),
                         &entry.event_id,
@@ -4751,8 +4765,18 @@ impl Workspace {
                     body: entry.body.clone(),
                     thread_id: entry.scene_id.clone().or_else(|| entry.session_id.clone()),
                     event_id: entry.event_id.clone(),
-                    play_sound: sound_enabled,
-                }));
+                    play_sound: if cfg!(windows) { event_sound } else { sound_enabled },
+                });
+                #[cfg(windows)]
+                if system_request.is_some() {
+                    if self.system_notification_targets.len() == NOTIFICATION_LIMIT {
+                        self.system_notification_targets.pop_front();
+                    }
+                    self.system_notification_targets.push_back(entry.clone());
+                }
+                if !cfg!(windows) || event_sound {
+                    system_requests.extend(system_request);
+                }
             }
             if play_sound {
                 if system_requests.is_empty() {
@@ -4967,6 +4991,30 @@ impl Workspace {
         }
     }
 
+    #[cfg(windows)]
+    pub fn open_notification_from_system(
+        &mut self,
+        event: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some((id, scene, session)) = self.notifications.entries.iter()
+            .chain(self.system_notification_targets.iter().rev())
+            .find_map(|entry| {
+                if entry.event_id != event { return None; }
+                let (scene, session) = self.notification_target(entry)?;
+                Some((entry.id, scene.to_owned(), session.to_owned()))
+            })
+        {
+            self.focus_notification(id, scene, session, window, cx);
+        } else {
+            self.show_toast(self.locale.text(
+                "通知对应的会话已不可用",
+                "The session for this notification is no longer available",
+            ), cx);
+        }
+    }
+
     fn open_notification(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         let Some((scene_id, session_id)) = self
             .notifications
@@ -4978,6 +5026,17 @@ impl Workspace {
         else {
             return;
         };
+        self.focus_notification(id, scene_id, session_id, window, cx);
+    }
+
+    fn focus_notification(
+        &mut self,
+        id: u64,
+        scene_id: String,
+        session_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.close_settings_for_navigation(window, cx) {
             return;
         }
@@ -6359,6 +6418,11 @@ impl Workspace {
                         self.refresh_level(cx);
                     }
                     if matches!(request, Some(LevelFocusRequest::Notification(_))) {
+                        #[cfg(windows)]
+                        self.show_toast(self.locale.text(
+                            "通知对应的会话已不可用",
+                            "The session for this notification is no longer available",
+                        ), cx);
                         cx.notify();
                         return;
                     }
@@ -22476,7 +22540,26 @@ fn notification_window_active(window: &Window) -> bool {
             }
         }
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        use windows::Win32::{
+            Foundation::HWND,
+            UI::WindowsAndMessaging::{GetForegroundWindow, IsIconic},
+        };
+
+        let Ok(handle) = HasWindowHandle::window_handle(window) else {
+            return false;
+        };
+        let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+            return false;
+        };
+        // A minimized window must retain unread events even if GPUI has not yet
+        // applied the activation callback queued by Windows.
+        let native_window = HWND(handle.hwnd.get() as *mut std::ffi::c_void);
+        unsafe { GetForegroundWindow() == native_window && !IsIconic(native_window).as_bool() }
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         window.is_window_active()
     }

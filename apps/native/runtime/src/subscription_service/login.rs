@@ -35,6 +35,7 @@ impl Default for LoginOptions {
                     browser_integration::open_system_url(url)
                 } else {
                     browser_integration::open_controlled_url(url)
+                        || browser_integration::open_system_url(url)
                 }
             },
         }
@@ -133,8 +134,7 @@ impl LoginAttempt {
             }
             match browser {
                 BROWSER_CONTROLLED_FAILED => Some(
-                    "Could not open the sign-in browser. Try again or use the system browser."
-                        .into(),
+                    "Could not open the sign-in browser. Check your browser and try again.".into(),
                 ),
                 BROWSER_SYSTEM_FAILED => Some(
                     "Could not open the system browser. Check your browser and try again.".into(),
@@ -148,7 +148,7 @@ impl LoginAttempt {
             status: self.status,
             can_reopen,
             system_browser_available: can_reopen
-                && matches!(browser, BROWSER_CONTROLLED_FAILED | BROWSER_SYSTEM_FAILED),
+                && browser == BROWSER_CONTROLLED_FAILED,
             reason,
             draft: self.draft.clone(),
         }
@@ -256,7 +256,10 @@ impl SubscriptionService {
             draft: None,
             reason: None,
         };
-        attempt.open(self.login_options.open, false);
+        attempt.open(
+            self.login_options.open,
+            !browser_integration::prefers_controlled_browser(&self.root),
+        );
         let view = attempt.view(&id);
         attempts.insert(id, attempt);
         Ok(view)
@@ -335,7 +338,10 @@ impl SubscriptionService {
         let attempt = owned_attempt(&mut attempts, owner, id)?;
         let view = attempt.view(id);
         if view.can_reopen && (!system || view.system_browser_available) {
-            attempt.open(self.login_options.open, system);
+            attempt.open(
+                self.login_options.open,
+                system || !browser_integration::prefers_controlled_browser(&self.root),
+            );
         }
         Ok(attempt.view(id))
     }

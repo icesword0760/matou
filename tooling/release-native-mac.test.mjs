@@ -1,15 +1,18 @@
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
+import { fileURLToPath } from 'node:url'
 
 import { desktopConfig } from './native-release-helpers.mjs'
 import { generateMacManifest, macReleaseOptions } from './release-native-mac.mjs'
 
 const config = await desktopConfig()
 const date = '2026-11-24T11:00:00.000Z'
+const script = fileURLToPath(new URL('./release-native-mac.mjs', import.meta.url))
 
 test('uses the desktop release version, production feed and secure timestamp by default', () => {
   const options = macReleaseOptions([], {}, config)
@@ -58,6 +61,17 @@ test('supports environment settings, CLI overrides and explicit offline signing'
   assert.equal(options.timestamp, false)
   assert.throws(() => macReleaseOptions(['--arch', 'toString'], env, config), /--arch/)
   assert.throws(() => macReleaseOptions(['--update-channel', '../stable'], env, config), /Invalid update channel/)
+})
+
+test('refuses an old explicit accounts engine before starting the release build', { skip: process.platform !== 'darwin' }, async t => {
+  const root = await mkdtemp(join(tmpdir(), 'matou-mac-release-account-test-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  await writeFile(join(root, 'matou-claude-accounts'), 'old executable without a source manifest')
+  const result = spawnSync(process.execPath, [script, '--claude-accounts-engine', root,
+    '--desktop-bin', join(root, 'must-not-build'), '--out-dir', join(root, 'release')], { encoding: 'utf8' })
+  assert.ifError(result.error)
+  assert.equal(result.status, 1, result.stdout)
+  assert.match(result.stderr, /Invalid account engine source manifest.*pnpm accounts:build/)
 })
 
 test('formats the updater manifest with ZIP first and the legacy ZIP path and checksum', async t => {

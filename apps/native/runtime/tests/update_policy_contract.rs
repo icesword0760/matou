@@ -635,6 +635,10 @@ impl Write for InstallFixtureFile {
 }
 
 impl PendingUpdateFile for InstallFixtureFile {
+    fn verify_windows_installer(&mut self, _: Architecture, _: &str) -> io::Result<()> {
+        panic!("The DMG fixture must not use the Windows installer verifier")
+    }
+
     fn commit(self) -> io::Result<PathBuf> {
         Ok(PathBuf::from("pending-updates/fixture.dmg"))
     }

@@ -1387,8 +1387,8 @@ fn subscription_login_message(reason: String, chinese: bool) -> String {
         "Sign-in is already in progress in another window. Finish it or cancel it there." => {
             "另一个窗口正在登录。请在该窗口完成或取消登录。"
         }
-        "Could not open the sign-in browser. Try again or use the system browser." => {
-            "浏览器没有打开。请重试，或选择使用系统浏览器。"
+        "Could not open the sign-in browser. Check your browser and try again." => {
+            "登录浏览器没有打开。请检查浏览器设置后重试。"
         }
         "Could not open the system browser. Check your browser and try again." => {
             "系统浏览器没有打开。请检查默认浏览器设置后重试。"

@@ -135,6 +135,19 @@ impl LaunchOptions {
                 args.next();
                 std::process::exit(crate::mt_cli::run(args));
             }
+            if args.peek().is_some_and(|flag| flag == crate::mt_cli::FOREMAN_MODE) {
+                args.next();
+                std::process::exit(crate::foreman::run(args));
+            }
+            #[cfg(windows)]
+            if args.peek().is_some_and(|flag| flag == "--agent-batch") {
+                args.next();
+                std::process::exit(crate::codex_launch::run_batch_agent(args));
+            }
+            if args.peek().is_some_and(|flag| flag == crate::native_hooks::MODE) {
+                args.next();
+                std::process::exit(crate::native_hooks::run(args));
+            }
             args
         };
         Self::from_args_with_env(
@@ -2653,7 +2666,10 @@ fn environment_diagnostics(
                 });
                 value
             });
-            json!({"state": "ready", "cwd": ready.cwd, "git": git})
+            json!({
+                "state": "ready", "cwd": ready.cwd, "git": git,
+                "gitAvailable": matou_native_core::git_repo::git_executable().is_some(),
+            })
         }
         Err(environment_runtime::EnvironmentProblem::Missing(reason)) => {
             json!({"state": "missing", "reason": format!("{reason:?}")})

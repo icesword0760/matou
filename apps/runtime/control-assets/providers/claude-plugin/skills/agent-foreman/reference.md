@@ -1,6 +1,6 @@
 # 派活监工参考
 
-命令：Matou 托管终端中直接运行 `mt-foreman`（与 `node <本技能目录>/scripts/foreman.mjs` 等价，下文简写 `foreman`）。运行记录默认在 `~/.claude/agent-foreman/runs/<task>/`，可用环境变量 `FOREMAN_RUN_DIR` 改。
+在 Matou 托管终端中直接运行 `mt-foreman`，下表简写为 `foreman`。运行记录默认保存在用户主目录的 `.claude/agent-foreman/runs/<task>/`，可通过 `FOREMAN_RUN_DIR` 改目录。
 
 ## 命令
 
@@ -58,7 +58,6 @@
 
 - **码头（Matou）终端**：终端里自带 `MATOU_AGENT_STATUS_DIR` 时，任务状态自动显示在底栏「Agents」里，卡片写明 agent、任务名、模型和推理档位；运行蓝点、等待空心点、警示黄、出错红，结束后消失。码头会覆盖 Claude Code 自己的状态条，所以在码头里只看底栏。
 - **当前活动**：运行 / 跑完某条命令（内嵌脚本显示为「Python 脚本」，写文件显示为「写入 <文件名>」）、修改某个文件、`说明：` 执行者自己的阶段说明。Codex 一口气生成长内容时 `codex exec` 不发任何事件；脚本在 macOS 上每 5 秒用 `nettop` 读取 Codex 进程的入站字节，在涨就显示「生成中 N秒 · Codex 最近说的打算」，并算作有活动，不会误判卡住。只有网络也没有数据时才提醒「没有动静（网络也没有数据）」并按 `--idle-min` 结束重试。其他系统上没有这项检测，长时间生成可能被判卡住，可调大 `--idle-min`。
-- **普通终端**：在项目的 `.claude/settings.local.json` 里配置 `statusLine`，`command` 为 `node <本技能目录>/scripts/foreman-statusline.mjs`，`refreshInterval` 设为 2。它会先原样输出原有的状态条，再为每个任务加一行。
 
 ## 已知坑
 

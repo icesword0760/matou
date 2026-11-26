@@ -31,10 +31,22 @@ use matou_native_desktop::{windows_theme, workspace::QuitConfirmed};
 actions!(matou_native, [Quit]);
 
 fn main() -> Result<()> {
+    let args = std::env::args_os().skip(1);
+    #[cfg(windows)]
+    let mut args = args.peekable();
+    #[cfg(windows)]
+    if args.peek().and_then(|argument| argument.to_str()).is_some_and(instance_open::is_notification_uri) {
+        let uri = args.next().unwrap();
+        if args.next().is_none() {
+            let root = DesktopOptions::from_args([])?.runtime.data_root;
+            return instance_open::forward_notification_uri(&root, uri.to_str().unwrap());
+        }
+        return Ok(());
+    }
     let DesktopOptions {
         runtime: options,
         paths,
-    } = DesktopOptions::from_args(std::env::args_os().skip(1))?;
+    } = DesktopOptions::from_args(args)?;
     let dag_probe = cfg!(all(target_os = "macos", debug_assertions))
         && std::env::var("MATOU_DAG_WINDOW_PROBE").as_deref() == Ok("hidden");
     if dag_probe {
@@ -80,7 +92,7 @@ fn main() -> Result<()> {
         #[cfg(target_os = "windows")]
         bounds_path,
     });
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     matou_native_desktop::system_notifications::install();
     let application = Application::new().with_assets(NativeAssets);
     #[cfg(target_os = "macos")]
@@ -597,6 +609,18 @@ async fn run_requests(
                 })
                 .await;
             for request in validated {
+                #[cfg(windows)]
+                if let OpenRequest::Notification(id) = &request {
+                    let _ = cx.update(|cx| {
+                        if let Some(window) = desktop.live_window(cx) {
+                            desktop.focus(window, cx);
+                            let _ = window.update(cx, |workspace, window, cx| {
+                                workspace.open_notification_from_system(id, window, cx);
+                            });
+                        }
+                    });
+                    continue;
+                }
                 registry.enqueue(request);
             }
         }

@@ -1,0 +1,15 @@
+{
+  "task": "B-等待回答",
+  "status": "running",
+  "agent": "dsh",
+  "options": { "model": "deepseek-flash", "effort": "high" },
+  "createdAt": "2026-11-24T00:00:00.000Z",
+  "runStartedAt": "2026-11-24T00:01:00.000Z",
+  "pid": null,
+  "supervisorPid": null,
+  "threadId": "fixture-question-thread",
+  "turns": [{ "n": 1, "startedAt": "2026-11-24T00:01:00.000Z" }],
+  "mailboxSeen": { "q-1": true },
+  "waitingQuestions": [1],
+  "waitingQuestionText": "选择测试模式？"
+}

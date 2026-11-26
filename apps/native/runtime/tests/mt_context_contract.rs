@@ -228,7 +228,7 @@ fn data_root_prefers_explicit_then_env_then_existing_platform_directory() {
 fn managed_environment_scopes_search_and_resume_and_expired_ids_stay_distinct() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("data");
-    let workspace = dir.path().join("workspace");
+    let workspace = dir.path().join("工作区 with spaces");
     fs::create_dir(&workspace).unwrap();
     let git = |args: &[&str]| {
         let output = Command::new("git")
@@ -256,6 +256,28 @@ fn managed_environment_scopes_search_and_resume_and_expired_ids_stay_distinct() 
     let resume = text(run(&["resume"]));
     assert!(resume.contains("test-card") && !resume.contains("log_0002"));
     assert!(resume.contains("first.txt") && resume.contains("other file.txt"));
+    let changed = text(run(&["git"]));
+    assert!(changed.contains("first.txt") && changed.contains("other file.txt"));
+
+    let empty_path = dir.path().join("no executables");
+    fs::create_dir(&empty_path).unwrap();
+    let without_git = |subcommand| {
+        mt(&workspace, &root)
+            .env("PATH", &empty_path)
+            .arg(subcommand)
+            .output()
+            .unwrap()
+    };
+    let unavailable = without_git("git");
+    assert!(!unavailable.status.success());
+    assert!(String::from_utf8_lossy(&unavailable.stderr).contains("GIT_NOT_INSTALLED"));
+    let resume_without_git = text(without_git("resume"));
+    assert!(resume_without_git.contains("log_0001"));
+    assert!(!resume_without_git.contains("Git changed files"));
+    let outside = mt(dir.path(), &root).arg("git").output().unwrap();
+    assert!(!outside.status.success());
+    assert!(String::from_utf8_lossy(&outside.stderr).contains("GIT_NOT_REPOSITORY"));
+
     let env_resume = text(
         mt(&workspace, &root)
             .env("MATOU_SESSION_ID", "other-card")

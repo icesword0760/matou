@@ -2967,6 +2967,35 @@ mod probe {
         std::fs::remove_dir(root).unwrap();
     }
 
+    #[cfg(test)]
+    #[::core::prelude::v1::test]
+    fn diagnostics_refresh_works_from_keyboard_without_native_window() {
+        let (commands, _sink) = runtime_bridge::probe_channel();
+        let mut app = TestAppContext::single();
+        let (view, cx) = app.add_window_view(|window, cx| SettingsShell::new(commands, window, cx));
+        cx.update(|window, cx| {
+            view.update(cx, |settings, cx| {
+                settings.configure_agent_readiness(Some(Vec::new()));
+                settings.select_diagnostics_for_probe(window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        let reached = (0..4).any(|_| {
+            let focused = cx.update(|window, cx| {
+                window.focus_next();
+                view.read(cx).agent_refresh_focus_for_test(window).0
+            });
+            cx.run_until_parked();
+            focused
+        });
+        assert!(reached, "Tab traversal skipped the Agent refresh control");
+        cx.update(|window, cx| {
+            assert!(window.dispatch_keystroke(Keystroke::parse("enter").unwrap(), cx));
+            assert!(view.read(cx).agent_refresh_focus_for_test(window).1);
+        });
+    }
+
     fn verify_retention_receipt(cx: &mut AsyncApp) {
         let (window, sink) = cx.update(|cx| open_window_at(None, 720., cx)).unwrap();
         window

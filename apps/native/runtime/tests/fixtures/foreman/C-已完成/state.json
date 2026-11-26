@@ -1,0 +1,19 @@
+{
+  "task": "C-已完成",
+  "status": "completed",
+  "options": { "model": "sol", "effort": "high" },
+  "createdAt": "2026-11-24T00:00:00.000Z",
+  "endedAt": "2026-11-24T00:04:15.000Z",
+  "pid": null,
+  "threadId": "fixture-completed-thread",
+  "turns": [
+    { "n": 1, "result": "completed" },
+    { "n": 2, "result": "completed", "error": null, "startedAt": "2026-11-24T00:03:00.000Z", "endedAt": "2026-11-24T00:04:15.000Z", "files": { "last": "turn-2-last.md" } }
+  ],
+  "error": null,
+  "ownerSession": { "ref": "owner-fixture", "title": "测试监督会话", "provider": "codex" },
+  "lastExternalSend": {
+    "caller": { "ref": "caller-fixture", "title": "测试调用会话", "provider": "dsh" },
+    "at": "2026-11-24T00:03:00.000Z"
+  }
+}

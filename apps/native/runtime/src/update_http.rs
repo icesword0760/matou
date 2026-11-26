@@ -59,7 +59,13 @@ impl UpdateSettings {
             .and_then(|dir| std::fs::read(dir.join("version.json")).ok())
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
-        let override_url = env("MATOU_UPDATE_BASE_URL");
+        let override_url = if cfg!(all(windows, target_arch = "aarch64")) {
+            env("MATOU_WIN_ARM64_UPDATE_BASE_URL")
+                .filter(|url| !url.trim().is_empty())
+                .or_else(|| env("MATOU_UPDATE_BASE_URL"))
+        } else {
+            env("MATOU_UPDATE_BASE_URL")
+        };
         let packaged_url = packaged_config.as_deref().and_then(parse_packaged_base_url);
         let packaged_channel = packaged_config
             .as_deref()

@@ -1,0 +1,644 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 3843063..a4f4242 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -678,6 +678,7 @@ features = [
+     "Win32_Graphics_Direct3D11",
+     "Win32_Graphics_Direct3D_Fxc",
+     "Win32_Graphics_DirectComposition",
++    "Win32_Graphics_DirectManipulation",
+     "Win32_Graphics_DirectWrite",
+     "Win32_Graphics_Dwm",
+     "Win32_Graphics_Dxgi",
+@@ -709,6 +710,7 @@ features = [
+     "Win32_UI_HiDpi",
+     "Win32_UI_Input_Ime",
+     "Win32_UI_Input_KeyboardAndMouse",
++    "Win32_UI_Input_Pointer",
+     "Win32_UI_Shell",
+     "Win32_UI_Shell_Common",
+     "Win32_UI_Shell_PropertiesSystem",
+diff --git a/src/elements/div.rs b/src/elements/div.rs
+index 938988f..8882478 100644
+--- a/src/elements/div.rs
++++ b/src/elements/div.rs
+@@ -1706,7 +1706,11 @@ impl Interactivity {
+                         style.overflow_mask(bounds, window.rem_size()),
+                         |window| {
+                             let hitbox = if self.should_insert_hitbox(&style, window, cx) {
+-                                Some(window.insert_hitbox(bounds, self.hitbox_behavior))
++                                Some(window.insert_interactive_hitbox(
++                                    bounds,
++                                    self.hitbox_behavior,
++                                    !self.magnify_listeners.is_empty(),
++                                ))
+                             } else {
+                                 None
+                             };
+diff --git a/src/platform/windows/events.rs b/src/platform/windows/events.rs
+index b097ce4..caba5f0 100644
+--- a/src/platform/windows/events.rs
++++ b/src/platform/windows/events.rs
+@@ -10,13 +10,14 @@ use windows::{
+         UI::{
+             Controls::*,
+             HiDpi::*,
+-            Input::{Ime::*, KeyboardAndMouse::*},
++            Input::{Ime::*, KeyboardAndMouse::*, Pointer::GetPointerType},
+             WindowsAndMessaging::*,
+         },
+     },
+     core::PCWSTR,
+ };
+ 
++use super::{touchpad, window::touchpad_rect};
+ use crate::*;
+ 
+ pub(crate) const WM_GPUI_CURSOR_STYLE_CHANGED: u32 = WM_USER + 1;
+@@ -103,6 +104,7 @@ impl WindowsWindowInner {
+             WM_XBUTTONUP => {
+                 self.handle_xbutton_msg(handle, wparam, lparam, Self::handle_mouse_up_msg)
+             }
++            DM_POINTERHITTEST => self.handle_touchpad_hit_test(handle, wparam),
+             WM_MOUSEWHEEL => self.handle_mouse_wheel_msg(handle, wparam, lparam),
+             WM_MOUSEHWHEEL => self.handle_mouse_horizontal_wheel_msg(handle, wparam, lparam),
+             WM_SYSKEYDOWN => self.handle_syskeydown_msg(handle, wparam, lparam),
+@@ -271,11 +273,70 @@ impl WindowsWindowInner {
+                 runnable.run();
+             }
+             self.handle_paint_msg(handle)
++        } else if wparam.0 == touchpad::UPDATE_TIMER {
++            self.update_touchpad(handle);
++            Some(0)
+         } else {
+             None
+         }
+     }
+ 
++    fn handle_touchpad_hit_test(&self, handle: HWND, wparam: WPARAM) -> Option<isize> {
++        let id = wparam.0 as u16 as u32;
++        let mut pointer_type = PT_POINTER;
++        let mut cursor = POINT::default();
++        unsafe {
++            GetPointerType(id, &mut pointer_type).ok()?;
++            if pointer_type != PT_TOUCHPAD {
++                return None;
++            }
++            GetCursorPos(&mut cursor).ok()?;
++            ScreenToClient(handle, &mut cursor).ok().ok()?;
++        }
++        let (dpi, mut hit_test) = {
++            let mut state = self.state.try_borrow_mut().ok()?;
++            (
++                state.scale_factor,
++                state.callbacks.touchpad_hit_test.take()?,
++            )
++        };
++        let position = logical_point(cursor.x as f32, cursor.y as f32, dpi);
++        let bounds = hit_test(position);
++        self.state.borrow_mut().callbacks.touchpad_hit_test = Some(hit_test);
++        let region = touchpad_rect(bounds?, dpi);
++        let mut touchpad = self.touchpad.try_borrow_mut().ok()?;
++        touchpad
++            .as_mut()?
++            .contact(id, position, dpi, region)
++            .log_err()?;
++        Some(0)
++    }
++
++    fn update_touchpad(&self, handle: HWND) {
++        let inputs = {
++            let Ok(touchpad) = self.touchpad.try_borrow() else {
++                return;
++            };
++            let Some(inputs) = touchpad
++                .as_ref()
++                .and_then(|touchpad| touchpad.update().log_err())
++            else {
++                unsafe { KillTimer(Some(handle), touchpad::UPDATE_TIMER).log_err() };
++                return;
++            };
++            inputs
++        };
++        if !inputs.is_empty() {
++            let Some(mut callback) = self.state.borrow_mut().callbacks.input.take() else {
++                return;
++            };
++            for event in inputs {
++                callback(event);
++            }
++            self.state.borrow_mut().callbacks.input = Some(callback);
++        }
++    }
++
+     fn handle_paint_msg(&self, handle: HWND) -> Option<isize> {
+         self.draw_window(handle, false)
+     }
+@@ -288,6 +349,9 @@ impl WindowsWindowInner {
+     }
+ 
+     fn handle_destroy_msg(&self, handle: HWND) -> Option<isize> {
++        if let Ok(mut touchpad) = self.touchpad.try_borrow_mut() {
++            drop(touchpad.take());
++        }
+         let callback = {
+             let mut lock = self.state.borrow_mut();
+             lock.callbacks.close.take()
+diff --git a/src/platform/windows/touchpad.rs b/src/platform/windows/touchpad.rs
+new file mode 100644
+index 0000000..cad33be
+--- /dev/null
++++ b/src/platform/windows/touchpad.rs
+@@ -0,0 +1,295 @@
++//! Turn Windows Precision Touchpad transforms into GPUI events. The native
++//! viewport follows an opt-in hitbox and never enrolls mouse or touch input.
++#![deny(unsafe_op_in_unsafe_fn)]
++
++use std::sync::{Arc, Mutex};
++
++use windows::{
++    Win32::{
++        Foundation::{HWND, RECT},
++        Graphics::DirectManipulation::*,
++        System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance},
++        UI::WindowsAndMessaging::{KillTimer, SetTimer},
++    },
++    core::{Ref, Result, implement},
++};
++
++use super::{current_modifiers, logical_point};
++use crate::{
++    MagnifyEvent, Pixels, PlatformInput, Point, ScrollDelta, ScrollWheelEvent, TouchPhase,
++};
++
++pub(super) const UPDATE_TIMER: usize = 2;
++const TRANSFORM_EPSILON: f32 = 0.00001;
++
++pub(super) struct Touchpad {
++    hwnd: HWND,
++    manager: IDirectManipulationManager,
++    update_manager: IDirectManipulationUpdateManager,
++    viewport: IDirectManipulationViewport,
++    cookie: Option<u32>,
++    region: RECT,
++    gesture: Arc<Mutex<Gesture>>,
++}
++
++impl Touchpad {
++    pub(super) fn new(hwnd: HWND, region: RECT) -> Result<Self> {
++        // GPUI initializes OLE on the UI thread before creating its windows.
++        unsafe {
++            let manager: IDirectManipulationManager =
++                CoCreateInstance(&DirectManipulationManager, None, CLSCTX_INPROC_SERVER)?;
++            let update_manager = manager.GetUpdateManager()?;
++            let viewport =
++                manager.CreateViewport(None::<&IDirectManipulationFrameInfoProvider>, hwnd)?;
++            let mut touchpad = Self {
++                hwnd,
++                manager,
++                update_manager,
++                viewport,
++                cookie: None,
++                region,
++                gesture: Arc::default(),
++            };
++            touchpad.viewport.ActivateConfiguration(
++                DIRECTMANIPULATION_CONFIGURATION_INTERACTION
++                    | DIRECTMANIPULATION_CONFIGURATION_TRANSLATION_X
++                    | DIRECTMANIPULATION_CONFIGURATION_TRANSLATION_Y
++                    | DIRECTMANIPULATION_CONFIGURATION_TRANSLATION_INERTIA
++                    | DIRECTMANIPULATION_CONFIGURATION_SCALING,
++            )?;
++            touchpad
++                .viewport
++                .SetViewportOptions(DIRECTMANIPULATION_VIEWPORT_OPTIONS_MANUALUPDATE)?;
++            touchpad.viewport.SetViewportRect(&region)?;
++            let handler: IDirectManipulationViewportEventHandler = TouchpadEvents {
++                hwnd: hwnd.0 as isize,
++                gesture: touchpad.gesture.clone(),
++            }
++            .into();
++            touchpad.cookie = Some(touchpad.viewport.AddEventHandler(Some(hwnd), &handler)?);
++            touchpad.manager.Activate(hwnd)?;
++            touchpad.viewport.Enable()?;
++            touchpad
++                .update_manager
++                .Update(None::<&IDirectManipulationFrameInfoProvider>)?;
++            Ok(touchpad)
++        }
++    }
++
++    pub(super) fn resize(&mut self, region: RECT) -> Result<()> {
++        if self.region != region {
++            unsafe {
++                self.viewport.Stop()?;
++                self.viewport.SetViewportRect(&region)?;
++            }
++            self.region = region;
++        }
++        Ok(())
++    }
++
++    pub(super) fn contact(
++        &mut self,
++        id: u32,
++        position: Point<Pixels>,
++        dpi: f32,
++        region: RECT,
++    ) -> Result<()> {
++        self.resize(region)?;
++        unsafe {
++            let previous = {
++                let mut gesture = self.gesture.lock().unwrap();
++                let previous = gesture.anchor;
++                if gesture.kind.is_none() {
++                    gesture.anchor = Some((position, dpi));
++                }
++                previous
++            };
++            if let Err(error) = self.viewport.SetContact(id) {
++                self.gesture.lock().unwrap().anchor = previous;
++                return Err(error);
++            }
++            Ok(())
++        }
++    }
++
++    pub(super) fn update(&self) -> Result<Vec<PlatformInput>> {
++        unsafe {
++            self.update_manager
++                .Update(None::<&IDirectManipulationFrameInfoProvider>)?
++        };
++        Ok(std::mem::take(&mut self.gesture.lock().unwrap().pending))
++    }
++}
++
++impl Drop for Touchpad {
++    fn drop(&mut self) {
++        unsafe {
++            if let Some(cookie) = self.cookie {
++                let _ = self.viewport.RemoveEventHandler(cookie);
++            }
++            let _ = self.viewport.Abandon();
++            let _ = self.manager.Deactivate(self.hwnd);
++            let _ = KillTimer(Some(self.hwnd), UPDATE_TIMER);
++        }
++    }
++}
++
++#[implement(
++    IDirectManipulationViewportEventHandler,
++    IDirectManipulationInteractionEventHandler
++)]
++struct TouchpadEvents {
++    hwnd: isize,
++    gesture: Arc<Mutex<Gesture>>,
++}
++
++#[allow(non_snake_case)]
++impl IDirectManipulationInteractionEventHandler_Impl for TouchpadEvents_Impl {
++    fn OnInteraction(
++        &self,
++        _viewport: Ref<'_, IDirectManipulationViewport2>,
++        interaction: DIRECTMANIPULATION_INTERACTION_TYPE,
++    ) -> Result<()> {
++        let hwnd = HWND(self.hwnd as *mut _);
++        unsafe {
++            if interaction == DIRECTMANIPULATION_INTERACTION_BEGIN {
++                // A synthetic viewport has no compositor to advance it.
++                SetTimer(Some(hwnd), UPDATE_TIMER, 16, None);
++            } else if interaction == DIRECTMANIPULATION_INTERACTION_END {
++                let _ = KillTimer(Some(hwnd), UPDATE_TIMER);
++            }
++        }
++        Ok(())
++    }
++}
++
++#[allow(non_snake_case)]
++impl IDirectManipulationViewportEventHandler_Impl for TouchpadEvents_Impl {
++    fn OnViewportStatusChanged(
++        &self,
++        viewport: Ref<'_, IDirectManipulationViewport>,
++        current: DIRECTMANIPULATION_STATUS,
++        previous: DIRECTMANIPULATION_STATUS,
++    ) -> Result<()> {
++        if current == DIRECTMANIPULATION_READY
++            && matches!(
++                previous,
++                DIRECTMANIPULATION_RUNNING | DIRECTMANIPULATION_INERTIA
++            )
++            && self.gesture.lock().unwrap().finish()
++        {
++            // Reset only after an actual transform. Resetting the identity can
++            // itself emit another RUNNING -> READY notification.
++            let viewport = viewport.ok()?;
++            unsafe {
++                let region = viewport.GetViewportRect()?;
++                viewport.ZoomToRect(
++                    0.0,
++                    0.0,
++                    (region.right - region.left) as f32,
++                    (region.bottom - region.top) as f32,
++                    false,
++                )?;
++            }
++        }
++        Ok(())
++    }
++
++    fn OnViewportUpdated(&self, _viewport: Ref<'_, IDirectManipulationViewport>) -> Result<()> {
++        Ok(())
++    }
++
++    fn OnContentUpdated(
++        &self,
++        _viewport: Ref<'_, IDirectManipulationViewport>,
++        content: Ref<'_, IDirectManipulationContent>,
++    ) -> Result<()> {
++        let mut matrix = [0.0; 6];
++        unsafe { content.ok()?.GetContentTransform(&mut matrix)? };
++        self.gesture
++            .lock()
++            .unwrap()
++            .apply(matrix[0], matrix[4], matrix[5]);
++        Ok(())
++    }
++}
++
++struct Gesture {
++    anchor: Option<(Point<Pixels>, f32)>,
++    last: (f32, f32, f32),
++    kind: Option<GestureKind>,
++    pending: Vec<PlatformInput>,
++}
++
++#[derive(Clone, Copy, Eq, PartialEq)]
++enum GestureKind {
++    Pan,
++    Pinch,
++}
++
++impl Default for Gesture {
++    fn default() -> Self {
++        Self {
++            anchor: None,
++            last: (1.0, 0.0, 0.0),
++            kind: None,
++            pending: Vec::new(),
++        }
++    }
++}
++
++impl Gesture {
++    fn apply(&mut self, scale: f32, x: f32, y: f32) {
++        let Some((position, dpi)) = self.anchor else {
++            return;
++        };
++        if !scale.is_finite() || scale <= 0.0 || !x.is_finite() || !y.is_finite() {
++            return;
++        }
++        let (last_scale, last_x, last_y) = self.last;
++        let modifiers = current_modifiers();
++        // Once scaling begins, the native translation includes zoom-centre
++        // motion. DAG already zooms about the pointer, so omit those offsets.
++        if self.kind == Some(GestureKind::Pinch) || (scale - 1.0).abs() > TRANSFORM_EPSILON {
++            let magnification = scale / last_scale - 1.0;
++            if magnification.abs() <= TRANSFORM_EPSILON {
++                return;
++            }
++            let touch_phase = self.phase_for(GestureKind::Pinch);
++            self.pending.push(PlatformInput::Magnify(MagnifyEvent {
++                position,
++                magnification,
++                modifiers,
++                touch_phase,
++            }));
++        } else {
++            let delta = logical_point(x - last_x, y - last_y, dpi);
++            if delta.x.0 == 0.0 && delta.y.0 == 0.0 {
++                return;
++            }
++            let touch_phase = self.phase_for(GestureKind::Pan);
++            self.pending
++                .push(PlatformInput::ScrollWheel(ScrollWheelEvent {
++                    position,
++                    delta: ScrollDelta::Pixels(delta),
++                    modifiers,
++                    touch_phase,
++                }));
++        }
++        self.last = (scale, x, y);
++    }
++
++    fn phase_for(&mut self, kind: GestureKind) -> TouchPhase {
++        if self.kind.replace(kind) == Some(kind) {
++            TouchPhase::Moved
++        } else {
++            TouchPhase::Started
++        }
++    }
++
++    fn finish(&mut self) -> bool {
++        self.anchor = None;
++        self.kind = None;
++        std::mem::replace(&mut self.last, (1.0, 0.0, 0.0)) != (1.0, 0.0, 0.0)
++    }
++}
+diff --git a/src/platform/windows/window.rs b/src/platform/windows/window.rs
+index ba58f95..9dbb019 100644
+--- a/src/platform/windows/window.rs
++++ b/src/platform/windows/window.rs
+@@ -26,6 +26,7 @@ use windows::{
+     core::*,
+ };
+ 
++use super::touchpad::Touchpad;
+ use crate::*;
+ 
+ pub(crate) struct WindowsWindow(pub Rc<WindowsWindowInner>);
+@@ -78,6 +79,18 @@ pub(crate) struct WindowsWindowInner {
+     pub(crate) platform_window_handle: HWND,
+     pub(super) frame_requested: Arc<AtomicBool>,
+     ime_sync_pending: Cell<bool>,
++    pub(super) touchpad: RefCell<Option<Touchpad>>,
++    touchpad_region: Cell<Option<RECT>>,
++}
++
++pub(super) fn touchpad_rect(bounds: Bounds<Pixels>, dpi: f32) -> RECT {
++    let bounds = bounds.to_device_pixels(dpi);
++    RECT {
++        left: bounds.left().0,
++        top: bounds.top().0,
++        right: bounds.right().0,
++        bottom: bounds.bottom().0,
++    }
+ }
+ 
+ impl WindowsWindowState {
+@@ -239,6 +252,8 @@ impl WindowsWindowInner {
+             platform_window_handle: context.platform_window_handle,
+             frame_requested: Arc::new(AtomicBool::new(true)),
+             ime_sync_pending: Cell::new(false),
++            touchpad: RefCell::default(),
++            touchpad_region: Cell::new(None),
+             system_settings: RefCell::new(WindowsSystemSettings::new(context.display)),
+         }))
+     }
+@@ -344,6 +359,7 @@ pub(crate) struct Callbacks {
+     pub(crate) should_close: Option<Box<dyn FnMut() -> bool>>,
+     pub(crate) close: Option<Box<dyn FnOnce()>>,
+     pub(crate) hit_test_window_control: Option<Box<dyn FnMut() -> Option<WindowControlArea>>>,
++    pub(super) touchpad_hit_test: Option<Box<dyn FnMut(Point<Pixels>) -> Option<Bounds<Pixels>>>>,
+     pub(crate) appearance_changed: Option<Box<dyn FnMut()>>,
+ }
+ 
+@@ -862,6 +878,35 @@ impl PlatformWindow for WindowsWindow {
+         self.0.state.borrow_mut().callbacks.close = Some(callback);
+     }
+ 
++    fn on_touchpad_hit_test(
++        &self,
++        callback: Box<dyn FnMut(Point<Pixels>) -> Option<Bounds<Pixels>>>,
++    ) {
++        self.0.state.borrow_mut().callbacks.touchpad_hit_test = Some(callback);
++    }
++
++    fn set_touchpad_region(&self, bounds: Option<Bounds<Pixels>>) {
++        let region = bounds
++            .map(|bounds| touchpad_rect(bounds, self.scale_factor()))
++            .filter(|rect| rect.right > rect.left && rect.bottom > rect.top);
++        if self.0.touchpad_region.get() == region {
++            return;
++        }
++        let Ok(mut touchpad) = self.0.touchpad.try_borrow_mut() else {
++            return;
++        };
++        self.0.touchpad_region.set(region);
++        if let Some(region) = region {
++            if let Some(touchpad) = touchpad.as_mut() {
++                touchpad.resize(region).log_err();
++            } else {
++                *touchpad = Touchpad::new(self.0.hwnd, region).log_err();
++            }
++        } else {
++            drop(touchpad.take());
++        }
++    }
++
+     fn on_hit_test_window_control(&self, callback: Box<dyn FnMut() -> Option<WindowControlArea>>) {
+         self.0.state.borrow_mut().callbacks.hit_test_window_control = Some(callback);
+     }
+diff --git a/src/platform/windows.rs b/src/platform/windows.rs
+index 9cd1a7d..917e719 100644
+--- a/src/platform/windows.rs
++++ b/src/platform/windows.rs
+@@ -10,6 +10,7 @@ mod events;
+ mod keyboard;
+ mod platform;
+ mod system_settings;
++mod touchpad;
+ mod util;
+ mod vsync;
+ mod window;
+diff --git a/src/platform.rs b/src/platform.rs
+index b6a8268..a5dc601 100644
+--- a/src/platform.rs
++++ b/src/platform.rs
+@@ -492,6 +492,14 @@ pub(crate) trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
+     fn frame_requested(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+         Default::default()
+     }
++    #[cfg(target_os = "windows")]
++    fn on_touchpad_hit_test(
++        &self,
++        _callback: Box<dyn FnMut(Point<Pixels>) -> Option<Bounds<Pixels>>>,
++    ) {
++    }
++    #[cfg(target_os = "windows")]
++    fn set_touchpad_region(&self, _bounds: Option<Bounds<Pixels>>) {}
+     fn on_input(&self, callback: Box<dyn FnMut(PlatformInput) -> DispatchEventResult>);
+     fn on_active_status_change(&self, callback: Box<dyn FnMut(bool)>);
+     fn on_hover_status_change(&self, callback: Box<dyn FnMut(bool)>);
+diff --git a/src/window.rs b/src/window.rs
+index 661552a..c6bbbde 100644
+--- a/src/window.rs
++++ b/src/window.rs
+@@ -550,6 +550,8 @@ pub struct Hitbox {
+     pub content_mask: ContentMask<Pixels>,
+     /// Flags that specify hitbox behavior.
+     pub behavior: HitboxBehavior,
++    #[cfg(target_os = "windows")]
++    touchpad_magnify: bool,
+ }
+ 
+ impl Hitbox {
+@@ -1154,6 +1156,24 @@ impl Window {
+                     .unwrap_or(DispatchEventResult::default())
+             })
+         });
++        #[cfg(target_os = "windows")]
++        platform_window.on_touchpad_hit_test({
++            let mut cx = cx.to_async();
++            Box::new(move |position| {
++                handle
++                    .update(&mut cx, |_, window, _| {
++                        let frame = &window.rendered_frame;
++                        let hit_test = frame.hit_test(position);
++                        let hovered = &hit_test.ids[..hit_test.hover_hitbox_count];
++                        frame.hitboxes.iter().rev().find_map(|hitbox| {
++                            (hitbox.touchpad_magnify && hovered.contains(&hitbox.id))
++                                .then(|| hitbox.bounds.intersect(&hitbox.content_mask.bounds))
++                        })
++                    })
++                    .ok()
++                    .flatten()
++            })
++        });
+         platform_window.on_hit_test_window_control({
+             let mut cx = cx.to_async();
+             Box::new(move || {
+@@ -1967,6 +1987,18 @@ impl Window {
+         let previous_window_active = self.rendered_frame.window_active;
+         mem::swap(&mut self.rendered_frame, &mut self.next_frame);
+         self.next_frame.clear();
++        #[cfg(target_os = "windows")]
++        self.platform_window.set_touchpad_region(
++            self.rendered_frame
++                .hitboxes
++                .iter()
++                .rev()
++                .find_map(|hitbox| {
++                    hitbox
++                        .touchpad_magnify
++                        .then(|| hitbox.bounds.intersect(&hitbox.content_mask.bounds))
++                }),
++        );
+         let current_focus_path = self.rendered_frame.focus_path();
+         let current_window_active = self.rendered_frame.window_active;
+ 
+@@ -3335,6 +3367,15 @@ impl Window {
+     ///
+     /// This method should only be called as part of the prepaint phase of element drawing.
+     pub fn insert_hitbox(&mut self, bounds: Bounds<Pixels>, behavior: HitboxBehavior) -> Hitbox {
++        self.insert_interactive_hitbox(bounds, behavior, false)
++    }
++
++    pub(crate) fn insert_interactive_hitbox(
++        &mut self,
++        bounds: Bounds<Pixels>,
++        behavior: HitboxBehavior,
++        _touchpad_magnify: bool,
++    ) -> Hitbox {
+         self.invalidator.debug_assert_prepaint();
+ 
+         let content_mask = self.content_mask();
+@@ -3345,6 +3386,8 @@ impl Window {
+             bounds,
+             content_mask,
+             behavior,
++            #[cfg(target_os = "windows")]
++            touchpad_magnify: _touchpad_magnify,
+         };
+         self.next_frame.hitboxes.push(hitbox.clone());
+         hitbox

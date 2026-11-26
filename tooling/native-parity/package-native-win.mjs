@@ -16,6 +16,7 @@ const frozenVersion = '0.2.24'
 const artifactNamePattern = 'Matou-${version}-${os}-${arch}.${ext}'
 const defaultUpdateBaseUrl = 'https://github.com/icesword0760/matou/releases/latest/download'
 const frozenUpdateBaseUrl = 'https://updates.baize-ailabs.com/stable'
+export const windowsArm64UpdateBaseUrl = `${frozenUpdateBaseUrl}/win-arm64`
 const stableChannel = 'stable'
 const updateConfigFilename = 'app-update.yml'
 const resourcesDirectory = 'resources'
@@ -56,7 +57,8 @@ function dirProjection(arch, version) {
 }
 
 // The URL is offline metadata. The reference dir target skips both updater files.
-export function planWindowsPackage({ target = 'dir', arch, version, updateBaseUrl = defaultUpdateBaseUrl }) {
+export function planWindowsPackage({ target = 'dir', arch, version,
+  updateBaseUrl = arch === 'arm64' ? windowsArm64UpdateBaseUrl : defaultUpdateBaseUrl }) {
   if (target !== 'dir') throw new Error('Target must be dir')
   checkArch(arch)
   checkVersion(version)
@@ -333,7 +335,7 @@ function packageMetadata(plan) {
       appId: plan.appId, productName: plan.productName, version: plan.version,
       arch: plan.arch, artifactNamePattern: plan.artifactNamePattern,
       update: {
-        baseUrl: plan.updateBaseUrl, channel: stableChannel,
+        baseUrl: plan.updateBaseUrl, channel: plan.updateChannel ?? stableChannel,
         appUpdateYml: plan.appUpdateYml, releaseChannelManifest: plan.releaseChannelManifest
       }
     }
@@ -350,7 +352,7 @@ async function requirePath(path, label, directory = false) {
   }
 }
 
-async function checkPe(path, label, arch, dll = false) {
+export async function checkPe(path, label, arch, dll = false) {
   await requirePath(path, label)
   const file = await open(path, 'r')
   const invalid = () => new Error(`Expected a Windows PE ${dll ? 'DLL' : 'executable'} for ${label}: ${path}`)
@@ -398,9 +400,18 @@ async function optionalDirectory(path, label = 'Claude accounts path') {
   return path
 }
 
-async function verifyAccountsDirectory(directory, arch) {
+async function verifyAccountsDirectory(directory, arch, required = false) {
   await requirePath(directory, 'Claude accounts onedir', true)
   await checkPe(join(directory, accountsExecutable), 'Claude accounts executable', arch)
+  if (required) {
+    const internal = join(directory, '_internal')
+    await requirePath(join(directory, 'UPSTREAM-LICENSE'), 'Claude accounts license')
+    await requirePath(internal, 'Claude accounts _internal', true)
+    await requirePath(join(internal, 'base_library.zip'), 'Claude accounts Python standard library')
+    const python = (await readdir(internal)).filter(name => /^python3\d{2,}\.dll$/i.test(name))
+    if (python.length !== 1) throw new Error('Expected one Claude accounts Python runtime DLL')
+    await checkPe(join(internal, python[0]), 'Claude accounts Python runtime', arch, true)
+  }
 }
 
 async function requireEntries(directory, expected, label) {
@@ -433,7 +444,8 @@ async function verifyClaudePlugin(resources) {
   await requireEntries(assets, ['providers'], 'control assets')
   await requireEntries(providers, ['claude-plugin'], 'control asset providers')
   await requirePath(plugin, 'Claude plugin', true)
-  const sourceEntries = await readdir(claudePluginSource, { recursive: true, withFileTypes: true })
+  const sourceEntries = (await readdir(claudePluginSource, { recursive: true, withFileTypes: true }))
+    .filter(entry => nativeClaudeAsset(join(entry.parentPath, entry.name)))
   for (const entry of sourceEntries) {
     const source = join(entry.parentPath, entry.name)
     const destination = join(plugin, relative(claudePluginSource, source))
@@ -447,8 +459,13 @@ async function verifyClaudePlugin(resources) {
   }
 }
 
+function nativeClaudeAsset(path) {
+  const parts = relative(claudePluginSource, path).split(sep)
+  return parts[0] !== 'hooks' && parts.slice(0, 3).join('/') !== 'skills/agent-foreman/scripts'
+}
+
 export async function verifyWindowsDirPackage(path, options) {
-  const plan = planWindowsPackage(options)
+  const plan = payloadPlan(options)
   if (basename(resolve(path)) !== plan.unpackedDirectoryName) {
     throw new Error(`Expected directory named ${plan.unpackedDirectoryName}: ${path}`)
   }
@@ -456,13 +473,14 @@ export async function verifyWindowsDirPackage(path, options) {
   await requireEntries(path, [plan.applicationExecutable, plan.runtimeExecutable, ghosttyFilename, plan.resourcesDirectory], 'unpacked package')
   const expectedResources = [plan.manifestFilename, plan.versionFilename, 'control-assets']
   const accounts = join(resources, accountsResource)
-  if (options.accountsDir !== undefined || await optionalDirectory(accounts)) {
+  if (options.requireReleaseComponents || options.accountsDir !== undefined || await optionalDirectory(accounts)) {
     expectedResources.push(accountsResource)
     await requireEntries(accounts, [accountsDirectory], 'Claude accounts resources')
-    await verifyAccountsDirectory(join(accounts, accountsDirectory), plan.arch)
+    await verifyAccountsDirectory(join(accounts, accountsDirectory), plan.arch, options.requireReleaseComponents)
   }
   const modelRouter = join(resources, modelRouterResource)
-  if (options.modelRouterDir !== undefined || await optionalDirectory(modelRouter, 'model-router path')) {
+  if (options.requireReleaseComponents || options.modelRouterDir !== undefined
+      || await optionalDirectory(modelRouter, 'model-router path')) {
     expectedResources.push(modelRouterResource)
     await verifyModelRouter(modelRouter, plan.arch)
   }
@@ -479,6 +497,13 @@ export async function verifyWindowsDirPackage(path, options) {
   await checkPe(join(path, plan.applicationExecutable), 'desktop binary', plan.arch)
   await checkPe(join(path, plan.runtimeExecutable), 'runtime binary', plan.arch)
   await checkPe(join(path, ghosttyFilename), 'Ghostty DLL', plan.arch, true)
+  return plan
+}
+
+function payloadPlan(options) {
+  const plan = planWindowsPackage(options)
+  if (options.internalInstaller) return { ...plan, updateChannel: 'internal' }
+  if (options.portableOnly) return { ...plan, updateChannel: 'portable' }
   return plan
 }
 
@@ -554,7 +579,7 @@ async function requireAbsent(path) {
 }
 
 export async function assembleWindowsDirPackage({ desktopBin, runtimeBin, ghosttyDll, outDir, ...options }) {
-  const plan = planWindowsPackage(options)
+  const plan = payloadPlan(options)
   const output = await safeOutput(outDir)
   const destination = join(output, plan.unpackedDirectoryName)
   await requireAbsent(destination)
@@ -566,8 +591,10 @@ export async function assembleWindowsDirPackage({ desktopBin, runtimeBin, ghostt
   await checkPe(dll, 'Ghostty DLL', plan.arch, true)
   if (options.accountsDir !== undefined && (typeof options.accountsDir !== 'string' || !options.accountsDir.trim())) throw new Error('Missing Claude accounts directory')
   const accounts = options.accountsDir ?? await optionalDirectory(defaultAccountsDir)
-  if (accounts) await verifyAccountsDirectory(accounts, plan.arch)
+  if (options.requireReleaseComponents && !accounts) throw new Error('Missing Claude accounts directory (--accounts-dir)')
+  if (accounts) await verifyAccountsDirectory(accounts, plan.arch, options.requireReleaseComponents)
   const modelRouter = options.modelRouterDir
+  if (options.requireReleaseComponents && modelRouter === undefined) throw new Error('Missing model-router directory (--model-router)')
   if (modelRouter !== undefined) {
     if (typeof modelRouter !== 'string' || !modelRouter.trim()) throw new Error('Missing model-router directory')
     await requirePath(modelRouter, 'model-router directory', true)
@@ -583,7 +610,9 @@ export async function assembleWindowsDirPackage({ desktopBin, runtimeBin, ghostt
     await copyFile(desktopBin, join(directory, plan.applicationExecutable))
     await copyFile(runtimeBin, join(directory, plan.runtimeExecutable))
     await copyFile(dll, join(directory, ghosttyFilename))
-    await cp(claudePluginSource, join(resources, 'control-assets', 'providers', 'claude-plugin'), { recursive: true })
+    await cp(claudePluginSource, join(resources, 'control-assets', 'providers', 'claude-plugin'), {
+      recursive: true, filter: nativeClaudeAsset
+    })
     if (accounts) {
       await cp(accounts, join(resources, accountsResource, accountsDirectory), { recursive: true })
     }

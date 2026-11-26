@@ -93,7 +93,7 @@ for (const [arch, unpacked] of [['x64', 'win-unpacked'], ['arm64', 'win-arm64-un
     const resources = join(packageResult.path, 'resources')
     assert.deepEqual(await readdir(resources).then(names => names.sort()), ['control-assets', 'manifest.json', 'version.json'])
     const plugin = join(resources, 'control-assets', 'providers', 'claude-plugin')
-    assert.deepEqual(await readdir(plugin).then(names => names.sort()), ['.claude-plugin', 'hooks', 'skills'])
+    assert.deepEqual(await readdir(plugin).then(names => names.sort()), ['.claude-plugin', 'skills'])
     assert.ok(JSON.parse(await readFile(join(plugin, '.claude-plugin', 'plugin.json'), 'utf8')).name)
     const load = async filename => JSON.parse(await readFile(join(resources, filename), 'utf8'))
     assert.deepEqual(await load('manifest.json'), {
@@ -216,7 +216,7 @@ test('rejects non-isolated, protected and invalid output paths', async () => {
   await assert.rejects(readdir(guarded), { code: 'ENOENT' })
 })
 
-test('verifier rejects a missing Claude plugin manifest or a changed hook', async () => {
+test('verifier rejects a missing Claude plugin manifest or a legacy hook', async () => {
   const input = options('x64', join(root, 'verify-claude-plugin'))
   const { path } = await assembleWindowsDirPackage(input)
   const plugin = join(path, 'resources', 'control-assets', 'providers', 'claude-plugin')
@@ -225,8 +225,26 @@ test('verifier rejects a missing Claude plugin manifest or a changed hook', asyn
   await rm(manifest)
   await assert.rejects(verifyWindowsDirPackage(path, input), /Missing Claude plugin asset/)
   await writeFile(manifest, original)
-  await writeFile(join(plugin, 'hooks', 'session-start.mjs'), 'changed')
-  await assert.rejects(verifyWindowsDirPackage(path, input), /Claude plugin asset differs from source/)
+  await mkdir(join(plugin, 'hooks'))
+  await writeFile(join(plugin, 'hooks', 'session-start.mjs'), 'legacy')
+  await assert.rejects(verifyWindowsDirPackage(path, input), /Unexpected Claude plugin assets/)
+})
+
+test('installer package requires both engines and complete Claude accounts onedir', async () => {
+  const accountsDir = join(root, 'release accounts source')
+  await mkdir(join(accountsDir, '_internal'), { recursive: true })
+  await writeFile(join(accountsDir, 'matou-claude-accounts.exe'), peFixture(0x8664, 'account engine'))
+  const input = options('x64', join(root, 'release payload'), { accountsDir, requireReleaseComponents: true })
+  await assert.rejects(assembleWindowsDirPackage({ ...input, accountsDir: join(root, 'missing accounts') }),
+    /Missing Claude accounts onedir/)
+  await assert.rejects(assembleWindowsDirPackage(input), /Missing Claude accounts license/)
+  await writeFile(join(accountsDir, 'UPSTREAM-LICENSE'), 'license')
+  await assert.rejects(assembleWindowsDirPackage(input), /Missing Claude accounts Python standard library/)
+  await writeFile(join(accountsDir, '_internal', 'base_library.zip'), 'fixture')
+  await assert.rejects(assembleWindowsDirPackage(input), /Expected one Claude accounts Python runtime DLL/)
+  await writeFile(join(accountsDir, '_internal', 'python312.dll'), peFixture(0x8664, 'python', true))
+  await assert.rejects(assembleWindowsDirPackage(input), /Missing model-router directory/)
+  await assert.rejects(readdir(input.outDir), { code: 'ENOENT' })
 })
 
 test('rejects output links and Windows junctions without writing through them', async () => {
@@ -263,6 +281,8 @@ test('plans a safe HTTP(S) URL without creating packaged or published updater ma
   // Current native package metadata follows the GitHub feed. The fixture captures the old feed.
   assert.equal(planWindowsPackage({ arch: 'x64', version }).updateBaseUrl,
     'https://github.com/icesword0760/matou/releases/latest/download')
+  assert.equal(planWindowsPackage({ arch: 'arm64', version }).updateBaseUrl,
+    'https://updates.baize-ailabs.com/stable/win-arm64')
   for (const url of ['', ' ', 'relative/path', 'https://', 'file:///releases', 'https://example.invalid/\nnext']) {
     assert.throws(() => planWindowsPackage({ arch: 'x64', version, updateBaseUrl: url }), /absolute HTTP\(S\) URL/)
   }

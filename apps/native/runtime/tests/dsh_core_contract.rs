@@ -306,10 +306,6 @@ fn dsh_control_instructions_and_token_are_scoped_to_the_managed_run() {
             "MATOU_CONTROL_ENDPOINT".into(),
             "/fixture/private-control.sock".into(),
         ),
-        (
-            "MATOU_CONTROL_NODE_EXECUTABLE".into(),
-            "/fixture/node".into(),
-        ),
         ("MATOU_CONTROL_TOKEN".into(), "fixture-private-token".into()),
     ]);
     let instructions = dsh_launch::system_instructions(&environment, "run-a").unwrap();

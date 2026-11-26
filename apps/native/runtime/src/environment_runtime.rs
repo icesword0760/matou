@@ -4,7 +4,9 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-use matou_native_core::git_repo::{ChangeCounts, Head, LocalBranch, Repository, WorktreeScope};
+use matou_native_core::git_repo::{
+    ChangeCounts, GIT_NOT_INSTALLED, GitActionError, Head, LocalBranch, Repository, WorktreeScope,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnvironmentKind {
@@ -51,6 +53,7 @@ pub enum UnavailableEnvironment {
     WrongRepository,
     WrongBranch,
     WrongHead,
+    GitNotInstalled,
     Io(String),
     Git(String),
     UnsafeRepair(String),
@@ -104,7 +107,23 @@ fn inspect(
         EnvironmentTarget::Worktree(worktree) => (worktree.path, EnvironmentKind::Worktree),
     };
     let cwd = directory(path)?;
-    let repository = Repository::discover(&cwd).map_err(git_error)?;
+    let git = match inspect_git(&cwd, target, require_registration) {
+        Err(EnvironmentProblem::Unavailable(UnavailableEnvironment::GitNotInstalled))
+            if kind == EnvironmentKind::Local =>
+        {
+            None
+        }
+        result => result?,
+    };
+    Ok(ReadyEnvironment { kind, cwd, git })
+}
+
+fn inspect_git(
+    cwd: &Path,
+    target: EnvironmentTarget<'_>,
+    require_registration: bool,
+) -> Result<Option<GitState>, EnvironmentProblem> {
+    let repository = Repository::discover(cwd).map_err(git_error)?;
 
     if let EnvironmentTarget::Worktree(expected) = target {
         let source = match directory(expected.repository_root) {
@@ -135,7 +154,7 @@ fn inspect(
         }
     }
 
-    let git = if let Some(repository) = repository {
+    if let Some(repository) = repository {
         let head = repository.head().map_err(git_error)?;
         if let EnvironmentTarget::Worktree(expected) = target
             && &head != expected.head
@@ -147,15 +166,14 @@ fn inspect(
             return Err(unavailable(reason));
         }
         let changes = repository.changes().map_err(git_error)?;
-        Some(GitState {
+        Ok(Some(GitState {
             repository,
             head,
             changes,
-        })
+        }))
     } else {
-        None
-    };
-    Ok(ReadyEnvironment { kind, cwd, git })
+        Ok(None)
+    }
 }
 
 fn directory(path: &Path) -> Result<PathBuf, EnvironmentProblem> {
@@ -177,7 +195,16 @@ fn unavailable(reason: UnavailableEnvironment) -> EnvironmentProblem {
 }
 
 fn git_error(error: anyhow::Error) -> EnvironmentProblem {
+    if git_is_missing(&error) {
+        return unavailable(UnavailableEnvironment::GitNotInstalled);
+    }
     unavailable(UnavailableEnvironment::Git(format!("{error:#}")))
+}
+
+fn git_is_missing(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<GitActionError>()
+        .is_some_and(|error| error.0 == GIT_NOT_INSTALLED)
 }
 
 pub struct SessionDirectory<'a> {
@@ -302,8 +329,13 @@ pub(crate) fn check_change(
     let original = Path::new(&owned.path);
     let head = managed_head(owned)?;
     let repository = Repository::discover(Path::new(&owned.repository_root))
-        .ok()
-        .flatten()
+        .or_else(|error| {
+            if git_is_missing(&error) {
+                Err(error)
+            } else {
+                Ok(None)
+            }
+        })?
         .context("wrong-repository")?;
     let path = if kind == Kind::Locate {
         directory(candidate.context("path-missing")?).map_err(problem_reason)?
@@ -460,6 +492,9 @@ fn problem_reason(problem: EnvironmentProblem) -> anyhow::Error {
         }
         EnvironmentProblem::Unavailable(UnavailableEnvironment::WrongBranch) => "wrong-branch",
         EnvironmentProblem::Unavailable(UnavailableEnvironment::WrongHead) => "wrong-head",
+        EnvironmentProblem::Unavailable(UnavailableEnvironment::GitNotInstalled) => {
+            return GitActionError(GIT_NOT_INSTALLED).into();
+        }
         EnvironmentProblem::Unavailable(
             UnavailableEnvironment::Io(error)
             | UnavailableEnvironment::Git(error)
@@ -474,6 +509,9 @@ fn problem_reason(problem: EnvironmentProblem) -> anyhow::Error {
 pub(crate) fn change_failure(kind: Kind, error: &anyhow::Error) -> String {
     if let Some(message) = error.downcast_ref::<crate::subscription_service::LaunchMessage>() {
         return message.0.clone();
+    }
+    if git_is_missing(error) {
+        return GIT_NOT_INSTALLED.into();
     }
     let reason = error.to_string();
     if matches!(

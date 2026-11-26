@@ -108,6 +108,8 @@ pub enum OpenRequest {
     SecondLaunch(Vec<String>),
     Directories(Vec<String>),
     Reopen,
+    #[cfg(windows)]
+    Notification(String),
 }
 
 impl OpenRequest {
@@ -117,9 +119,60 @@ impl OpenRequest {
                 paths.retain(|path| Path::new(path).is_dir());
             }
             Self::Reopen => {}
+            #[cfg(windows)]
+            Self::Notification(_) => {}
         }
         self
     }
+}
+
+#[cfg(windows)]
+pub fn is_notification_uri(value: &str) -> bool {
+    value.starts_with("matou-notification:")
+}
+
+#[cfg(windows)]
+fn notification_id(uri: &str) -> Option<String> {
+    use crate::system_notifications::{MAX_NOTIFICATION_EVENT_ID_BYTES, NOTIFICATION_URI_PREFIX};
+    let encoded = uri.strip_prefix(NOTIFICATION_URI_PREFIX)?;
+    if encoded.is_empty() || encoded.len() > MAX_NOTIFICATION_EVENT_ID_BYTES * 2 || !encoded.len().is_multiple_of(2)
+        || !encoded.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return None;
+    }
+    let bytes: Vec<_> = encoded.as_bytes().chunks_exact(2)
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+        .collect();
+    String::from_utf8(bytes).ok()
+        .filter(|id| crate::system_notifications::valid_notification_event_id(id))
+}
+
+#[cfg(windows)]
+pub fn forward_notification_uri(data_root: &Path, uri: &str) -> Result<()> {
+    let Some(id) = notification_id(uri) else { return Ok(()) };
+    let Ok(root) = data_root.canonicalize() else { return Ok(()) };
+    let endpoint = transport::Endpoint::new(&root)?;
+    // The request is meaningful only to a currently running desktop.
+    let deadline = Instant::now() + FORWARD_LIMIT;
+    let mut stream = loop {
+        match endpoint.connect() {
+            Ok(stream) => break stream,
+            Err(error) if transport::retryable(&error) && Instant::now() < deadline => {
+                thread::sleep(RETRY)
+            }
+            Err(_) => return Ok(()),
+        }
+    };
+    let body = serde_json::to_vec(&serde_json::json!({
+        "dataRoot": root.as_os_str().as_encoded_bytes(),
+        "notification": id,
+    }))?;
+    stream.write_all(&(body.len() as u32).to_be_bytes())?;
+    stream.write_all(&body)?;
+    let mut ack = [0];
+    stream.read_exact(&mut ack)?;
+    ensure!(ack == [ACK], "desktop rejected notification activation");
+    Ok(())
 }
 
 const MAX_REQUEST: usize = 64 * 1024;
@@ -251,6 +304,18 @@ fn receive(
     ensure!(length <= MAX_REQUEST, "desktop open request is too large");
     let mut body = vec![0; length];
     stream.read_exact(&mut body)?;
+    #[cfg(windows)]
+    if body.first() == Some(&b'{') {
+        let mut value: serde_json::Value = serde_json::from_slice(&body)?;
+        let data_root: Vec<u8> = serde_json::from_value(value["dataRoot"].take())?;
+        ensure!(root.as_os_str().as_encoded_bytes() == data_root, "notification data root differs");
+        let id = value["notification"].as_str()
+            .filter(|id| crate::system_notifications::valid_notification_event_id(id))
+            .context("invalid notification activation")?;
+        sender.try_send(OpenRequest::Notification(id.to_owned()))?;
+        stream.write_all(&[ACK])?;
+        return Ok(());
+    }
     let (data_root, paths): (Vec<u8>, Vec<String>) = serde_json::from_slice(&body)?;
     ensure!(
         root.as_os_str().as_encoded_bytes() == data_root,

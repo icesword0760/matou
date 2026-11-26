@@ -2582,27 +2582,37 @@ mod workspace {
         const HTTPS: &str = "https://ip.net.coffee/";
         const LOGIN: &str = "https://auth.openai.com/oauth/authorize?redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback";
         const KEY_PAGE: &str = "https://platform.deepseek.com/api_keys";
-        let (window, _) = open_probe_at(cx, 1260.);
+        let visual_locale = match std::env::var("MATOU_LINKS_PROBE").as_deref() {
+            Ok("visual-zh") => Some(InterfaceLocale::Chinese),
+            Ok("visual-en") => Some(InterfaceLocale::English),
+            _ => None,
+        };
+        let title = visual_locale.map(|_| "Matou browser prompt preview");
+        let (window, _) = open_probe_window(cx, 1260., title);
         let calls = Rc::new(RefCell::new(Vec::new()));
         let clips = Rc::new(RefCell::new(Vec::new()));
         let prompts = Rc::new(RefCell::new(Vec::<PromptRecord>::new()));
         let prompt_feed = prompts.clone();
-        cx.update(|cx| {
-            cx.set_prompt_builder(move |_, title, detail, buttons, handle, window, cx| {
-                let record = PromptRecord {
-                    title: title.into(),
-                    detail: detail.map(str::to_owned),
-                    buttons: buttons.to_vec(),
-                };
-                prompt_feed.borrow_mut().push(record.clone());
-                let prompt = cx.new(|cx| ProbePrompt {
-                    focus: cx.focus_handle(),
-                    record,
-                });
-                handle.with_view(prompt, window, cx)
+        if let Some(locale) = visual_locale {
+            window.update(cx, |view, _, _| view.locale = locale).unwrap();
+        } else {
+            cx.update(|cx| {
+                cx.set_prompt_builder(move |_, title, detail, buttons, handle, window, cx| {
+                    let record = PromptRecord {
+                        title: title.into(),
+                        detail: detail.map(str::to_owned),
+                        buttons: buttons.to_vec(),
+                    };
+                    prompt_feed.borrow_mut().push(record.clone());
+                    let prompt = cx.new(|cx| ProbePrompt {
+                        focus: cx.focus_handle(),
+                        record,
+                    });
+                    handle.with_view(prompt, window, cx)
+                })
             })
-        })
-        .unwrap();
+            .unwrap();
+        }
         window
             .update(cx, |view, _, _| {
                 let (calls, clips) = (calls.clone(), clips.clone());
@@ -2610,11 +2620,12 @@ mod workspace {
                     move |url, target, _| {
                         calls.borrow_mut().push((url.to_owned(), target));
                         gpui::Task::ready(match (url, target) {
-                            (LOGIN, LinkOpenTarget::Controlled) => {
+                            (LOGIN, LinkOpenTarget::System)
+                                if calls.borrow().iter().filter(|(value, _)| value == LOGIN).count() <= 2 => {
                                 Err(ControlledBrowserFailure::LaunchFailed)
                             }
-                            (KEY_PAGE, LinkOpenTarget::Controlled) => {
-                                Err(ControlledBrowserFailure::Missing)
+                            (KEY_PAGE, LinkOpenTarget::System) => {
+                                Err(ControlledBrowserFailure::LaunchFailed)
                             }
                             _ => Ok(()),
                         })
@@ -2640,7 +2651,17 @@ mod workspace {
                     });
                 })
                 .unwrap();
-            draw(window.into(), cx);
+            if visual_locale.is_some() {
+                let window: AnyWindowHandle = window.into();
+                window
+                    .update(cx, |_, window, cx| {
+                        window.refresh();
+                        window.draw(cx).clear();
+                    })
+                    .unwrap();
+            } else {
+                draw(window.into(), cx);
+            }
             let hit = window
                 .update(cx, |view, _, cx| {
                     view.terminals[A]
@@ -2664,8 +2685,28 @@ mod workspace {
         terminal_click(cx, HTTPS, 4, 0);
         assert_eq!(
             *calls.borrow(),
-            [(HTTPS.into(), LinkOpenTarget::Controlled)]
+            [(HTTPS.into(), LinkOpenTarget::System)]
         );
+        if visual_locale.is_some() {
+            wait_for_link(cx, window, false).await;
+            terminal_click(cx, LOGIN, 10, 1);
+            println!("Native browser prompt ready for visual review");
+            for _ in 0..300 {
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
+                if !window
+                    .update(cx, |view, _, _| view.link_in_progress_for_probe())
+                    .unwrap()
+                {
+                    break;
+                }
+            }
+            window
+                .update(cx, |_, window, _| window.remove_window())
+                .unwrap();
+            return;
+        }
         for locale in [InterfaceLocale::Chinese, InterfaceLocale::English] {
             window
                 .update(cx, |view, _, _| view.locale = locale)
@@ -2701,11 +2742,11 @@ mod workspace {
             dispatch_mouse(window, cx, mouse_down(position, Modifiers::default()));
             dispatch_mouse(window, cx, mouse_up(position));
         };
-        for button in [1, 0] {
+        for (index, button) in [2, 0].into_iter().enumerate() {
             // Click a wrapped row of the OAuth URL, through the actual terminal handler.
             terminal_click(cx, LOGIN, 10, 1);
             for _ in 0..100 {
-                if prompts.borrow().len() >= if button == 1 { 1 } else { 2 } {
+                if prompts.borrow().len() > index {
                     break;
                 }
                 cx.background_executor()
@@ -2713,18 +2754,19 @@ mod workspace {
                     .await;
             }
             let prompt = prompts.borrow().last().unwrap().clone();
-            assert_eq!(prompt.title, "Mantle could not open");
+            assert_eq!(prompt.title, "Browser did not open");
             assert_eq!(
                 prompt.detail.as_deref(),
-                Some("Mantle could not open this page.")
+                Some("Try again, or copy the link and open it in your browser.")
             );
-            assert_eq!(prompt.buttons[0].label().as_ref(), "Open in system browser");
-            assert!(matches!(prompt.buttons[1], PromptButton::Cancel(_)));
+            assert_eq!(prompt.buttons[0].label().as_ref(), "Try again");
+            assert_eq!(prompt.buttons[1].label().as_ref(), "Copy link");
+            assert!(matches!(prompt.buttons[2], PromptButton::Cancel(_)));
             assert!(
                 calls
                     .borrow()
                     .iter()
-                    .all(|(_, target)| *target != LinkOpenTarget::System)
+                    .all(|(_, target)| *target == LinkOpenTarget::System)
             );
             choose(cx, button);
             wait_for_link(cx, window, false).await;
@@ -2757,10 +2799,14 @@ mod workspace {
                 .await;
         }
         let fallback = prompts.borrow().last().unwrap().clone();
-        assert_eq!(fallback.title, format!("Open in your browser: {KEY_PAGE}"));
-        assert_eq!(fallback.buttons[0].label().as_ref(), "Copy link");
+        assert_eq!(fallback.title, "Browser did not open");
+        assert_eq!(
+            fallback.detail.as_deref(),
+            Some("Try again, or copy the link and open it in your browser.")
+        );
+        assert_eq!(fallback.buttons[1].label().as_ref(), "Copy link");
         assert!(clips.borrow().is_empty());
-        choose(cx, 0);
+        choose(cx, 1);
         wait_for_link(cx, window, false).await;
         assert_eq!(*clips.borrow(), [KEY_PAGE]);
         assert_eq!(calls.borrow().len(), 5);
@@ -2769,7 +2815,7 @@ mod workspace {
             .unwrap();
         cx.update(|cx| cx.reset_prompt_builder()).unwrap();
         println!(
-            "links: trusted HTTPS, bilingual rejection, wrapped OAuth confirmation/cancel/explicit system open, settings key-page copy; opener and clipboard mocked"
+            "links: trusted HTTPS, bilingual rejection, system browser retry/cancel, settings key-page copy; opener and clipboard mocked"
         );
     }
 
@@ -4477,9 +4523,15 @@ mod workspace {
         }
         let fixture_root = live_wiring::prepare();
         let board_only = std::env::var_os("MATOU_BOARD_PROBE").is_some();
+        let links_only = std::env::var_os("MATOU_LINKS_PROBE").is_some();
         let footer_probe = std::env::var("MATOU_FOOTER_PROBE").ok();
         Application::new().with_assets(NativeAssets).run(move |cx| {
             cx.spawn(async move |cx| {
+                if links_only {
+                    verify_links(cx).await;
+                    cx.update(|cx| cx.quit()).unwrap();
+                    return;
+                }
                 if board_only {
                     let (window, _sink) = open_probe_at(cx, 1260.);
                     verify_board_card_return(window, cx).await;

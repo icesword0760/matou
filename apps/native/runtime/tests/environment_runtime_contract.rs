@@ -94,6 +94,124 @@ fn plain_local_directory_is_ready_and_missing_or_file_paths_are_distinct() {
 }
 
 #[test]
+fn no_git_keeps_local_directories_ready_and_managed_worktrees_checked() -> anyhow::Result<()> {
+    const FIXTURE: &str = "MATOU_TEST_NO_GIT_ENVIRONMENT";
+    if let Some(root) = std::env::var_os(FIXTURE).map(PathBuf::from) {
+        let plain = root.join("普通 目录");
+        let repo = root.join("已有 仓库");
+        for path in [&plain, &repo] {
+            let ready = probe_environment(EnvironmentTarget::Local(path)).unwrap();
+            assert_eq!(ready.kind, EnvironmentKind::Local);
+            assert_eq!(ready.cwd, path.canonicalize()?);
+            assert_eq!(ready.git, None);
+        }
+        let head = Head::Branch("main".into());
+        assert_eq!(
+            probe_environment(EnvironmentTarget::Worktree(WorktreeExpectation {
+                repository_root: &repo,
+                path: &repo,
+                head: &head,
+            })),
+            Err(EnvironmentProblem::Unavailable(
+                UnavailableEnvironment::GitNotInstalled
+            ))
+        );
+        assert_shell_starts_without_git(&root, repo)?;
+        return Ok(());
+    }
+
+    let root = tempfile::tempdir()?;
+    fs::create_dir(root.path().join("普通 目录"))?;
+    fs::create_dir_all(root.path().join("已有 仓库/.git"))?;
+    fs::write(
+        root.path().join("已有 仓库/.git/HEAD"),
+        "ref: refs/heads/main\n",
+    )?;
+    let tools = root.path().join("no executables");
+    fs::create_dir(&tools)?;
+    let output = Command::new(std::env::current_exe()?)
+        .env(FIXTURE, root.path())
+        .env("PATH", tools)
+        .args([
+            "--exact",
+            "no_git_keeps_local_directories_ready_and_managed_worktrees_checked",
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&[output.stdout, output.stderr].concat())
+    );
+    Ok(())
+}
+
+fn assert_shell_starts_without_git(root: &Path, workspace: PathBuf) -> anyhow::Result<()> {
+    use std::time::{Duration, Instant};
+
+    use anyhow::{Context, bail, ensure};
+    use matou_native_runtime::host::{Command, Event, LaunchOptions, OfflineFixtures, RuntimeHost};
+
+    let shell = if cfg!(windows) {
+        PathBuf::from(std::env::var_os("ComSpec").context("Windows command interpreter")?)
+    } else {
+        PathBuf::from("/bin/sh")
+    };
+    let shell_home = root.join("test home");
+    fs::create_dir(&shell_home)?;
+    let options = LaunchOptions {
+        data_root: root.join("test data"),
+        workspace,
+        shell_home,
+        shell,
+    };
+    let mut runtime =
+        RuntimeHost::start_with_offline_fixtures(options, OfflineFixtures::default())?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut session_id = None;
+    let mut saw_output = false;
+    while Instant::now() < deadline {
+        match runtime.events.try_recv() {
+            Ok(Event::Ready { hierarchy, .. }) => {
+                let id = hierarchy.session.context("startup Shell card")?.id;
+                let command = if cfg!(windows) {
+                    "echo MATOU_NO_GIT_^SHELL\r"
+                } else {
+                    "printf 'MATOU_NO_GIT_%s\\n' SHELL\r"
+                };
+                runtime.commands.send(Command::Input {
+                    session_id: id.clone(),
+                    bytes: command.as_bytes().to_vec(),
+                    defer_ordering: false,
+                })?;
+                session_id = Some(id);
+            }
+            Ok(Event::Frame {
+                session_id: id,
+                screen,
+                ..
+            }) if session_id.as_ref() == Some(&id) => {
+                let output = screen
+                    .cells
+                    .iter()
+                    .map(|cell| cell.text.as_str())
+                    .collect::<String>();
+                if output.contains("MATOU_NO_GIT_SHELL") {
+                    saw_output = true;
+                    break;
+                }
+            }
+            Ok(Event::Diagnostic(message)) => bail!("{message}"),
+            Ok(Event::Closed) => bail!("Runtime closed before the Shell responded"),
+            Ok(_) => {}
+            Err(_) => std::thread::sleep(Duration::from_millis(5)),
+        }
+    }
+    runtime.shutdown()?;
+    ensure!(saw_output, "Shell did not respond with Git missing");
+    Ok(())
+}
+
+#[test]
 fn local_and_independent_targets_report_checkout_identity_and_changes() {
     let (dir, path, repo, scope) = fixture();
     let child = path.join("子 目录");

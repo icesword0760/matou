@@ -15,11 +15,10 @@ use crate::dsh_events::{js_whitespace, valid_session_id};
 
 const COMMAND_OVERRIDE: &str = "MATOU_DSH_COMMAND";
 const TUI: &str = "dsh-tui";
-const CONTROL_REQUIRED: [&str; 4] = [
+const CONTROL_REQUIRED: [&str; 3] = [
     "MATOU_CONTROL_ENDPOINT",
     "MATOU_CONTROL_TOKEN",
     "MATOU_CONTROL_CALLER_SESSION",
-    "MATOU_CONTROL_NODE_EXECUTABLE",
 ];
 pub const FALLBACK_CONTROL_TOKEN: &str = "DSH_MATOU_CONTROL_TOKEN";
 pub const DUMP_CONFIG_ARGS: [&str; 2] = [TUI, "--dump-config"];
@@ -108,6 +107,8 @@ pub fn prepare(input: DshLaunchInput<'_>) -> Result<DshLaunchPlan> {
                 &"MATOU_CONTROL_PROTOCOL",
                 &"MATOU_CONTROL_CALLER_RUN",
                 &"MATOU_CONTROL_ASSET_ROOT",
+                &"MATOU_CONTROL_NODE_EXECUTABLE",
+                &"MATOU_CONTROL_RUNTIME",
                 &"MATOU_AGENT_STATUS_DIR",
                 &"MATOU_FOREMAN_ROLES_FILE",
                 &"MATOU_PROVIDER_HOOK_URL",
@@ -200,15 +201,7 @@ fn discover_executable(
     #[cfg(unix)]
     let executable = resolve_command_with_login_path(path, cwd, environment).ok();
     #[cfg(not(unix))]
-    let executable = if path.file_name() != Some(command.as_os_str()) {
-        executable_at(cwd.join(path))
-    } else {
-        env_value(environment, "PATH")
-            .into_iter()
-            .flat_map(std::env::split_paths)
-            .filter(|dir| !dir.as_os_str().is_empty())
-            .find_map(|dir| executable_at(cwd.join(dir).join(path)))
-    };
+    let executable = crate::codex_launch::resolve_executable(path, cwd, environment);
     executable.with_context(|| {
         let command = command.to_string_lossy();
         if env_value(environment, "MATOU_LOCALE") == Some(OsStr::new("en")) {
@@ -217,18 +210,6 @@ fn discover_executable(
             format!("未检测到 DSH（命令：{command}）。请先安装并确保 `{command}` 在 PATH 中，再重试。")
         }
     })
-}
-
-#[cfg(not(unix))]
-fn executable_at(path: PathBuf) -> Option<PathBuf> {
-    #[cfg(windows)]
-    if path.extension().is_none() {
-        return executable_at(path.with_extension("exe"));
-    }
-    if !path.is_file() {
-        return None;
-    }
-    Some(path)
 }
 
 fn has_managed_control(environment: &BTreeMap<OsString, OsString>, run_id: &str) -> bool {

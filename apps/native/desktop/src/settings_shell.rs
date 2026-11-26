@@ -41,6 +41,7 @@ use matou_native_desktop::system_notifications::{self, Authorization};
 use matou_native_desktop::theme_tokens::{
     AppTheme, ThemePalette, ThemePreference, ThemeState, theme_preference_picker,
 };
+use matou_native_runtime::agent_readiness::{self, AgentReadiness, AgentStatus};
 use matou_native_runtime::protocol::{
     ClaudeModelCatalogReply, ClaudeModelPreferencesReply, ClaudeRoleAssignmentsReply,
     TimeZoneSettingsReply, TimeZoneSettingsSnapshot,
@@ -1172,13 +1173,17 @@ impl SettingsPage {
                 "设置新派任务的全局默认执行者、模型、时限与重试次数。",
                 "Set the global defaults for new dispatched tasks: executor, model, time limits and retries.",
             ),
+            Self::Notifications if cfg!(windows) => locale.text(
+                "管理码头在后台时的提醒方式。",
+                "Manage how Matou alerts you while it is in the background.",
+            ),
             Self::Notifications => locale.text(
                 "设置码头在后台时是否通过 macOS 通知中心提醒你。",
                 "Choose whether Matou notifies you through macOS while it is in the background.",
             ),
             Self::Diagnostics => locale.text(
-                "只读查看账号订阅、运行环境与受控浏览器状态，并手动运行保留清理。",
-                "Read-only account subscription, runtime environment and controlled browser status, with a manual retention cleanup.",
+                "查看本机 Agent、运行环境和账号状态。",
+                "Check local agents, the runtime environment, and account status.",
             ),
             Self::ContextOptimizer => locale.text(
                 "让 AI 少读废话、少花额度。默认已经按推荐配置好。",
@@ -1205,7 +1210,7 @@ fn visible_settings_pages() -> &'static [SettingsPage] {
         SettingsPage::Dispatch,
         SettingsPage::ContextOptimizer,
         SettingsPage::Language,
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         SettingsPage::Notifications,
         SettingsPage::Diagnostics,
     ]
@@ -1221,7 +1226,9 @@ enum SystemToggleAction {
 fn system_toggle_action(enabled: bool, authorization: Authorization) -> SystemToggleAction {
     match (enabled, authorization) {
         (true, Authorization::Denied) => SystemToggleAction::OpenSettings,
-        (true, Authorization::NotDetermined) => SystemToggleAction::RequestAuthorization,
+        (true, Authorization::NotDetermined) if !cfg!(windows) => {
+            SystemToggleAction::RequestAuthorization
+        }
         _ => SystemToggleAction::Flip(!enabled),
     }
 }
@@ -1236,10 +1243,12 @@ mod system_toggle_tests {
         use SystemToggleAction::{Flip, OpenSettings, RequestAuthorization};
 
         assert_eq!(system_toggle_action(true, Denied), OpenSettings);
-        assert_eq!(
-            system_toggle_action(true, NotDetermined),
+        let undetermined_action = if cfg!(windows) {
+            Flip(false)
+        } else {
             RequestAuthorization
-        );
+        };
+        assert_eq!(system_toggle_action(true, NotDetermined), undetermined_action);
         assert_eq!(system_toggle_action(false, Denied), Flip(true));
         assert_eq!(system_toggle_action(false, NotDetermined), Flip(true));
         assert_eq!(system_toggle_action(true, Authorized), Flip(false));
@@ -1251,7 +1260,7 @@ mod system_toggle_tests {
 mod navigation_tests {
     use super::{SettingsPage, visible_settings_pages};
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     #[test]
     fn settings_pages_place_notifications_between_language_and_diagnostics() {
         let pages = visible_settings_pages();
@@ -1270,7 +1279,7 @@ mod navigation_tests {
                 SettingsPage::Dispatch,
                 SettingsPage::ContextOptimizer,
                 SettingsPage::Language,
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", windows))]
                 SettingsPage::Notifications,
                 SettingsPage::Diagnostics,
             ]
@@ -2093,6 +2102,7 @@ pub enum SettingsShellEvent {
     SaveTheme(ThemePreference),
     SetSystemNotifications(bool),
     OpenProviderKeyPage(&'static str),
+    AgentReadinessChanged(Vec<AgentStatus>),
 }
 
 impl EventEmitter<SettingsShellEvent> for SettingsShell {}
@@ -2140,6 +2150,11 @@ pub struct SettingsShell {
     system_notification_toggle_focus: FocusHandle,
     system_notification_settings_focus: FocusHandle,
     diagnostics_cleanup_focus: FocusHandle,
+    agent_diagnostics_focus: FocusHandle,
+    agent_diagnostics: Option<Vec<AgentStatus>>,
+    agent_diagnostics_running: bool,
+    browser_preference_focus: FocusHandle,
+    browser_preference_failed: bool,
     diagnostics_cwd: Option<std::path::PathBuf>,
     diagnostics_generation: Option<u64>,
     runtime_diagnostics: HashMap<&'static str, RuntimeDiagnostic>,
@@ -2202,6 +2217,11 @@ impl SettingsShell {
             system_notification_toggle_focus: cx.focus_handle().tab_stop(true),
             system_notification_settings_focus: cx.focus_handle().tab_stop(true),
             diagnostics_cleanup_focus: cx.focus_handle().tab_stop(true),
+            agent_diagnostics_focus: cx.focus_handle().tab_stop(true),
+            agent_diagnostics: None,
+            agent_diagnostics_running: false,
+            browser_preference_focus: cx.focus_handle().tab_stop(true),
+            browser_preference_failed: false,
             diagnostics_cwd: None,
             diagnostics_generation: None,
             runtime_diagnostics: HashMap::new(),
@@ -4769,7 +4789,7 @@ impl SettingsShell {
         cx.notify();
     }
 
-    fn select_page(&mut self, page: SettingsPage, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn select_page(&mut self, page: SettingsPage, window: &mut Window, cx: &mut Context<Self>) {
         if self.providers.switching().is_some() || self.editor.is_some() {
             return;
         }
@@ -4819,6 +4839,9 @@ impl SettingsShell {
                 // Entering the page asks the host for fresh read-only
                 // account, environment and browser projections.
                 self.refresh_runtime_diagnostics(cx);
+                if self.agent_diagnostics.is_none() {
+                    self.refresh_agent_diagnostics(cx);
+                }
             }
             SettingsPage::ContextOptimizer => {
                 self.load_context_optimizer(cx);
@@ -5614,7 +5637,8 @@ impl SettingsShell {
             && !matches!(self.commands.connection().1, ConnectionPhase::ReadOnly { .. });
         let checked = available
             && self.system_notifications_enabled
-            && authorization == Authorization::Authorized;
+            && (authorization == Authorization::Authorized
+                || cfg!(windows) && authorization == Authorization::NotDetermined);
         // Match the 44 × 26 switches in Context Optimizer.
         let track_color = if checked {
             palette.accent
@@ -5684,20 +5708,34 @@ impl SettingsShell {
                     .text_size(px(12.))
                     .line_height(px(17.))
                     .text_color(rgba(palette.muted))
-                    .child(self.locale.text(
-                        "码头不在前台时，在 macOS 通知中心显示所有 AI 会话的提醒。点击通知会回到对应卡片。",
-                        "Show alerts from all AI sessions in macOS Notification Center while Matou is in the background. Click a notification to return to its card.",
-                    )),
+                    .child(if cfg!(windows) {
+                        self.locale.text(
+                            "码头在后台或最小化时接收 AI 会话提醒。点击通知可回到对应卡片。",
+                            "Receive AI session alerts while Matou is in the background or minimized. Select an alert to return to its card.",
+                        )
+                    } else {
+                        self.locale.text(
+                            "码头不在前台时，在 macOS 通知中心显示所有 AI 会话的提醒。点击通知会回到对应卡片。",
+                            "Show alerts from all AI sessions in macOS Notification Center while Matou is in the background. Click a notification to return to its card.",
+                        )
+                    }),
             );
         if !available {
             detail = detail.child(
                 div()
                     .text_size(px(12.))
                     .text_color(rgba(palette.muted))
-                    .child(self.locale.text(
-                        "仅在打包后的码头中可用",
-                        "Only available in the packaged Matou app",
-                    )),
+                    .child(if cfg!(windows) {
+                        self.locale.text(
+                            "安装版码头支持系统通知。",
+                            "Install Matou to enable system notifications.",
+                        )
+                    } else {
+                        self.locale.text(
+                            "仅在打包后的码头中可用",
+                            "Only available in the packaged Matou app",
+                        )
+                    }),
             );
         } else if self.system_notifications_enabled && authorization == Authorization::Denied {
             let link = div()
@@ -5706,10 +5744,17 @@ impl SettingsShell {
                 .text_color(rgba(palette.accent))
                 .cursor_pointer()
                 .hover(|style| style.underline())
-                .child(self.locale.text(
-                    "macOS 已关闭通知，去系统设置开启",
-                    "Notifications are disabled in macOS. Open System Settings to enable them.",
-                ));
+                .child(if cfg!(windows) {
+                    self.locale.text(
+                        "Windows 已关闭通知。应用内未读提醒仍可用，点击前往系统设置。",
+                        "Windows notifications are off. Unread alerts remain in Matou. Open system settings.",
+                    )
+                } else {
+                    self.locale.text(
+                        "macOS 已关闭通知，去系统设置开启",
+                        "Notifications are disabled in macOS. Open System Settings to enable them.",
+                    )
+                });
             detail = detail.child(wire_button(
                 link,
                 &self.system_notification_settings_focus,
@@ -5718,6 +5763,17 @@ impl SettingsShell {
                 |_, _, _| system_notifications::open_notification_settings(),
                 cx,
             ));
+        } else if cfg!(windows) && self.system_notifications_enabled {
+            detail = detail.child(
+                div()
+                    .text_size(px(12.))
+                    .line_height(px(17.))
+                    .text_color(rgba(palette.muted))
+                    .child(self.locale.text(
+                        "Windows 开启勿扰时，仍可在码头查看未读提醒。",
+                        "When Windows Do not disturb is on, unread alerts remain available in Matou.",
+                    )),
+            );
         }
         div()
             .w_full()
@@ -5733,27 +5789,139 @@ impl SettingsShell {
             .child(switch)
     }
 
-    /// Read-only diagnostics page. Each block owns a title and one agreed
-    /// status string; the host supplies the strings after its Runtime reads
-    /// complete, so this view never invents or caches diagnostic data.
     fn diagnostics_content(&mut self, cx: &mut Context<Self>) -> Div {
-        let mut content = div().flex().flex_col().w_full();
+        let mut content = div().flex().flex_col().w_full().child(self.agent_diagnostics_section(cx));
         content = content.child(self.diagnostic_section(
             self.locale.text("账号摘要", "Account summary"),
             "accountSummaryResult",
-            true,
+            false,
         ));
         content = content.child(self.diagnostic_section(
             self.locale.text("运行环境", "Runtime environment"),
             "environmentDiagnosticsResult",
             false,
         ));
-        content = content.child(self.diagnostic_section(
-            self.locale.text("受控浏览器", "Controlled browser"),
-            "browserDiagnosticsResult",
-            false,
-        ));
+        if cfg!(target_os = "macos") {
+            let browser = self.diagnostic_section(
+                self.locale.text("隔离浏览器（可选）", "Isolated browser (optional)"),
+                "browserDiagnosticsResult",
+                false,
+            );
+            content = content.child(browser.child(self.browser_preference_switch(cx)));
+        }
         content.child(self.retention_cleanup_section(cx))
+    }
+
+    pub(crate) fn configure_agent_readiness(&mut self, readings: Option<Vec<AgentStatus>>) {
+        self.agent_diagnostics = readings;
+    }
+
+    fn refresh_agent_diagnostics(&mut self, cx: &mut Context<Self>) {
+        if self.agent_diagnostics_running {
+            return;
+        }
+        self.agent_diagnostics_running = true;
+        let cwd = self.diagnostics_cwd.clone();
+        let probe = cx.background_executor().spawn(async move {
+            let cwd = cwd.filter(|path| path.is_dir()).or_else(std::env::home_dir)
+                .or_else(|| std::env::current_dir().ok()).unwrap_or_default();
+            agent_readiness::probe(&cwd, std::env::vars_os().collect())
+        });
+        cx.spawn(async move |this, cx| {
+            let readings = probe.await;
+            let _ = this.update(cx, |this, cx| {
+                this.agent_diagnostics_running = false;
+                cx.emit(SettingsShellEvent::AgentReadinessChanged(readings.clone()));
+                this.agent_diagnostics = Some(readings);
+                cx.notify();
+            });
+        }).detach();
+        cx.notify();
+    }
+
+    fn agent_diagnostics_section(&self, cx: &mut Context<Self>) -> Div {
+        let locale = self.locale;
+        let palette = self.theme.effective().palette();
+        let refresh = div().id("settings-agent-status-refresh")
+            .px(px(6.)).h(px(22.)).flex().items_center().rounded(px(5.))
+            .text_size(px(12.)).child(if self.agent_diagnostics_running {
+                locale.text("检查中…", "Checking…")
+            } else {
+                locale.text("刷新", "Refresh")
+            });
+        let refresh = if self.agent_diagnostics_running {
+            refresh.text_color(rgba(palette.workspace.muted))
+        } else {
+            wire_button(
+                refresh.text_color(rgba(palette.workspace.accent)).cursor_pointer()
+                    .hover(|style| style.bg(rgba(palette.workspace.panel_muted))),
+                &self.agent_diagnostics_focus, 5., self.keyboard_focus,
+                |this, _, cx| this.refresh_agent_diagnostics(cx), cx,
+            )
+        };
+        let mut panel = div().mt(px(9.)).min_h(px(130.)).px(px(12.))
+            .rounded(px(9.)).border_1().border_color(rgba(palette.workspace.line))
+            .bg(rgba(palette.settings.providers));
+        if let Some(agents) = &self.agent_diagnostics {
+            panel = panel.children(agents.iter().enumerate().map(|(index, agent)| {
+                use AgentReadiness::*;
+                let (label, color) = match agent.readiness {
+                    Ready => (locale.text("已就绪", "Ready"), palette.workspace.accent),
+                    CliNotFound => (locale.text("未找到 CLI", "CLI not found"), palette.workspace.muted),
+                    PathUnavailable => (locale.text("PATH 不可用", "Missing from PATH"), palette.workspace.text),
+                    NotLoggedIn => (locale.text("尚未登录", "Sign-in needed"), palette.workspace.text),
+                    StartFailed => (locale.text("启动失败", "Could not start"), palette.workspace.text),
+                    Installed => (locale.text("登录待确认", "Sign-in unverified"), palette.workspace.muted),
+                };
+                div().min_h(px(32.)).flex().items_center().justify_between().gap(px(12.))
+                    .when(index > 0, |row| row.border_t_1().border_color(rgba(palette.workspace.line)))
+                    .text_size(px(12.))
+                    .child(div().text_color(rgba(palette.workspace.text)).child(agent.name()))
+                    .child(div().text_right().text_color(rgba(color)).child(label))
+            }));
+        } else {
+            panel = panel.child(div().py(px(10.)).text_size(px(12.))
+                .text_color(rgba(palette.workspace.muted))
+                .child(locale.text("正在检测本机 Agent…", "Checking local agents…")));
+        }
+        self.diagnostic_section_frame(locale.text("本机 Agent", "Local agents"), true)
+            .relative().child(div().absolute().right_0().top(px(-2.)).child(refresh))
+            .child(panel)
+    }
+
+    fn browser_preference_switch(&self, cx: &mut Context<Self>) -> Div {
+        use matou_native_runtime::browser_integration;
+        let Some(root) = self.context_optimizer_config.as_ref()
+            .and_then(|config| config.path().parent())
+        else { return div() };
+        let root = root.to_owned();
+        let enabled = browser_integration::prefers_controlled_browser(&root);
+        let installed = std::path::Path::new(browser_integration::DEFAULT_BROWSER_EXECUTABLE).is_file();
+        let palette = self.theme.effective().palette().workspace;
+        let label = self.locale.text("使用 Mantle 打开网页和订阅登录", "Use Mantle for links and subscription sign-in");
+        let track = div().id("settings-controlled-browser")
+            .w(px(44.)).h(px(26.)).flex_none().rounded_full().p(px(3.))
+            .flex().items_center()
+            .bg(rgba(if enabled { palette.accent } else if self.is_dark() { 0x3a4048ff } else { 0xcfd4dcff }))
+            .child(div().size(px(20.)).rounded_full().ml(px(if enabled { 18. } else { 0. })).bg(rgb(0xffffff)));
+        let switch = if enabled || installed {
+            wire_button(track.cursor_pointer(), &self.browser_preference_focus, 13., true,
+                move |this, _, cx| {
+                    this.browser_preference_failed =
+                        browser_integration::set_controlled_browser_preference(&root, !enabled).is_err();
+                    cx.notify();
+                }, cx)
+        } else {
+            track.opacity(0.55)
+        };
+        let mut description = div().min_w_0().text_size(px(12.)).line_height(px(18.))
+            .text_color(rgba(palette.text)).child(label);
+        if self.browser_preference_failed {
+            description = description.child(div().text_color(rgba(palette.muted))
+                .child(self.locale.text("未能保存，请重试。", "Could not save. Try again.")));
+        }
+        div().mt(px(12.)).w_full().flex().items_start().justify_between().gap(px(18.))
+            .child(description).child(switch)
     }
 
     fn diagnostic_section(&self, title: &str, key: &str, first: bool) -> Div {
@@ -6057,6 +6225,9 @@ impl SettingsShell {
                         lines.push(format!("Git · {branch}"));
                     }
                 }
+                if result["gitAvailable"] == false {
+                    lines.push(locale.text("Git 未安装", "Git is not installed").to_owned());
+                }
                 lines.extend(result["reason"].as_str().map(str::to_owned));
                 lines.join(
                     "
@@ -6118,6 +6289,14 @@ impl SettingsShell {
         cx: &mut Context<Self>,
     ) {
         self.select_page(SettingsPage::Diagnostics, window, cx);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn agent_refresh_focus_for_test(&self, window: &Window) -> (bool, bool) {
+        (
+            self.agent_diagnostics_focus.is_focused(window),
+            self.agent_diagnostics_running,
+        )
     }
 
     #[cfg(debug_assertions)]

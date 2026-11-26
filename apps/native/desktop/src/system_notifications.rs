@@ -19,6 +19,18 @@ pub fn notification_identifier(session_id: Option<&str>, event_id: &str) -> Stri
     session_id.map_or_else(|| format!("event:{event_id}"), str::to_owned)
 }
 
+#[cfg(any(target_os = "windows", test))]
+pub const NOTIFICATION_URI_PREFIX: &str = "matou-notification://open/";
+#[cfg(any(target_os = "windows", test))]
+pub const MAX_NOTIFICATION_EVENT_ID_BYTES: usize = 512;
+
+#[cfg(any(target_os = "windows", test))]
+pub fn valid_notification_event_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_NOTIFICATION_EVENT_ID_BYTES
+        && !id.chars().any(char::is_control)
+}
+
 pub use platform::*;
 
 #[cfg(target_os = "macos")]
@@ -341,7 +353,370 @@ mod platform {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(any(target_os = "windows", test))]
+mod windows_toast {
+    use super::{NOTIFICATION_URI_PREFIX, SystemRequest, valid_notification_event_id};
+
+    pub fn activation_uri(event_id: &str) -> Option<String> {
+        if !valid_notification_event_id(event_id) {
+            return None;
+        }
+        let bytes = event_id.as_bytes();
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut uri = String::with_capacity(NOTIFICATION_URI_PREFIX.len() + bytes.len() * 2);
+        uri.push_str(NOTIFICATION_URI_PREFIX);
+        for byte in bytes {
+            uri.push(char::from(HEX[usize::from(byte >> 4)]));
+            uri.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+        Some(uri)
+    }
+
+    pub fn tag(identifier: &str) -> String {
+        // FNV-1a gives the same 16-character tag across process restarts.
+        let hash = identifier
+            .bytes()
+            .fold(0xcbf29ce484222325_u64, |hash, byte| {
+                (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+            });
+        format!("{hash:016x}")
+    }
+
+    pub fn xml(request: &SystemRequest) -> Option<String> {
+        let uri = activation_uri(&request.event_id)?;
+        let mut xml = format!(
+            r#"<toast activationType="protocol" launch="{uri}"><visual><binding template="ToastGeneric">"#
+        );
+        append_text(&mut xml, &request.title);
+        if !request.subtitle.is_empty() {
+            append_text(&mut xml, &request.subtitle);
+        }
+        append_text(&mut xml, &request.body);
+        xml.push_str("</binding></visual>");
+        if !request.play_sound {
+            xml.push_str(r#"<audio silent="true"/>"#);
+        }
+        xml.push_str("</toast>");
+        Some(xml)
+    }
+
+    fn append_text(xml: &mut String, text: &str) {
+        xml.push_str("<text>");
+        for character in text.chars() {
+            match character {
+                '&' => xml.push_str("&amp;"),
+                '<' => xml.push_str("&lt;"),
+                '>' => xml.push_str("&gt;"),
+                '"' => xml.push_str("&quot;"),
+                '\'' => xml.push_str("&apos;"),
+                '\t'
+                | '\n'
+                | '\r'
+                | '\u{20}'..='\u{d7ff}'
+                | '\u{e000}'..='\u{fffd}'
+                | '\u{10000}'..='\u{10ffff}' => xml.push(character),
+                _ => {}
+            }
+        }
+        xml.push_str("</text>");
+    }
+
+    pub fn registered_executable(command: &str) -> Option<&str> {
+        // The per-user installer registers exactly "<absolute exe path>" "%1".
+        let path = command.strip_prefix('"')?.strip_suffix(r#"" "%1""#)?;
+        (!path.contains(['"', '\0'])
+            && std::path::Path::new(path)
+                .extension()?
+                .eq_ignore_ascii_case("exe"))
+        .then_some(path)
+    }
+}
+
+#[cfg(target_os = "windows")]
+mod platform {
+    use std::{
+        env, fs, process,
+        sync::{
+            OnceLock,
+            atomic::{AtomicU8, Ordering},
+            mpsc::{self, Receiver, SyncSender},
+        },
+        thread,
+    };
+
+    use windows::{
+        Data::Xml::Dom::XmlDocument,
+        UI::Notifications::{NotificationSetting, ToastNotification, ToastNotificationManager},
+        Win32::{
+            Foundation::{ERROR_NOT_FOUND, ERROR_SUCCESS},
+            System::{
+                Registry::{HKEY_CURRENT_USER, RRF_RT_REG_SZ, RegGetValueW},
+                WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize},
+            },
+            UI::{
+                Shell::{SetCurrentProcessExplicitAppUserModelID, ShellExecuteW},
+                WindowsAndMessaging::{
+                    GetForegroundWindow, GetWindowThreadProcessId, SW_SHOWNORMAL,
+                },
+            },
+        },
+        core::{HRESULT, HSTRING, PCWSTR, Result, w},
+    };
+
+    use super::{Authorization, SystemRequest, windows_toast};
+
+    const APP_USER_MODEL_ID: &str = "com.matou.desktop";
+    const PROTOCOL_COMMAND_KEY: PCWSTR =
+        w!(r"Software\Classes\matou-notification\shell\open\command");
+    static WORKER: OnceLock<Option<SyncSender<Work>>> = OnceLock::new();
+    static AUTHORIZATION: AtomicU8 = AtomicU8::new(0);
+
+    enum Work {
+        RefreshAuthorization,
+        Post(SystemRequest, async_channel::Sender<bool>),
+    }
+
+    pub fn install() {
+        WORKER.get_or_init(start_worker);
+    }
+
+    fn start_worker() -> Option<SyncSender<Work>> {
+        let command = read_protocol_command()?;
+        let installed = std::path::Path::new(windows_toast::registered_executable(&command)?);
+        if !installed.is_absolute()
+            || fs::canonicalize(installed).ok()?
+                != fs::canonicalize(env::current_exe().ok()?).ok()?
+        {
+            return None;
+        }
+        let app_id = HSTRING::from(APP_USER_MODEL_ID);
+        if let Err(error) =
+            unsafe { SetCurrentProcessExplicitAppUserModelID(PCWSTR(app_id.as_ptr())) }
+        {
+            eprintln!("Set Windows notification identity: {error}");
+            return None;
+        }
+        // Keep WinRT and its system calls off GPUI's UI thread. Serial sends
+        // preserve event order when several notifications replace the same tag.
+        let (sender, receiver) = mpsc::sync_channel(32);
+        if let Err(error) = thread::Builder::new()
+            .name("windows-notifications".into())
+            .spawn(move || run_worker(receiver))
+        {
+            eprintln!("Start Windows notification worker: {error}");
+            return None;
+        }
+        Some(sender)
+    }
+
+    fn read_protocol_command() -> Option<String> {
+        // Windows command lines are limited to 32,767 UTF-16 code units.
+        let mut buffer = vec![0u16; 32_767];
+        let mut bytes = (buffer.len() * size_of::<u16>()) as u32;
+        let status = unsafe {
+            RegGetValueW(
+                HKEY_CURRENT_USER,
+                PROTOCOL_COMMAND_KEY,
+                PCWSTR::null(),
+                RRF_RT_REG_SZ,
+                None,
+                Some(buffer.as_mut_ptr().cast()),
+                Some(&mut bytes),
+            )
+        };
+        if status != ERROR_SUCCESS {
+            return None;
+        }
+        let units = bytes as usize / size_of::<u16>();
+        let command = buffer.get(..units)?.strip_suffix(&[0])?;
+        String::from_utf16(command).ok()
+    }
+
+    fn run_worker(receiver: Receiver<Work>) {
+        if let Err(error) = unsafe { RoInitialize(RO_INIT_MULTITHREADED) } {
+            eprintln!("Initialize Windows notifications: {error}");
+            return;
+        }
+        refresh_setting();
+        while let Ok(work) = receiver.recv() {
+            match work {
+                Work::RefreshAuthorization => refresh_setting(),
+                Work::Post(request, sender) => {
+                    let shown = match show(request) {
+                        Ok(shown) => shown,
+                        Err(error) => {
+                            eprintln!("Post Windows notification: {error}");
+                            false
+                        }
+                    };
+                    let _ = sender.try_send(shown);
+                }
+            }
+        }
+        unsafe { RoUninitialize() };
+    }
+
+    fn notifier() -> Result<windows::UI::Notifications::ToastNotifier> {
+        ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(APP_USER_MODEL_ID))
+    }
+
+    fn authorization_for_setting(setting: Result<NotificationSetting>) -> Result<Authorization> {
+        match setting {
+            Ok(NotificationSetting::Enabled) => Ok(Authorization::Authorized),
+            Ok(_) => Ok(Authorization::Denied),
+            // On a fresh installation Windows may create the sender's settings
+            // on its first actual notification. Let Show enforce system policy.
+            Err(error) if error.code() == HRESULT::from_win32(ERROR_NOT_FOUND.0) => {
+                Ok(Authorization::NotDetermined)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn read_setting(notifier: &windows::UI::Notifications::ToastNotifier) -> Result<Authorization> {
+        let setting = authorization_for_setting(notifier.Setting());
+        let value = match &setting {
+            Ok(Authorization::Authorized) => 1,
+            Ok(Authorization::Denied) => 2,
+            _ => 0,
+        };
+        AUTHORIZATION.store(value, Ordering::Relaxed);
+        setting
+    }
+
+    fn refresh_setting() {
+        if let Err(error) = notifier().and_then(|notifier| read_setting(&notifier)) {
+            AUTHORIZATION.store(0, Ordering::Relaxed);
+            eprintln!("Read Windows notification setting: {error}");
+        }
+    }
+
+    fn show(request: SystemRequest) -> Result<bool> {
+        let notifier = notifier()?;
+        let setting = read_setting(&notifier)?;
+        if setting == Authorization::Denied {
+            return Ok(false);
+        }
+        let Some(xml) = windows_toast::xml(&request) else {
+            return Ok(false);
+        };
+        let document = XmlDocument::new()?;
+        document.LoadXml(&HSTRING::from(xml))?;
+        let toast = ToastNotification::CreateToastNotification(&document)?;
+        toast.SetTag(&HSTRING::from(windows_toast::tag(&request.identifier)))?;
+        // Use the app's default notification group so a session replaces its
+        // previous toast even when the session moves to another scene.
+        notifier.Show(&toast)?;
+        if setting == Authorization::NotDetermined
+            && let Err(error) = read_setting(&notifier)
+        {
+            eprintln!("Read Windows notification setting after delivery: {error}");
+        }
+        Ok(true)
+    }
+
+    fn worker() -> Option<&'static SyncSender<Work>> {
+        WORKER.get()?.as_ref()
+    }
+
+    pub fn is_available() -> bool {
+        worker().is_some()
+    }
+
+    pub fn authorization() -> Authorization {
+        match AUTHORIZATION.load(Ordering::Relaxed) {
+            1 => Authorization::Authorized,
+            2 => Authorization::Denied,
+            _ => Authorization::NotDetermined,
+        }
+    }
+
+    pub fn request_authorization_once() {
+        refresh_authorization();
+    }
+
+    pub fn refresh_authorization() {
+        if let Some(worker) = worker() {
+            let _ = worker.try_send(Work::RefreshAuthorization);
+        }
+    }
+
+    pub fn app_is_active() -> bool {
+        let mut foreground_pid = 0;
+        unsafe {
+            let window = GetForegroundWindow();
+            if !window.0.is_null() {
+                GetWindowThreadProcessId(window, Some(&mut foreground_pid));
+            }
+        }
+        foreground_pid == process::id()
+    }
+
+    pub fn post(request: SystemRequest) -> Option<async_channel::Receiver<bool>> {
+        let worker = worker()?;
+        if app_is_active() {
+            return None;
+        }
+        let (send, result) = async_channel::bounded(1);
+        worker.try_send(Work::Post(request, send)).ok()?;
+        Some(result)
+    }
+
+    pub fn take_pending_activations() -> Vec<String> {
+        // The protocol launcher hands activation to the desktop's single instance.
+        Vec::new()
+    }
+
+    pub fn open_notification_settings() {
+        let result = unsafe {
+            ShellExecuteW(
+                None,
+                w!("open"),
+                w!("ms-settings:notifications"),
+                PCWSTR::null(),
+                PCWSTR::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        if result.0 as isize <= 32 {
+            eprintln!(
+                "Open Windows notification settings: error {}",
+                result.0 as isize
+            );
+        }
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn windows_notification_sender_creation_and_disabled_setting_are_distinct() {
+        use windows::core::Error;
+
+        assert_eq!(
+            authorization_for_setting(Err(Error::from_hresult(HRESULT::from_win32(
+                ERROR_NOT_FOUND.0,
+            ))))
+            .unwrap(),
+            Authorization::NotDetermined,
+        );
+        assert_eq!(
+            authorization_for_setting(Ok(NotificationSetting::Enabled)).unwrap(),
+            Authorization::Authorized,
+        );
+        assert_eq!(
+            authorization_for_setting(Ok(NotificationSetting::DisabledForApplication)).unwrap(),
+            Authorization::Denied,
+        );
+        let access_denied = HRESULT::from_win32(5);
+        assert_eq!(
+            authorization_for_setting(Err(Error::from_hresult(access_denied)))
+                .unwrap_err()
+                .code(),
+            access_denied,
+        );
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 mod platform {
     use super::{Authorization, SystemRequest};
 
@@ -374,5 +749,86 @@ mod tests {
     fn notification_identifier_prefers_session() {
         assert_eq!(notification_identifier(Some("s1"), "e1"), "s1");
         assert_eq!(notification_identifier(None, "e1"), "event:e1");
+    }
+
+    #[test]
+    fn windows_toast_uri_encodes_utf8_and_limits_payload_size() {
+        assert_eq!(
+            windows_toast::activation_uri("会话 /\"").as_deref(),
+            Some("matou-notification://open/e4bc9ae8af9d202f22")
+        );
+        assert_eq!(windows_toast::activation_uri(""), None);
+        assert_eq!(windows_toast::activation_uri("invalid\u{0}control"), None);
+        let limit = MAX_NOTIFICATION_EVENT_ID_BYTES;
+        assert_eq!(
+            windows_toast::activation_uri(&"x".repeat(limit))
+                .unwrap()
+                .len(),
+            NOTIFICATION_URI_PREFIX.len() + limit * 2,
+        );
+        assert_eq!(windows_toast::activation_uri(&"x".repeat(limit + 1)), None);
+    }
+
+    #[test]
+    fn windows_toast_plain_text_is_escaped_and_only_uses_legal_xml_characters() {
+        let mut request = SystemRequest {
+            identifier: "会话".into(),
+            title: "<action>&\"'".into(),
+            subtitle: "新消息".into(),
+            body: "普通\u{0}内容\u{1b}\u{fffe} 😀]]>\n".into(),
+            thread_id: None,
+            event_id: "e1".into(),
+            play_sound: false,
+        };
+        let xml = windows_toast::xml(&request).unwrap();
+        assert_eq!(
+            xml,
+            concat!(
+                r#"<toast activationType="protocol" launch="matou-notification://open/6531">"#,
+                r#"<visual><binding template="ToastGeneric">"#,
+                "<text>&lt;action&gt;&amp;&quot;&apos;</text><text>新消息</text>",
+                "<text>普通内容 😀]]&gt;\n</text></binding></visual>",
+                r#"<audio silent="true"/></toast>"#,
+            ),
+        );
+        request.play_sound = true;
+        request.subtitle.clear();
+        let xml = windows_toast::xml(&request).unwrap();
+        assert!(!xml.contains("<audio"));
+        assert_eq!(xml.matches("<text>").count(), 2);
+    }
+
+    #[test]
+    fn windows_toast_tag_replaces_by_session_and_fits_winrt() {
+        let first = windows_toast::tag(&notification_identifier(Some("s1"), "e1"));
+        let second = windows_toast::tag(&notification_identifier(Some("s1"), "e2"));
+        assert_eq!(first, second);
+        assert_eq!(first, "08d8ff07b578d149");
+        assert_eq!(first.len(), 16);
+        assert_ne!(
+            first,
+            windows_toast::tag(&notification_identifier(Some("s2"), "e1"))
+        );
+        assert_ne!(
+            windows_toast::tag(&notification_identifier(None, "e1")),
+            windows_toast::tag(&notification_identifier(None, "e2")),
+        );
+    }
+
+    #[test]
+    fn windows_installer_protocol_preserves_spaces_and_chinese_in_executable_path() {
+        let path = r"C:\Users\测试 帐号\AppData\Local\Programs\Matou\码头.exe";
+        assert_eq!(
+            windows_toast::registered_executable(&format!(r#""{path}" "%1""#)),
+            Some(path),
+        );
+        assert_eq!(
+            windows_toast::registered_executable(&format!("{path} %1")),
+            None
+        );
+        assert_eq!(
+            windows_toast::registered_executable(&format!(r#""{path}" "%1" --flag"#)),
+            None,
+        );
     }
 }

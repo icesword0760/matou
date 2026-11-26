@@ -1,4 +1,5 @@
 pub mod agent_hud_projection;
+pub mod agent_readiness;
 mod agent_hud_sources;
 pub mod antigravity_catalog;
 pub mod antigravity_events;
@@ -23,6 +24,7 @@ pub mod dsh_resume;
 pub mod egress_probe;
 pub mod environment_runtime;
 pub mod flow;
+mod foreman;
 pub mod fork_worktree;
 pub mod history;
 pub mod history_worker;
@@ -33,6 +35,7 @@ mod model;
 #[doc(hidden)]
 pub mod model_router;
 pub mod mt_cli;
+mod native_hooks;
 pub mod owner;
 pub mod protocol;
 mod provider_catalog;

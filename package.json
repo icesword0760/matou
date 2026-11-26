@@ -44,6 +44,7 @@
     "package:win": "node tooling/release-native-win.mjs",
     "build:native": "cargo build --manifest-path apps/native/Cargo.toml --release",
     "test:native": "cargo test --manifest-path apps/native/Cargo.toml --offline --locked",
+    "check:native-clean-install": "cargo test --manifest-path apps/native/Cargo.toml -p matou-native-runtime --offline --locked --test native_hooks_contract --test foreman_read_contract --test foreman_process_contract --test foreman_mail_contract --test environment_runtime_contract --test mt_context_contract",
     "package:mac:legacy": "export MATOU_UPDATE_BASE_URL=\"${MATOU_UPDATE_BASE_URL:-https://updates.baize-ailabs.com/stable}\" && pnpm build && node tooling/prepare-package-resources.mjs && electron-builder --projectDir apps/desktop --mac dmg zip --${MATOU_MAC_ARCH:-arm64} --publish never --config.forceCodeSigning=true --config.mac.entitlements=\"$PWD/apps/desktop/build/entitlements.mac.plist\" --config.mac.entitlementsInherit=\"$PWD/apps/desktop/build/entitlements.mac.plist\"",
     "accounts:setup": "uv sync --project tooling/claude-accounts --frozen",
     "accounts:build": "node tooling/claude-accounts/build.mjs",

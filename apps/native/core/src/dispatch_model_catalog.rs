@@ -6,7 +6,7 @@ use std::{
     ffi::{OsStr, OsString},
     fs,
     io::{self, Read},
-    path::{Path, PathBuf},
+    path::Path,
     process::{Command, Stdio},
     sync::{Mutex, mpsc},
     thread,
@@ -318,26 +318,6 @@ fn add_login_path(environment: &mut BTreeMap<OsString, OsString>) {
             set_var(environment, "PATH".into(), path);
         }
     }
-}
-
-/// Resolve an executable for the managed control bridge using the session PATH.
-pub fn resolve_control_node(
-    cwd: &Path,
-    environment: &BTreeMap<OsString, OsString>,
-) -> Option<PathBuf> {
-    let cwd = std::path::absolute(cwd).ok()?;
-    let node = Path::new("node");
-    if let Ok(path) = search_command(node, &cwd, environment) {
-        return Some(path);
-    }
-    #[cfg(unix)]
-    {
-        let mut environment = environment.clone();
-        add_login_path(&mut environment);
-        search_command(node, &cwd, &environment).ok()
-    }
-    #[cfg(not(unix))]
-    None
 }
 
 fn run_cli(

@@ -30,6 +30,7 @@ use matou_native_runtime::update_download::{
 };
 use matou_native_runtime::update_http::{HttpUpdateFetcher, UpdateSettings};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha512};
 use tokio::runtime::Builder;
 use tokio::sync::{Notify, oneshot};
 
@@ -66,6 +67,7 @@ enum Reply {
     Redirect(&'static str),
     Found(String),
     Artifact { tampered: bool, stall: bool },
+    Bytes(Vec<u8>),
     NoHeaders,
     Gated(Arc<Notify>, String),
 }
@@ -98,6 +100,7 @@ impl Reply {
                 }
                 (chunks, stall)
             }
+            Self::Bytes(bytes) => (VecDeque::from([Bytes::from(bytes)]), false),
             Self::NoHeaders => pending().await,
             Self::Gated(gate, text) => {
                 gate.notified().await;
@@ -226,18 +229,46 @@ fn yaml(version: &str, artifact: &str, checksum: &str) -> String {
 }
 
 fn manager(base: &str, channel: &str, platform: Platform, current: &str) -> UpdateManager {
+    let arch = if matches!(platform, Platform::Win32) {
+        Architecture::X64
+    } else {
+        Architecture::Arm64
+    };
+    manager_on(base, channel, platform, arch, current)
+}
+
+fn manager_on(
+    base: &str,
+    channel: &str,
+    platform: Platform,
+    arch: Architecture,
+    current: &str,
+) -> UpdateManager {
     UpdateManager::new(
         CurrentVersion::parse(current).unwrap(),
         UpdateOptions {
             feed: FeedConfiguration::resolve(Some(base), None, Some(channel)),
             platform,
-            arch: Architecture::Arm64,
+            arch,
             enabled: true,
             install_mode: InstallMode::Manual,
             locale: UpdateLocale::English,
         },
     )
     .unwrap()
+}
+
+fn windows_installer_bytes(machine: u16) -> Vec<u8> {
+    // An inert PE header, with no executable code or version resources.
+    let mut bytes = vec![0; ARTIFACT_SIZE];
+    bytes[..2].copy_from_slice(b"MZ");
+    bytes[60..64].copy_from_slice(&64u32.to_le_bytes());
+    bytes[64..68].copy_from_slice(b"PE\0\0");
+    bytes[68..70].copy_from_slice(&machine.to_le_bytes());
+    bytes[84..86].copy_from_slice(&0xf0u16.to_le_bytes());
+    bytes[86..88].copy_from_slice(&2u16.to_le_bytes());
+    bytes[88..90].copy_from_slice(&0x20bu16.to_le_bytes());
+    bytes
 }
 
 #[test]
@@ -537,12 +568,14 @@ fn live_github_release_manifest() -> Result<()> {
 
 #[test]
 fn windows_falls_back_to_json_on_404_and_keeps_the_exe_extension() -> Result<()> {
-    let cdn = Server::start(|path| match path {
+    let installer = windows_installer_bytes(0x8664);
+    let checksum = STANDARD.encode(Sha512::digest(&installer));
+    let cdn = Server::start(move |path| match path {
         "/signed/json" => Reply::Text(
             StatusCode::OK,
             json!({"version":"2.0.0", "files":[
                 {"url":"Matou.dmg", "sha512":SHA512},
-                {"url":"Matou.exe", "sha512":SHA512, "size":ARTIFACT_SIZE}
+                {"url":"Matou.exe", "sha512":checksum, "size":ARTIFACT_SIZE}
             ]})
             .to_string(),
         ),
@@ -552,10 +585,7 @@ fn windows_falls_back_to_json_on_404_and_keeps_the_exe_extension() -> Result<()>
     let server = Server::start(move |path| match path {
         "/stable/release-channel.json" => Reply::Found("/versioned/release-channel.json".into()),
         "/versioned/release-channel.json" => Reply::Found(json_location.clone()),
-        "/versioned/Matou.exe" => Reply::Artifact {
-            tampered: false,
-            stall: false,
-        },
+        "/versioned/Matou.exe" => Reply::Bytes(windows_installer_bytes(0x8664)),
         _ => not_found(),
     })?;
     let root = tempfile::tempdir()?;
@@ -578,10 +608,7 @@ fn windows_falls_back_to_json_on_404_and_keeps_the_exe_extension() -> Result<()>
         update.state().phase,
         UpdatePhase::Downloaded { .. }
     ));
-    assert_eq!(
-        fs::read(root.path().join("Matou.exe"))?,
-        vec![b'x'; ARTIFACT_SIZE]
-    );
+    assert_eq!(fs::read(root.path().join("Matou.exe"))?, installer);
     assert_eq!(
         server.paths(),
         [
@@ -592,6 +619,57 @@ fn windows_falls_back_to_json_on_404_and_keeps_the_exe_extension() -> Result<()>
         ]
     );
     assert_eq!(cdn.paths(), ["/signed/json"]);
+    Ok(())
+}
+
+#[test]
+fn windows_arm64_rejects_a_mismatched_feed_and_wrong_pe_even_at_the_correct_hash() -> Result<()> {
+    let wrong_arch = windows_installer_bytes(0xaa64);
+    let digest = STANDARD.encode(Sha512::digest(&wrong_arch));
+    let server = Server::start(move |path| match path {
+        "/wrong-feed/stable.yml" => Reply::Text(
+            StatusCode::OK,
+            yaml("2.0.0", "Matou-2.0.0-win-x64.exe", &digest),
+        ),
+        "/arm64/stable.yml" => Reply::Text(
+            StatusCode::OK,
+            yaml("2.0.0", "Matou-2.0.0-win-arm64.exe", &digest),
+        ),
+        "/arm64/Matou-2.0.0-win-arm64.exe" => Reply::Bytes(wrong_arch.clone()),
+        _ => not_found(),
+    })?;
+    let fetcher = HttpUpdateFetcher::new(Platform::Win32)?;
+    let manager = |base: &str| {
+        manager_on(
+            &server.url(base),
+            "stable",
+            Platform::Win32,
+            Architecture::Arm64,
+            "1.0.0",
+        )
+    };
+    let wrong = manager("/wrong-feed")
+        .check(&fetcher, || 1, |_| {}, |_| {})
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(wrong.code, Some("ERR_UPDATER_INVALID_INSTALLER"));
+    let update = manager("/arm64");
+    assert!(
+        update
+            .check(&fetcher, || 1, |_| {}, |_| {})
+            .unwrap()
+            .unwrap()
+            .is_update_available
+    );
+    let root = tempfile::tempdir()?;
+    update.download(
+        &fetcher,
+        &LocalUpdateFiles::new(root.path().to_owned()),
+        || 1,
+        |_| {},
+    );
+    assert!(matches!(update.state().phase, UpdatePhase::Error { .. }));
+    assert_eq!(fs::read_dir(root.path())?.count(), 0);
     Ok(())
 }
 
@@ -728,7 +806,9 @@ fn resolves_update_source_version_channel_and_disable_in_frozen_order() -> Resul
     let yaml_only = resolve(&[]);
     assert_eq!(yaml_only.feed.channel, "beta");
     assert_eq!(
-        yaml_only.feed.channel_filename(Platform::Darwin, Architecture::Arm64),
+        yaml_only
+            .feed
+            .channel_filename(Platform::Darwin, Architecture::Arm64),
         "beta-mac.yml"
     );
     fs::write(
@@ -812,15 +892,30 @@ fn runtime_host_uses_live_http_and_remains_responsive_during_check() -> Result<(
     let gate = Arc::new(Notify::new());
     let server_gate = Arc::clone(&gate);
     let (checking, requested) = mpsc::channel();
-    let installer = if cfg!(windows) {
+    let windows_arm64 = cfg!(all(windows, target_arch = "aarch64"));
+    let installer = if windows_arm64 {
+        "Matou-99.0.0-win-arm64.exe"
+    } else if cfg!(windows) {
         "Matou.exe"
     } else {
         "Matou.dmg"
     };
+    let installer_contents = if cfg!(windows) {
+        windows_installer_bytes(0x8664)
+    } else {
+        vec![b'x'; ARTIFACT_SIZE]
+    };
+    let server_artifact = installer_contents.clone();
+    let checksum = STANDARD.encode(Sha512::digest(&installer_contents));
     let server = Server::start(move |path| {
         if path.ends_with(".yml") {
             let _ = checking.send(());
-            Reply::Gated(Arc::clone(&server_gate), yaml("99.0.0", installer, SHA512))
+            Reply::Gated(
+                Arc::clone(&server_gate),
+                yaml("99.0.0", installer, &checksum),
+            )
+        } else if path.ends_with(installer) && cfg!(windows) {
+            Reply::Bytes(server_artifact.clone())
         } else if path.ends_with(installer) {
             Reply::Artifact {
                 tampered: false,
@@ -881,11 +976,17 @@ fn runtime_host_uses_live_http_and_remains_responsive_during_check() -> Result<(
     host.commands
         .send(Command::DownloadUpdate { request_id: 3 })?;
     let downloaded = host_reply(&host, 3, "updateDownloadResult")?;
+    if windows_arm64 {
+        assert_eq!(downloaded["status"], "error");
+        assert!(!options.data_root.join("updates").join(installer).exists());
+        host.shutdown()?;
+        return Ok(());
+    }
     assert_eq!(downloaded["status"], "downloaded");
     assert_eq!(downloaded["version"], "99.0.0");
     assert_eq!(
         fs::read(options.data_root.join("updates").join(installer))?,
-        vec![b'x'; ARTIFACT_SIZE]
+        installer_contents
     );
     if cfg!(any(target_os = "macos", windows)) {
         // This host uses the actual HTTP worker and an explicit dry-run opener.

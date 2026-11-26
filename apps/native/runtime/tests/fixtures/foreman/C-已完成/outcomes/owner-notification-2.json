@@ -1,0 +1,7 @@
+{
+  "round": 2,
+  "caller": { "ref": "caller-fixture", "title": "测试调用会话", "provider": "dsh" },
+  "at": "2026-11-24T00:03:00.000Z",
+  "ownerWorkStatus": "needs-input",
+  "reason": "所有者处于等待输入"
+}

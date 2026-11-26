@@ -575,13 +575,12 @@ fn wrap_antigravity_command(
     if !is_foreground_command(command) {
         return None;
     }
-    let mt = resolve_mt(data_root)?;
+    let (executable, entry) = mt_context_command(data_root)?;
     let command_line = format!(
-        "{} ctx exec --session {} --data-root {} -- {}",
-        bash_arg(mt.to_str()?)?,
-        bash_arg(session_id)?,
-        bash_arg(data_root.to_str()?)?,
-        bash_arg(command)?,
+        "{executable}{entry} ctx exec --session {} --data-root {} -- {}",
+        shell_arg(session_id)?,
+        shell_arg(data_root.to_str()?)?,
+        shell_arg(command)?,
     );
     Some(HookEvaluation {
         response_json: json!({"decision":"allow", "overwrite":{"CommandLine":command_line}})
@@ -590,11 +589,17 @@ fn wrap_antigravity_command(
     })
 }
 
-fn resolve_mt(data_root: &Path) -> Option<PathBuf> {
-    let executable_name = if cfg!(windows) { "mt.exe" } else { "mt" };
+#[cfg(windows)]
+fn mt_context_command(_: &Path) -> Option<(String, &'static str)> {
+    let executable = std::env::current_exe().ok()?;
+    Some((shell_arg(executable.to_str()?)?, " --mt"))
+}
+
+#[cfg(not(windows))]
+fn mt_context_command(data_root: &Path) -> Option<(String, &'static str)> {
     let sibling = std::env::current_exe()
         .ok()
-        .map(|path| path.with_file_name(executable_name));
+        .map(|path| path.with_file_name("mt"));
     let valid = |path: &Path| {
         path.is_absolute()
             && path
@@ -612,17 +617,29 @@ fn resolve_mt(data_root: &Path) -> Option<PathBuf> {
             })
     };
     if let Some(sibling) = sibling.filter(|path| valid(path)) {
-        return Some(sibling);
+        return Some((shell_arg(sibling.to_str()?)?, ""));
     }
     // Native macOS/Linux installs generate this private shim; a shell-wide PATH
     // lookup would resolve against the runtime, not the agent's terminal.
     let shim = data_root.join("control/bin/mt");
-    (cfg!(unix) && valid(&shim)).then_some(shim)
+    if !valid(&shim) {
+        return None;
+    }
+    Some((shell_arg(shim.to_str()?)?, ""))
 }
 
-fn bash_arg(value: &str) -> Option<String> {
+#[cfg(not(windows))]
+fn shell_arg(value: &str) -> Option<String> {
     (!value.is_empty() && !value.chars().any(char::is_control))
         .then(|| format!("'{}'", value.replace('\'', "'\\''")))
+}
+
+#[cfg(windows)]
+fn shell_arg(value: &str) -> Option<String> {
+    (!value.is_empty() && !value.chars().any(|ch| {
+        ch.is_control() || matches!(ch, '"' | '%' | '!' | '^')
+    }))
+    .then(|| format!(r#""{value}""#))
 }
 
 fn is_foreground_command(command: &str) -> bool {

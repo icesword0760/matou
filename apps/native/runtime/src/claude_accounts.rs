@@ -187,12 +187,14 @@ impl Engine {
         }
         #[cfg(target_os = "macos")]
         if bin.file_name().is_some_and(|name| name == "MacOS") {
-            return Some(Self::new(
+            let bundled = bin.join("matou-claude-accounts");
+            let engine = if bundled.is_file() {
+                bundled
+            } else {
                 bin.parent()?
-                    .join("Resources/claude-accounts/matou-claude-accounts/matou-claude-accounts"),
-                None,
-                true,
-            ));
+                    .join("Resources/claude-accounts/matou-claude-accounts/matou-claude-accounts")
+            };
+            return Some(Self::new(engine, None, true));
         }
         let tooling =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../tooling/claude-accounts");
@@ -978,6 +980,8 @@ mod tests {
     #[test]
     fn account_engine_receives_the_resolved_browser_settings() {
         let root = tempfile::tempdir().unwrap();
+        crate::browser_integration::set_controlled_browser_preference(root.path(), true)
+            .unwrap();
         let accounts = root.path().join("claude-accounts");
         fs::create_dir(&accounts).unwrap();
         let browser = root.path().join("fixture browser");

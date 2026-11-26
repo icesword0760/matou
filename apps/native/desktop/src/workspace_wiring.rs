@@ -4,8 +4,7 @@ use super::*;
 mod footer_claude_accounts;
 use footer_claude_accounts::AccountUi;
 use matou_native_core::link_routing::{
-    BROWSER_RELEASES_URL, ConfirmationAction, ControlledBrowserFailure, LinkSource, OpenFailure,
-    route_link, system_browser_confirmation,
+    ControlledBrowserFailure, LinkSource, route_link,
 };
 use matou_native_desktop::{
     card_context_menu::{
@@ -72,8 +71,7 @@ pub(super) enum LinkOpenTarget {
 
 #[derive(Clone, Copy)]
 enum LinkFallbackAction {
-    Install,
-    OpenSystem,
+    Retry,
     Copy,
     Dismiss,
 }
@@ -87,29 +85,15 @@ fn launch_link(
     target: LinkOpenTarget,
     cx: &mut App,
 ) -> gpui::Task<Result<(), ControlledBrowserFailure>> {
-    if target == LinkOpenTarget::System {
-        cx.open_url(url);
-        return gpui::Task::ready(Ok(()));
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let url = url.to_owned();
-        cx.background_executor().spawn(async move {
-            let app = "/Applications/Mantle.app";
-            if !std::path::Path::new(app)
-                .join("Contents/MacOS/Chromium")
-                .is_file()
-            {
-                return Err(ControlledBrowserFailure::Missing);
-            }
-            let opened = matou_native_runtime::browser_integration::open_controlled_url(&url);
-            opened
-                .then_some(())
-                .ok_or(ControlledBrowserFailure::LaunchFailed)
-        })
-    }
-    #[cfg(not(target_os = "macos"))]
-    gpui::Task::ready(Err(ControlledBrowserFailure::Missing))
+    let url = url.to_owned();
+    cx.background_executor().spawn(async move {
+        use matou_native_runtime::browser_integration;
+        let opened = match target {
+            LinkOpenTarget::Controlled => browser_integration::open_controlled_url(&url),
+            LinkOpenTarget::System => browser_integration::open_system_url(&url),
+        };
+        opened.then_some(()).ok_or(ControlledBrowserFailure::LaunchFailed)
+    })
 }
 
 pub(super) struct WorkspaceWiring {
@@ -359,35 +343,38 @@ impl Workspace {
         }
         self.wiring.link_in_progress = true;
         let url = link.url().to_owned();
-        let open = (self.wiring.link_opener)(&url, LinkOpenTarget::Controlled, cx);
+        let prefer_controlled = self.data_root.as_deref().is_some_and(
+            matou_native_runtime::browser_integration::prefers_controlled_browser,
+        );
+        let initial_target = if prefer_controlled {
+            LinkOpenTarget::Controlled
+        } else {
+            LinkOpenTarget::System
+        };
+        let initial_open = (self.wiring.link_opener)(&url, initial_target, cx);
         cx.spawn_in(window, async move |owner, cx| {
-            if let Err(failure) = open.await {
-                let prompt = owner.update_in(cx, |this, window, cx| {
-                    this.link_failure_prompt(&url, source, failure, window, cx)
-                });
-                if let Ok(prompt) = prompt {
-                    let action = prompt.await;
-                    let _ = owner.update(cx, |this, cx| match action {
-                        LinkFallbackAction::Install => {
-                            if let Ok(releases) =
-                                route_link(Some(BROWSER_RELEASES_URL), LinkSource::External)
-                            {
-                                (this.wiring.link_opener)(
-                                    releases.url(),
-                                    LinkOpenTarget::System,
-                                    cx,
-                                )
-                                .detach();
-                            }
-                        }
-                        LinkFallbackAction::OpenSystem => {
-                            (this.wiring.link_opener)(&url, LinkOpenTarget::System, cx).detach();
-                        }
-                        LinkFallbackAction::Copy => {
-                            (this.wiring.copy_link)(&url, cx);
-                        }
-                        LinkFallbackAction::Dismiss => {}
-                    });
+            let open_system = |this: &mut Self, cx: &mut Context<Self>| {
+                (this.wiring.link_opener)(&url, LinkOpenTarget::System, cx)
+            };
+            let mut result = initial_open.await;
+            if result.is_err() && prefer_controlled {
+                let Ok(open) = owner.update(cx, open_system) else { return };
+                result = open.await;
+            }
+            while result.is_err() {
+                let Ok(prompt) = owner.update_in(cx, |this, window, cx| {
+                    this.link_failure_prompt(window, cx)
+                }) else { break };
+                match prompt.await {
+                    LinkFallbackAction::Retry => {
+                        let Ok(open) = owner.update(cx, open_system) else { break };
+                        result = open.await;
+                    }
+                    LinkFallbackAction::Copy => {
+                        let _ = owner.update(cx, |this, cx| (this.wiring.copy_link)(&url, cx));
+                        break;
+                    }
+                    LinkFallbackAction::Dismiss => break,
                 }
             }
             let _ = owner.update(cx, |this, _| this.wiring.link_in_progress = false);
@@ -397,79 +384,27 @@ impl Workspace {
 
     fn link_failure_prompt(
         &self,
-        url: &str,
-        source: LinkSource<'static>,
-        failure: ControlledBrowserFailure,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::Task<LinkFallbackAction> {
-        let cancel = PromptButton::cancel(self.locale.text("取消", "Cancel"));
-        let mut actions = Vec::new();
-        let answer = if matches!(source, LinkSource::ProviderKeyPage { .. }) {
-            let fallback = route_link(Some(url), source)
-                .ok()
-                .and_then(|link| {
-                    link.copy_fallback(
-                        match failure {
-                            ControlledBrowserFailure::Missing => OpenFailure::BridgeUnavailable,
-                            ControlledBrowserFailure::LaunchFailed => {
-                                OpenFailure::BrowserDidNotOpen
-                            }
-                        },
-                        self.locale,
-                    )
-                })
-                .expect("a routed preset URL has a copy fallback");
-            actions.push(LinkFallbackAction::Copy);
-            window.prompt(
-                PromptLevel::Warning,
-                &fallback.message(),
-                None,
-                &[
-                    PromptButton::ok(self.locale.text("复制链接", "Copy link")),
-                    cancel,
-                ],
-                cx,
-            )
-        } else {
-            let confirmation = system_browser_confirmation(failure, self.locale);
-            let buttons: Vec<_> = confirmation
-                .buttons
-                .iter()
-                .enumerate()
-                .map(|(index, button)| {
-                    actions.push(match confirmation.selected_action(Some(index)) {
-                        ConfirmationAction::InstallBrowser => LinkFallbackAction::Install,
-                        ConfirmationAction::OpenSystemBrowser => LinkFallbackAction::OpenSystem,
-                        ConfirmationAction::Cancel => LinkFallbackAction::Dismiss,
-                    });
-                    if button.action == ConfirmationAction::Cancel {
-                        PromptButton::cancel(button.label)
-                    } else if index == confirmation.default_index {
-                        PromptButton::ok(button.label)
-                    } else {
-                        PromptButton::new(button.label)
-                    }
-                })
-                .collect();
-            window.prompt(
-                PromptLevel::Warning,
-                confirmation.title,
-                Some(&confirmation.detail.map_or_else(
-                    || confirmation.message.to_owned(),
-                    |detail| format!("{}\n\n{detail}", confirmation.message),
-                )),
-                &buttons,
-                cx,
-            )
-        };
-        cx.spawn(async move |_, _| {
-            answer
-                .await
-                .ok()
-                .and_then(|index| actions.get(index))
-                .copied()
-                .unwrap_or(LinkFallbackAction::Dismiss)
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            self.locale.text("浏览器未打开", "Browser did not open"),
+            Some(self.locale.text(
+                "可以重试，或复制链接后手动打开。",
+                "Try again, or copy the link and open it in your browser.",
+            )),
+            &[
+                PromptButton::ok(self.locale.text("重试", "Try again")),
+                PromptButton::new(self.locale.text("复制链接", "Copy link")),
+                PromptButton::cancel(self.locale.text("取消", "Cancel")),
+            ],
+            cx,
+        );
+        cx.spawn(async move |_, _| match answer.await.ok() {
+            Some(0) => LinkFallbackAction::Retry,
+            Some(1) => LinkFallbackAction::Copy,
+            _ => LinkFallbackAction::Dismiss,
         })
     }
 

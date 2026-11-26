@@ -3,9 +3,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use matou_native_core::git_repo::{
-    ChangeCounts, ForkBranchError, GitActionError, Head, Removal, Repository, WorktreeBranch,
-    WorktreeScope, current_branch, git_checkout, git_commit, git_create_branch, git_push,
-    git_status_detail, git_worktree_create, git_worktree_remove,
+    ChangeCounts, ForkBranchError, GIT_NOT_INSTALLED, GitActionError, Head, Removal, Repository,
+    WorktreeBranch, WorktreeScope, current_branch, git_checkout, git_commit, git_create_branch,
+    git_executable, git_push, git_status_detail, git_worktree_create, git_worktree_remove,
+    is_dirty,
 };
 use tempfile::TempDir;
 
@@ -91,6 +92,93 @@ fn discovers_non_git_directory() {
     let dir = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
     assert!(Repository::discover(dir.path()).unwrap().is_none());
     assert_eq!(current_branch(dir.path()), None);
+    let error = git_status_detail(dir.path()).unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<GitActionError>().unwrap().0,
+        "GIT_NOT_REPOSITORY"
+    );
+}
+
+#[test]
+fn git_probe_keeps_head_and_rediscovers_git_in_the_same_process() -> anyhow::Result<()> {
+    const FIXTURE: &str = "MATOU_TEST_GIT_PROBE_FIXTURE";
+    const REAL_GIT: &str = "MATOU_TEST_GIT_PROBE_EXECUTABLE";
+    if let Some(root) = std::env::var_os(FIXTURE).map(PathBuf::from) {
+        let repo = root.join("已有 HEAD");
+        assert!(git_executable().is_none());
+        assert_eq!(current_branch(&repo).as_deref(), Some("main"));
+        assert_eq!(is_dirty(&repo), None);
+        let error = git_status_detail(&repo).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<GitActionError>().unwrap().0,
+            GIT_NOT_INSTALLED
+        );
+
+        let executable =
+            root.join("工具 with space")
+                .join(if cfg!(windows) { "git.exe" } else { "git" });
+        let original = PathBuf::from(std::env::var_os(REAL_GIT).unwrap());
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(original, &executable)?;
+        #[cfg(windows)]
+        fs::copy(original, &executable)?;
+        assert_eq!(git_executable().as_deref(), Some(executable.as_path()));
+        return Ok(());
+    }
+
+    let root = tempfile::tempdir()?;
+    let repo = root.path().join("已有 HEAD");
+    fs::create_dir_all(repo.join(".git"))?;
+    fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n")?;
+    let tools = root.path().join("工具 with space");
+    fs::create_dir(&tools)?;
+    #[cfg(windows)]
+    fs::write(tools.join("git.cmd"), "@exit /b 99\r\n")?;
+    let executable = git_executable().expect("Git for the contract fixture");
+    let output = Command::new(std::env::current_exe()?)
+        .env(FIXTURE, root.path())
+        .env(REAL_GIT, executable)
+        .env("PATH", &tools)
+        .args([
+            "--exact",
+            "git_probe_keeps_head_and_rediscovers_git_in_the_same_process",
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&[output.stdout, output.stderr].concat())
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn apple_shim_is_ignored_when_selected_developer_directory_has_no_git() -> anyhow::Result<()> {
+    const FIXTURE: &str = "MATOU_TEST_GIT_SHIM_NO_TOOLS";
+    if std::env::var_os(FIXTURE).is_some() {
+        assert!(git_executable().is_none());
+        return Ok(());
+    }
+    let directory = tempfile::tempdir()?;
+    let output = Command::new(std::env::current_exe()?)
+        .env(FIXTURE, "1")
+        .env("PATH", "/usr/bin")
+        .env(
+            "DEVELOPER_DIR",
+            directory.path().join("missing developer tools"),
+        )
+        .args([
+            "--exact",
+            "apple_shim_is_ignored_when_selected_developer_directory_has_no_git",
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&[output.stdout, output.stderr].concat())
+    );
+    Ok(())
 }
 
 #[test]

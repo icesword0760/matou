@@ -118,7 +118,23 @@ pub fn open_controlled_url(url: &str) -> bool {
     }
 }
 
-pub(crate) fn open_system_url(url: &str) -> bool {
+pub fn prefers_controlled_browser(data_root: &Path) -> bool {
+    data_root.join("use-controlled-browser").is_file()
+}
+
+pub fn set_controlled_browser_preference(data_root: &Path, enabled: bool) -> io::Result<()> {
+    let preference = data_root.join("use-controlled-browser");
+    if enabled {
+        fs::OpenOptions::new().create(true).append(true).open(preference)?;
+    } else if let Err(error) = fs::remove_file(preference)
+        && error.kind() != io::ErrorKind::NotFound
+    {
+        return Err(error);
+    }
+    Ok(())
+}
+
+pub fn open_system_url(url: &str) -> bool {
     #[cfg(target_os = "macos")]
     return run_url_opener("/usr/bin/open", &[url]);
     #[cfg(windows)]

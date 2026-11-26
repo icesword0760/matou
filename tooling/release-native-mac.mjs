@@ -1,8 +1,9 @@
-import { access, lstat, mkdir, open, readFile, readdir, realpath, symlink, writeFile } from 'node:fs/promises'
+import { access, lstat, mkdir, readFile, realpath, symlink, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { basename, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
+import { macAccountEngineCode, macAccountEngineDirectory, refreshAccountEngineManifestAfterSigning, verifyAccountEngineManifest } from './claude-accounts/artifact.mjs'
 
 import {
   defaultUpdateBaseUrl, desktopConfig, fileDigests, formatUpdateConfig, generateChecksums, generateManifest,
@@ -15,7 +16,6 @@ const resourcesSource = join(desktopProject, 'package-resources')
 const accountEngine = 'matou-claude-accounts'
 const codesign = '/usr/bin/codesign'
 const architectures = { arm64: 'aarch64', x64: 'x86_64' }
-const machoMagic = new Set([0xfeedface, 0xcefaedfe, 0xfeedfacf, 0xcffaedfe, 0xcafebabe, 0xcafebabf])
 
 const usage = `Usage: pnpm package:mac [--version X.Y.Z] [--arch arm64|x64] [--out-dir directory]
   [--desktop-bin file] [--runtime-bin file] [--claude-accounts-engine directory] [--model-router directory]
@@ -23,6 +23,7 @@ const usage = `Usage: pnpm package:mac [--version X.Y.Z] [--arch arm64|x64] [--o
 
 The default inputs are under apps/desktop/package-resources. Override them with
 the flags above or MATOU_CLAUDE_ACCOUNTS_ENGINE and MATOU_MODEL_ROUTER_DIR.
+Build the complete account engine with pnpm accounts:build before packaging.
 MATOU_MAC_ARCH, MATOU_UPDATE_BASE_URL, MATOU_UPDATE_CHANNEL and CARGO_TARGET_DIR
 set the respective defaults. The output directory defaults to apps/native/release.
 Set MATOU_APP_BUILDER to an existing app-builder binary to generate blockmaps.`
@@ -75,40 +76,23 @@ async function resolveAccounts(paths) {
   throw new Error(`Missing Claude accounts engine under ${paths.join(' or ')}. Pass --claude-accounts-engine or MATOU_CLAUDE_ACCOUNTS_ENGINE.`)
 }
 
-async function accountCodeFiles(directory) {
-  const binaries = []
-  for (const entry of await readdir(directory, { withFileTypes: true })) {
-    const path = join(directory, entry.name)
-    if (entry.isDirectory()) binaries.push(...await accountCodeFiles(path))
-    if (!entry.isFile()) continue
-    const file = await open(path, 'r')
-    try {
-      const magic = Buffer.alloc(4)
-      const { bytesRead } = await file.read(magic)
-      if (bytesRead === 4 && machoMagic.has(magic.readUInt32BE())) binaries.push(path)
-    } finally {
-      await file.close()
-    }
-  }
-  return binaries
-}
-
-async function signApp(app, options, config) {
-  const resources = join(app, 'Contents/Resources')
-  const accounts = join(resources, 'claude-accounts', accountEngine)
+async function signApp(app, options, config, accountCode) {
+  const contents = join(app, 'Contents')
+  const resources = join(contents, 'Resources')
   const entitlements = join(desktopProject, config.build.mac.entitlements)
   const flags = ['--force', '--sign', options.identity, '--options', 'runtime',
     options.timestamp ? '--timestamp' : '--timestamp=none']
   const sign = (path, args = []) => runTool(codesign, [...flags, ...args, path])
   const inherited = ['--entitlements', join(desktopProject, config.build.mac.entitlementsInherit)]
 
-  const engine = join(accounts, accountEngine)
-  for (const binary of await accountCodeFiles(accounts)) {
+  const engine = accountCode.get(accountEngine)
+  for (const binary of accountCode.values()) {
     if (binary !== engine) await sign(binary)
   }
   await sign(engine, inherited)
+  await refreshAccountEngineManifestAfterSigning(macAccountEngineDirectory(contents), accountCode)
 
-  const router = join(resources, 'model-router', 'model-router')
+  const router = join(contents, 'MacOS', 'model-router')
   await sign(router, ['--identifier', `${config.build.appId}.model-router`])
   // Signing changes the executable bytes. Update the existing resource seal
   // before signing the bundle that contains both files.
@@ -170,6 +154,7 @@ async function blockmaps(artifacts) {
 async function releaseMac(options, config) {
   const { version, arch, outDir, modelRouterDir, updateBaseUrl, channel, timestamp } = options
   const accounts = await resolveAccounts(options.accountsDirs)
+  await verifyAccountEngineManifest(accounts)
   await access(join(modelRouterDir, 'model-router'))
   const stem = `Matou-${version}-mac-${arch}`
   const appName = `${config.productName}.app`
@@ -188,10 +173,11 @@ async function releaseMac(options, config) {
     for (const [label, slices] of Object.entries(bundledArch)) {
       if (!slices.includes(machoArch)) throw new Error(`${label} does not contain a ${machoArch} slice`)
     }
-    await runTool('/usr/bin/lipo', [
-      join(app, 'Contents/Resources/claude-accounts', accountEngine, accountEngine), '-verify_arch', machoArch
-    ])
-    await signApp(app, options, config)
+    const accountCode = await macAccountEngineCode(join(app, 'Contents'))
+    for (const file of accountCode.values()) {
+      await runTool('/usr/bin/lipo', [file, '-verify_arch', machoArch])
+    }
+    await signApp(app, options, config, accountCode)
     await verifyApp(app, timestamp)
 
     const zip = join(staging, stem + '.zip')
@@ -207,6 +193,14 @@ async function releaseMac(options, config) {
     await symlink('/Applications', join(volume, 'Applications'))
     await runTool('/usr/bin/hdiutil', ['create', '-volname', config.productName, '-format', 'UDZO', '-srcfolder', volume, dmg])
     await runTool('/usr/bin/hdiutil', ['verify', dmg])
+    const mounted = join(staging, 'dmg-verification')
+    await mkdir(mounted)
+    await runTool('/usr/bin/hdiutil', ['attach', '-readonly', '-nobrowse', '-noautoopen', '-mountpoint', mounted, dmg])
+    try {
+      await verifyApp(join(mounted, appName), timestamp)
+    } finally {
+      await runTool('/usr/bin/hdiutil', ['detach', mounted])
+    }
 
     const artifacts = [zip, dmg, ...await blockmaps([zip, dmg])]
     const manifest = join(staging, manifestName)

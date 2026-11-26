@@ -10,6 +10,7 @@ use std::{
 use std::{path::Path, time::Duration};
 
 pub(crate) const MODE: &str = "--mt";
+pub(crate) const FOREMAN_MODE: &str = "--mt-foreman";
 
 #[cfg(unix)]
 pub(crate) fn install_shim(data_root: &Path) -> anyhow::Result<std::path::PathBuf> {
@@ -36,51 +37,20 @@ pub(crate) fn install_shim(data_root: &Path) -> anyhow::Result<std::path::PathBu
     );
     fs::set_permissions(&dir, Permissions::from_mode(0o700))?;
     let executable = std::env::current_exe()?;
-    let mut shim = tempfile::NamedTempFile::new_in(&dir)?;
-    shim.write_all(b"#!/bin/sh\nexec '")?;
-    for part in executable
-        .as_os_str()
-        .as_bytes()
-        .split_inclusive(|byte| *byte == b'\'')
-    {
-        if let Some(path) = part.strip_suffix(b"'") {
-            shim.write_all(path)?;
-            shim.write_all(b"'\\''")?;
-        } else {
-            shim.write_all(part)?;
-        }
-    }
-    writeln!(shim, "' {MODE} \"$@\"")?;
-    shim.as_file()
-        .set_permissions(Permissions::from_mode(0o700))?;
-    shim.persist(dir.join("mt"))?;
-    let foreman_shim_path = dir.join("mt-foreman");
-    let control_asset_root = std::env::var_os("MATOU_CONTROL_ASSET_ROOT");
-    if let Some(script) = crate::provider_hook::bundled_foreman_script(
-        Some(executable.as_path()),
-        control_asset_root.as_deref().map(Path::new),
-    ) {
-        let mut foreman_shim = tempfile::NamedTempFile::new_in(&dir)?;
-        foreman_shim.write_all(b"#!/bin/sh\nexec \"${MATOU_CONTROL_NODE_EXECUTABLE:-node}\" '")?;
-        for part in script
-            .as_os_str()
-            .as_bytes()
-            .split_inclusive(|byte| *byte == b'\'')
-        {
+    for (name, mode) in [("mt", MODE), ("mt-foreman", FOREMAN_MODE)] {
+        let mut shim = tempfile::NamedTempFile::new_in(&dir)?;
+        shim.write_all(b"#!/bin/sh\nexec '")?;
+        for part in executable.as_os_str().as_bytes().split_inclusive(|byte| *byte == b'\'') {
             if let Some(path) = part.strip_suffix(b"'") {
-                foreman_shim.write_all(path)?;
-                foreman_shim.write_all(b"'\\''")?;
+                shim.write_all(path)?;
+                shim.write_all(b"'\\''")?;
             } else {
-                foreman_shim.write_all(part)?;
+                shim.write_all(part)?;
             }
         }
-        writeln!(foreman_shim, "' \"$@\"")?;
-        foreman_shim
-            .as_file()
-            .set_permissions(Permissions::from_mode(0o700))?;
-        foreman_shim.persist(foreman_shim_path)?;
-    } else {
-        let _ = fs::remove_file(foreman_shim_path);
+        writeln!(shim, "' {mode} \"$@\"")?;
+        shim.as_file().set_permissions(Permissions::from_mode(0o700))?;
+        shim.persist(dir.join(name))?;
     }
     Ok(dir)
 }
@@ -89,28 +59,12 @@ pub(crate) fn install_shim(data_root: &Path) -> anyhow::Result<std::path::PathBu
 pub(crate) fn install_shim(data_root: &Path) -> anyhow::Result<std::path::PathBuf> {
     let dir = data_root.join("control/bin");
     std::fs::create_dir_all(&dir)?;
-    let mut shim = tempfile::NamedTempFile::new_in(&dir)?;
-    write!(
-        shim,
-        "@echo off\r\nsetlocal DisableDelayedExpansion\r\n\"%MATOU_CONTROL_RUNTIME%\" {MODE} %*\r\n"
-    )?;
-    shim.persist(dir.join("mt.cmd"))?;
-    let foreman_shim_path = dir.join("mt-foreman.cmd");
-    let executable = std::env::current_exe().ok();
-    let control_asset_root = std::env::var_os("MATOU_CONTROL_ASSET_ROOT");
-    if let Some(script) = crate::provider_hook::bundled_foreman_script(
-        executable.as_deref(),
-        control_asset_root.as_deref().map(Path::new),
-    ) {
-        let mut foreman_shim = tempfile::NamedTempFile::new_in(&dir)?;
-        let script_str = script.to_string_lossy();
-        write!(
-            foreman_shim,
-            "@echo off\r\nsetlocal DisableDelayedExpansion\r\nif not \"%MATOU_CONTROL_NODE_EXECUTABLE%\"==\"\" (\r\n  \"%MATOU_CONTROL_NODE_EXECUTABLE%\" \"{script_str}\" %*\r\n) else (\r\n  node \"{script_str}\" %*\r\n)\r\n"
+    for (name, mode) in [("mt.cmd", MODE), ("mt-foreman.cmd", FOREMAN_MODE)] {
+        let mut shim = tempfile::NamedTempFile::new_in(&dir)?;
+        write!(shim,
+            "@echo off\r\nsetlocal DisableDelayedExpansion\r\n\"%MATOU_CONTROL_RUNTIME%\" {mode} %*\r\n"
         )?;
-        foreman_shim.persist(foreman_shim_path)?;
-    } else {
-        let _ = std::fs::remove_file(foreman_shim_path);
+        shim.persist(dir.join(name))?;
     }
     Ok(dir)
 }

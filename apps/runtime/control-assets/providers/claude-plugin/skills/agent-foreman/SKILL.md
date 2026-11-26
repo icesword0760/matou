@@ -5,7 +5,7 @@ description: Use whenever work is handed to another coding agent — the user sa
 
 # 派活监工
 
-你作为当前会话的监工，写交代书，用监督脚本把活派给执行的 agent，盯进度、回答它的提问，最后看实物验收。在 Matou 托管终端里可以直接运行 `mt-foreman`（与 `node <本技能目录>/scripts/foreman.mjs` 完全等价）；查看配套文档可运行 `mt-foreman guide brief`、`mt-foreman guide parallel`、`mt-foreman guide reference`。
+你作为当前会话的监工，用 `mt-foreman` 派活、跟踪进度、回答执行者的提问，最后看实物验收。查看配套文档可运行 `mt-foreman guide brief`、`mt-foreman guide parallel`、`mt-foreman guide reference`。
 
 ## 分工
 
@@ -24,17 +24,14 @@ description: Use whenever work is handed to another coding agent — the user sa
 1. **先想清楚**：创意、取舍、文案、数值由你定。用户没表态的产品问题先问用户，再派活。
 2. **写交代书**：复制 `brief-template.md`，每个槽位都填。目标、实际场景、开发者意图、项目意图、验收标准这五栏是防止做偏的根本，任何一栏写不出来，说明还没想清楚，先想清楚或问用户，再派活。「原因与方案」按下面「交到哪一级」由你先查清、定好。子代理（Codex 派出的 DSH 或 terra）由运行约定要求直接读原始交代书，不靠转述。
 3. **启动**（如果当前环境有 `Monitor` 工具则用 `Monitor` 运行，`timeout_ms: 1800000`；否则直接用 shell 命令长超时运行）：
-   ```bash
-   mt-foreman start <task> --cd <工作目录> 2>&1 <<'EOF'
-   …交代书全文…
-   EOF
+   ```text
+   mt-foreman start 任务名 --cd "工作目录" --brief "交代书.md"
    ```
-   （若在非 Matou 托管终端里，改用 `node <本技能目录>/scripts/foreman.mjs start ...`。）
    **模型**：一般不写 `--model`，即 Codex 主力 sol 系列最新版 + 高档推理。任务里要操作电脑界面的部分（computer use：点按软件界面、操作桌面应用，包括 Blender 建模），由主 Codex 派 terra 系列最新版的子代理完成，主模型不来回切换。这条要求由脚本自动附在运行约定里，交代书不用写。用户要求时才用 `--model best`。
    task 名全局唯一：`<项目简称>-<主题>-<两位序号>`，如 `商城-购物车-01`、`官网-首页改版-02`；不能有空格、引号、斜杠，最长 40 个字。终端底栏、状态条和推送里都显示这个名字。每条事件都会实时推送给你。单次跟踪上限默认 29 分钟，到期只结束跟踪，任务照常运行：监督进程启动后由系统托管。跟踪满 29 分钟会以退出码 8 自动交回，最后一行给出继续跟踪的命令，照着重新运行 `mt-foreman watch <task>` 即可；收到工具超时通知时同样处理。
 4. **处理事件**：执行者阻塞提问时跟踪命令以退出码 7 结束，最后三行是问题摘要、完整问题路径和回答命令——按下一节回答后，再用 Monitor 运行 `watch <task>` 接着跟踪；不阻塞的 ❓ 不会结束跟踪，有空就回答。⚠ ⏸ ✖ ❌ 先看原因再决定重试、改交代还是报告用户；⏱ 是单轮跑满 `--max-min` 被叫停，不算失败：先看它做到哪了，再用 `send` 让它从断点接着做，剩下的活太大就拆成更小的关卡；✅ 带着执行者的回复原文，进入验收。
 5. **看实物验收**：先看代码实现（改了哪里、取值从哪来、是否按原因和方案改），再测实际表现：界面截图或真机、视频抽帧、音频测量、自己跑测试。执行者说完成不等于验收通过。逐条复核回复里的「我自己做的决定」。哪些由你判、哪些可让执行者查，见下面「审查分工」。
-6. **返工 / 下一关**：`send <task>` 加 heredoc，写清具体改哪里、改成什么。
+6. **返工 / 下一关**：`mt-foreman send 任务名 --message "补充交代.md"`，在文件里写清具体改哪里、改成什么。
 7. **汇报**：测试结果与实物验收分开报告，失败照实说。
 
 ## 和其他技能的关系（统一约束，其他技能无需适配）
@@ -85,7 +82,7 @@ description: Use whenever work is handed to another coding agent — the user sa
 
 ## 回答执行者的提问
 
-- 能从用户已表达的意图推出答案的：`answer <task> [编号]` 加 heredoc，直接给决定和理由。
+- 能从用户已表达的意图推出答案时，把决定和理由写到 UTF-8 回答文件，再用 `mt-foreman answer 任务名 1 --message "回答.md"`。
 - 涉及产品范围、用户能看到的取舍、删除或不可逆操作，而用户没表态的：先问用户，再回答。执行者等不到会停在这个问题上，之后用 `send` 把用户的决定发过去。不要为了不让它停下而替用户拍板。
 - 执行者工作中途想补充要求：`note <task>` 留言，它每做完一步会查看。
 

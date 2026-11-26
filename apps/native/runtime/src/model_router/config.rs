@@ -498,6 +498,18 @@ pub(super) fn router_binary(override_path: Option<OsString>) -> Result<PathBuf> 
     } else {
         "model-router"
     };
+    #[cfg(target_os = "macos")]
+    if directory.file_name().is_some_and(|name| name == "MacOS") {
+        let bundled = directory.join(name);
+        if bundled.is_file() {
+            let binary = bundled.canonicalize()?;
+            ensure!(
+                binary.parent() == Some(directory.canonicalize()?.as_path()),
+                "Invalid model router executable path"
+            );
+            return Ok(binary);
+        }
+    }
     let resources = if cfg!(target_os = "macos") {
         "../Resources"
     } else {

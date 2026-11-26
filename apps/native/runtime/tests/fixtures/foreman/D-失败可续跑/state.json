@@ -1,0 +1,17 @@
+{
+  "task": "D-失败可续跑",
+  "status": "failed",
+  "agent": "dsh",
+  "options": { "model": "deepseek-flash", "effort": "high", "cwd": "/example/worktree" },
+  "createdAt": "2026-11-24T00:00:00.000Z",
+  "endedAt": "2026-11-24T00:02:00.000Z",
+  "supervisorPid": null,
+  "pid": null,
+  "threadId": "fixture-resumable-thread",
+  "turns": [
+    { "n": 1, "result": "failed", "error": "测试服务暂不可用", "files": { "last": "turn-1-last.md" } }
+  ],
+  "exitCode": 2,
+  "error": "测试服务暂不可用\n仅第一行进入 watch 摘要",
+  "ownerSession": { "ref": "owner-fixture", "title": "测试监督会话", "provider": "codex" }
+}

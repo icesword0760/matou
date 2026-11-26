@@ -8,8 +8,8 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, ensure};
 use matou_native_core::git_repo::{
-    BranchReservation, Head, Removal, Repository, WorktreeBranch, WorktreeScope,
-    check_branch_reservations,
+    BranchReservation, GIT_NOT_INSTALLED, GitActionError, Head, Removal, Repository,
+    WorktreeBranch, WorktreeScope, check_branch_reservations, git_executable,
 };
 use serde::Serialize;
 use uuid::Uuid;
@@ -341,7 +341,8 @@ impl WorktreeBinding {
 
 fn git_output(cwd: &Path, args: &[&str]) -> Result<Output> {
     let hooks = if cfg!(windows) { "NUL" } else { "/dev/null" };
-    let mut command = Command::new("git");
+    let executable = git_executable().ok_or(GitActionError(GIT_NOT_INSTALLED))?;
+    let mut command = Command::new(executable);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

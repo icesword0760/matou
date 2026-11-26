@@ -1,0 +1,15 @@
+{
+  "task": "A-进行中",
+  "status": "running",
+  "agent": "agy",
+  "options": { "model": "gemini-pro-hydrogen-high", "effort": "high", "cwd": "/example/worktree" },
+  "createdAt": "2026-11-24T00:00:00.000Z",
+  "runStartedAt": "2026-11-24T00:01:00.000Z",
+  "lastActivityAt": "2026-11-24T00:02:00.000Z",
+  "activity": "检查项目",
+  "pid": null,
+  "supervisorPid": null,
+  "threadId": "fixture-running-thread",
+  "turns": [{ "n": 1, "startedAt": "2026-11-24T00:01:00.000Z" }],
+  "futureField": { "schema": 2, "data": ["原样保留", null] }
+}

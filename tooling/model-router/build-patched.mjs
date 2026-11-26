@@ -2,10 +2,12 @@ import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { createReadStream, createWriteStream } from 'node:fs'
 import { access, chmod, cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
-import { dirname, join, resolve } from 'node:path'
+import { delimiter, dirname, join, resolve } from 'node:path'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { fileURLToPath } from 'node:url'
+
+import { checkPe } from '../native-parity/package-native-win.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const pinned = JSON.parse(await readFile(new URL('./version.json', import.meta.url), 'utf8'))
@@ -45,22 +47,33 @@ async function goArchiveChecksum(filename) {
   return undefined
 }
 
-async function ensureGo(version, arch) {
+function goArch(arch) {
+  return arch === 'x64' ? 'amd64' : arch
+}
+
+async function ensureGo(version) {
   const forced = process.env.MATOU_GO_BIN
   if (forced) return resolve(forced)
-  const toolchainRoot = join(cacheRoot, 'go', `${version}-darwin-${arch}`)
-  const binary = join(toolchainRoot, 'bin/go')
+  const { arch, platform } = process
+  const windows = platform === 'win32'
+  const system = windows ? 'windows' : platform
+  const toolchainRoot = join(cacheRoot, 'go', `${version}-${platform}-${arch}`)
+  const binary = join(toolchainRoot, 'bin', windows ? 'go.exe' : 'go')
   if (await exists(binary)) return binary
-  const filename = `go${version}.darwin-${arch}.tar.gz`
+  const filename = `go${version}.${system}-${goArch(arch)}.${windows ? 'zip' : 'tar.gz'}`
   const archive = join(cacheRoot, 'go', filename)
-  await download(`https://go.dev/dl/${filename}`, archive, await goArchiveChecksum(filename))
+  const checksum = await goArchiveChecksum(filename)
+  if (!checksum) throw new Error(`Cannot verify the pinned Go toolchain checksum: ${filename}`)
+  await download(`https://go.dev/dl/${filename}`, archive, checksum)
   const temporary = `${toolchainRoot}.${process.pid}.tmp`
   await rm(temporary, { recursive: true, force: true })
   await mkdir(temporary, { recursive: true })
   try {
-    const listing = spawnSync('tar', ['-tzf', archive], { encoding: 'utf8' })
-    if (listing.status !== 0 || listing.stdout.split(/\r?\n/).filter(Boolean).some(path => path.startsWith('/') || path.split('/').includes('..'))) throw new Error('Unsafe Go archive')
-    if (spawnSync('tar', ['-xzf', archive, '-C', temporary], { encoding: 'utf8' }).status !== 0) throw new Error('Cannot extract Go toolchain')
+    const tar = windows ? 'tar.exe' : 'tar'
+    const listing = spawnSync(tar, ['-tf', archive], { encoding: 'utf8' })
+    if (listing.status !== 0 || listing.stdout.split(/\r?\n/).filter(Boolean).some(path =>
+      /^[/\\]|^[a-z]:/i.test(path) || path.split(/[/\\]/).includes('..'))) throw new Error('Unsafe Go archive')
+    if (spawnSync(tar, ['-xf', archive, '-C', temporary], { encoding: 'utf8' }).status !== 0) throw new Error('Cannot extract Go toolchain')
     await rm(toolchainRoot, { recursive: true, force: true })
     await cp(join(temporary, 'go'), toolchainRoot, { recursive: true })
   } finally { await rm(temporary, { recursive: true, force: true }) }
@@ -80,22 +93,38 @@ async function ensureSource() {
   return source
 }
 
-export async function buildPatchedRouter({ arch = process.env.MATOU_MAC_ARCH || process.arch, packageResources = false } = {}) {
+function git(args, cwd, label) {
+  const result = spawnSync('git', args, { cwd, encoding: 'utf8' })
+  if (result.status !== 0) throw new Error(`${label}: ${result.error?.message || result.stderr?.trim() || result.stdout?.trim()}`)
+}
+
+export async function buildPatchedRouter({ platform = 'darwin',
+  arch = platform === 'win32' ? 'x64' : process.env.MATOU_MAC_ARCH || process.arch, packageResources = false } = {}) {
   if (!pinned.patch) throw new Error('No router patch is pinned')
-  if (!['arm64', 'x64'].includes(arch)) throw new Error(`Patched router is available only for macOS arm64/x64: ${arch}`)
+  const windows = platform === 'win32'
+  if (!(windows || platform === 'darwin') || !['arm64', 'x64'].includes(arch)) {
+    throw new Error(`Patched router is available for macOS and Windows arm64/x64: ${platform}-${arch}`)
+  }
+  if (windows && packageResources) throw new Error('Pass the Windows output directory to package:win --model-router')
   const patchFile = join(root, 'tooling/model-router', pinned.patch.file)
   if (await digest(patchFile) !== pinned.patch.sha256) throw new Error('Pinned router patch checksum mismatch')
-  const go = await ensureGo(pinned.patch.go, arch)
+  const go = await ensureGo(pinned.patch.go)
+  const goVersion = spawnSync(go, ['version'], { encoding: 'utf8' })
+  if (goVersion.status !== 0 || !goVersion.stdout.startsWith(`go version go${pinned.patch.go} `)) {
+    throw new Error(`Expected Go toolchain ${pinned.patch.go}`)
+  }
   const source = await ensureSource()
-  const buildRoot = join(cacheRoot, 'build', `${pinned.commit.slice(0, 12)}-${pinned.patch.sha256.slice(0, 12)}-${arch}`)
+  const target = `${windows ? 'windows' : 'darwin'}-${arch}`
+  const buildRoot = join(cacheRoot, 'build', `${pinned.commit.slice(0, 12)}-${pinned.patch.sha256.slice(0, 12)}-${target}`)
   await rm(buildRoot, { recursive: true, force: true })
-  await cp(source, buildRoot, { recursive: true, filter: path => !path.split('/').includes('.git') })
-  const applied = spawnSync('patch', ['-p1', '-i', patchFile], { cwd: buildRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
-  if (applied.status !== 0) throw new Error(`Cannot apply pinned router patch: ${applied.stderr.trim() || applied.stdout.trim()}`)
+  git(['clone', '--quiet', '--no-checkout', source, buildRoot], root, 'Cannot stage pinned router source')
+  git(['-c', 'core.autocrlf=false', 'checkout', '--quiet', '--detach', pinned.commit], buildRoot, 'Cannot check out pinned router source')
+  git(['apply', '--unidiff-zero', '--whitespace=nowarn', patchFile], buildRoot, 'Cannot apply pinned router patch')
 
-  const cache = join(cacheRoot, pinned.version, `darwin-${arch}`)
+  const cache = join(cacheRoot, pinned.version, target)
   await mkdir(cache, { recursive: true })
-  const output = join(buildRoot, 'model-router')
+  const filename = windows ? 'model-router.exe' : 'model-router'
+  const output = join(buildRoot, filename)
   const buildDate = process.env.SOURCE_DATE_EPOCH
     ? new Date(Number(process.env.SOURCE_DATE_EPOCH) * 1000).toISOString()
     : new Date().toISOString()
@@ -106,22 +135,28 @@ export async function buildPatchedRouter({ arch = process.env.MATOU_MAC_ARCH || 
     stdio: 'inherit',
     env: {
       ...process.env,
-      CGO_ENABLED: '1',
-      GOOS: 'darwin',
-      GOARCH: arch,
+      CGO_ENABLED: windows ? '0' : '1',
+      GOOS: windows ? 'windows' : 'darwin',
+      GOARCH: goArch(arch),
+      GOTOOLCHAIN: 'local',
       GOCACHE: join(cacheRoot, 'gocache'),
       GOMODCACHE: join(cacheRoot, 'gomod'),
       GOFLAGS: '-mod=mod',
-      PATH: `${dirname(go)}:${process.env.PATH ?? '/usr/bin:/bin'}`
+      PATH: `${dirname(go)}${delimiter}${process.env.PATH ?? ''}`
     }
   })
   if (build.status !== 0) throw new Error('Patched router build failed')
-  const version = spawnSync(output, ['-version'], { encoding: 'utf8' })
-  if (!`${version.stdout}${version.stderr}`.includes(`Version: ${pinned.version}`)) throw new Error('Patched router does not report the pinned version')
+  if (windows) await checkPe(output, 'patched model-router.exe', arch)
+  if (process.platform === platform && process.arch === arch) {
+    const version = spawnSync(output, ['-version'], { encoding: 'utf8' })
+    if (!`${version.stdout}${version.stderr}`.includes(`Version: ${pinned.version}`)) {
+      throw new Error('Patched router does not report the pinned version')
+    }
+  }
 
-  await rm(join(cache, 'model-router'), { force: true })
-  await cp(output, join(cache, 'model-router'))
-  await chmod(join(cache, 'model-router'), 0o755)
+  await rm(join(cache, filename), { force: true })
+  await cp(output, join(cache, filename))
+  if (!windows) await chmod(join(cache, filename), 0o755)
   await cp(join(buildRoot, 'LICENSE'), join(cache, 'LICENSE'))
   const metadata = {
     version: pinned.version,
@@ -133,7 +168,8 @@ export async function buildPatchedRouter({ arch = process.env.MATOU_MAC_ARCH || 
     patchSha256: pinned.patch.sha256,
     goVersion: pinned.patch.go,
     buildDate,
-    binarySha256: await digest(join(cache, 'model-router'))
+    ...(windows && { platform: 'windows' }),
+    binarySha256: await digest(join(cache, filename))
   }
   await writeFile(join(cache, 'source.json'), JSON.stringify(metadata, null, 2) + '\n')
   if (packageResources) {
@@ -147,5 +183,6 @@ export async function buildPatchedRouter({ arch = process.env.MATOU_MAC_ARCH || 
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const arch = process.argv.find(arg => arg.startsWith('--arch='))?.slice(7)
-  console.log(await buildPatchedRouter({ ...(arch ? { arch } : {}), packageResources: process.argv.includes('--package') }))
+  const platform = process.argv.find(arg => arg.startsWith('--platform='))?.slice(11)
+  console.log(await buildPatchedRouter({ arch, platform, packageResources: process.argv.includes('--package') }))
 }

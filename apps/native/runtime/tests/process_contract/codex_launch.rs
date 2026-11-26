@@ -343,12 +343,7 @@ fn codex_launch_promotes_exact_commands_on_the_same_card() -> Result<()> {
             Path::new(dispatch_env.next().unwrap()).canonicalize()?,
             roles.path().canonicalize()?,
         );
-        if executable == "codex" {
-            assert_eq!(
-                Path::new(dispatch_env.next().unwrap()).canonicalize()?,
-                root.path().join("fixture bin/node").canonicalize()?
-            );
-        }
+        assert!(dispatch_env.all(str::is_empty), "native control must not inject Node");
         assert_eq!(
             fs::read_to_string(codex_home.join("cwd"))?.trim_end(),
             cwd.to_str().unwrap()

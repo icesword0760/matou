@@ -510,8 +510,12 @@ fn codex_current_fork_uses_the_reserved_source_and_only_confirms_session_start()
             "source-model",
             "--ask-for-approval",
             "on-request",
-            "--sandbox",
-            "read-only",
+            "-c",
+            "sandbox_mode=\"read-only\"",
+            "-c",
+            "default_permissions=\":read-only\"",
+            "-c",
+            "approvals_reviewer=\"user\"",
             "-c",
             "tui.resume_cwd=\"current\"",
             "fork",
@@ -549,7 +553,7 @@ fn codex_current_fork_uses_the_reserved_source_and_only_confirms_session_start()
         )?
         .unwrap();
     assert!(bound.inherited_conversation);
-    assert_eq!(bound.permission_mode, "plan");
+    assert_eq!(bound.permission_mode, "readOnly");
     assert_eq!(bound.model, "source-model");
     assert_eq!(bound.provider_session_id, Uuid::parse_str(CHILD)?);
     assert_eq!(intent.stage(), ForkStage::Succeeded);

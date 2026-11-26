@@ -442,7 +442,7 @@ skip = true
 
     #[test]
     fn antigravity_reads_mcp_settings_and_plugin_hooks() -> Result<()> {
-        let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR"))?;
+        let root = tempfile::tempdir()?;
         let plugin = root.path().join("plugins/test/hooks");
         fs::create_dir_all(&plugin)?;
         fs::write(

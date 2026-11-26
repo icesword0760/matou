@@ -1,9 +1,9 @@
 use std::{
     path::{Path, PathBuf},
-    process::Command,
     sync::{LazyLock, mpsc},
 };
 
+use matou_native_core::git_repo::{git_command, git_status_porcelain};
 use regex::Regex;
 
 use serde_json::Value;
@@ -44,22 +44,12 @@ pub(crate) fn start_git_snapshot(cwd: PathBuf) -> std::io::Result<mpsc::Receiver
 }
 
 fn git_modified_files(cwd: &Path) -> Vec<String> {
-    let Ok(output) = Command::new("git")
-        .current_dir(cwd)
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
-        .output()
-    else {
+    let Ok(status) = git_status_porcelain(cwd) else {
         return Vec::new();
     };
-    if !output.status.success() {
-        return Vec::new();
-    }
-    let repo_root = Command::new("git")
-        .current_dir(cwd)
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
+    let repo_root = git_command(cwd)
         .ok()
+        .and_then(|mut command| command.args(["rev-parse", "--show-toplevel"]).output().ok())
         .filter(|output| output.status.success())
         .map(|output| {
             PathBuf::from(
@@ -69,7 +59,7 @@ fn git_modified_files(cwd: &Path) -> Vec<String> {
             )
         });
     let repo_root = repo_root.as_deref().unwrap_or(cwd);
-    let mut entries = output.stdout.split(|byte| *byte == 0);
+    let mut entries = status.split(|byte| *byte == 0);
     let mut files = Vec::new();
     while let Some(entry) = entries.next().filter(|entry| entry.len() > 3) {
         for path in std::iter::once(&entry[3..]).chain(
@@ -160,10 +150,6 @@ pub(crate) fn recent_log_ids(root: &Path, session: &str) -> Vec<String> {
         .take(LOG_LIMIT)
         .map(|log| log.id)
         .collect()
-}
-
-fn clip(text: &str, max: usize) -> &str {
-    &text[..text.floor_char_boundary(text.len().min(max))]
 }
 
 #[cfg(test)]

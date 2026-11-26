@@ -97,6 +97,10 @@ pub(crate) fn account_env(
     country: Option<&str>,
     env: impl Fn(&str) -> Option<OsString>,
 ) -> Vec<(&'static str, OsString)> {
+    if !crate::browser_integration::prefers_controlled_browser(data_root) {
+        return Vec::new();
+    }
+
     let external: Vec<_> = ACCOUNT_ENV_KEYS
         .into_iter()
         .filter_map(|key| env(key).map(|value| (key, value)))
@@ -401,13 +405,16 @@ mod tests {
             assert!(account_env(root.path(), None, env).is_empty());
             fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))?;
         }
+        assert!(account_env(root.path(), Some("JP"), env).is_empty());
+        assert!(!root.path().join(SEED_FILE).exists());
+        crate::browser_integration::set_controlled_browser_preference(root.path(), true)?;
         let first = account_env(root.path(), Some("JP"), env);
         let next = account_env(root.path(), Some("GB"), env);
         let seed = load_or_create_fingerprint_seed(root.path())?.to_string();
         assert_eq!(
             first,
             [
-                ("MATOU_SAFE_BROWSER_BIN", executable.into_os_string()),
+                ("MATOU_SAFE_BROWSER_BIN", executable.clone().into_os_string()),
                 ("MATOU_SAFE_BROWSER_TZ", "Asia/Tokyo".into()),
                 ("MATOU_SAFE_BROWSER_SEED", seed.clone().into()),
             ]
@@ -415,12 +422,15 @@ mod tests {
         assert_eq!(next[0], first[0]);
         assert_eq!(next[1], ("MATOU_SAFE_BROWSER_TZ", "Europe/London".into()));
         assert_eq!(next[2], first[2]);
+        crate::browser_integration::set_controlled_browser_preference(root.path(), false)?;
+        assert!(account_env(root.path(), Some("JP"), env).is_empty());
         Ok(())
     }
 
     #[test]
     fn account_env_preserves_a_complete_external_override() -> Result<()> {
         let root = tempfile::tempdir()?;
+        crate::browser_integration::set_controlled_browser_preference(root.path(), true)?;
         let external = [
             ("MATOU_SAFE_BROWSER_BIN", OsString::from("/fixture/browser")),
             ("MATOU_SAFE_BROWSER_TZ", "America/Los_Angeles".into()),

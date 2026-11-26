@@ -206,21 +206,31 @@ pub(crate) fn resolve_executable(
     cwd: &Path,
     environment: &BTreeMap<OsString, OsString>,
 ) -> Option<PathBuf> {
+    #[cfg(windows)]
+    let check = |path: PathBuf| {
+        if path.extension().is_some() {
+            return executable_at(path);
+        }
+        let extensions = get_var(environment, "PATHEXT").unwrap_or(OsStr::new(".EXE;.CMD;.BAT"));
+        std::env::split_paths(extensions)
+            .filter_map(|extension| extension.to_str()?.strip_prefix('.').map(str::to_owned))
+            .filter(|extension| ["exe", "cmd", "bat"].iter().any(|allowed| extension.eq_ignore_ascii_case(allowed)))
+            .chain(["exe".to_owned(), "cmd".to_owned()])
+            .find_map(|extension| executable_at(path.with_extension(extension)))
+    };
+    #[cfg(not(windows))]
+    let check = executable_at;
     if path.file_name() != Some(path.as_os_str()) {
-        return executable_at(cwd.join(path));
+        return check(cwd.join(path));
     }
     get_var(environment, "PATH")
         .into_iter()
         .flat_map(std::env::split_paths)
         .filter(|dir| !dir.as_os_str().is_empty())
-        .find_map(|dir| executable_at(cwd.join(dir).join(path)))
+        .find_map(|dir| check(cwd.join(dir).join(path)))
 }
 
 fn executable_at(path: PathBuf) -> Option<PathBuf> {
-    #[cfg(windows)]
-    if path.extension().is_none() {
-        return executable_at(path.with_extension("exe"));
-    }
     if !path.is_file() {
         return None;
     }
@@ -232,6 +242,29 @@ fn executable_at(path: PathBuf) -> Option<PathBuf> {
         }
     }
     Some(path)
+}
+
+#[cfg(windows)]
+pub(crate) fn is_batch(path: &Path) -> bool {
+    path.extension().and_then(OsStr::to_str).is_some_and(|extension| {
+        extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
+    })
+}
+
+#[cfg(windows)]
+pub(crate) fn run_batch_agent(args: impl IntoIterator<Item = OsString>) -> i32 {
+    let mut args = args.into_iter();
+    let Some(path) = args.next().map(PathBuf::from) else { return 2 };
+    if !path.is_absolute() || !is_batch(&path) || !path.is_file() {
+        return 2;
+    }
+    match std::process::Command::new(path).args(args).status() {
+        Ok(status) => status.code().unwrap_or(1),
+        Err(error) => {
+            eprintln!("{error}");
+            1
+        }
+    }
 }
 
 #[cfg(test)]

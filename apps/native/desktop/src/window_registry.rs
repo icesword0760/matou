@@ -21,6 +21,8 @@ impl WindowRegistry {
                 self.reopen = true;
                 return;
             }
+            #[cfg(windows)]
+            OpenRequest::Notification(_) => return,
         };
         for path in paths {
             if !self.pending.contains(&path) {

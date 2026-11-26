@@ -19,6 +19,7 @@ use anyhow::{Context, Result, bail};
 use matou_native_core::context_optimizer_config::{
     ContextOptimizerConfig, DEFAULT_MAX_LOG_BYTES, KNOWN_AGENT_IDS,
 };
+use matou_native_core::git_repo::git_status_porcelain;
 
 use crate::context_guard::{
     filter::{
@@ -43,6 +44,7 @@ Usage:
   mt ctx index <file> [--session <id>] [--data-root <path>]
   mt ctx log <id> [--offset <bytes>] [--data-root <path>]
   mt ctx search <query> [--source <id>] [--limit <n>] [--session <id>] [--data-root <path>]
+  mt ctx git
   mt ctx resume [--session <id>] [--data-root <path>]
   mt ctx exec [--session <id>] [--data-root <path>] [--max-bytes <n>] [--agent <id>] -- <command...>
 ";
@@ -61,6 +63,10 @@ pub fn run_ctx_command(args: &[String], default_data_root: Option<&Path>) -> Res
         "index" => cmd_index(rest, default_data_root)?,
         "log" => cmd_log(rest, default_data_root)?,
         "search" => cmd_search(rest, default_data_root)?,
+        "git" => {
+            anyhow::ensure!(rest.is_empty(), "Usage: mt ctx git");
+            git_changed_files(&env::current_dir()?)?
+        }
         "resume" => cmd_resume(rest, default_data_root)?,
         other => bail!("Unknown `mt ctx` subcommand: {other}\n\n{CTX_HELP}"),
     };
@@ -504,7 +510,10 @@ fn cmd_resume(args: &[String], default_data_root: Option<&Path>) -> Result<Strin
     let logs = store.list_session_logs(&session_id, 10)?;
     let session_label = &session_id[..session_id.floor_char_boundary(200)];
     let mut out = format!("Post-compact resume clues for session `{session_label}`:\n");
-    if let Some(changes) = git_changed_files() {
+    if let Some(changes) = env::current_dir()
+        .ok()
+        .and_then(|cwd| git_changed_files(&cwd).ok())
+    {
         out.push_str(&changes);
     }
     out.push_str("\nRecent saved logs and command status:\n");
@@ -534,23 +543,14 @@ fn cmd_resume(args: &[String], default_data_root: Option<&Path>) -> Result<Strin
     Ok(out)
 }
 
-fn git_changed_files() -> Option<String> {
-    let output = Command::new("git")
-        .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .stdin(Stdio::null())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-
+fn git_changed_files(cwd: &Path) -> Result<String> {
+    let output = git_status_porcelain(cwd)?;
     let mut out = "\nGit changed files:\n".to_owned();
-    if output.stdout.is_empty() {
+    if output.is_empty() {
         out.push_str("(working tree clean)\n");
-        return Some(out);
+        return Ok(out);
     }
-    let mut items = output.stdout.split(|&byte| byte == 0);
+    let mut items = output.split(|&byte| byte == 0);
     while let Some(item) = items.next().filter(|item| item.len() >= 3) {
         let status = String::from_utf8_lossy(&item[..2]);
         let path = String::from_utf8_lossy(&item[3..]);
@@ -573,7 +573,7 @@ fn git_changed_files() -> Option<String> {
         }
         out.push_str(&entry);
     }
-    Some(out)
+    Ok(out)
 }
 
 fn resolve_session_id(explicit: Option<&str>) -> String {

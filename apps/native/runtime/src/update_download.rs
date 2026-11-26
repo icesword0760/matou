@@ -14,6 +14,8 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+mod windows;
+
 pub const CHECK_RETRY_DELAYS_MS: &[u64] = &[600, 1_600];
 const PROGRESS_INTERVAL_MS: u64 = 100;
 
@@ -88,6 +90,50 @@ fn resolve_manual_download(
         expected_sha256: file.sha256.clone().filter(|hash| !hash.is_empty()),
         expected_sha512: file.sha512.clone().filter(|hash| !hash.is_empty()),
     })
+}
+
+fn resolve_windows_download(
+    manifest: &Manifest,
+    feed: &FeedConfiguration,
+    arch: Architecture,
+) -> Result<Option<ManualDownload>, UpdateError> {
+    let base = feed.manifest_url(Platform::Win32, arch, 0)?;
+    let matching = manifest.files.iter().filter_map(|file| {
+        let url = base.join(file.url.as_deref()?).ok()?;
+        let name = percent_decode_str(url.path_segments()?.next_back()?)
+            .decode_utf8()
+            .ok()?;
+        let priority = windows::installer_name_priority(&name, &manifest.version, arch)?;
+        Some((priority, url, file))
+    });
+    let invalid = || UpdateError {
+        code: Some("ERR_UPDATER_INVALID_INSTALLER"),
+        message:
+            "The update manifest has no matching Windows installer with a valid SHA-512 checksum"
+                .into(),
+    };
+    let mut best = None;
+    for (priority, url, file) in matching {
+        match &best {
+            None => best = Some((priority, url, file)),
+            Some((previous, _, _)) if priority > *previous => {
+                best = Some((priority, url, file));
+            }
+            _ => {}
+        }
+    }
+    let (_, url, file) = best.ok_or_else(invalid)?;
+    let expected_sha512 = file
+        .sha512
+        .as_deref()
+        .filter(|value| windows::valid_sha512(value))
+        .ok_or_else(invalid)?;
+    Ok(Some(ManualDownload {
+        url,
+        size: file.size,
+        expected_sha256: file.sha256.clone().filter(|hash| !hash.is_empty()),
+        expected_sha512: Some(expected_sha512.to_owned()),
+    }))
 }
 
 fn normalize_notes(notes: Option<ManifestNotes>) -> Vec<String> {
@@ -306,6 +352,7 @@ pub trait UpdateFetcher {
 }
 
 pub trait PendingUpdateFile: Write {
+    fn verify_windows_installer(&mut self, arch: Architecture, version: &str) -> io::Result<()>;
     fn commit(self) -> io::Result<PathBuf>;
 }
 
@@ -346,6 +393,10 @@ impl Write for LocalPendingFile {
 }
 
 impl PendingUpdateFile for LocalPendingFile {
+    fn verify_windows_installer(&mut self, arch: Architecture, version: &str) -> io::Result<()> {
+        windows::verify_installer(self.staging.path(), arch, version)
+    }
+
     fn commit(self) -> io::Result<PathBuf> {
         self.staging.persist(&self.destination)?;
         Ok(self.destination)
@@ -403,10 +454,12 @@ fn download_manual(
     request: &ManualDownload,
     fetcher: &impl UpdateFetcher,
     files: &impl UpdateFileWriter,
-    locale: UpdateLocale,
+    options: &UpdateOptions,
+    version: &str,
     mut now: impl FnMut() -> u64,
     mut on_progress: impl FnMut(Progress),
 ) -> Result<PathBuf, String> {
+    let locale = options.locale;
     let response = fetcher.fetch(request).map_err(|error| error.to_string())?;
     if !(200..300).contains(&response.status) {
         return Err(locale.download_http(response.status));
@@ -422,7 +475,7 @@ fn download_manual(
     let mut last_progress_at = started_at;
     let mut file = files.create(&filename).map_err(|error| error.to_string())?;
     let mut transferred = 0;
-    let total = response.content_length.unwrap_or(0);
+    let total = response.content_length.or(request.size).unwrap_or(0);
     let mut checksums = DownloadChecksums::default();
     let mut buffer = vec![0; 64 * 1024];
     loop {
@@ -456,6 +509,16 @@ fn download_manual(
             .text("更新文件下载中断", "Update download was interrupted")
             .into());
     }
+    if matches!(options.platform, Platform::Win32)
+        && request.size.is_some_and(|length| length != transferred)
+    {
+        return Err(locale
+            .text(
+                "安装包大小与更新清单不符",
+                "Installer size does not match the update manifest",
+            )
+            .into());
+    }
     if !checksums.matches(
         request.expected_sha256.as_deref(),
         request.expected_sha512.as_deref(),
@@ -468,6 +531,10 @@ fn download_manual(
             .into());
     }
     file.flush().map_err(|error| error.to_string())?;
+    if matches!(options.platform, Platform::Win32) {
+        file.verify_windows_installer(options.arch, version)
+            .map_err(|error| error.to_string())?;
+    }
     let path = file.commit().map_err(|error| error.to_string())?;
     on_progress(Progress::streaming(
         transferred,
@@ -592,10 +659,23 @@ impl UpdateManager {
                 )?;
                 let manifest = fetcher.check(&url)?;
                 let available = self.current_version.offers(&manifest.version)?;
-                Ok((manifest, available))
+                let manual_download = if !available {
+                    None
+                } else if matches!(self.options.platform, Platform::Win32)
+                    && self.options.install_mode == InstallMode::Manual
+                {
+                    resolve_windows_download(&manifest, &self.options.feed, self.options.arch)?
+                } else {
+                    resolve_manual_download(
+                        &manifest.files,
+                        &self.options.feed,
+                        fetcher.installer_extension(),
+                    )
+                };
+                Ok((manifest, available, manual_download))
             })();
             match result {
-                Ok((manifest, available)) => {
+                Ok((manifest, available, manual_download)) => {
                     let result = CheckResult {
                         is_update_available: available,
                         update_info: CheckVersion {
@@ -603,7 +683,7 @@ impl UpdateManager {
                         },
                     };
                     if available {
-                        self.accept_release(manifest, fetcher.installer_extension(), &mut publish);
+                        self.accept_release(manifest, manual_download, &mut publish);
                     } else {
                         self.publish(UpdatePhase::NotAvailable, &mut publish);
                     }
@@ -627,11 +707,9 @@ impl UpdateManager {
     fn accept_release(
         &self,
         manifest: Manifest,
-        extension: &str,
+        manual_download: Option<ManualDownload>,
         publish: &mut impl FnMut(UpdateState),
     ) {
-        let manual_download =
-            resolve_manual_download(&manifest.files, &self.options.feed, extension);
         let first_size = manifest.files.iter().find_map(|file| file.size);
         let size = match self.options.install_mode {
             InstallMode::Manual => manual_download
@@ -741,9 +819,17 @@ impl UpdateManager {
         };
         let result = if let Some(manual) = &manual {
             progress(Progress::new(0.0, 0, release.size_bytes.unwrap_or(0), 0));
-            download_manual(manual, fetcher, files, self.options.locale, now, progress)
-                .map(Some)
-                .map_err(DownloadError::Rejected)
+            download_manual(
+                manual,
+                fetcher,
+                files,
+                &self.options,
+                &release.version,
+                now,
+                progress,
+            )
+            .map(Some)
+            .map_err(DownloadError::Rejected)
         } else {
             fetcher
                 .download_automatic(&release, &mut progress)
@@ -777,15 +863,17 @@ impl UpdateManager {
             .operation
             .try_lock()
             .map_err(|_| anyhow::anyhow!("Another update operation is in progress"))?;
-        let path = {
+        let (path, version, manual) = {
             let state = self.state.lock().unwrap();
-            anyhow::ensure!(
-                matches!(state.phase, UpdatePhase::Downloaded { .. }),
-                "No downloaded update installer is ready to open"
-            );
-            state.manual_path.clone()
-        }
-        .ok_or_else(|| anyhow::anyhow!("No downloaded installer path is available"))?;
+            let UpdatePhase::Downloaded { release } = &state.phase else {
+                anyhow::bail!("No downloaded update installer is ready to open");
+            };
+            let path = state
+                .manual_path
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("No downloaded installer path is available"))?;
+            (path, release.version.clone(), state.manual_download.clone())
+        };
         let extension = match self.options.platform {
             Platform::Darwin => "dmg",
             Platform::Win32 => "exe",
@@ -817,6 +905,33 @@ impl UpdateManager {
                 .is_some_and(|value| value.eq_ignore_ascii_case(extension)),
             "Downloaded installer must have a .{extension} extension"
         );
+        if matches!(self.options.platform, Platform::Win32) {
+            let manual = manual.context("Windows update verification metadata is unavailable")?;
+            windows::verify_installer(&path, self.options.arch, &version)?;
+            let mut file = std::fs::File::open(&path)?;
+            anyhow::ensure!(
+                manual
+                    .size
+                    .is_none_or(|size| file.metadata().is_ok_and(|info| info.len() == size)),
+                "Downloaded installer size does not match the update manifest"
+            );
+            let mut checksums = DownloadChecksums::default();
+            let mut buffer = [0; 64 * 1024];
+            loop {
+                let count = file.read(&mut buffer)?;
+                if count == 0 {
+                    break;
+                }
+                checksums.update(&buffer[..count]);
+            }
+            anyhow::ensure!(
+                checksums.matches(
+                    manual.expected_sha256.as_deref(),
+                    manual.expected_sha512.as_deref()
+                ),
+                "Downloaded installer integrity check failed"
+            );
+        }
         open(&path)
     }
 

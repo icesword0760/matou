@@ -169,13 +169,9 @@ exec /bin/sleep 60
         assert_eq!(stop["type"], "http", "{entry}");
         assert_eq!(stop["url"], url, "{entry}");
         assert_eq!(start["type"], "command", "{entry}");
-        assert!(
-            start["command"]
-                .as_str()
-                .context("SessionStart command")?
-                .contains(url),
-            "{entry}"
-        );
+        let command = start["command"].as_str().context("SessionStart executable")?;
+        assert!(Path::new(command).is_absolute(), "{entry}");
+        assert_eq!(start["args"], json!(["--hook", "claude-session-start"]), "{entry}");
         let hud = &payload["statusLine"];
         assert_eq!(hud["type"], "command", "{entry}");
         assert_eq!(hud["padding"], 0, "{entry}");

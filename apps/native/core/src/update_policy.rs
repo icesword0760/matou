@@ -9,6 +9,8 @@ use url::Url;
 
 pub const DEFAULT_UPDATE_BASE_URL: &str =
     "https://github.com/icesword0760/matou/releases/latest/download";
+pub const WINDOWS_ARM64_UPDATE_BASE_URL: &str = "https://updates.baize-ailabs.com/stable/win-arm64";
+const WINDOWS_X64_RELEASE_BASE_URL: &str = "https://updates.baize-ailabs.com/stable";
 
 #[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -18,7 +20,7 @@ pub enum Platform {
     Linux,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Architecture {
     #[default]
@@ -116,6 +118,20 @@ impl FeedConfiguration {
         unix_ms: u64,
     ) -> Result<Url, PolicyError> {
         let mut base = self.base_url()?;
+        if matches!((platform, arch), (Platform::Win32, Architecture::Arm64)) {
+            let mut address = base.clone();
+            address.set_query(None);
+            address.set_fragment(None);
+            if matches!(
+                address.as_str().trim_end_matches('/'),
+                DEFAULT_UPDATE_BASE_URL | WINDOWS_X64_RELEASE_BASE_URL
+            ) {
+                let mut replacement =
+                    Url::parse(WINDOWS_ARM64_UPDATE_BASE_URL).map_err(|_| invalid_url())?;
+                replacement.set_query(base.query());
+                base = replacement;
+            }
+        }
         if !base.path().ends_with('/') {
             base.path_segments_mut()
                 .map_err(|_| invalid_url())?
@@ -596,6 +612,30 @@ mod tests {
                 format!(
                     "https://github.com/icesword0760/matou/releases/latest/download/{asset}?noCache=1a"
                 )
+            );
+        }
+    }
+
+    #[test]
+    fn windows_arm64_uses_an_independent_stable_path_with_no_x64_fallback() {
+        for base in [
+            DEFAULT_UPDATE_BASE_URL,
+            WINDOWS_X64_RELEASE_BASE_URL,
+            WINDOWS_ARM64_UPDATE_BASE_URL,
+        ] {
+            let configured = format!("{base}/?probe=1");
+            let feed = FeedConfiguration::resolve(Some(&configured), None, None);
+            assert_eq!(
+                feed.manifest_url(Platform::Win32, Architecture::Arm64, 42)
+                    .unwrap()
+                    .as_str(),
+                format!("{WINDOWS_ARM64_UPDATE_BASE_URL}/stable.yml?probe=1")
+            );
+            assert_eq!(
+                feed.manifest_url(Platform::Win32, Architecture::X64, 42)
+                    .unwrap()
+                    .as_str(),
+                format!("{base}/stable.yml?probe=1")
             );
         }
     }

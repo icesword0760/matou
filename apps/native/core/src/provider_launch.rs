@@ -3148,7 +3148,7 @@ fn search_command_with_file_filter(
             if path.extension().is_some() {
                 return None;
             }
-            let extensions = get_var(environment, "PATHEXT").unwrap_or(OsStr::new(".EXE"));
+            let extensions = get_var(environment, "PATHEXT").unwrap_or(OsStr::new(".EXE;.CMD;.BAT"));
             std::env::split_paths(extensions)
                 .filter_map(|ext| {
                     ext.to_str()

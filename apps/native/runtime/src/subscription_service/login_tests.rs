@@ -177,6 +177,7 @@ fn credential_state(path: &std::path::Path) -> Result<Value> {
 fn codex_callback_draft_relogin_rollback_and_delete() -> Result<()> {
     let fixture = Fixture::new("", LOGIN_TIMEOUT)?;
     let service = &fixture.service;
+    browser_integration::set_controlled_browser_preference(&service.root, true)?;
     let kind = SubscriptionProvider::ChatGpt;
     service.begin_settings(1)?;
     service.begin_settings(2)?;

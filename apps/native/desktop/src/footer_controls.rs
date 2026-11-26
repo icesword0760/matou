@@ -3,10 +3,16 @@
 // and TerminalHud.tsx (QuotaDetailWindows).
 use super::*;
 use crate::terminal_surface::session_history_seam::local_time::local_date_time_with_year;
-use matou_native_core::git_repo::{GitStatusDetail, LocalBranch};
+use matou_native_core::git_repo::{GIT_NOT_INSTALLED, GitStatusDetail, LocalBranch};
 use matou_native_runtime::claude_accounts::ClaudeAccountsState;
 use matou_native_runtime::host::{GitFailure, GitReply};
 use std::collections::BTreeMap;
+
+const GIT_INSTALL_URL: &str = if cfg!(windows) {
+    "https://git-scm.com/install/windows"
+} else {
+    "https://git-scm.com/install/mac"
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum FooterMenu {
@@ -293,6 +299,7 @@ enum GitAction {
 
 struct GitMenu {
     status: Option<GitStatusDetail>,
+    missing_executable: bool,
     session_counts: BTreeMap<PathBuf, usize>,
     view: GitView,
     search: Entity<RenameInput>,
@@ -524,6 +531,7 @@ impl Workspace {
             );
             GitMenu {
                 status: None,
+                missing_executable: false,
                 session_counts: BTreeMap::new(),
                 view: GitView::Branches,
                 search,
@@ -1323,12 +1331,23 @@ impl Workspace {
             }
             match reply.result {
                 Ok(status) => {
+                    git.missing_executable = false;
                     git.status = Some(status);
                     git.session_counts = reply.worktree_session_counts;
                     git.notice = request.action.notice(self.locale);
                 }
                 Err(error) => {
-                    popup.error = Some(localized_git_error(self.locale, request.action, &error))
+                    git.missing_executable = error.code == GIT_NOT_INSTALLED;
+                    if git.missing_executable {
+                        git.status = None;
+                        git.view = GitView::Branches;
+                        if window.window_handle() == request.handle
+                            && git.search.read(cx).focus.is_focused(window)
+                        {
+                            window.focus(&self.control_focus[FooterMenu::Git.id()]);
+                        }
+                    }
+                    popup.error = Some(localized_git_error(self.locale, request.action, &error));
                 }
             }
         }
@@ -1743,12 +1762,23 @@ impl Workspace {
                 .into_iter()
                 .flatten()
                 .all(|state| state == "ready");
+        let git_missing = result["gitAvailable"].as_bool().map_or_else(
+            || {
+                environment["error"] == GIT_NOT_INSTALLED
+                    || matches!(
+                        self.environment_actions.get(&popup.session),
+                        Some(EnvironmentActionState::Failed(reason)) if reason == GIT_NOT_INSTALLED
+                    )
+            },
+            |available| !available,
+        );
         let warning = environment["error"]
             .as_str()
             .map(|reason| environment_warning(reason, locale))
             .or_else(|| match result["state"].as_str() {
                 Some("missing") => Some(locale.text("目录不存在", "Directory missing")),
                 Some("unavailable") => Some(locale.text("环境不可用", "Environment unavailable")),
+                _ if git_missing => Some(git_missing_message(locale)),
                 _ => None,
             });
         let (bg, border, divider, text, path_bg, button_bg) = if dark {
@@ -1968,6 +1998,30 @@ impl Workspace {
                             .text_color(rgba(if dark { 0xe3b866ff } else { 0x8b5a12ff }))
                             .child(ui_text(warning.to_owned()))
                     }))
+                    .children(git_missing.then(|| {
+                        let colors = GitColors::new(dark);
+                        div()
+                            .flex()
+                            .gap(px(7.))
+                            .child(self.git_button(
+                                "hud-environment-git-install",
+                                git_label(locale.text("安装 Git", "Install Git")),
+                                true,
+                                colors,
+                                window,
+                                cx,
+                                |_, _, cx| cx.open_url(GIT_INSTALL_URL),
+                            ))
+                            .child(self.git_button(
+                                "hud-environment-git-refresh",
+                                git_label(locale.text("刷新", "Refresh")),
+                                popup.request.is_none(),
+                                colors,
+                                window,
+                                cx,
+                                Self::request_footer_diagnostics,
+                            ))
+                    }))
                     .child(actions)
                     .children(recovery),
             )
@@ -2006,24 +2060,12 @@ impl Workspace {
         let git = popup.git.as_ref().expect("Git popover state");
         let colors = GitColors::new(dark);
         let viewport = window.viewport_size();
-        let view = match (git.view, &git.status) {
-            (GitView::Branches, _) | (_, None) => self.git_branches(git, colors, window, cx),
-            (GitView::CreateBranch | GitView::CreateWorktree, Some(status)) => {
-                self.git_create(git, status, colors, window, cx)
-            }
-            (GitView::Worktrees, Some(status)) => {
-                self.git_worktrees(git, status, colors, window, cx)
-            }
-            (GitView::Commit, Some(status)) => {
-                self.git_commit_panel(git, status, colors, window, cx)
-            }
-        };
         let feedback = popup
             .error
             .as_deref()
             .or_else(|| git.busy.map(|(_, action)| action.pending(self.locale)))
             .or(git.notice);
-        div()
+        let panel = div()
             .w((viewport.width - px(28.)).min(px(316.)).max(px(0.)))
             .max_h((viewport.height - px(66.)).min(px(390.)).max(px(0.)))
             .overflow_hidden()
@@ -2043,7 +2085,75 @@ impl Workspace {
                     shadow(0x171c23, 0.20, 16., 44.),
                     shadow(0x171c23, 0.10, 2., 8.),
                 ]
-            })
+            });
+        if git.missing_executable {
+            let locale = self.locale;
+            let refreshing = git.busy.is_some();
+            return panel.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .p(px(12.))
+                    .gap(px(5.))
+                    .child(
+                        div()
+                            .font_weight(FontWeight::BOLD)
+                            .child(ui_text(locale.text("未找到 Git", "Git was not found"))),
+                    )
+                    .child(div().text_color(rgba(colors.muted)).child(ui_text(
+                        locale.text("安装 Git 后点刷新。", "Install Git, then select Refresh."),
+                    )))
+                    .child(
+                        div()
+                            .mt(px(5.))
+                            .flex()
+                            .gap(px(7.))
+                            .child(
+                                self.git_button(
+                                    "hud-menu-git-install",
+                                    git_label(locale.text("安装 Git", "Install Git")),
+                                    true,
+                                    colors,
+                                    window,
+                                    cx,
+                                    |_, _, cx| cx.open_url(GIT_INSTALL_URL),
+                                )
+                                .h(px(28.))
+                                .border_1()
+                                .border_color(rgba(colors.line)),
+                            )
+                            .child(
+                                self.git_button(
+                                    "hud-menu-git-refresh",
+                                    git_label(if refreshing {
+                                        locale.text("刷新中…", "Refreshing…")
+                                    } else {
+                                        locale.text("刷新", "Refresh")
+                                    }),
+                                    !refreshing,
+                                    colors,
+                                    window,
+                                    cx,
+                                    Self::refresh_footer_git,
+                                )
+                                .h(px(28.)),
+                            ),
+                    ),
+            );
+        }
+        let view = match (git.view, &git.status) {
+            (GitView::Branches, _) | (_, None) => self.git_branches(git, colors, window, cx),
+            (GitView::CreateBranch | GitView::CreateWorktree, Some(status)) => {
+                self.git_create(git, status, colors, window, cx)
+            }
+            (GitView::Worktrees, Some(status)) => {
+                self.git_worktrees(git, status, colors, window, cx)
+            }
+            (GitView::Commit, Some(status)) => {
+                self.git_commit_panel(git, status, colors, window, cx)
+            }
+        };
+        panel
             .child(div().min_h_0().pt(px(7.)).px(px(8.)).pb(px(8.)).child(view))
             .children(feedback.map(|feedback| {
                 let refresh = self.git_button(
@@ -3250,6 +3360,7 @@ fn localized_git_error(locale: InterfaceLocale, action: GitAction, error: &GitFa
             STORAGE_READ_ONLY_TITLE,
             "The database is in read-only recovery mode",
         ),
+        GIT_NOT_INSTALLED => git_missing_message(locale),
         "GIT_NOT_REPOSITORY" => locale.text(
             "当前目录不是 Git 仓库",
             "The current directory is not a Git repository",
@@ -3410,6 +3521,13 @@ fn git_form_field(
         .child(input.clone())
 }
 
+fn git_missing_message(locale: InterfaceLocale) -> &'static str {
+    locale.text(
+        "未找到 Git。安装后请刷新或重启码头。",
+        "Git was not found. Refresh or restart Matou after installing it.",
+    )
+}
+
 fn environment_warning(reason: &str, locale: InterfaceLocale) -> &str {
     if reason.starts_with("restore-failed:") {
         return locale.text("恢复 Worktree 失败", "Could not restore the worktree");
@@ -3421,6 +3539,7 @@ fn environment_warning(reason: &str, locale: InterfaceLocale) -> &str {
         return locale.text("切换运行环境失败", "Could not switch environments");
     }
     match reason {
+        GIT_NOT_INSTALLED => git_missing_message(locale),
         "path-missing" => locale.text("所选目录不存在", "The selected directory does not exist"),
         "not-worktree" => locale.text(
             "所选目录不是 Git Worktree",

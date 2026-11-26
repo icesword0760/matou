@@ -411,66 +411,44 @@ fn antigravity_plugin_install_update_and_repair() -> Result<()> {
     });
     let manifest = plugin.join("plugin.json");
     let hooks = plugin.join("hooks.json");
-    let hook = plugin.join("hooks/matou-hook.sh");
-    let start = plugin.join("hooks/session-start.sh");
     let stamp = plugin.join(".matou-plugin-version");
     let hooks_json: Value = serde_json::from_slice(&fs::read(&hooks)?)?;
-    for event in ["PreInvocation", "PostInvocation", "Stop"] {
-        assert_eq!(
-            hooks_json["matou"][event][0]["command"],
-            "./hooks/matou-hook.sh"
-        );
-    }
+    let runtime = std::env::current_exe()?;
     for (event, hint) in [
+        ("PreInvocation", "observe"),
+        ("PostInvocation", "observe"),
+        ("Stop", "observe"),
+        ("SessionStart", "session-start"),
         ("PreToolUse", "pre-tool-use"),
         ("PostToolUse", "post-tool-use"),
     ] {
-        assert_eq!(
-            hooks_json["matou"][event][0]["hooks"][0]["command"],
-            format!("./hooks/matou-hook.sh {hint}")
-        );
+        let handler = &hooks_json["matou"][event][0];
+        let command = handler["command"].as_str()
+            .or_else(|| handler["hooks"][0]["command"].as_str()).unwrap();
+        assert!(command.contains(&*runtime.to_string_lossy()));
+        assert!(command.ends_with(&format!(" --hook agy {hint}")));
     }
-    assert_eq!(
-        hooks_json["matou"]["SessionStart"][0]["command"],
-        "./hooks/session-start.sh"
-    );
+    assert!(!plugin.join("hooks").exists());
     assert_eq!(
         serde_json::from_slice::<Value>(&fs::read(&manifest)?)?["name"],
         "matou"
     );
     let expected_stamp = fs::read_to_string(&stamp)?;
-    assert_eq!(
-        expected_stamp,
-        "1.0.0:5ece83e5428063a43b3c3d52c4afed7a0bb6a55d263b9afa4e73386f86399dd6\n"
-    );
     let modified = fs::metadata(&stamp)?.modified()?;
-    let original = fs::read_to_string(&hook)?;
-    assert!(original.contains("kind=$event"));
-    assert!(original.contains("--max-time 1"));
-    assert!(!original.contains("node"));
-    assert!(fs::read_to_string(&start)?.contains("MATOU_ANTIGRAVITY_SYSTEM_MESSAGE_FILE"));
     ensure_plugin_installed(&plugin)?;
     assert_eq!(fs::metadata(&stamp)?.modified()?, modified);
 
+    fs::create_dir(plugin.join("hooks"))?;
     fs::write(plugin.join("hooks/extra.sh"), "user file")?;
     fs::write(&stamp, "0.9.0:obsolete\n")?;
     fs::write(&hooks, "{bad")?;
     ensure_plugin_installed(&plugin)?;
     assert_eq!(fs::read_to_string(&stamp)?, expected_stamp);
-    assert_eq!(
-        serde_json::from_slice::<Value>(&fs::read(&hooks)?)?,
-        hooks_json
-    );
-    // A valid stamp does not hide damaged content or a missing managed file.
-    fs::write(&hook, original.replace("exit 0", "exit 9"))?;
-    fs::remove_file(&start)?;
+    assert_eq!(serde_json::from_slice::<Value>(&fs::read(&hooks)?)?, hooks_json);
+    fs::remove_file(&hooks)?;
     ensure_plugin_installed(&plugin)?;
-    assert_eq!(fs::read_to_string(&hook)?, original);
-    assert!(start.is_file());
-    assert_eq!(
-        fs::read_to_string(plugin.join("hooks/extra.sh"))?,
-        "user file"
-    );
+    assert_eq!(serde_json::from_slice::<Value>(&fs::read(&hooks)?)?, hooks_json);
+    assert_eq!(fs::read_to_string(plugin.join("hooks/extra.sh"))?, "user file");
     assert!(ensure_plugin_installed(&third_party).is_err());
     assert_eq!(
         fs::read_to_string(third_party.join("plugin.json"))?,
@@ -478,26 +456,6 @@ fn antigravity_plugin_install_update_and_repair() -> Result<()> {
     );
     assert_eq!(fs::read_dir(third_party)?.count(), 1);
     assert_eq!(fs::read_dir(&plugin)?.count(), 4);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&hook, fs::Permissions::from_mode(0o644))?;
-        ensure_plugin_installed(&plugin)?;
-        assert_eq!(fs::metadata(&hook)?.permissions().mode() & 0o777, 0o755);
-        for script in [&hook, &start] {
-            assert!(
-                std::process::Command::new("/bin/sh")
-                    .args(["-n"])
-                    .arg(script)
-                    .status()?
-                    .success()
-            );
-            let output = std::process::Command::new(script).env_clear().output()?;
-            assert!(
-                output.status.success() && output.stdout.is_empty() && output.stderr.is_empty()
-            );
-        }
-    }
     Ok(())
 }
 

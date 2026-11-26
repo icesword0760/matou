@@ -13,7 +13,7 @@ use anyhow::{Context, Result, ensure};
 #[cfg(unix)]
 use matou_native_core::provider_launch::resolve_command_with_login_path;
 use serde::Serialize;
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::dsh_events::{js_whitespace, valid_session_id};
 
@@ -304,17 +304,7 @@ pub fn prepare(input: LaunchInput<'_>) -> Result<LaunchPlan> {
     #[cfg(unix)]
     let executable = resolve_command_with_login_path(command_path, &cwd, &mut environment).ok();
     #[cfg(not(unix))]
-    let executable = if command.is_empty() {
-        None
-    } else if command_path.file_name() != Some(&command) {
-        executable_at(cwd.join(command_path))
-    } else {
-        env_value(&environment, "PATH")
-            .into_iter()
-            .flat_map(std::env::split_paths)
-            .filter(|dir| !dir.as_os_str().is_empty())
-            .find_map(|dir| executable_at(cwd.join(dir).join(command_path)))
-    };
+    let executable = crate::codex_launch::resolve_executable(command_path, &cwd, &environment);
     let executable = executable.with_context(|| {
         let command = command.to_string_lossy();
         if env_value(&environment, "MATOU_LOCALE") == Some(OsStr::new("en")) {
@@ -365,18 +355,6 @@ fn checked_path(cwd: &Path, path: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
-#[cfg(not(unix))]
-fn executable_at(path: PathBuf) -> Option<PathBuf> {
-    #[cfg(windows)]
-    if path.extension().is_none() {
-        return executable_at(path.with_extension("exe"));
-    }
-    if !path.is_file() {
-        return None;
-    }
-    Some(path)
-}
-
 pub fn plugin_directory(home: &Path, environment: &BTreeMap<OsString, OsString>) -> PathBuf {
     if let Some(path) = env_value(environment, PLUGIN_OVERRIDE)
         .and_then(OsStr::to_str)
@@ -412,8 +390,7 @@ pub(crate) fn prepare_environment(
         shell_home.as_os_str().to_owned(),
     );
     environment.retain(|key, _| !env_key_eq(key, PLUGIN_OVERRIDE));
-    // The frozen plugin uses curl's environment to bypass inherited proxies
-    // on loopback requests. Keep any existing exclusions.
+    // Preserve loopback exclusions for the agent and its tools.
     let no_proxy = env_value(environment, "no_proxy")
         .or_else(|| env_value(environment, "NO_PROXY"))
         .unwrap_or_default()
@@ -429,8 +406,7 @@ pub(crate) fn prepare_environment(
     Ok(())
 }
 
-/// Install only the five Matou-managed files. All files are replaced atomically,
-/// and the completion stamp is written after the plugin content.
+/// Install the managed manifests atomically and publish the completion stamp last.
 pub fn ensure_plugin_installed(directory: &Path) -> Result<()> {
     static INSTALL: Mutex<()> = Mutex::new(());
     let _guard = INSTALL.lock().unwrap_or_else(|error| error.into_inner());
@@ -447,12 +423,14 @@ pub fn ensure_plugin_installed(directory: &Path) -> Result<()> {
     }
     check_owned_path(&directory.join("hooks"), true)?;
     let manifest = directory.join("plugin.json");
-    for (relative, _, _) in
-        PLUGIN_FILES
-            .iter()
-            .chain(std::iter::once(&(STAMP_PATH, PLUGIN_STAMP, 0o644)))
-    {
-        check_owned_path(&directory.join(relative), false)?;
+    let hooks = directory.join("hooks.json");
+    let stamp = directory.join(STAMP_PATH);
+    for path in [&manifest, &hooks, &stamp] {
+        check_owned_path(path, false)?;
+    }
+    // Continue to reject symlink replacements of previously managed files.
+    for name in ["hooks/matou-hook.sh", "hooks/session-start.sh"] {
+        check_owned_path(&directory.join(name), false)?;
     }
     if let Ok(bytes) = fs::read(&manifest)
         && let Ok(value) = serde_json::from_slice::<Value>(&bytes)
@@ -460,12 +438,13 @@ pub fn ensure_plugin_installed(directory: &Path) -> Result<()> {
     {
         ensure!(name == "matou", "Antigravity plugin belongs to {name}");
     }
-
-    if file_matches(&directory.join(STAMP_PATH), PLUGIN_STAMP, 0o644)
-        && PLUGIN_FILES
-            .iter()
-            .all(|(path, contents, mode)| file_matches(&directory.join(path), contents, *mode))
-    {
+    let hooks_json = plugin_hooks(&std::env::current_exe()?)?;
+    let files = [
+        (&manifest, PLUGIN_MANIFEST),
+        (&hooks, hooks_json.as_str()),
+        (&stamp, PLUGIN_STAMP),
+    ];
+    if files.iter().all(|(path, content)| file_matches(path, content, 0o644)) {
         return Ok(());
     }
     let mut directories = fs::DirBuilder::new();
@@ -475,11 +454,25 @@ pub fn ensure_plugin_installed(directory: &Path) -> Result<()> {
         use std::os::unix::fs::DirBuilderExt;
         directories.mode(0o755);
     }
-    directories.create(directory.join("hooks"))?;
-    for (path, contents, mode) in PLUGIN_FILES {
-        write_atomic(&directory.join(path), contents, mode)?;
+    directories.create(directory)?;
+    for (path, contents) in files {
+        write_atomic(path, contents, 0o644)?;
     }
-    write_atomic(&directory.join(STAMP_PATH), PLUGIN_STAMP, 0o644)
+    Ok(())
+}
+
+fn plugin_hooks(runtime: &Path) -> Result<String> {
+    let hook = |event| -> Result<Value> {
+        Ok(json!({"command": crate::native_hooks::antigravity_command(runtime, event)?}))
+    };
+    Ok(serde_json::to_string_pretty(&json!({"matou": {
+        "SessionStart": [hook("session-start")?],
+        "PreInvocation": [hook("observe")?],
+        "PostInvocation": [hook("observe")?],
+        "PreToolUse": [{"hooks": [hook("pre-tool-use")?]}],
+        "PostToolUse": [{"hooks": [hook("post-tool-use")?]}],
+        "Stop": [hook("observe")?]
+    }}))?)
 }
 
 fn check_owned_path(path: &Path, directory: bool) -> Result<()> {
@@ -538,105 +531,7 @@ const PLUGIN_MANIFEST: &str = r#"{
 }
 "#;
 
-const HOOKS: &str = r#"{
-  "matou": {
-    "SessionStart": [
-      {
-        "command": "./hooks/session-start.sh"
-      }
-    ],
-    "PreInvocation": [
-      {
-        "command": "./hooks/matou-hook.sh"
-      }
-    ],
-    "PostInvocation": [
-      {
-        "command": "./hooks/matou-hook.sh"
-      }
-    ],
-    "PreToolUse": [
-      {
-        "hooks": [
-          {
-            "command": "./hooks/matou-hook.sh pre-tool-use"
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "hooks": [
-          {
-            "command": "./hooks/matou-hook.sh post-tool-use"
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "command": "./hooks/matou-hook.sh"
-      }
-    ]
-  }
-}
-"#;
-
-const MATOU_HOOK: &str = r#"#!/bin/sh
-[ -n "${MATOU_PROVIDER_HOOK_URL:-}" ] || exit 0
-[ -n "${MATOU_PROVIDER_HOOK_TOKEN:-}" ] || exit 0
-payload=$(cat; printf '.')
-payload=${payload%.}
-event=${1:-}
-if [ -z "$event" ] && printf '%s' "$payload" | grep -Eq '"hookEventName"[[:space:]]*:[[:space:]]*"PreToolUse"'; then
-  event=pre-tool-use
-fi
-url=$MATOU_PROVIDER_HOOK_URL
-case "$event" in
-  pre-tool-use|post-tool-use)
-    case "$url" in
-      *\?*) url="$url&kind=$event" ;;
-      *) url="$url?kind=$event" ;;
-    esac ;;
-esac
-if [ "$event" = pre-tool-use ]; then
-  decision=$(printf '%s' "$payload" | /usr/bin/curl --disable --noproxy '*' --silent --fail --max-time 1 \
-    --request POST --header 'content-type: application/json' \
-    --data-binary @- "$url" 2>/dev/null && printf '.') || exit 0
-  printf '%s' "${decision%.}"
-  exit 0
-fi
-(
-  printf '%s' "$payload" | /usr/bin/curl --disable --noproxy '*' --silent --max-time 2 \
-    --request POST --header 'content-type: application/json' \
-    --data-binary @- "$url" >/dev/null 2>&1
-) </dev/null >/dev/null 2>&1 &
-exit 0
-"#;
-
-const SESSION_START: &str = r#"#!/bin/sh
-[ -n "${MATOU_PROVIDER_HOOK_URL:-}" ] || exit 0
-[ -n "${MATOU_PROVIDER_HOOK_TOKEN:-}" ] || exit 0
-payload=$(cat)
-(
-  printf '%s' "$payload" | /usr/bin/curl --silent --show-error --max-time 2 \
-    --request POST --header 'content-type: application/json' \
-    --data-binary @- "${MATOU_PROVIDER_HOOK_URL}" >/dev/null 2>&1
-) </dev/null >/dev/null 2>&1 &
-if [ -n "${MATOU_ANTIGRAVITY_SYSTEM_MESSAGE_FILE:-}" ] && [ -r "$MATOU_ANTIGRAVITY_SYSTEM_MESSAGE_FILE" ]; then
-  cat "$MATOU_ANTIGRAVITY_SYSTEM_MESSAGE_FILE"
-fi
-exit 0
-"#;
-
-const PLUGIN_FILES: [(&str, &str, u32); 4] = [
-    ("plugin.json", PLUGIN_MANIFEST, 0o644),
-    ("hooks.json", HOOKS, 0o644),
-    ("hooks/matou-hook.sh", MATOU_HOOK, 0o755),
-    ("hooks/session-start.sh", SESSION_START, 0o755),
-];
-const PLUGIN_STAMP: &str =
-    "1.0.0:5ece83e5428063a43b3c3d52c4afed7a0bb6a55d263b9afa4e73386f86399dd6\n";
+const PLUGIN_STAMP: &str = "2.0.0:native-hooks\n";
 
 #[cfg(test)]
 mod tests {

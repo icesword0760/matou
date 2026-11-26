@@ -104,6 +104,8 @@ impl std::fmt::Display for GitActionError {
 
 impl std::error::Error for GitActionError {}
 
+pub const GIT_NOT_INSTALLED: &str = "GIT_NOT_INSTALLED";
+
 fn require_repository(cwd: &Path) -> Result<Repository> {
     Repository::discover(cwd)?.ok_or_else(|| GitActionError("GIT_NOT_REPOSITORY").into())
 }
@@ -522,6 +524,7 @@ pub fn is_dirty(cwd: &Path) -> Option<bool> {
     }
     let start = Instant::now();
     let mut child = git_command(cwd)
+        .ok()?
         .args([
             "-c",
             "core.fsmonitor=false",
@@ -1295,7 +1298,7 @@ impl WorktreeScope {
     }
 
     fn run(&self, args: &[impl AsRef<OsStr>]) -> Result<Vec<u8>> {
-        let mut command = git_command(&self.repository.root);
+        let mut command = git_command(&self.repository.root)?;
         // Worktree plumbing must not execute interactive checkout or ref hooks.
         let no_hooks = if cfg!(windows) {
             "core.hooksPath=NUL"
@@ -1495,8 +1498,92 @@ fn git_cli_path(path: &Path) -> PathBuf {
     path.to_owned()
 }
 
-fn git_command(cwd: &Path) -> Command {
-    let mut command = Command::new("git");
+/// Resolve Git in the process PATH without starting a Git process.
+pub fn git_executable() -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    let name = if cfg!(windows) { "git.exe" } else { "git" };
+    #[cfg(target_os = "macos")]
+    let mut apple_shim_present = false;
+
+    for dir in std::env::split_paths(&path).filter(|dir| !dir.as_os_str().is_empty()) {
+        let candidate = std::path::absolute(dir.join(name)).ok();
+        let Some(candidate) = candidate.filter(|path| is_executable(path)) else {
+            continue;
+        };
+        #[cfg(target_os = "macos")]
+        if is_apple_git_shim(&candidate) {
+            apple_shim_present = true;
+            continue;
+        }
+        return Some(candidate);
+    }
+    #[cfg(target_os = "macos")]
+    if apple_shim_present {
+        return apple_developer_git();
+    }
+    None
+}
+
+fn is_executable(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+
+        std::ffi::CString::new(path.as_os_str().as_bytes())
+            .is_ok_and(|path| unsafe { libc::access(path.as_ptr(), libc::X_OK) == 0 })
+    }
+    #[cfg(windows)]
+    {
+        use std::io::Read;
+
+        let mut prefix = [0; 2];
+        fs::File::open(path).is_ok_and(|mut file| file.read_exact(&mut prefix).is_ok())
+            && prefix == *b"MZ"
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn is_apple_git_shim(path: &Path) -> bool {
+    let shim = Path::new("/usr/bin/git");
+    path == shim || fs::canonicalize(path).is_ok_and(|path| path == shim)
+}
+
+#[cfg(target_os = "macos")]
+fn apple_developer_git() -> Option<PathBuf> {
+    // The system Git shim would offer to install the command line tools.
+    // Asking xcode-select for the active directory does not request installation.
+    let output = Command::new("/usr/bin/xcode-select")
+        .arg("--print-path")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let directory = git_path(line(&output.stdout));
+    if !directory.is_absolute() {
+        return None;
+    }
+    [
+        directory.join("Toolchains/XcodeDefault.xctoolchain/usr/bin/git"),
+        directory.join("usr/bin/git"),
+    ]
+    .into_iter()
+    .find(|path| is_executable(path) && !is_apple_git_shim(path))
+}
+
+/// Prepare a scoped Git invocation after resolving the actual executable.
+pub fn git_command(cwd: &Path) -> Result<Command> {
+    let executable = git_executable().ok_or(GitActionError(GIT_NOT_INSTALLED))?;
+    let mut command = Command::new(executable);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+
+        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
     command
         .current_dir(git_cli_path(cwd))
         .env("LC_ALL", "C")
@@ -1522,11 +1609,32 @@ fn git_command(cwd: &Path) -> Command {
     ] {
         command.env_remove(key);
     }
-    command
+    Ok(command)
 }
 
 fn git(cwd: &Path, args: &[&str]) -> Result<Output> {
-    git_command(cwd).args(args).output().context("run Git")
+    git_command(cwd)?.args(args).output().context("run Git")
+}
+
+/// Read status, including individual untracked files, without writing the index.
+pub fn git_status_porcelain(cwd: &Path) -> Result<Vec<u8>> {
+    let output = git(
+        cwd,
+        &[
+            "-c",
+            "core.fsmonitor=false",
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+        ],
+    )?;
+    if !output.status.success()
+        && String::from_utf8_lossy(&output.stderr).contains("not a git repository")
+    {
+        return Err(GitActionError("GIT_NOT_REPOSITORY").into());
+    }
+    stdout(output)
 }
 
 fn run(cwd: &Path, args: &[&str]) -> Result<Vec<u8>> {

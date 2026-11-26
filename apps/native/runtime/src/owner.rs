@@ -13,7 +13,6 @@ use anyhow::{Context, Result, ensure};
 use matou_native_core::{
     backup::{BackupService, CLEAN_EXIT_BACKUP_TIMEOUT},
     context_optimizer_config::{ContextOptimizerConfig, ContextOptimizerSnapshot},
-    dispatch_model_catalog::resolve_control_node,
     dispatch_roles::{DispatchRolesStore, format_roles_markdown},
     hierarchy::{
         self, HierarchyIds, HierarchyResult, Scene, Session as StoredSession, Task, Workspace,
@@ -3697,13 +3696,7 @@ impl ShellOwner {
                 let end = options.launch.argv.len();
                 options.launch.argv.split_off(end - 2)
             });
-            let control_asset_root = std::env::var_os("MATOU_CONTROL_ASSET_ROOT");
-            let current_executable = std::env::current_exe().ok();
-            let foreman_available = crate::provider_hook::bundled_foreman_script(
-                current_executable.as_deref(),
-                control_asset_root.as_deref().map(Path::new),
-            )
-            .is_some();
+            let foreman_available = self.control_bin.is_some() && self.run_control.is_some();
             let roles_markdown = foreman_available.then(|| {
                 let config = DispatchRolesStore::for_data_root(&options.launch.data_root)
                     .snapshot()
@@ -4033,26 +4026,21 @@ impl ShellOwner {
                             }
                         }
                     }
-                    let launch = &mut options.launch;
-                    if get_var(&launch.env, "MATOU_CONTROL_NODE_EXECUTABLE").is_none() {
-                        let mut environment = launch.inherited_env.clone();
-                        for (key, value) in &launch.env {
-                            set_var(&mut environment, key.clone(), value.clone());
-                        }
-                        if let Some(node) = resolve_control_node(&launch.cwd, &environment) {
-                            set_var(
-                                &mut launch.env,
-                                "MATOU_CONTROL_NODE_EXECUTABLE".into(),
-                                node.into_os_string(),
-                            );
-                        }
-                    }
+
                 }
                 Err(error) => eprintln!("[host-control] {error:#}"),
             }
         }
         #[cfg(any(unix, windows))]
         let alias_input = is_shell.then(|| ShellInput::with_shell_environment(&options.launch));
+        #[cfg(windows)]
+        if !is_shell && crate::codex_launch::is_batch(&options.launch.executable) {
+            let runtime = std::env::current_exe()?;
+            let batch = options.launch.executable.to_str()
+                .context("Agent command path is not UTF-8")?.to_owned();
+            options.launch.executable = runtime;
+            options.launch.argv.splice(0..0, ["--agent-batch".to_owned(), batch]);
+        }
         let mut worker = match SessionWorker::spawn(options, self.send.clone(), run_id.clone()) {
             Ok(worker) => worker,
             Err(error) => {
@@ -4147,7 +4135,7 @@ impl ShellOwner {
         if self.hook_server.is_none() {
             self.hook_server = Some(ProviderHookServer::start()?);
         }
-        let registration = self.hook_server.as_ref().unwrap().register(
+        let mut registration = self.hook_server.as_ref().unwrap().register(
             &options.launch.data_root,
             Scope {
                 profile: options.launch.profile,
@@ -4162,12 +4150,16 @@ impl ShellOwner {
             registration.attach_codex(&mut options.launch, foreman_available, roles_markdown)?;
         } else if options.launch.profile == LaunchProfile::ClaudeCode {
             attach_claude_settings(&mut options.launch, &registration.settings_path)?;
+            for (key, value) in registration.hook_environment() {
+                set_var(&mut options.launch.env, key, value);
+            }
             let control_asset_root = std::env::var_os("MATOU_CONTROL_ASSET_ROOT");
             let executable = std::env::current_exe().ok();
             if let Some(plugin) = crate::provider_hook::bundled_claude_plugin(
                 executable.as_deref(),
                 control_asset_root.as_deref().map(Path::new),
             ) {
+                let plugin = registration.claude_plugin(plugin)?;
                 let path = plugin.to_str().context("Claude plugin path is not UTF-8")?;
                 options
                     .launch
