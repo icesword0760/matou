@@ -860,18 +860,29 @@ mod supervisor_tests {
     fn setup() -> Result<(PathBuf, RuntimeBridge)> {
         setup_with_hooks(TestHooks::default())
     }
+    fn locate_runtime_binary() -> Result<PathBuf> {
+        let name = if cfg!(windows) {
+            "matou-native-runtime.exe"
+        } else {
+            "matou-native-runtime"
+        };
+        let exe = std::env::current_exe()?;
+        if let Some(found) = exe
+            .ancestors()
+            .skip(1)
+            .map(|dir| dir.join(name))
+            .find(|candidate| candidate.is_file())
+        {
+            return Ok(found);
+        }
+        Ok(exe.parent().unwrap().parent().unwrap().join(name))
+    }
     fn setup_with_hooks(hooks: TestHooks) -> Result<(PathBuf, RuntimeBridge)> {
         let root = std::env::temp_dir().join(format!("matou-supervisor-race-{}", Uuid::new_v4()));
         let home = root.join("home");
         fs::create_dir_all(&home)?;
         fs::write(home.join(".zshrc"), "PROMPT='RACE_READY> '\n")?;
-        let exe = std::env::current_exe()?;
-        let binary = exe
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("matou-native-runtime");
+        let binary = locate_runtime_binary()?;
         let options = LaunchOptions {
             data_root: root.join("data"),
             workspace: root.join("workspace"),
@@ -1079,13 +1090,7 @@ mod supervisor_tests {
             "INSERT INTO schema_migrations (version, name, checksum, applied_at)
                     VALUES (999, 'newer', 'newer', 1)",
         )?;
-        let executable = std::env::current_exe()?;
-        let binary = executable
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("matou-native-runtime");
+        let binary = locate_runtime_binary()?;
         let mut bridge = RuntimeBridge::start_supervised(
             LaunchOptions {
                 data_root,

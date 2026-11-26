@@ -1510,12 +1510,18 @@ mod recovery_loading_tests {
         let root = std::env::temp_dir().join(format!("water-{}", uuid::Uuid::new_v4().simple()));
         let result = (|| {
             fs::create_dir(&root)?;
-            let binary = std::env::current_exe()?
-                .parent()
-                .unwrap()
-                .parent()
-                .unwrap()
-                .join("matou-native-runtime");
+            let runtime_name = if cfg!(windows) {
+                "matou-native-runtime.exe"
+            } else {
+                "matou-native-runtime"
+            };
+            let current = std::env::current_exe()?;
+            let binary = current
+                .ancestors()
+                .skip(1)
+                .map(|dir| dir.join(runtime_name))
+                .find(|candidate| candidate.is_file())
+                .unwrap_or_else(|| current.parent().unwrap().parent().unwrap().join(runtime_name));
             let mut bridge = RuntimeBridge::start_with_binary(
                 LaunchOptions {
                     data_root: root.join("data"),

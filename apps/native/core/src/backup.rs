@@ -785,7 +785,7 @@ mod tests {
         });
         let mut service = BackupService::new(root.path())?;
         let error = service
-            .backup_for_clean_exit(&source, 1, Duration::from_millis(250))
+            .backup_for_clean_exit(&source, 1, CLEAN_EXIT_BACKUP_TIMEOUT)
             .unwrap_err();
         drop(guard);
         assert!(reached.get());
@@ -879,7 +879,7 @@ mod tests {
         });
         let mut service = BackupService::new(root.path())?;
         let error = service
-            .backup_for_clean_exit(&source, 1, Duration::from_millis(250))
+            .backup_for_clean_exit(&source, 1, CLEAN_EXIT_BACKUP_TIMEOUT)
             .unwrap_err();
         drop(guard);
         assert!(reached.get(), "never reached real integrity SQL");

@@ -6,12 +6,25 @@ use matou_native_desktop::runtime_bridge::{
 use std::path::{Path, PathBuf};
 
 pub fn runtime_binary() -> Result<PathBuf> {
+    let name = if cfg!(windows) {
+        "matou-native-runtime.exe"
+    } else {
+        "matou-native-runtime"
+    };
     let test = std::env::current_exe()?;
+    if let Some(found) = test
+        .ancestors()
+        .skip(1)
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
+    {
+        return Ok(found);
+    }
     let debug = test
         .parent()
         .and_then(|deps| deps.parent())
         .context("test debug/deps path")?;
-    Ok(debug.join("matou-native-runtime"))
+    Ok(debug.join(name))
 }
 // Existing business contracts are deliberately leased to generation 1. Neither
 // dequeuing an event nor sending an old ACK can silently upgrade this lease.

@@ -2992,6 +2992,17 @@ mod tests {
         }
     }
 
+    fn test_abs(path: &str) -> String {
+        #[cfg(windows)]
+        {
+            format!(r"C:{}", path.replace('/', r"\"))
+        }
+        #[cfg(not(windows))]
+        {
+            path.to_owned()
+        }
+    }
+
     fn shell_session_fixture(mut db: Connection) -> Result<Connection> {
         configure_connection(&db)?;
         migrate(&mut db, 1)?;
@@ -3000,7 +3011,7 @@ mod tests {
             &command("bootstrap"),
             &BootstrapWindowInput {
                 window_id: "window".into(),
-                default_root_directory: "/workspace".into(),
+                default_root_directory: test_abs("/workspace"),
                 default_name: "Workspace".into(),
                 now: 2,
             },
@@ -3027,20 +3038,32 @@ mod tests {
 
     #[test]
     fn catalog_load_changes_only_target_directory_and_rolls_back_environment() -> Result<()> {
+        let workspace_path = test_abs("/workspace");
+        let worktree_path = test_abs("/worktree");
+        let other_worktree = test_abs("/other-worktree");
         for managed in [false, true] {
             let mut db = shell_session_fixture(Connection::open_in_memory()?)?;
             if managed {
-                db.execute_batch(
+                db.execute(
                     "INSERT INTO execution_contexts (id, workspace_id, kind, cwd, created_at)
-                     VALUES ('worktree-context', 'workspace', 'git-worktree', '/worktree', 3);
-                     INSERT INTO worktrees (id, execution_context_id, repository_root, worktree_path,
+                     VALUES ('worktree-context', 'workspace', 'git-worktree', ?1, 3)",
+                    [&worktree_path],
+                )?;
+                db.execute(
+                    "INSERT INTO worktrees (id, execution_context_id, repository_root, worktree_path,
                          branch_name, state, created_at, updated_at)
-                     VALUES ('worktree', 'worktree-context', '/workspace', '/worktree',
-                         'feature', 'ready', 3, 3);
-                     UPDATE sessions SET execution_context_id = 'worktree-context', cwd = '/worktree'
-                     WHERE id = 'session';
-                     UPDATE session_environment_bindings SET managed_worktree_id = 'worktree',
-                         active_target = 'worktree' WHERE session_id = 'session';",
+                     VALUES ('worktree', 'worktree-context', ?1, ?2, 'feature', 'ready', 3, 3)",
+                    params![&workspace_path, &worktree_path],
+                )?;
+                db.execute(
+                    "UPDATE sessions SET execution_context_id = 'worktree-context', cwd = ?1
+                     WHERE id = 'session'",
+                    [&worktree_path],
+                )?;
+                db.execute(
+                    "UPDATE session_environment_bindings SET managed_worktree_id = 'worktree',
+                         active_target = 'worktree' WHERE session_id = 'session'",
+                    [],
                 )?;
             }
             let before = require_session(&db, "session")?;
@@ -3067,12 +3090,12 @@ mod tests {
                 false,
                 Some(CatalogReplacement {
                     takeover_from: None,
-                    source_cwd: Some("/other-worktree"),
+                    source_cwd: Some(&other_worktree),
                 }),
                 4,
             )?;
             let loaded = require_session(&db, "session")?;
-            assert_eq!(loaded.cwd, "/other-worktree");
+            assert_eq!(loaded.cwd, other_worktree);
             assert_ne!(loaded.execution_context_id, before.execution_context_id);
             let environment = crate::hierarchy::session_environment::binding(&db, "session")?
                 .context("environment after catalog load")?;
@@ -3113,6 +3136,7 @@ mod tests {
     fn catalog_load_in_context_subdirectory_preserves_context_and_cancels_cleanly() -> Result<()> {
         let mut db = shell_session_fixture(Connection::open_in_memory()?)?;
         let before = require_session(&db, "session")?;
+        let subdirectory = test_abs("/workspace/subdirectory");
         load_provider_catalog_binding_with_rollback(
             &mut db,
             &command("catalog-subdirectory"),
@@ -3130,12 +3154,12 @@ mod tests {
             false,
             Some(CatalogReplacement {
                 takeover_from: None,
-                source_cwd: Some("/workspace/subdirectory"),
+                source_cwd: Some(&subdirectory),
             }),
             4,
         )?;
         let loaded = require_session(&db, "session")?;
-        assert_eq!(loaded.cwd, "/workspace/subdirectory");
+        assert_eq!(loaded.cwd, subdirectory);
         assert_eq!(loaded.execution_context_id, before.execution_context_id);
         cancel_claude_catalog_load(&mut db, &command("cancel"), "session", 4, 5)?;
         let restored = require_session(&db, "session")?;
@@ -3146,6 +3170,7 @@ mod tests {
 
     #[test]
     fn catalog_load_relocates_and_finishes_each_runtime_provider_transaction() -> Result<()> {
+        let other_worktree = test_abs("/other-worktree");
         for provider in ["codex", "dsh", "antigravity"] {
             for outcome in ["failure", "cancel", "restart", "confirm"] {
                 let mut db = shell_session_fixture(Connection::open_in_memory()?)?;
@@ -3178,14 +3203,14 @@ mod tests {
                     false,
                     Some(CatalogReplacement {
                         takeover_from: None,
-                        source_cwd: Some("/other-worktree"),
+                        source_cwd: Some(&other_worktree),
                     }),
                     4,
                 )?;
                 let pending = runtime_provider_binding(&db, "session", provider)?
                     .context("staged catalog binding")?;
                 assert_eq!(pending.id, "loaded", "{provider}/{outcome}");
-                assert_eq!(require_session(&db, "session")?.cwd, "/other-worktree");
+                assert_eq!(require_session(&db, "session")?.cwd, other_worktree);
                 match outcome {
                     "failure" => {
                         change_runtime_provider_restore(
@@ -3243,7 +3268,7 @@ mod tests {
                 let binding = runtime_provider_binding(&db, "session", provider)?
                     .context("catalog result binding")?;
                 if outcome == "confirm" {
-                    assert_eq!(after.cwd, "/other-worktree");
+                    assert_eq!(after.cwd, other_worktree);
                     assert_eq!(binding.id, "loaded");
                     assert!(binding.metadata.get("catalogRollback").is_none());
                 } else {
