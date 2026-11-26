@@ -8355,40 +8355,44 @@ impl SettingsShell {
                     ),
             );
             if phase == "waiting" {
-                let waiting = self.locale.text(
-                    "等待浏览器完成登录…",
-                    "Waiting for the browser to finish signing in…",
-                );
-                let dot = div()
-                    .size(px(8.))
-                    .flex_none()
-                    .rounded_full()
-                    .bg(rgba(0x3284edff));
-                let dot = if reduced_motion() {
-                    dot.into_any_element()
+                if let Some(message) = login.error.as_deref() {
+                    body = body.child(self.subscription_error_box(message, editor, colors));
                 } else {
-                    dot.with_animation(
-                        "subscription-waiting-pulse",
-                        Animation::new(Duration::from_millis(1100)).repeat(),
-                        |dot, pulse| dot.opacity(1. - 0.75 * pulse),
-                    )
-                    .into_any_element()
-                };
-                body = body.child(mark_provider(
-                    div()
-                        .mt(px(18.))
-                        .flex()
-                        .items_center()
-                        .gap(px(9.))
-                        .text_size(px(13.))
-                        .font_weight(FontWeight(600.))
-                        .text_color(rgba(colors.label))
-                        .child(dot)
-                        .child(waiting),
-                    "subscription-waiting",
-                    waiting,
-                    true,
-                ));
+                    let waiting = self.locale.text(
+                        "等待浏览器完成登录…",
+                        "Waiting for the browser to finish signing in…",
+                    );
+                    let dot = div()
+                        .size(px(8.))
+                        .flex_none()
+                        .rounded_full()
+                        .bg(rgba(0x3284edff));
+                    let dot = if reduced_motion() {
+                        dot.into_any_element()
+                    } else {
+                        dot.with_animation(
+                            "subscription-waiting-pulse",
+                            Animation::new(Duration::from_millis(1100)).repeat(),
+                            |dot, pulse| dot.opacity(1. - 0.75 * pulse),
+                        )
+                        .into_any_element()
+                    };
+                    body = body.child(mark_provider(
+                        div()
+                            .mt(px(18.))
+                            .flex()
+                            .items_center()
+                            .gap(px(9.))
+                            .text_size(px(13.))
+                            .font_weight(FontWeight(600.))
+                            .text_color(rgba(colors.label))
+                            .child(dot)
+                            .child(waiting),
+                        "subscription-waiting",
+                        waiting,
+                        true,
+                    ));
+                }
                 let reopen_enabled = connected && login.can_reopen && !login.busy;
                 let reopen_label = self.locale.text("重新打开浏览器", "Open browser again");
                 body = body.child(mark_provider(
@@ -8397,8 +8401,7 @@ impl SettingsShell {
                     reopen_label,
                     reopen_enabled,
                 ));
-            }
-            if phase == "error" {
+            } else if phase == "error" {
                 let message = login
                     .error
                     .clone()
@@ -8421,8 +8424,6 @@ impl SettingsShell {
                     body = body.child(self.subscription_reopen_row(editor, colors, connected, cx));
                 }
             } else if let Some(message) = login.error.as_deref() {
-                // A failed browser launch keeps the attempt alive; show the
-                // reason while the waiting chain continues.
                 body = body.child(self.subscription_error_box(message, editor, colors));
             }
             if existing {

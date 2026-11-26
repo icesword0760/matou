@@ -19,10 +19,26 @@ const BROWSER_CONTROLLED_FAILED: u8 = 2;
 const BROWSER_SYSTEM_FAILED: u8 = 3;
 const BROWSER_STOPPED: u8 = 4;
 
+pub(super) enum BrowserOpenFailure {
+    Controlled,
+    System,
+}
+
+impl BrowserOpenFailure {
+    fn state(self) -> u8 {
+        match self {
+            Self::Controlled => BROWSER_CONTROLLED_FAILED,
+            Self::System => BROWSER_SYSTEM_FAILED,
+        }
+    }
+}
+
+type BrowserOpener = fn(&str, bool) -> Result<(), BrowserOpenFailure>;
+
 pub(super) struct LoginOptions {
     pub ports: Option<[u16; 2]>,
     pub timeout: Duration,
-    pub open: fn(&str, bool) -> bool,
+    pub open: BrowserOpener,
 }
 
 impl Default for LoginOptions {
@@ -31,15 +47,29 @@ impl Default for LoginOptions {
             ports: None,
             timeout: LOGIN_TIMEOUT,
             open: |url, system| {
-                if system {
-                    browser_integration::open_system_url(url)
-                } else {
-                    browser_integration::open_controlled_url(url)
-                        || browser_integration::open_system_url(url)
-                }
+                open_subscription_browser(
+                    url,
+                    system,
+                    browser_integration::open_controlled_url,
+                    browser_integration::open_system_url,
+                )
             },
         }
     }
+}
+
+fn open_subscription_browser(
+    url: &str,
+    system_only: bool,
+    open_controlled: impl FnOnce(&str) -> bool,
+    open_system: impl FnOnce(&str) -> bool,
+) -> Result<(), BrowserOpenFailure> {
+    if !system_only && open_controlled(url) {
+        return Ok(());
+    }
+    open_system(url)
+        .then_some(())
+        .ok_or(BrowserOpenFailure::System)
 }
 
 pub(super) struct LoginAttempt {
@@ -83,7 +113,7 @@ impl LoginAttempt {
                 .is_some_and(|callback| !callback.accepted.load(Ordering::Acquire))
     }
 
-    fn open(&mut self, opener: fn(&str, bool) -> bool, system: bool) {
+    fn open(&mut self, opener: BrowserOpener, system: bool) {
         let Some(url) = self.authorization.clone() else {
             return;
         };
@@ -94,11 +124,6 @@ impl LoginAttempt {
         let accepted = callback.accepted.clone();
         self.browser.store(BROWSER_STOPPED, Ordering::Release);
         self.browser = browser.clone();
-        let fallback = if system {
-            BROWSER_SYSTEM_FAILED
-        } else {
-            BROWSER_CONTROLLED_FAILED
-        };
         if thread::Builder::new()
             .name("matou-subscription-browser".into())
             .spawn(move || {
@@ -107,10 +132,9 @@ impl LoginAttempt {
                 {
                     return;
                 }
-                let result = if opener(&url, system) {
-                    BROWSER_OPENED
-                } else {
-                    fallback
+                let result = match opener(&url, system) {
+                    Ok(()) => BROWSER_OPENED,
+                    Err(failure) => failure.state(),
                 };
                 let _ = browser.compare_exchange(
                     BROWSER_PENDING,
@@ -121,7 +145,13 @@ impl LoginAttempt {
             })
             .is_err()
         {
-            self.browser.store(fallback, Ordering::Release);
+            // No browser was attempted if the worker itself could not start.
+            let failure = if system {
+                BrowserOpenFailure::System
+            } else {
+                BrowserOpenFailure::Controlled
+            };
+            self.browser.store(failure.state(), Ordering::Release);
         }
     }
 
@@ -147,8 +177,7 @@ impl LoginAttempt {
             provider: self.provider,
             status: self.status,
             can_reopen,
-            system_browser_available: can_reopen
-                && browser == BROWSER_CONTROLLED_FAILED,
+            system_browser_available: can_reopen && browser == BROWSER_CONTROLLED_FAILED,
             reason,
             draft: self.draft.clone(),
         }

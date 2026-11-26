@@ -1375,10 +1375,28 @@ mod probe {
         );
     }
 
-    fn verify_subscription_window(cx: &mut AsyncApp) {
-        let (window, sink) = cx.update(|cx| open_window(None, cx)).unwrap();
+    fn verify_subscription_window(
+        cx: &mut AsyncApp,
+        visible_state: Option<&str>,
+    ) -> Option<(WindowHandle<Workspace>, ProbeReceiver)> {
+        let (window, sink) = cx
+            .update(|cx| {
+                if visible_state.is_some() {
+                    open_window_at(visible_state, 970., cx)
+                } else {
+                    open_window(None, cx)
+                }
+            })
+            .unwrap();
         window
-            .update(cx, |view, window, cx| view.open_settings(window, cx))
+            .update(cx, |view, window, cx| {
+                if let Some(state) = visible_state {
+                    let root = probe_root(state);
+                    write_theme_preference(&root, ThemePreference::Light).unwrap();
+                    view.load_capture_fixture(root, window);
+                }
+                view.open_settings(window, cx);
+            })
             .unwrap();
         let (mut read, mut settings, mut assignments, mut compaction) = (None, None, None, None);
         for command in std::iter::from_fn(|| sink.try_recv().ok()) {
@@ -1519,15 +1537,21 @@ mod probe {
                 SubscriptionLoginStatus::Waiting,
                 true,
                 Some(
-                    "Could not open the sign-in browser. Try again or use the system browser."
-                        .into(),
+                    "Could not open the sign-in browser. Check your browser and try again.".into(),
                 ),
                 None,
             ),
         );
         let view = frame(cx);
-        assert!(view.labels["subscription-waiting"].contains("等待浏览器完成登录"));
+        assert_eq!(
+            view.labels["subscription-error"],
+            "登录浏览器没有打开。请检查浏览器设置后重试。"
+        );
+        assert!(!view.labels.contains_key("subscription-waiting"));
         assert!(view.enabled["subscription-reopen"]);
+        assert!(
+            view.bounds["subscription-reopen"].top() >= view.bounds["subscription-error"].bottom()
+        );
         activate(cx, "subscription-reopen");
         let Command::ReopenSubscriptionLogin {
             request_id,
@@ -1554,6 +1578,9 @@ mod probe {
                 None,
             ),
         );
+        let view = frame(cx);
+        assert!(view.labels["subscription-waiting"].contains("等待浏览器完成登录"));
+        assert!(!view.labels.contains_key("subscription-error"));
         activate(cx, "subscription-system-browser");
         let Command::ReopenSubscriptionLogin {
             request_id,
@@ -1563,18 +1590,65 @@ mod probe {
         else {
             panic!("expected explicit system browser fallback");
         };
-        reply(
-            cx,
-            request_id,
-            login(
+        let system_browser_failure = || {
+            ProviderSettingsResult::SubscriptionLogin(SubscriptionLoginView {
+                attempt_id: "agy-attempt".into(),
                 provider,
-                "agy-attempt",
-                SubscriptionLoginStatus::Waiting,
-                false,
-                None,
-                None,
-            ),
+                status: SubscriptionLoginStatus::Waiting,
+                can_reopen: true,
+                system_browser_available: false,
+                reason: Some(
+                    "Could not open the system browser. Check your browser and try again.".into(),
+                ),
+                draft: None,
+            })
+        };
+        reply(cx, request_id, system_browser_failure());
+        let view = frame(cx);
+        assert_eq!(
+            view.labels["subscription-error"],
+            "系统浏览器没有打开。请检查默认浏览器设置后重试。"
         );
+        assert!(view.enabled["subscription-reopen"]);
+        check_shell(window, cx, |shell, _| {
+            let (phase, _, can_reopen, system_browser_available) =
+                shell.probe_subscription_state().unwrap();
+            assert_eq!(
+                (phase, can_reopen, system_browser_available),
+                ("waiting", true, false)
+            );
+        });
+        assert!(!view.labels.contains_key("subscription-waiting"));
+        assert!(
+            view.bounds["subscription-reopen"].top() >= view.bounds["subscription-error"].bottom()
+        );
+        if visible_state.is_some() {
+            return Some((window, sink));
+        }
+        update_shell(window, cx, |shell, window, _| {
+            shell.probe_provider_editor_focus("subscription-system-browser", window);
+        });
+        AnyWindowHandle::from(window)
+            .update(cx, |_, window, cx| {
+                window.dispatch_keystroke(Keystroke::parse("enter").unwrap(), cx);
+            })
+            .unwrap();
+        assert!(business(&sink).is_err());
+        activate(cx, "subscription-reopen");
+        let Command::ReopenSubscriptionLogin {
+            request_id,
+            settings_id,
+            attempt_id,
+            system_browser,
+        } = business(&sink).unwrap()
+        else {
+            panic!("expected the existing retry control to keep the attempt active");
+        };
+        assert_eq!(
+            (settings_id, attempt_id.as_str(), system_browser),
+            (settings, "agy-attempt", false)
+        );
+        reply(cx, request_id, system_browser_failure());
         activate(cx, "subscription-cancel");
         let Command::CancelSubscriptionLogin {
             settings_id,
@@ -1830,8 +1904,9 @@ mod probe {
             .update(cx, |_, window, _| window.remove_window())
             .unwrap();
         println!(
-            "Hidden GPUI subscription: provider chooser, risk gate, browser reopen and cancel, Fable draft commit, quota, catalog refresh, re-login, and close"
+            "Hidden GPUI subscription: provider chooser, risk gate, system browser failure with retry and cancel, Fable draft commit, quota, catalog refresh, re-login, and close"
         );
+        None
     }
 
     fn verify_window(cx: &mut AsyncApp) {
@@ -3308,6 +3383,8 @@ mod probe {
 
     pub(super) fn run() {
         let args = std::env::args().skip(1).collect::<Vec<_>>();
+        let subscription_only = std::env::var("MATOU_SETTINGS_SUBSCRIPTION_ONLY").as_deref()
+            == Ok("verify");
         let state = match args.as_slice() {
             [] => None,
             [flag, state]
@@ -3324,12 +3401,13 @@ mod probe {
                             | "ctx-opt-focused-dark"
                             | "provider-editor-official-light"
                             | "claude-icon-preview"
+                            | "subscription-browser-failure"
                     ) =>
             {
                 Some(state.clone())
             }
             _ => panic!(
-                "usage: settings_shell_probe [--visible-state loading|empty|dispatch-light|dispatch-dark|dispatch-narrow|context-optimizer|ctx-opt-focused-light|ctx-opt-focused-dark|provider-editor-official-light|claude-icon-preview]"
+                "usage: settings_shell_probe [--visible-state loading|empty|dispatch-light|dispatch-dark|dispatch-narrow|context-optimizer|ctx-opt-focused-light|ctx-opt-focused-dark|provider-editor-official-light|claude-icon-preview|subscription-browser-failure]"
             ),
         };
         Application::new().with_assets(NativeAssets).run(move |cx| {
@@ -3419,6 +3497,20 @@ mod probe {
                     open_official_editor(window, &sink, cx);
                     capture_visible_window(window.into(), "provider-editor-official-light", cx).await;
                 }).detach();
+            } else if state.as_deref() == Some("subscription-browser-failure") {
+                cx.activate(true);
+                cx.spawn(async move |cx| {
+                    let (window, sink) = verify_subscription_window(cx, state.as_deref()).unwrap();
+                    cx.update(|cx| {
+                        cx.on_app_quit(move |_| {
+                            let _ = &sink;
+                            async {}
+                        })
+                        .detach();
+                    })
+                    .unwrap();
+                    capture_visible_window(window.into(), "subscription-browser-failure", cx).await;
+                }).detach();
             } else if state.as_deref() == Some("claude-icon-preview") {
                 let window = cx.open_window(
                     WindowOptions {
@@ -3490,6 +3582,12 @@ mod probe {
                         .unwrap();
                 }
                 cx.activate(true);
+            } else if subscription_only {
+                cx.spawn(async |cx| {
+                    assert!(verify_subscription_window(cx, None).is_none());
+                    cx.update(|cx| cx.quit()).unwrap();
+                })
+                .detach();
             } else {
                 verify_commands();
                 cx.spawn(async |cx| {
@@ -3497,7 +3595,7 @@ mod probe {
                     verify_narrow_dispatch_scroll(cx);
                     verify_theme_window(cx);
                     verify_provider_editors(cx);
-                    verify_subscription_window(cx);
+                    assert!(verify_subscription_window(cx, None).is_none());
                     verify_window(cx);
                     verify_delete_window(cx);
                     verify_assignments_window(cx);

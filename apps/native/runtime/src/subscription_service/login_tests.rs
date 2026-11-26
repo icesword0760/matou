@@ -57,7 +57,11 @@ impl Fixture {
                     url.starts_with("https://auth.openai.com/")
                         || url.starts_with("https://accounts.google.com/")
                 );
-                system
+                if system {
+                    Ok(())
+                } else {
+                    Err(BrowserOpenFailure::Controlled)
+                }
             },
         };
         Ok(Self {
@@ -171,6 +175,50 @@ fn preferences() -> Result<Connection> {
 
 fn credential_state(path: &std::path::Path) -> Result<Value> {
     Ok(serde_json::from_slice(&fs::read(path)?)?)
+}
+
+#[test]
+fn reports_system_browser_failure_after_automatic_fallback() -> Result<()> {
+    let mut fixture = Fixture::new("", LOGIN_TIMEOUT)?;
+    let service = &mut fixture.service;
+    service.login_options.open = |url, system| {
+        let tried_controlled = std::cell::Cell::new(false);
+        open_subscription_browser(
+            url,
+            system,
+            |_| {
+                tried_controlled.set(true);
+                false
+            },
+            |_| {
+                assert!(
+                    tried_controlled.get(),
+                    "the controlled browser is tried first"
+                );
+                false
+            },
+        )
+    };
+    browser_integration::set_controlled_browser_preference(&service.root, true)?;
+    service.begin_settings(1)?;
+    let start = service.start_login(1, SubscriptionProvider::ChatGpt, false)?;
+    wait_for(|| {
+        service
+            .login_status(1, &start.attempt_id)
+            .unwrap()
+            .can_reopen
+    });
+    let view = service.login_status(1, &start.attempt_id)?;
+    assert_eq!(view.status, Status::Waiting);
+    assert!(
+        !view.system_browser_available,
+        "the system browser already failed",
+    );
+    assert_eq!(
+        view.reason.as_deref(),
+        Some("Could not open the system browser. Check your browser and try again."),
+    );
+    Ok(())
 }
 
 #[test]
