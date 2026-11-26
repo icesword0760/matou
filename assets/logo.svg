@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-labelledby="title">
+<svg xmlns:xlink="http://www.w3.org/1999/xlink" xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-labelledby="title">
   <title id="title">码头 · 浅瓷</title>
   <defs>
     <linearGradient id="orange-green" gradientUnits="userSpaceOnUse" x1="542.65" y1="402.86" x2="738.59" y2="553.58">
@@ -10,8 +10,25 @@
     <linearGradient id="orange-blue" gradientUnits="userSpaceOnUse" x1="542.65" y1="423.72" x2="496.28" y2="699.67">
       <stop offset=".745" stop-color="#D77553"/><stop offset=".79" stop-color="#A26D9E"/><stop offset=".835" stop-color="#0768F4"/>
     </linearGradient>
+    <clipPath id="tile-outline"><rect x="100" y="100" width="824" height="824" rx="184"/></clipPath>
+    <linearGradient id="edge" x2="0" y2="1">
+      <stop stop-color="#E7E7E9"/><stop offset=".25" stop-color="#F0F0F2"/><stop offset=".5" stop-color="#F7F7F8"/><stop offset=".75" stop-color="#FBFBFC"/><stop offset="1" stop-color="#FCFCFD"/>
+    </linearGradient>
+    <radialGradient id="corner" cx="1" cy="1" r="1">
+      <stop offset=".88587" stop-color="#FCFCFD"/><stop offset=".91440" stop-color="#FBFBFC"/><stop offset=".94293" stop-color="#F7F7F8"/><stop offset=".97147" stop-color="#F0F0F2"/><stop offset="1" stop-color="#E7E7E9"/>
+    </radialGradient>
+    <g id="tile-edge">
+      <rect x="100" y="100" width="184" height="184" fill="url(#corner)"/>
+      <rect x="284" y="100" width="456" height="21" fill="url(#edge)"/>
+    </g>
   </defs>
-  <rect x="100" y="100" width="824" height="824" rx="184" fill="#FCFCFD"/>
+  <g clip-path="url(#tile-outline)">
+    <rect x="100" y="100" width="824" height="824" fill="#FCFCFD"/>
+    <use xlink:href="#tile-edge"/>
+    <use xlink:href="#tile-edge" transform="rotate(90 512 512)"/>
+    <use xlink:href="#tile-edge" transform="rotate(180 512 512)"/>
+    <use xlink:href="#tile-edge" transform="rotate(270 512 512)"/>
+  </g>
   <g transform="translate(512 510) scale(1.15) translate(-482 -522)">
     <path fill="url(#orange-green)" d="M563.2 458 C578.5 452.3 625.5 476.4 639.8 487.4 C654.1 498.4 712.3 548.4 713.4 556.9 L735.3 528.4 C726.8 529.5 663.6 486.1 649.3 475.1 C635 464 599.6 424.9 601.2 408.6 Z"/>
     <path d="M241.21 357.44 429 473 241.19 589.61" stroke="#162C4C" stroke-width="48" stroke-linecap="butt" stroke-linejoin="round" fill="none"/>
