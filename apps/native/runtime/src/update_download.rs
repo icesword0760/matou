@@ -378,26 +378,38 @@ impl LocalUpdateFiles {
 }
 
 struct LocalPendingFile {
-    staging: tempfile::NamedTempFile,
+    writer: Option<std::fs::File>,
+    staging: tempfile::TempPath,
     destination: PathBuf,
+}
+
+impl LocalPendingFile {
+    fn writer(&mut self) -> io::Result<&mut std::fs::File> {
+        self.writer
+            .as_mut()
+            .ok_or_else(|| io::Error::other("The staged installer is already closed for writing"))
+    }
 }
 
 impl Write for LocalPendingFile {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.staging.write(bytes)
+        self.writer()?.write(bytes)
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.staging.flush()
+        self.writer()?.flush()
     }
 }
 
 impl PendingUpdateFile for LocalPendingFile {
     fn verify_windows_installer(&mut self, arch: Architecture, version: &str) -> io::Result<()> {
-        windows::verify_installer(self.staging.path(), arch, version)
+        // Windows cannot query the version resource while a writable handle is open.
+        drop(self.writer.take());
+        windows::verify_installer(&self.staging, arch, version)
     }
 
     fn commit(self) -> io::Result<PathBuf> {
+        drop(self.writer);
         self.staging.persist(&self.destination)?;
         Ok(self.destination)
     }
@@ -415,10 +427,13 @@ impl UpdateFileWriter for LocalUpdateFiles {
             ));
         }
         std::fs::create_dir_all(&self.directory)?;
+        let (writer, staging) = tempfile::Builder::new()
+            .suffix(".part")
+            .tempfile_in(&self.directory)?
+            .into_parts();
         Ok(LocalPendingFile {
-            staging: tempfile::Builder::new()
-                .suffix(".part")
-                .tempfile_in(&self.directory)?,
+            writer: Some(writer),
+            staging,
             destination: self.directory.join(filename),
         })
     }

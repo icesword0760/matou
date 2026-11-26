@@ -1149,6 +1149,28 @@ impl DagCanvas {
         self.focus_node(&id)
     }
 
+    #[cfg(any(target_os = "windows", test))]
+    fn focus_initial_below_toolbar(&mut self, toolbar_bottom: Option<f64>) -> bool {
+        if !self.focus_initial() {
+            return false;
+        }
+        let Some(toolbar_bottom) = toolbar_bottom else {
+            return true;
+        };
+        // The layout includes INSET on all sides. Clear the toolbar only
+        // when every card still fits in the viewport at the initial zoom.
+        let minimum_y = toolbar_bottom + 8. - INSET;
+        if self.transform.scale == 1.
+            && self.transform.y < minimum_y
+            && self.transform.x + INSET >= 0.
+            && self.transform.x + self.layout.width - INSET <= self.viewport.width
+            && minimum_y + self.layout.height - INSET <= self.viewport.height
+        {
+            self.transform.y = minimum_y;
+        }
+        true
+    }
+
     pub fn focus_node(&mut self, id: &str) -> bool {
         let Some(node) = self.layout.node(id) else {
             return false;
@@ -1397,6 +1419,77 @@ mod tests {
             assert_eq!(factor > 1., zoom_in);
             assert_eq!(factor, (-dom_delta_y * 0.002).exp());
         }
+    }
+
+    fn initial_focus_fixture(roots: usize, saved: Option<DagTransform>) -> DagCanvas {
+        let nodes: Vec<_> = (0..roots)
+            .map(|index| json!({"sessionId": index.to_string(), "title": "Shell", "cwd": "/fixture"}))
+            .collect();
+        let graph = DagGraph::from_snapshot(&json!({
+            "sceneId": "scene",
+            "nodes": nodes,
+            "edges": [],
+        }))
+        .unwrap();
+        let mut canvas = DagCanvas::new(
+            DagLayout::new(graph).unwrap(),
+            &(roots - 1).to_string(),
+            saved,
+        );
+        canvas.viewport = DagSize {
+            width: 1065.,
+            height: 589.5,
+        };
+        canvas
+    }
+
+    #[test]
+    fn dag_first_focus_clears_windows_toolbar_with_two_roots() {
+        let mut canvas = initial_focus_fixture(2, None);
+        let focused = canvas.preview_session_id.clone();
+        let first = canvas.layout.node("0").unwrap().rect;
+        let second = canvas.layout.node(&focused).unwrap().rect;
+        assert!(canvas.focus_node(&focused));
+        let centered = canvas.transform;
+        assert!(first.y + centered.y < 68.);
+
+        assert!(canvas.focus_initial_below_toolbar(Some(68.)));
+        assert_eq!(canvas.preview_session_id, focused);
+        assert_eq!(canvas.transform.scale, 1.);
+        assert_eq!(canvas.transform.x, centered.x);
+        assert_eq!(first.y + canvas.transform.y, 76.);
+        assert!(second.y + second.height + canvas.transform.y <= canvas.viewport.height);
+
+        assert!(canvas.focus_node(&focused));
+        assert_eq!(canvas.transform, centered);
+        assert!(!canvas.focus_initial_below_toolbar(Some(68.)));
+        assert_eq!(canvas.transform, centered);
+        canvas.reset_transform();
+        assert_eq!(canvas.transform, DagTransform::default());
+    }
+
+    #[test]
+    fn dag_first_focus_keeps_single_and_oversize_graphs_centered() {
+        for roots in [1, 3] {
+            let mut canvas = initial_focus_fixture(roots, None);
+            let focused = canvas.preview_session_id.clone();
+            assert!(canvas.focus_node(&focused));
+            let centered = canvas.transform;
+            assert!(canvas.focus_initial_below_toolbar(Some(68.)));
+            assert_eq!(canvas.transform, centered);
+        }
+    }
+
+    #[test]
+    fn dag_first_focus_preserves_saved_transform() {
+        let saved = DagTransform {
+            x: 112.,
+            y: -37.,
+            scale: 1.25,
+        };
+        let mut canvas = initial_focus_fixture(2, Some(saved));
+        assert!(!canvas.focus_initial_below_toolbar(Some(68.)));
+        assert_eq!(canvas.transform, saved);
     }
 
     #[test]
@@ -1704,6 +1797,8 @@ mod view {
         centering: Option<Centering>,
         notifications: HashSet<String>,
         initial_focus_done: bool,
+        #[cfg(target_os = "windows")]
+        initial_toolbar_bottom: Option<f64>,
         dark: bool,
         transform_frame_pending: bool,
         committed_transform: (f64, f64, f64),
@@ -1756,6 +1851,8 @@ mod view {
                 centering: None,
                 notifications: HashSet::new(),
                 initial_focus_done: false,
+                #[cfg(target_os = "windows")]
+                initial_toolbar_bottom: None,
                 dark,
                 transform_frame_pending: false,
                 committed_transform,
@@ -1891,7 +1988,15 @@ mod view {
 
         fn finish_initial_focus(&mut self, cx: &mut Context<Self>) {
             self.initial_focus_done = true;
-            if self.canvas.focus_initial() {
+            #[cfg(target_os = "windows")]
+            let focused = self.canvas.focus_initial_below_toolbar(
+                self.initial_toolbar_bottom
+                    .zip(self.bounds)
+                    .map(|(bottom, bounds)| bottom - f64::from(bounds.top())),
+            );
+            #[cfg(not(target_os = "windows"))]
+            let focused = self.canvas.focus_initial();
+            if focused {
                 self.commit_transform(cx);
             }
             cx.notify();
@@ -2478,7 +2583,17 @@ mod view {
                         .window_control_area(WindowControlArea::Drag)
                         .occlude(),
                 )
-                .child(right.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()));
+                .child(right.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()))
+                .when(!self.initial_focus_done, |toolbar| {
+                    let view = cx.entity().downgrade();
+                    toolbar.on_children_prepainted(move |children, _, cx| {
+                        let bottom = children
+                            .iter()
+                            .map(|bounds| f64::from(bounds.bottom()))
+                            .reduce(f64::max);
+                        let _ = view.update(cx, |this, _| this.initial_toolbar_bottom = bottom);
+                    })
+                });
             #[cfg(not(target_os = "windows"))]
             let toolbar = toolbar
                 .left(px(MAC_TOOLBAR_LEFT))

@@ -63,12 +63,14 @@ function windowsPowerShell(env) {
     : 'powershell.exe'
 }
 
-async function inspectSignatures(paths, workDir, env, command) {
+async function inspectSignatures(paths, workDir, env, command, embeddedCatalog = false) {
   const listFile = join(workDir, 'signatures.json')
   await writeFile(listFile, JSON.stringify(paths))
   const { stdout } = await command(windowsPowerShell(env), [
     '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-    '-File', signatureScript, '-ListFile', listFile
+    '-File', signatureScript,
+    ...(embeddedCatalog ? ['-EmbeddedSignTool', env.MATOU_WIN_SIGNTOOL || 'signtool.exe'] : []),
+    '-ListFile', listFile
   ])
   const signatures = JSON.parse(stdout)
   if (!Array.isArray(signatures) || signatures.length !== paths.length) {
@@ -118,7 +120,7 @@ async function stageMsvcRuntime(payload, source, workDir, arch, env, command) {
     await copyFile(join(source, basename(destination).toLowerCase()), destination)
     destinations.push(destination)
   }
-  const signatures = await inspectSignatures(destinations, workDir, env, command)
+  const signatures = await inspectSignatures(destinations, workDir, env, command, true)
   for (const [index, signature] of signatures.entries()) {
     if (signature.status !== 'Valid' ||
         !['Microsoft Corporation', 'Microsoft Windows Software Compatibility Publisher'].includes(signature.signerName) ||

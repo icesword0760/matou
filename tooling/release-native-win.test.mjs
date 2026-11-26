@@ -96,6 +96,10 @@ function windowsTools(options, variation = {}) {
   return async (tool, args, runOptions) => {
     if (tool === 'powershell.exe') {
       const files = JSON.parse(await readFile(args.at(-1), 'utf8'))
+      const checkingCrt = files.every(path => path.endsWith('.dll'))
+      assert.equal(args.includes('-EmbeddedSignTool'), checkingCrt)
+      if (checkingCrt) assert.equal(args[args.indexOf('-EmbeddedSignTool') + 1],
+        options.env.MATOU_WIN_SIGNTOOL ?? 'signtool.exe')
       const signatures = files.map(path => path.endsWith('.dll') ? {
         status: variation.crtStatus ?? 'Valid', signerName: variation.crtSigner ?? 'Microsoft Windows Software Compatibility Publisher',
         signerSubject: 'CN=Microsoft Windows Software Compatibility Publisher, O=Microsoft Corporation, C=US'
