@@ -2015,12 +2015,12 @@ mod probe {
             .unwrap();
         draw(window, cx);
 
-        // From the sidebar button, tab through all five navigation entries,
+        // From the sidebar button, tab through all six navigation entries,
         // Close and Add. The next button is the first card's Edit.
         window
             .update(cx, |view, window, _| view.arm_settings_entry(window))
             .unwrap();
-        for _ in 0..8 {
+        for _ in 0..9 {
             press(window, "tab", cx);
         }
         press(window, "enter", cx);
