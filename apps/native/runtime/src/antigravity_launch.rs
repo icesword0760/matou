@@ -1,12 +1,13 @@
 //! Prepare an Antigravity CLI launch and maintain Matou's lifecycle plugin.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     ffi::{OsStr, OsString},
     fs, io,
     io::Write,
     path::{Component, Path, PathBuf},
     sync::Mutex,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, ensure};
@@ -19,6 +20,14 @@ use crate::dsh_events::{js_whitespace, valid_session_id};
 
 const COMMAND_OVERRIDE: &str = "MATOU_ANTIGRAVITY_COMMAND";
 const PLUGIN_OVERRIDE: &str = "MATOU_ANTIGRAVITY_PLUGIN_DIR";
+const STAGGER_OVERRIDE: &str = "MATOU_ANTIGRAVITY_STAGGER_MS";
+const PHASE_PERIOD: Duration = Duration::from_secs(60);
+const MAX_GAP_MS: u64 = 30_000;
+const DEFAULT_GAP: Duration = if cfg!(target_os = "macos") {
+    Duration::from_secs(6)
+} else {
+    Duration::ZERO
+};
 const STAMP_PATH: &str = ".matou-plugin-version";
 pub(crate) const MODES: &[&str] = &[
     "default",
@@ -59,6 +68,98 @@ const CALLER_MARKERS: &[&str] = &[
     "CLAUDE_CODE_RESUME_INTERRUPTED_TURN",
     crate::dsh_launch::FALLBACK_CONTROL_TOKEN,
 ];
+
+pub(crate) struct LaunchStagger {
+    epoch: Instant,
+    min_gap: Duration,
+    launches: HashMap<String, Instant>,
+}
+
+impl LaunchStagger {
+    fn new(epoch: Instant, min_gap: Duration) -> Self {
+        Self {
+            epoch,
+            min_gap,
+            launches: HashMap::new(),
+        }
+    }
+
+    pub(crate) fn from_environment(environment: &BTreeMap<OsString, OsString>) -> Self {
+        let min_gap = env_value(environment, STAGGER_OVERRIDE)
+            .and_then(OsStr::to_str)
+            .and_then(|value| {
+                let digits = value.strip_prefix('+').unwrap_or(value);
+                if digits.is_empty() {
+                    return None;
+                }
+                digits.chars().try_fold(0, |ms, digit| {
+                    digit
+                        .to_digit(10)
+                        .map(|digit| (ms * 10 + u64::from(digit)).min(MAX_GAP_MS))
+                })
+            })
+            .map_or(DEFAULT_GAP, Duration::from_millis);
+        Self::new(Instant::now(), min_gap)
+    }
+
+    fn phase(&self, time: Instant) -> Duration {
+        let elapsed = time.saturating_duration_since(self.epoch);
+        Duration::from_nanos((elapsed.as_nanos() % PHASE_PERIOD.as_nanos()) as u64)
+    }
+
+    pub(crate) fn is_ready(&self, session_id: &str, now: Instant) -> bool {
+        if self.min_gap.is_zero() {
+            return true;
+        }
+        let phase = self.phase(now);
+        let mut phases: Vec<_> = self
+            .launches
+            .iter()
+            .filter(|(id, _)| *id != session_id)
+            .map(|(_, &launched_at)| self.phase(launched_at))
+            .collect();
+        let Some(nearest) = phases
+            .iter()
+            .map(|&other| {
+                let direct = phase.abs_diff(other);
+                direct.min(PHASE_PERIOD - direct)
+            })
+            .min()
+        else {
+            return true;
+        };
+        if nearest >= self.min_gap {
+            return true;
+        }
+
+        phases.sort_unstable();
+        let wrap_gap = PHASE_PERIOD - phases[phases.len() - 1] + phases[0];
+        let max_gap = phases
+            .windows(2)
+            .map(|pair| pair[1] - pair[0])
+            .fold(wrap_gap, Duration::max);
+        // Keep at least a 500 ms window around the midpoint for the host loop to hit.
+        let effective_gap = if max_gap < Duration::from_secs(1) {
+            Duration::ZERO
+        } else {
+            self.min_gap
+                .min((max_gap / 2).saturating_sub(Duration::from_millis(250)))
+        };
+        nearest >= effective_gap
+    }
+
+    pub(crate) fn record_launch(&mut self, session_id: String, launched_at: Instant) {
+        self.launches.insert(session_id, launched_at);
+    }
+
+    pub(crate) fn remove(&mut self, session_id: &str) {
+        self.launches.remove(session_id);
+    }
+
+    pub(crate) fn retain_active(&mut self, mut keep: impl FnMut(&str) -> bool) {
+        self.launches.retain(|id, _| keep(id));
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -536,6 +637,123 @@ const PLUGIN_STAMP: &str = "2.0.0:native-hooks\n";
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launch_stagger_starts_immediately_when_alone_or_at_a_safe_phase() {
+        let epoch = Instant::now();
+        let mut stagger = LaunchStagger::new(epoch, Duration::from_secs(6));
+        let at = |seconds| epoch + Duration::from_secs(seconds);
+        assert!(stagger.is_ready("first", epoch));
+        stagger.record_launch("first".into(), epoch);
+        assert!(!stagger.is_ready("second", epoch));
+        assert!(!stagger.is_ready("second", at(5)));
+        assert!(stagger.is_ready("second", at(6)));
+        assert!(stagger.is_ready("second", at(54)));
+        assert!(!stagger.is_ready("second", at(55)));
+        assert!(!stagger.is_ready("second", at(60)));
+    }
+
+    #[test]
+    fn launch_stagger_spaces_a_batch_across_the_period_boundary() {
+        let epoch = Instant::now();
+        let mut stagger = LaunchStagger::new(epoch, Duration::from_secs(6));
+        let at = |seconds| epoch + Duration::from_secs(seconds);
+        for (id, seconds) in [("a", 50), ("b", 56), ("c", 62), ("d", 68)] {
+            if id != "a" {
+                assert!(!stagger.is_ready(id, at(seconds - 1)));
+            }
+            assert!(stagger.is_ready(id, at(seconds)));
+            stagger.record_launch(id.into(), at(seconds));
+        }
+        assert!(!stagger.is_ready("e", at(120)));
+        assert!(stagger.is_ready("e", at(134)));
+    }
+
+    #[test]
+    fn launch_stagger_releases_inactive_cards_and_replaces_a_restarted_card() {
+        let epoch = Instant::now();
+        let mut stagger = LaunchStagger::new(epoch, Duration::from_secs(6));
+        let restart = epoch + Duration::from_secs(15);
+        stagger.record_launch("a".into(), epoch);
+        assert!(stagger.is_ready("a", epoch));
+        stagger.record_launch("a".into(), restart);
+        assert!(stagger.is_ready("b", epoch + PHASE_PERIOD));
+        assert!(!stagger.is_ready("b", restart));
+        stagger.remove("a");
+        assert!(stagger.is_ready("b", restart));
+
+        stagger.record_launch("a".into(), restart);
+        stagger.record_launch("b".into(), restart + Duration::from_secs(10));
+        stagger.retain_active(|id| id == "b");
+        assert!(stagger.is_ready("c", restart));
+        assert!(!stagger.is_ready("c", restart + Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn launch_stagger_opens_a_window_at_the_widest_gap_when_the_ring_is_full() {
+        let epoch = Instant::now();
+        let at = |ms| epoch + Duration::from_millis(ms);
+        for (count, step) in [(10, 6_000), (12, 5_000)] {
+            let mut stagger = LaunchStagger::new(epoch, Duration::from_secs(6));
+            for index in 0..count {
+                stagger.record_launch(index.to_string(), at(index * step));
+            }
+            // Verify both edges of the window across the wrap back to phase zero.
+            let midpoint = 60_000 - step / 2;
+            assert!(!stagger.is_ready("new", at(midpoint - 251)));
+            assert!(stagger.is_ready("new", at(midpoint - 250)));
+            assert!(stagger.is_ready("new", at(midpoint)));
+            assert!(stagger.is_ready("new", at(midpoint + 250)));
+            assert!(!stagger.is_ready("new", at(midpoint + 251)));
+        }
+
+        let mut stagger = LaunchStagger::new(epoch, Duration::from_secs(6));
+        for index in 0..65 {
+            stagger.record_launch(index.to_string(), at(index * 60_000 / 65));
+        }
+        assert!(stagger.is_ready("new", at(60_000)));
+    }
+
+    #[test]
+    fn launch_stagger_keeps_a_window_when_the_gap_is_half_the_period() {
+        let epoch = Instant::now();
+        let mut stagger = LaunchStagger::new(epoch, Duration::from_secs(30));
+        let at = |ms| epoch + Duration::from_millis(ms);
+        stagger.record_launch("a".into(), epoch);
+        assert!(!stagger.is_ready("b", at(29_749)));
+        assert!(stagger.is_ready("b", at(29_750)));
+        assert!(stagger.is_ready("b", at(30_000)));
+        assert!(stagger.is_ready("b", at(30_250)));
+        assert!(!stagger.is_ready("b", at(30_251)));
+    }
+
+    #[test]
+    fn launch_stagger_parses_the_launch_environment() {
+        assert_eq!(
+            LaunchStagger::from_environment(&BTreeMap::new()).min_gap,
+            DEFAULT_GAP
+        );
+        for (value, expected) in [
+            ("0", Duration::ZERO),
+            ("350", Duration::from_millis(350)),
+            ("30000", Duration::from_secs(30)),
+            ("30001", Duration::from_secs(30)),
+            ("18446744073709551616", Duration::from_secs(30)),
+            ("-1", DEFAULT_GAP),
+            ("1.5", DEFAULT_GAP),
+            ("", DEFAULT_GAP),
+            ("invalid", DEFAULT_GAP),
+        ] {
+            let stagger =
+                LaunchStagger::from_environment(&[(STAGGER_OVERRIDE.into(), value.into())].into());
+            assert_eq!(stagger.min_gap, expected, "{value:?}");
+            if expected.is_zero() {
+                let mut stagger = stagger;
+                stagger.record_launch("a".into(), stagger.epoch);
+                assert!(stagger.is_ready("b", stagger.epoch));
+            }
+        }
+    }
 
     #[test]
     fn prepare_environment_honors_the_plugin_directory_override() -> Result<()> {

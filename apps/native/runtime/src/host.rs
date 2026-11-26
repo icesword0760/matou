@@ -4623,6 +4623,8 @@ fn run_writable(
     let mut deferred_recovery = HashSet::new();
     let mut environment_changes = HashMap::<String, EnvironmentChange>::new();
     let mut launch_preparations = HashMap::<String, Receiver<Result<PreparedLaunch>>>::new();
+    let mut antigravity_stagger =
+        antigravity_launch::LaunchStagger::from_environment(&owner.launch_environment());
     let mut recovering = HashMap::<String, String>::new();
     // A failed launch stays blocked until an explicit retry starts a worker.
     let mut failed_launches = HashMap::new();
@@ -5094,11 +5096,38 @@ fn run_writable(
             .then(|| id.clone())
         }));
         launch_preparations.retain(|id, _| launch_candidates.contains(id));
+        antigravity_stagger.retain_active(|id| {
+            owner.environment_worker_active(id) || launch_preparations.contains_key(id)
+        });
+        let mut preparing_antigravity = false;
+        for id in launch_preparations.keys() {
+            if owner
+                .session(id)?
+                .is_some_and(|session| session.kind == "antigravity")
+            {
+                preparing_antigravity = true;
+                break;
+            }
+        }
+        let focused_antigravity = match focused_session.as_ref() {
+            Some(id)
+                if launch_candidates.contains(id)
+                    && owner
+                        .session(id)?
+                        .is_some_and(|session| session.kind == "antigravity") =>
+            {
+                Some(id)
+            }
+            _ => None,
+        };
         let mut launch_candidates: Vec<_> = launch_candidates.into_iter().collect();
         launch_candidates.sort_unstable_by(|left, right| {
             foreground_sessions
                 .contains(right)
                 .cmp(&foreground_sessions.contains(left))
+                .then_with(|| {
+                    (Some(right) == focused_antigravity).cmp(&(Some(left) == focused_antigravity))
+                })
                 .then_with(|| {
                     startup_order
                         .get(left)
@@ -5117,6 +5146,17 @@ fn run_writable(
         let mut eligible = HashSet::new();
         let mut completed_launches = Vec::new();
         for session_id in launch_candidates {
+            let needs_preparation = !launch_preparations.contains_key(&session_id);
+            let prepares_antigravity = needs_preparation
+                && owner
+                    .session(&session_id)?
+                    .is_some_and(|session| session.kind == "antigravity");
+            if prepares_antigravity
+                && (preparing_antigravity
+                    || !antigravity_stagger.is_ready(&session_id, Instant::now()))
+            {
+                continue;
+            }
             let fresh_codex = launch_retries
                 .get(&session_id)
                 .is_some_and(|retry| retry.fresh_codex);
@@ -5134,7 +5174,7 @@ fn run_writable(
                 available_slots -= 1;
             }
             eligible.insert(session_id.clone());
-            if !launch_preparations.contains_key(&session_id) {
+            if needs_preparation {
                 if let Some(rebuild) = launch_retries
                     .get_mut(&session_id)
                     .and_then(|retry| retry.claude_rebuild.take())
@@ -5168,6 +5208,7 @@ fn run_writable(
                 ) {
                     Ok(result) => {
                         launch_preparations.insert(session_id, result);
+                        preparing_antigravity |= prepares_antigravity;
                     }
                     Err(error) => completed_launches.push((session_id, Err(error))),
                 }
@@ -5262,16 +5303,16 @@ fn run_writable(
                         .get(&session_id)
                         .copied()
                         .unwrap_or_else(default_terminal_options);
-                    owner
-                        .launch_antigravity(
-                            &session_id,
-                            terminal,
-                            &data_root,
-                            launch,
-                            permission,
-                            false,
-                        )
-                        .map(|_| ())
+                    owner.launch_antigravity(
+                        &session_id,
+                        terminal,
+                        &data_root,
+                        launch,
+                        permission,
+                        false,
+                    )?;
+                    antigravity_stagger.record_launch(session_id.clone(), Instant::now());
+                    Ok(())
                 }
                 PreparedLaunch::Dsh(launch) => {
                     waits_for_identity = launch.plan.mode.expected_session_id().is_some();
@@ -5786,6 +5827,7 @@ fn run_writable(
                                 failed_launches.remove(id);
                                 launch_retries.remove(id);
                                 launch_preparations.remove(id);
+                                antigravity_stagger.remove(id);
                                 claude_launch_targets.remove(id);
                             }
                             pending_input.retain(|input| !disposed.contains(&input.session_id));
@@ -7970,6 +8012,9 @@ fn run_writable(
             ) {
                 Ok(ShellPromotionProgress::Pending) => continue,
                 Ok(ShellPromotionProgress::Attached) => {
+                    if promotion.launch.profile == LaunchProfile::Antigravity {
+                        antigravity_stagger.record_launch(id.clone(), Instant::now());
+                    }
                     sessions.insert(id.clone());
                     dirty.insert(id.clone());
                     graph_dirty = true;
@@ -8050,6 +8095,9 @@ fn run_writable(
             ) {
                 Ok(PermissionProgress::Pending) => {}
                 Ok(PermissionProgress::Launched) => {
+                    if change.profile == LaunchProfile::Antigravity {
+                        antigravity_stagger.record_launch(id.clone(), Instant::now());
+                    }
                     sessions.insert(id.clone());
                     dirty.insert(id.clone());
                     graph_dirty = true;
@@ -8448,6 +8496,7 @@ fn run_writable(
                         failed_launches.remove(id);
                         launch_retries.remove(id);
                         launch_preparations.remove(id);
+                        antigravity_stagger.remove(id);
                         claude_launch_targets.remove(id);
                     }
                     pending_input.retain(|input| !disposed.contains(&input.session_id));
