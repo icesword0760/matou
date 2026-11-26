@@ -13038,13 +13038,6 @@ impl Workspace {
                 })
                 .map(|label| label.to_string())
         };
-        let cwd = live
-            .and_then(|hud| trimmed_graph_text(&hud["cwd"]))
-            .or_else(|| trimmed_graph_text(&node["cwd"]))
-            .and_then(|path| {
-                let tail = path.rsplit(['/', '\\']).find(|part| !part.is_empty())?;
-                Some((path, format!("~/{}", tail.replace(['\r', '\n', '\t'], " "))))
-            });
         let git = self
             .footer_git_projection(id)
             .or_else(|| FooterGit::projected(node, live, self.locale));
@@ -13053,7 +13046,6 @@ impl Workspace {
         Some(FooterFields {
             name,
             is_shell: mode == "shell",
-            cwd,
             git,
             environment,
             codex,
@@ -17871,39 +17863,18 @@ impl Workspace {
         let chip = session.and_then(|id| self.permission_chip_for(id));
         let menu_open =
             self.permission_menu_open(window) && chip.as_ref().is_some_and(|chip| !chip.disabled);
-        // The optional cwd/Git slot only gets space the model did not claim. A
-        // cwd needs room for both a recognizable prefix and any Git label that
-        // shares the slot; below that the field is omitted rather than
-        // clipped from the left.
-        let cwd_min_slot = FOOTER_CWD_MIN_WIDTH;
         let status_measure = window.use_keyed_state("footer-status-measure", cx, |_, _| {
             None::<FooterStatusMeasure>
         });
         let measure_key = (viewport_width, label.clone(), count.clone(), px(breadcrumb_width));
-        let (status_content_width, show_cwd) = {
-            let measured = status_measure.read(cx);
-            let measured = measured
-                .as_ref()
-                .filter(|measure| measure.key == measure_key);
-            let fallback_content = (status_estimate - status_padding - if detached { 0. } else { 1. }).max(0.);
-            let fallback_show_cwd = fallback_content > FOOTER_CWD_HIDE_BELOW;
-            let fallback_optional = if fallback_show_cwd {
-                FOOTER_CWD_MAX_WIDTH
-            } else {
-                0.
-            };
-            let (content, optional, show) = measured.map_or(
-                (fallback_content, fallback_optional, fallback_show_cwd),
-                |measure| {
-                    (
-                        measure.status_content_width,
-                        measure.optional_width,
-                        measure.show_cwd,
-                    )
-                },
-            );
-            (content, show && optional >= cwd_min_slot)
-        };
+        let status_content_width = status_measure
+            .read(cx)
+            .as_ref()
+            .filter(|measure| measure.key == measure_key)
+            .map(|measure| measure.status_content_width)
+            .unwrap_or_else(|| {
+                (status_estimate - status_padding - if detached { 0. } else { 1. }).max(0.)
+            });
         let mode = fields.as_ref().map_or("", |fields| fields.mode);
         let mode = match mode {
             "claude-code" => "claude-code",
@@ -18042,86 +18013,14 @@ impl Workspace {
                     .child(self.egress_trigger_for(session, false, window, cx)),
             );
         }
-        // The cwd takes only the space left after primary and fixed controls.
-        let mut optional = div()
-            .children(footer_bounds_probe("secondary"))
-            .flex_basis(px(0.))
-            .flex_grow()
-            .min_w_0()
-            .h_full()
-            .flex()
-            .items_center()
-            .justify_end()
-            .gap(px(FOOTER_GAP))
-            .overflow_hidden();
-        // Measure the real optional slot after layout. The next frame hides
-        // the cwd when this slot cannot show a recognizable path prefix, and
-        // otherwise lets the cwd tail-ellipsize inside its own width.
-        let optional_measure = status_measure.clone();
-        let optional_key = measure_key.clone();
-        optional = optional.child(
-            canvas(
-                |_, _, _| (),
-                move |bounds, _, _, cx| {
-                    let actual_width = f32::from(bounds.size.width);
-                    optional_measure.update(cx, |state, cx| {
-                        let needs_key = state
-                            .as_ref()
-                            .is_none_or(|measure| measure.key != optional_key);
-                        if needs_key {
-                            *state = Some(FooterStatusMeasure {
-                                key: optional_key.clone(),
-                                show_cwd,
-                                status_content_width,
-                                optional_width: actual_width,
-                            });
-                            cx.notify();
-                        } else if let Some(measure) = state.as_mut()
-                            && (measure.optional_width - actual_width).abs() > 0.5
-                        {
-                            measure.optional_width = actual_width;
-                            cx.notify();
-                        }
-                    });
-                },
-            )
-            .absolute()
-            .top_0()
-            .left_0()
-            .size_full(),
-        );
         let mut fixed = div()
+            .ml_auto()
             .flex_none()
             .h_full()
             .flex()
             .items_center()
             .gap(px(status_gap));
         if let Some(fields) = fields.as_ref() {
-            if show_cwd && !fields.is_shell && fields.cwd.is_some() {
-                optional = optional.child(
-                    div()
-                        .w(px(1.))
-                        .h(px(12.))
-                        .flex_none()
-                        .bg(rgba(palette.divider)),
-                );
-            }
-            if show_cwd && let Some((full, short)) = fields.cwd.as_ref() {
-                let tooltip: SharedString = SharedString::from((*full).to_owned());
-                optional = optional.child(
-                    div()
-                        .children(footer_bounds_probe("cwd"))
-                        .id("footer-cwd")
-                        .flex_shrink()
-                        .min_w_0()
-                        .max_w(px(FOOTER_CWD_MAX_WIDTH))
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .child(footer_text("cwd", short.as_str().to_owned()))
-                        .tooltip(move |_, cx| cx.new(|_| CardTooltip(tooltip.clone())).into()),
-                );
-            }
             if let Some(git) = fields.git.as_ref() {
                 let tooltip: SharedString = git.title.clone().into();
                 let git_button = div()
@@ -18143,9 +18042,6 @@ impl Workspace {
                     git_button
                 });
             }
-            // The environment moves out of the shrinkable optional slot and
-            // into the fixed right group, so a narrow footer can never clip
-            // the 22×22 local icon or its label from the left.
             if let Some(environment) = fields.environment.as_ref() {
                 let environment_button = div()
                     .children(footer_bounds_probe("environment"))
@@ -18366,7 +18262,7 @@ impl Workspace {
                     }
                 }
             }
-            status = status.child(primary).child(optional).child(fixed);
+            status = status.child(primary).child(fixed);
         } else {
             status = status.child(
                 div()
@@ -18385,10 +18281,7 @@ impl Workspace {
             cx.defer_in(window, Self::dismiss_footer_popover);
         }
         status = status.child(
-            // Measure the real status and optional boxes after layout. The next
-            // frame hides the cwd below the frozen 440pt budget (and when its
-            // slot cannot show a path prefix) plus the model/context cells at
-            // their 210pt/250pt priorities.
+            // Use the laid-out status width for model and context visibility.
             canvas(
                 |_, _, _| (),
                 move |bounds, _, _, cx| {
@@ -18397,28 +18290,19 @@ impl Workspace {
                     let actual_content_width =
                         actual_width - status_padding - if detached { 0. } else { 1. };
                     measure.update(cx, |state, cx| {
-                        let optional_width = state
-                            .as_ref()
-                            .filter(|measure| measure.key == measure_key)
-                            .map_or(0., |measure| measure.optional_width);
-                        let actual_show_cwd = actual_content_width > FOOTER_CWD_HIDE_BELOW
-                            && optional_width >= cwd_min_slot;
                         let actual_show_model = codex_hud::shows_model(mode, actual_content_width);
                         let actual_show_context =
                             actual_content_width > codex_hud::CONTEXT_HIDE_BELOW;
                         let changed = state
                             .as_ref()
                             .is_none_or(|measure| measure.key != measure_key)
-                            || actual_show_cwd != show_cwd
                             || actual_show_model != show_model
                             || actual_show_context != show_context
                             || (actual_content_width < FOOTER_COMPACT_STATUS_WIDTH)
                                 != (status_content_width < FOOTER_COMPACT_STATUS_WIDTH);
                         *state = Some(FooterStatusMeasure {
                             key: measure_key.clone(),
-                            show_cwd: actual_show_cwd,
                             status_content_width: actual_content_width,
-                            optional_width,
                         });
                         if changed {
                             cx.notify();
@@ -21121,31 +21005,16 @@ const FOOTER_COMPACT_STATUS_WIDTH: f32 = 310.;
 const FOOTER_COUNT_HIDE_BELOW: f32 = 340.;
 const FOOTER_CHILD_BREADCRUMB_MIN_WIDTH: f32 = 42.;
 const FOOTER_CHILD_STATUS_RESERVE_WIDTH: f32 = 400.;
-const FOOTER_CWD_MAX_WIDTH: f32 = 130.;
 const FOOTER_GIT_MAX_WIDTH: f32 = 150.;
 const FOOTER_NAME_MAX_WIDTH: f32 = 180.;
 const FOOTER_ENVIRONMENT_MAX_WIDTH: f32 = 150.;
-/// `.status-info` hides the cwd once its layout content box is this narrow.
-/// The comparison uses the measured status width, not the whole window.
-const FOOTER_CWD_HIDE_BELOW: f32 = 440.;
-/// A cwd narrower than this cannot show a recognizable `~/name` prefix even
-/// after tail ellipsis, so the whole field is hidden instead of left-clipped.
-const FOOTER_CWD_MIN_WIDTH: f32 = 64.;
 const FOOTER_SIDEBAR_WIDTH: f32 = 260.;
 const FOOTER_ACCOUNT_LABEL: &str = "Claude 账户";
 
-/// Measured cwd/model/context visibility for the current window width and
-/// breadcrumb. `status_content_width` is the `.status-info` outer box minus its
-/// 12pt left padding and 1pt divider, matching the frozen container queries.
-/// `optional_width` is the real cwd/Git slot after the model has taken its
-/// intrinsic width, so the cwd can be hidden before it loses its path prefix.
+/// The laid-out status width after padding and the breadcrumb divider.
 struct FooterStatusMeasure {
     key: (Pixels, SharedString, SharedString, Pixels),
-    show_cwd: bool,
     status_content_width: f32,
-    /// Real width of the cwd/Git overflow slot. The cwd field only renders when
-    /// this slot can still show its own tail-ellipsized path prefix.
-    optional_width: f32,
 }
 
 // Hidden probes install this sink before drawing a frame.
@@ -21626,7 +21495,6 @@ fn footer_user_icon(size: f32, color: Rgba) -> impl IntoElement {
 struct FooterFields<'a> {
     name: Option<String>,
     is_shell: bool,
-    cwd: Option<(&'a str, String)>,
     git: Option<FooterGit>,
     environment: Option<FooterEnvironment>,
     codex: Option<codex_hud::CodexHud>,
