@@ -446,7 +446,7 @@ index 0000000..cad33be
 +    }
 +}
 diff --git a/src/platform/windows/window.rs b/src/platform/windows/window.rs
-index ba58f95..9dbb019 100644
+index ba58f95..5e2f89f 100644
 --- a/src/platform/windows/window.rs
 +++ b/src/platform/windows/window.rs
 @@ -26,6 +26,7 @@ use windows::{
@@ -457,12 +457,13 @@ index ba58f95..9dbb019 100644
  use crate::*;
  
  pub(crate) struct WindowsWindow(pub Rc<WindowsWindowInner>);
-@@ -78,6 +79,18 @@ pub(crate) struct WindowsWindowInner {
+@@ -78,6 +79,19 @@ pub(crate) struct WindowsWindowInner {
      pub(crate) platform_window_handle: HWND,
      pub(super) frame_requested: Arc<AtomicBool>,
      ime_sync_pending: Cell<bool>,
 +    pub(super) touchpad: RefCell<Option<Touchpad>>,
 +    touchpad_region: Cell<Option<RECT>>,
++    touchpad_retry_at: Cell<Option<Instant>>,
 +}
 +
 +pub(super) fn touchpad_rect(bounds: Bounds<Pixels>, dpi: f32) -> RECT {
@@ -476,16 +477,17 @@ index ba58f95..9dbb019 100644
  }
  
  impl WindowsWindowState {
-@@ -239,6 +252,8 @@ impl WindowsWindowInner {
+@@ -239,6 +253,9 @@ impl WindowsWindowInner {
              platform_window_handle: context.platform_window_handle,
              frame_requested: Arc::new(AtomicBool::new(true)),
              ime_sync_pending: Cell::new(false),
 +            touchpad: RefCell::default(),
 +            touchpad_region: Cell::new(None),
++            touchpad_retry_at: Cell::new(None),
              system_settings: RefCell::new(WindowsSystemSettings::new(context.display)),
          }))
      }
-@@ -344,6 +359,7 @@ pub(crate) struct Callbacks {
+@@ -344,6 +361,7 @@ pub(crate) struct Callbacks {
      pub(crate) should_close: Option<Box<dyn FnMut() -> bool>>,
      pub(crate) close: Option<Box<dyn FnOnce()>>,
      pub(crate) hit_test_window_control: Option<Box<dyn FnMut() -> Option<WindowControlArea>>>,
@@ -493,7 +495,7 @@ index ba58f95..9dbb019 100644
      pub(crate) appearance_changed: Option<Box<dyn FnMut()>>,
  }
  
-@@ -862,6 +878,35 @@ impl PlatformWindow for WindowsWindow {
+@@ -862,6 +880,54 @@ impl PlatformWindow for WindowsWindow {
          self.0.state.borrow_mut().callbacks.close = Some(callback);
      }
  
@@ -508,21 +510,40 @@ index ba58f95..9dbb019 100644
 +        let region = bounds
 +            .map(|bounds| touchpad_rect(bounds, self.scale_factor()))
 +            .filter(|rect| rect.right > rect.left && rect.bottom > rect.top);
-+        if self.0.touchpad_region.get() == region {
++        if region.is_none() {
++            self.0.touchpad_retry_at.set(None);
++        }
++        if self.0.touchpad_region.get() == region
++            || self
++                .0
++                .touchpad_retry_at
++                .get()
++                .is_some_and(|retry_at| Instant::now() < retry_at)
++        {
 +            return;
 +        }
 +        let Ok(mut touchpad) = self.0.touchpad.try_borrow_mut() else {
 +            return;
 +        };
-+        self.0.touchpad_region.set(region);
-+        if let Some(region) = region {
++        let applied = if let Some(region) = region {
 +            if let Some(touchpad) = touchpad.as_mut() {
-+                touchpad.resize(region).log_err();
++                touchpad.resize(region).log_err().is_some()
 +            } else {
 +                *touchpad = Touchpad::new(self.0.hwnd, region).log_err();
++                touchpad.is_some()
 +            }
 +        } else {
 +            drop(touchpad.take());
++            true
++        };
++        if applied {
++            self.0.touchpad_region.set(region);
++            self.0.touchpad_retry_at.set(None);
++        } else {
++            // Leave the installed bounds unchanged and throttle COM retries on redraws.
++            self.0
++                .touchpad_retry_at
++                .set(Some(Instant::now() + Duration::from_secs(1)));
 +        }
 +    }
 +

@@ -39,7 +39,7 @@ PATCHED_SHA256 = {
     "src/platform/windows/direct_write.rs": "e345de60957683a982c560a00f7d685b17d23b91e1c9b45c52f930a4e4c0f609",
     "src/platform/windows/events.rs": "09c11fa0440f32dc0d6da01088df6ea8f73f3f3eeb391b6fa9321447b37b0a6b",
     "src/platform/windows/platform.rs": "f56046900c173914859233aad5af10717ec115a701e545c905fe022f8de340a3",
-    "src/platform/windows/window.rs": "2709270b8ac9683398fbaca82083196b8be343d69062dfa2b57c44fc6c09befd",
+    "src/platform/windows/window.rs": "b89e72e8f251e84f18c9a0d3c912716e45b5fc377538bee1176b526f8b6503fe",
 }
 SOURCES = tuple(map(Path, PATCHED_SHA256))
 ADDED_SOURCES = {Path("src/platform/windows/touchpad.rs")}
@@ -81,6 +81,7 @@ PREVIOUS_SHA256 = {
         "eb47662f55c3bd920c161c19bac52032b98bfb3ff6af9ebed9ad2127dbe83a03",
         "b946befe60d271dc97dcad562da3bd70415bd4d138eaa5c0f1f53e516de25cfa",
         "30e3c2ceb3dad569157874d99852d6a44b0b2cb3880a5a7d7abc11fdcdc7c736",
+        "2709270b8ac9683398fbaca82083196b8be343d69062dfa2b57c44fc6c09befd",
     ),
 }
 MARKER = ".matou-patch.json"
