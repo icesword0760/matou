@@ -1655,7 +1655,7 @@ mod tests {
                 cwd,
                 &scope,
                 &ListOptions {
-                    query: worktree.to_string_lossy().into_owned(),
+                    query: loaded.cwd.to_string_lossy().into_owned(),
                     ..Default::default()
                 },
             )

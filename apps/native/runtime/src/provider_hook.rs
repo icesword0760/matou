@@ -1166,7 +1166,8 @@ fn listen(
     }
 }
 
-const HOOK_DECISION_BUDGET: Duration = Duration::from_millis(150);
+const HOOK_DECISION_BUDGET: Duration =
+    Duration::from_millis(if cfg!(windows) { 500 } else { 150 });
 
 fn evaluate_hook_fail_open(
     interceptor: &Arc<HookInterceptor>,
@@ -1804,7 +1805,15 @@ mod tests {
             let expected = if case == "success" { decision } else { "" };
             assert!(output.status.success(), "{case}: {:?}", output);
             assert_eq!(output.stdout, expected.as_bytes(), "{case}");
-            assert!(output.stderr.is_empty(), "{case}: {:?}", output);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let allowed_ps_progress = cfg!(windows)
+                && stderr.starts_with("#< CLIXML")
+                && !stderr.contains(r#"S="Error""#);
+            assert!(
+                output.stderr.is_empty() || allowed_ps_progress,
+                "{case}: {:?}",
+                output
+            );
             if let Some(worker) = fixture {
                 let (request, raw_body) = worker.join().unwrap()?;
                 assert_eq!(request, "POST /hooks/fixture HTTP/1.1\r\n");

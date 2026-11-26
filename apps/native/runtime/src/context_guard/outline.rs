@@ -152,7 +152,7 @@ pub fn batch_search(root: &Path, queries: &[String]) -> Result<String> {
                     })
                     .collect::<Vec<_>>()
                     .join(", ");
-                let path = rel.display().to_string();
+                let path = rel.to_string_lossy().replace('\\', "/");
                 let row = format!(
                     "  {}:{}: {} [matches: {labels}]\n",
                     truncate_line(&path, 512),

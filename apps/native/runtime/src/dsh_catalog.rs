@@ -1604,8 +1604,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let main = temp.path().join("project");
         repository(&main);
-        let main = main.canonicalize().unwrap();
-        let linked = main.parent().unwrap().join("linked");
+        let linked = temp.path().join("linked");
         git(
             &main,
             &[
@@ -1616,6 +1615,8 @@ mod tests {
                 linked.to_str().unwrap(),
             ],
         );
+        let main = main.canonicalize().unwrap();
+        let linked = linked.canonicalize().unwrap();
         let subdirectory = main.join("src");
         fs::create_dir(&subdirectory).unwrap();
         let sibling = main.parent().unwrap().join("project-other");

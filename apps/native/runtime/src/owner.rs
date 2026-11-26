@@ -9206,9 +9206,31 @@ mod provider_tests {
             owner.claude_binding(session)?.unwrap().restore_state,
             "none"
         );
-        // Even a later authoritative report cannot change a targeted run's identity.
+        // Once the targeted run confirmed its identity, a later foreign hook is
+        // rejected without retiring the active session or mutating its binding.
         owner.apply_hook(
             resume.clone(),
+            observation("Stop", Some("CURRENT-ID")),
+            &mut events,
+        );
+        assert!(owner.provider_allows_derivation(session));
+        assert_eq!(count(&owner)?, 2);
+        assert_eq!(notification_count(&owner)?, after_context_reminders);
+        assert_eq!(
+            owner.claude_binding(session)?.unwrap().restore_state,
+            "none"
+        );
+        assert!(
+            matches!(events.last(), Some(OwnerEvent::ProviderIdentity(event))
+            if event["reason"] == "unexpected-child-identity")
+        );
+
+        // Before confirmation, a mismatched identity still retires the restore run.
+        let binding = owner.claude_binding(session)?.context("confirmed binding")?;
+        owner.launch_claude(session.into(), terminal, plan(), Some(&binding))?;
+        let unconfirmed = owner.provider_scope(session).unwrap();
+        owner.apply_hook(
+            unconfirmed.clone(),
             observation("Stop", Some("CURRENT-ID")),
             &mut events,
         );
@@ -9224,7 +9246,11 @@ mod provider_tests {
             owner.poll(Duration::from_millis(25))?;
         }
         assert!(owner.can_launch_provider(session));
-        owner.apply_hook(resume, observation("Stop", Some("current-id")), &mut events);
+        owner.apply_hook(
+            unconfirmed,
+            observation("Stop", Some("current-id")),
+            &mut events,
+        );
         assert!(
             matches!(events.last(), Some(OwnerEvent::ProviderIdentity(event))
             if event["reason"] == "retired-run")
