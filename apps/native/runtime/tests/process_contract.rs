@@ -4324,6 +4324,239 @@ fn post_claude_hook_url(url: &str, payload: serde_json::Value) -> Result<u16> {
         .parse()?)
 }
 
+fn start_claude_restore_hook_fixture(root: &Path) -> Result<(RuntimeChild, String)> {
+    let stub = root.join("claude-restore-stub");
+    fs::write(
+        &stub,
+        r#"#!/bin/sh
+set -eu
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --settings) settings="$2"; shift ;;
+    --resume) conversation="$2"; shift ;;
+  esac
+  shift
+done
+[ "$conversation" = 'restored-conversation' ]
+if [ -f "$0.settings" ]; then
+  marker='restarted hook ready'
+else
+  marker='restore hook ready'
+fi
+printf '%s' "$settings" > "$0.settings"
+printf '%s' "${MATOU_PROVIDER_HOOK_PROFILE:-}" > "$0.profile"
+printf '%s\n' "$marker"
+while IFS= read -r line; do
+  printf 'received: %s\n' "$line"
+done
+"#,
+    )?;
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o700))?;
+    let spawn = || {
+        RuntimeChild::spawn_configured(
+            root,
+            &format!("PROMPT='{PROMPT} '\n"),
+            Path::new("/bin/zsh"),
+            Some(&stub),
+        )
+    };
+    let mut child = spawn()?;
+    child.hello()?;
+    seed_catalog(root, &child.workspace, "restored-conversation")?;
+    child.send(Command::LoadProviderSession {
+        session_id: child.session.clone(),
+        provider_session_id: "restored-conversation".into(),
+        takeover_from: None,
+    })?;
+    child.frame(|_, screen, _| screen_has_line(screen, "restore hook ready"))?;
+    let settings_path = || fs::read_to_string(stub.with_extension("settings"));
+    post_claude_identity(
+        Path::new(&settings_path()?),
+        "restored-conversation",
+        "default",
+        "original-model",
+    )?;
+    wait_claude_restore_hook_result(&mut child, "confirmed")?;
+    child.send(Command::Shutdown)?;
+    child.closed()?;
+    let (status, stderr) = child.wait()?;
+    ensure!(status.success(), "seed runtime shutdown: {stderr}");
+
+    let mut restored = spawn()?;
+    restored.connect()?;
+    assert_eq!(restored.session, child.session);
+    restored.frame(|_, screen, _| screen_has_line(screen, "restarted hook ready"))?;
+    Ok((restored, claude_hook_url(Path::new(&settings_path()?))?))
+}
+
+fn wait_claude_restore_hook_result(
+    child: &mut RuntimeChild,
+    result: &str,
+) -> Result<serde_json::Value> {
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        if let Event::Graph(graph) = child.event(deadline, true)?
+            && let Some(event) = graph["providerIdentityEvents"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|event| {
+                    event["sessionId"] == child.session
+                        && (event["result"] == result || event["result"] == "restore-failed")
+                })
+        {
+            assert_eq!(event["result"], result, "{event}");
+            return Ok(event.clone());
+        }
+    }
+}
+
+#[test]
+fn claude_restore_retires_the_hook_when_the_first_identity_mismatches() -> Result<()> {
+    use matou_native_core::sessions::{claude_binding, list_runs};
+    use serde_json::json;
+
+    let root = tempfile::tempdir()?;
+    let (mut child, url) = start_claude_restore_hook_fixture(root.path())?;
+    let db = Connection::open(child.data.join("matou.sqlite"))?;
+    let run = list_runs(&db, &child.session)?
+        .pop()
+        .context("restore run")?;
+    assert_eq!(
+        post_claude_hook_url(
+            &url,
+            json!({
+                "hook_event_name": "SessionStart", "session_id": "other-conversation",
+            })
+        )?,
+        200
+    );
+    let failure = wait_claude_restore_hook_result(&mut child, "restore-failed")?;
+    assert_eq!(failure["runId"], run.id);
+    assert!(
+        failure["restoreError"]
+            .as_str()
+            .unwrap()
+            .contains("does not match the session being restored")
+    );
+    assert_eq!(
+        post_claude_hook_url(
+            &url,
+            json!({
+                "hook_event_name": "SessionStart", "session_id": "restored-conversation",
+            })
+        )?,
+        200
+    );
+    let rejected = wait_claude_restore_hook_result(&mut child, "rejected")?;
+    assert_eq!(rejected["reason"], "retired-run");
+    assert_shell_gone(run.pid.context("restore PID")?.try_into()?)?;
+    let binding = claude_binding(&db, &child.session)?.context("failed restore binding")?;
+    assert_eq!(binding.provider_session_id, "restored-conversation");
+    assert_eq!(binding.restore_state, "failed");
+    child.send(Command::Shutdown)?;
+    child.closed()?;
+    let (status, stderr) = child.wait()?;
+    ensure!(status.success(), "runtime shutdown: {stderr}");
+    Ok(())
+}
+
+#[test]
+fn claude_restore_rejects_a_child_hook_and_keeps_serving_the_confirmed_session() -> Result<()> {
+    use matou_native_core::sessions::{claude_binding, list_runs};
+    use serde_json::json;
+
+    let root = tempfile::tempdir()?;
+    let (mut child, url) = start_claude_restore_hook_fixture(root.path())?;
+    assert_eq!(
+        post_claude_hook_url(
+            &url,
+            json!({
+                "hook_event_name": "SessionStart", "session_id": "restored-conversation",
+                "model": {"id": "original-model"},
+            })
+        )?,
+        200
+    );
+    let confirmed = wait_claude_restore_hook_result(&mut child, "confirmed")?;
+    assert_eq!(confirmed["providerSessionId"], "restored-conversation");
+    let db = Connection::open(child.data.join("matou.sqlite"))?;
+    let before = claude_binding(&db, &child.session)?.context("confirmed binding")?;
+
+    assert_eq!(
+        post_claude_hook_url(
+            &url,
+            json!({
+                "hook_event_name": "SessionStart", "session_id": "child-conversation",
+                "model": {"id": "child-model"},
+            })
+        )?,
+        200
+    );
+    let rejected = wait_claude_restore_hook_result(&mut child, "rejected")?;
+    assert_eq!(rejected["reason"], "unexpected-child-identity");
+    assert_eq!(rejected["runId"], confirmed["runId"]);
+    let after = claude_binding(&db, &child.session)?.context("binding after child hook")?;
+    assert_eq!(after.id, before.id);
+    assert_eq!(after.provider_session_id, before.provider_session_id);
+    assert_eq!(after.restore_state, before.restore_state);
+    assert_eq!(after.metadata, before.metadata);
+    child.send(Command::GetAgentHud {
+        request_id: 1,
+        session_id: child.session.clone(),
+    })?;
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        if let Event::Graph(graph) = child.event(deadline, true)?
+            && graph["type"] == "agentHudResult"
+            && graph["requestId"] == 1
+        {
+            assert_eq!(graph["result"]["hud"]["model"], "original-model");
+            break;
+        }
+    }
+
+    child.input("still active")?;
+    child.frame(|_, screen, _| screen_has_line(screen, "received: still active"))?;
+    assert_eq!(
+        post_claude_hook_url(
+            &url,
+            json!({
+                "hook_event_name": "UserPromptSubmit", "session_id": "restored-conversation",
+                "model": "updated-model",
+            })
+        )?,
+        200
+    );
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        let binding = claude_binding(&db, &child.session)?.context("live restore binding")?;
+        if binding.metadata["model"] == "updated-model" {
+            assert_eq!(binding.id, before.id);
+            break;
+        }
+        ensure!(
+            Instant::now() < deadline,
+            "own hook did not update the binding"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    let run = list_runs(&db, &child.session)?
+        .pop()
+        .context("active restore run")?;
+    assert_eq!(confirmed["runId"], run.id);
+    assert_eq!(run.status, "running");
+    assert_eq!(
+        fs::read_to_string(root.path().join("claude-restore-stub.profile"))?,
+        "claude-code"
+    );
+    child.send(Command::Shutdown)?;
+    child.closed()?;
+    let (status, stderr) = child.wait()?;
+    ensure!(status.success(), "runtime shutdown: {stderr}");
+    Ok(())
+}
+
 fn wait_permission_identity(child: &mut RuntimeChild) -> Result<()> {
     let deadline = Instant::now() + TIMEOUT;
     loop {
@@ -6285,7 +6518,7 @@ while IFS= read -r line; do :; done
             &format!("{url}?kind=statusline"),
             json!({
                 "conversationId": CONVERSATION, "agent_state":"idle", "cycle_mode":mode,
-                "model":{"id":"gemini-fixture"}, "quota":{"gemini-5h":{"remaining_fraction":0.75}}
+                "model":{"id":"antigravity-fixture"}, "quota":{"gemini-5h":{"remaining_fraction":0.75}}
             }),
         )
     };
@@ -6337,6 +6570,7 @@ while IFS= read -r line; do :; done
         }
     };
     assert_eq!(hud["permissionMode"], "ask");
+    assert_eq!(hud["model"], "antigravity-fixture");
     assert_eq!(hud["usageWindows"][0]["usedPercent"], 25.0);
     assert_eq!(hud["configCounts"]["mcps"], 1);
     assert_eq!(hud["agents"][0]["id"], "external:reviewer");

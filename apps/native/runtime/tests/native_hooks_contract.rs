@@ -24,6 +24,7 @@ fn hook(root: &Path, input: &[u8], worker: bool) -> Result<Value> {
         .env("MATOU_DATA_ROOT", root)
         .env_remove("MATOU_PROVIDER_HOOK_URL")
         .env_remove("MATOU_PROVIDER_HOOK_TOKEN")
+        .env_remove("MATOU_PROVIDER_HOOK_PROFILE")
         .env("MATOU_FOREMAN_DEPTH", if worker { "1" } else { "" })
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -111,6 +112,76 @@ fn native_batch_entry_accepts_an_installed_agent_in_a_chinese_path() -> Result<(
 }
 
 #[test]
+fn native_session_start_hooks_only_callback_for_their_provider_or_legacy_environment() -> Result<()>
+{
+    let root = tempfile::tempdir()?;
+    let system_message = root.path().join("system-message.json");
+    let injection = br#"{"injectSteps":[]}"#;
+    fs::write(&system_message, injection)?;
+    let token = "A".repeat(43);
+    for (args, provider) in [
+        (&["--hook", "claude-session-start"][..], "claude-code"),
+        (&["--hook", "agy", "session-start"][..], "antigravity"),
+    ] {
+        for profile in [Some("claude-code"), Some("antigravity"), None] {
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+            listener.set_nonblocking(true)?;
+            let mut command = Command::new(runtime_binary());
+            command
+                .args(args)
+                .env("PATH", root.path())
+                .env("MATOU_DATA_ROOT", root.path())
+                .env("MATOU_ANTIGRAVITY_SYSTEM_MESSAGE_FILE", &system_message)
+                .env(
+                    "MATOU_PROVIDER_HOOK_URL",
+                    format!("http://{}/hooks/{token}", listener.local_addr()?),
+                )
+                .env("MATOU_PROVIDER_HOOK_TOKEN", &token)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped());
+            match profile {
+                Some(profile) => command.env("MATOU_PROVIDER_HOOK_PROFILE", profile),
+                None => command.env_remove("MATOU_PROVIDER_HOOK_PROFILE"),
+            };
+            let mut child = command.spawn()?;
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(br#"{"hook_event_name":"SessionStart","session_id":"fixture"}"#)?;
+            let output = child.wait_with_output()?;
+            assert!(output.status.success());
+
+            let should_callback = profile.is_none_or(|profile| profile == provider);
+            if should_callback {
+                let (mut connection, _) = listener.accept()?;
+                connection.set_read_timeout(Some(Duration::from_secs(2)))?;
+                let mut request = String::new();
+                connection.read_to_string(&mut request)?;
+                assert!(request.starts_with(&format!("POST /hooks/{token} HTTP/1.1\r\n")));
+            } else {
+                assert!(
+                    matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+                    "{provider} unexpectedly connected with profile {profile:?}"
+                );
+            }
+            if provider == "claude-code" {
+                let output: Value = serde_json::from_slice(&output.stdout)?;
+                assert_eq!(
+                    output["hookSpecificOutput"]["hookEventName"],
+                    "SessionStart"
+                );
+            } else if should_callback {
+                assert_eq!(output.stdout, injection);
+            } else {
+                assert!(output.stdout.is_empty());
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn antigravity_native_hook_forwards_a_tool_payload_without_external_commands() -> Result<()> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
     let endpoint = listener.local_addr()?;
@@ -153,6 +224,7 @@ fn antigravity_native_hook_forwards_a_tool_payload_without_external_commands() -
             format!("http://{endpoint}/hooks/{token}"),
         )
         .env("MATOU_PROVIDER_HOOK_TOKEN", token)
+        .env_remove("MATOU_PROVIDER_HOOK_PROFILE")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()?;

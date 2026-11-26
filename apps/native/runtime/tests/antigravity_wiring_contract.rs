@@ -60,6 +60,7 @@ impl Fixture {
             r#"#!/bin/sh
 set -eu
 [ -z "${CLAUDECODE:-}" ] && [ "${MATOU_ANTIGRAVITY_SYSTEM_MESSAGE_FILE:-}" != "stale-file" ] && [ -f "${MATOU_ANTIGRAVITY_SYSTEM_MESSAGE_FILE:-}" ]
+[ "${MATOU_PROVIDER_HOOK_PROFILE:-}" = 'antigravity' ]
 [ -f "$HOME/.gemini/settings.json" ]
 trace="$AGY_TEST_TRACES/$MATOU_PROVIDER_HOOK_TOKEN"
 mkdir "$trace"
@@ -140,6 +141,7 @@ done
                             self.traces.clone().into_os_string(),
                         ),
                         ("MATOU_PROVIDER_HOOK_URL".into(), "stale-hook".into()),
+                        ("MATOU_PROVIDER_HOOK_PROFILE".into(), "claude-code".into()),
                         (
                             "MATOU_ANTIGRAVITY_SYSTEM_MESSAGE_FILE".into(),
                             "stale-file".into(),
@@ -298,6 +300,7 @@ impl Run {
             .env("HOME", &self.home)
             .env("MATOU_PROVIDER_HOOK_URL", &self.endpoint)
             .env("MATOU_PROVIDER_HOOK_TOKEN", &self.token)
+            .env("MATOU_PROVIDER_HOOK_PROFILE", "antigravity")
             .env(
                 "MATOU_ANTIGRAVITY_SYSTEM_MESSAGE_FILE",
                 &self.system_message,

@@ -3824,7 +3824,10 @@ impl ShellOwner {
                         run_environment
                             .iter()
                             .filter(|(key, _)| {
-                                key.as_os_str() != "MATOU_ANTIGRAVITY_SYSTEM_MESSAGE_FILE"
+                                matches!(
+                                    key.to_str(),
+                                    Some("MATOU_PROVIDER_HOOK_URL" | "MATOU_PROVIDER_HOOK_TOKEN")
+                                )
                             })
                             .filter_map(|(_, value)| value.to_str().map(str::to_owned)),
                     );
@@ -5605,19 +5608,25 @@ impl ShellOwner {
         }
         if let (Some(expected), Some(identity)) = (&scope.expected_id, &observation.identity)
             && expected != identity
-            && let Some(binding_id) = hook
+        {
+            if hook.last_observation.is_some() {
+                reject_identity(events, &scope, "unexpected-child-identity");
+                return;
+            }
+            if let Some(binding_id) = hook
                 .resume
                 .as_ref()
                 .and_then(|resume| resume.binding_id.clone())
-        {
-            self.park_provider_run(
-                &scope.session_id,
-                &scope.run_id,
-                &binding_id,
-                IDENTITY_MISMATCH,
-                events,
-            );
-            return;
+            {
+                self.park_provider_run(
+                    &scope.session_id,
+                    &scope.run_id,
+                    &binding_id,
+                    IDENTITY_MISMATCH,
+                    events,
+                );
+                return;
+            }
         }
         let safe = |value: Option<String>| {
             value.filter(|value| safe_hook_text(value, &hook.secrets).is_some())

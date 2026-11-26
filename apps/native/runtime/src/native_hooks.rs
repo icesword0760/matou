@@ -8,10 +8,14 @@ use std::{
     time::Duration,
 };
 
-use matou_native_core::dispatch_roles::{DispatchRolesStore, format_roles_markdown};
+use matou_native_core::{
+    dispatch_roles::{DispatchRolesStore, format_roles_markdown},
+    pty::LaunchProfile,
+};
 use serde_json::{Value, json};
 
 pub(crate) const MODE: &str = "--hook";
+pub(crate) const PROFILE_ENV: &str = "MATOU_PROVIDER_HOOK_PROFILE";
 const MAX_BODY: u64 = 1024 * 1024;
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -37,7 +41,9 @@ pub(crate) fn run(args: impl IntoIterator<Item = OsString>) -> i32 {
     let output = match (kind.as_deref().and_then(|value| value.to_str()), extra) {
         (Some("claude-session-start"), None) => {
             let payload = read_payload();
-            if let Some(payload) = payload.as_deref() {
+            if let Some(payload) = payload.as_deref()
+                && matches_hook_profile(LaunchProfile::ClaudeCode)
+            {
                 let _ = provider_callback(payload, None, false);
             }
             let data_root = std::env::var_os("MATOU_DATA_ROOT")
@@ -142,6 +148,9 @@ fn read_payload() -> Option<Vec<u8>> {
 
 fn antigravity_hook(event: &str) -> Option<Vec<u8>> {
     let payload = read_payload()?;
+    if !matches_hook_profile(LaunchProfile::Antigravity) {
+        return None;
+    }
     let pre_tool = event == "pre-tool-use"
         || (event == "observe"
             && serde_json::from_slice::<Value>(&payload).ok()?["hookEventName"] == "PreToolUse");
@@ -164,6 +173,10 @@ fn antigravity_hook(event: &str) -> Option<Vec<u8>> {
         .then_some(output);
     }
     decision
+}
+
+fn matches_hook_profile(profile: LaunchProfile) -> bool {
+    std::env::var_os(PROFILE_ENV).is_none_or(|owner| owner == profile.kind())
 }
 
 fn provider_callback(payload: &[u8], kind: Option<&str>, wait_for_result: bool) -> Option<Vec<u8>> {

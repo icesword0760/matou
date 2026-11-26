@@ -405,6 +405,7 @@ fn append_instruction_section(instructions: &mut String, section: &str) {
 
 pub(crate) struct Registration {
     token: String,
+    profile: LaunchProfile,
     registry: Registry,
     pub settings_path: PathBuf,
     script_path: PathBuf,
@@ -539,6 +540,10 @@ impl Registration {
             (
                 "MATOU_PROVIDER_HOOK_TOKEN".into(),
                 self.token.clone().into(),
+            ),
+            (
+                crate::native_hooks::PROFILE_ENV.into(),
+                self.profile.kind().into(),
             ),
         ])
     }
@@ -727,6 +732,7 @@ impl ProviderHookServer {
         }
         let settings_path = files.settings.clone();
         let script_path = files.script.clone();
+        let profile = scope.profile;
         self.registry.lock().unwrap().insert(
             token.clone(),
             Record {
@@ -739,6 +745,7 @@ impl ProviderHookServer {
         );
         Ok(Registration {
             token,
+            profile,
             registry: Arc::clone(&self.registry),
             settings_path,
             script_path,
