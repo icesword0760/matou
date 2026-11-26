@@ -132,7 +132,7 @@ def main():
         previous = None
         if marker.exists():
             try:
-                previous = json.loads(marker.read_text())
+                previous = json.loads(marker.read_text(encoding="utf-8"))
             except (OSError, ValueError) as error:
                 raise SystemExit(f"Unrecognized GPUI preparation marker: {error}")
             if (previous.get("version") != VERSION or
@@ -194,7 +194,9 @@ def main():
         else:
             DESTINATION.parent.mkdir(parents=True, exist_ok=True)
             shutil.copytree(prepared, DESTINATION, dirs_exist_ok=True)
-        (DESTINATION / MARKER).write_text(json.dumps(record, indent=2) + "\n")
+        (DESTINATION / MARKER).write_text(
+            json.dumps(record, indent=2) + "\n", encoding="utf-8", newline="\n"
+        )
         print(f"GPUI {VERSION}: prepared verified platform adaptations")
 
 

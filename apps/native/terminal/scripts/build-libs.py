@@ -36,12 +36,12 @@ def digest(path):
 
 
 def patch_source(original, source, path, replacements):
-    text = (original / path).read_text()
+    text = (original / path).read_text(encoding='utf-8')
     for before, after in replacements:
         if text.count(before) != 1:
             raise ValueError(f'Pinned source {path} changed near {before.strip().splitlines()[0]!r}')
         text = text.replace(before, after)
-    (source / path).write_text(text, newline='\n')
+    (source / path).write_text(text, encoding='utf-8', newline='\n')
 
 
 def patch_history_trim(original, source):
@@ -193,7 +193,7 @@ def main():
         'widthSha256': digest(width),
         'historyTrimPatch': history_trim_patch,
         'terminalPaintPatch': terminal_paint_patch,
-    }, indent=2) + '\n')
+    }, indent=2) + '\n', encoding='utf-8', newline='\n')
     print(f'Built Matou libghostty-vt at {package}')
 
 

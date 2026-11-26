@@ -11,6 +11,7 @@ concurrency:
 
 env:
   ZIG_VERSION: '0.17.0'
+  PYTHONUTF8: '1'
 
 jobs:
   tooling-and-accounts:
@@ -59,6 +60,16 @@ jobs:
             apps/native/terminal/vendor/build-cache/*.tar.gz
             apps/native/terminal/vendor/build-cache/zig-global
           key: ${{ runner.os }}-${{ runner.arch }}-native-deps-${{ env.ZIG_VERSION }}-${{ hashFiles('apps/native/scripts/prepare-gpui.py', 'apps/native/patches/*.patch', 'apps/native/terminal/scripts/build-libs.py', 'apps/native/terminal/native/reference_width.zig') }}
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            apps/native/target
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('apps/native/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-cargo-
       - run: python3 apps/native/scripts/prepare-gpui.py
       - run: python3 apps/native/terminal/scripts/build-libs.py --target aarch64-apple-darwin
       - run: cargo fetch --manifest-path apps/native/Cargo.toml --locked
@@ -86,6 +97,16 @@ jobs:
             apps/native/terminal/vendor/build-cache/*.tar.gz
             apps/native/terminal/vendor/build-cache/zig-global
           key: ${{ runner.os }}-${{ runner.arch }}-native-deps-${{ env.ZIG_VERSION }}-${{ hashFiles('apps/native/scripts/prepare-gpui.py', 'apps/native/patches/*.patch', 'apps/native/terminal/scripts/build-libs.py', 'apps/native/terminal/native/reference_width.zig') }}
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            apps/native/target
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('apps/native/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-cargo-
       - run: python apps/native/scripts/prepare-gpui.py
       - run: python apps/native/terminal/scripts/build-libs.py --target x86_64-pc-windows-msvc
       - name: Add the Ghostty DLL to PATH
