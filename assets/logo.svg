@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-labelledby="title">
+  <title id="title">码头 · 浅瓷</title>
+  <defs>
+    <linearGradient id="orange-green" gradientUnits="userSpaceOnUse" x1="542.65" y1="402.86" x2="738.59" y2="553.58">
+      <stop offset=".30" stop-color="#D77553"/><stop offset=".51" stop-color="#A39A72"/><stop offset=".82" stop-color="#07C160"/>
+    </linearGradient>
+    <linearGradient id="green-blue" gradientUnits="userSpaceOnUse" x1="738.59" y1="553.58" x2="496.28" y2="699.67">
+      <stop offset=".18" stop-color="#07C160"/><stop offset=".52" stop-color="#118EAD"/><stop offset=".79" stop-color="#0768F4"/>
+    </linearGradient>
+    <linearGradient id="orange-blue" gradientUnits="userSpaceOnUse" x1="542.65" y1="423.72" x2="496.28" y2="699.67">
+      <stop offset=".745" stop-color="#D77553"/><stop offset=".79" stop-color="#A26D9E"/><stop offset=".835" stop-color="#0768F4"/>
+    </linearGradient>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="184" fill="#FCFCFD"/>
+  <g transform="translate(512 510) scale(1.15) translate(-482 -522)">
+    <path fill="url(#orange-green)" d="M563.2 458 C578.5 452.3 625.5 476.4 639.8 487.4 C654.1 498.4 712.3 548.4 713.4 556.9 L735.3 528.4 C726.8 529.5 663.6 486.1 649.3 475.1 C635 464 599.6 424.9 601.2 408.6 Z"/>
+    <path d="M241.21 357.44 429 473 241.19 589.61" stroke="#162C4C" stroke-width="48" stroke-linecap="butt" stroke-linejoin="round" fill="none"/>
+    <path fill="url(#green-blue)" d="M714 547.5 C711.8 556 626.4 612.5 608.7 623.1 C591 633.8 524.2 667.5 515.7 663 L537.8 699.6 C537.8 690 598.8 646.6 616.5 636 C634.1 625.3 724 576.1 732.5 578.2 Z"/>
+    <rect x="435" y="582" width="264" height="28" fill="#162C4C"/>
+    <path fill="url(#orange-blue)" d="M504.1 447.3 C514.1 455.9 509.6 533.6 506.2 555.3 C502.8 576.9 486.4 658.9 480.6 661.2 L522.9 667.8 C518.2 663.8 527.5 580.8 530.9 559.1 C534.3 537.5 553.7 462.1 565.8 457 Z"/>
+    <path d="M703.89 548.04 Q709.02 552.80 703.61 557.26 L715.53 552.97 Z" fill="#07C160"/>
+    <path d="M530.08 661.73 Q521.32 663.79 517.45 666.71 L515.82 671.68 Z" fill="#0768F4"/>
+    <circle cx="542.65" cy="402.86" r="59.13" fill="#D77553"/>
+    <circle cx="738.59" cy="553.58" r="25.51" fill="#07C160"/>
+    <circle cx="496.28" cy="699.67" r="41.74" fill="#0768F4"/>
+  </g>
+</svg>
