@@ -20,6 +20,7 @@ use crate::{
     antigravity_events::compact,
     antigravity_launch::{LaunchMode, env_value, valid_conversation_id},
     dsh_events::js_whitespace,
+    provider_catalog::project_scope::ProjectScope,
 };
 
 const MAX_LINE: u64 = 8 * 1024 * 1024;
@@ -183,6 +184,23 @@ impl Conversation {
             .filter_map(|uri| workspace_path(uri))
             .any(|path| canonical_path(&path).is_ok_and(|path| path == cwd))
     }
+
+    fn project_origin(&self, cwd: &Path, scope: &ProjectScope) -> Option<PathBuf> {
+        let mut origins: Vec<_> = self
+            .workspace_uris
+            .iter()
+            .filter_map(|uri| workspace_path(uri))
+            .filter_map(|path| canonical_path(&path).ok())
+            .filter(|path| scope.contains(path))
+            .collect();
+        origins.sort();
+        origins.dedup();
+        origins
+            .iter()
+            .find(|origin| origin.as_path() == cwd)
+            .cloned()
+            .or_else(|| origins.into_iter().next())
+    }
 }
 
 #[derive(PartialEq, Eq)]
@@ -282,9 +300,42 @@ impl Catalog {
 
     pub fn list(&mut self, cwd: &Path, options: ListOptions<'_>) -> Result<List> {
         let (cwd, conversations) = self.workspace(cwd)?;
+        self.list_entries(
+            conversations
+                .into_iter()
+                .map(|entry| (cwd.clone(), entry))
+                .collect(),
+            options,
+        )
+    }
+
+    pub(crate) fn list_in_project(
+        &mut self,
+        cwd: &Path,
+        scope: &ProjectScope,
+        options: ListOptions<'_>,
+    ) -> Result<List> {
+        let cwd = canonical_path(cwd)?;
+        let conversations = self
+            .metadata()?
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .project_origin(&cwd, scope)
+                    .map(|origin| (origin, entry.clone()))
+            })
+            .collect();
+        self.list_entries(conversations, options)
+    }
+
+    fn list_entries(
+        &mut self,
+        conversations: Vec<(PathBuf, Conversation)>,
+        options: ListOptions<'_>,
+    ) -> Result<List> {
         let query = normalize(options.query);
         let mut sessions = Vec::new();
-        for mut entry in conversations {
+        for (cwd, mut entry) in conversations {
             if let Some(title) = options
                 .title_for_session
                 .and_then(|title| title(&entry.id))
@@ -330,6 +381,45 @@ impl Catalog {
             sessions,
             page,
         })
+    }
+
+    pub(crate) fn detail_in_project(
+        &mut self,
+        cwd: &Path,
+        scope: &ProjectScope,
+        id: &str,
+        options: DetailOptions<'_>,
+    ) -> Result<Detail> {
+        let origin = self.selected_project_origin(cwd, scope, id)?;
+        self.detail(&origin, id, options)
+    }
+
+    pub(crate) fn search_in_project(
+        &mut self,
+        cwd: &Path,
+        scope: &ProjectScope,
+        id: &str,
+        query: &str,
+        offset: i64,
+        limit: Option<i64>,
+    ) -> Result<Search> {
+        let origin = self.selected_project_origin(cwd, scope, id)?;
+        self.search(&origin, id, query, offset, limit)
+    }
+
+    fn selected_project_origin(
+        &mut self,
+        cwd: &Path,
+        scope: &ProjectScope,
+        id: &str,
+    ) -> Result<PathBuf> {
+        ensure!(valid_conversation_id(id), INVALID_ID);
+        let cwd = canonical_path(cwd)?;
+        self.metadata()?
+            .iter()
+            .find(|entry| entry.id == id)
+            .and_then(|entry| entry.project_origin(&cwd, scope))
+            .context(NOT_FOUND)
     }
 
     pub fn detail(&mut self, cwd: &Path, id: &str, options: DetailOptions<'_>) -> Result<Detail> {
@@ -1018,4 +1108,149 @@ fn excerpt(text: &str, query: &str) -> String {
         String::from_utf16_lossy(&units[start..end]),
         if end < units.len() { "…" } else { "" }
     )
+}
+
+#[cfg(test)]
+mod project_tests {
+    use super::*;
+    use matou_native_core::git_repo::git_command;
+    use serde_json::json;
+
+    fn git(cwd: &Path, args: &[&str]) -> Result<()> {
+        let output = git_command(cwd)?.args(args).output()?;
+        ensure!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn project_catalog_preserves_source_directories_and_scopes_preview_and_search() -> Result<()> {
+        let fixture = tempfile::tempdir()?;
+        let main = fixture.path().join("project");
+        let linked = fixture.path().join("linked");
+        let child = main.join("src");
+        let neighbor = fixture.path().join("project-neighbor");
+        let nested = main.join("independent");
+        fs::create_dir_all(&child)?;
+        fs::create_dir_all(&neighbor)?;
+        fs::create_dir_all(&nested)?;
+        git(&main, &["init", "--quiet"])?;
+        git(
+            &main,
+            &[
+                "-c",
+                "user.name=Project Test",
+                "-c",
+                "user.email=project@example.invalid",
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                "initial",
+            ],
+        )?;
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "catalog-linked",
+                linked.to_str().unwrap(),
+            ],
+        )?;
+        git(&nested, &["init", "--quiet"])?;
+        let main = canonical_path(&main)?;
+        let linked = canonical_path(&linked)?;
+        let child = canonical_path(&child)?;
+        let scope = ProjectScope::discover(&linked, Some(&main))?;
+        let metadata = json!({"conversations": {
+            "agy-main": {"summary": {"AppDataDir": "antigravity-cli", "WorkspaceURIs": [main], "Title": "Main discussion", "UpdatedAt": 10}},
+            "agy-child": {"summary": {"AppDataDir": "antigravity-cli", "WorkspaceURIs": [Url::from_file_path(&child).unwrap().as_str()], "Title": "Child discussion", "UpdatedAt": 20}},
+            "agy-linked": {"summary": {"AppDataDir": "antigravity-cli", "WorkspaceURIs": [linked], "Title": "Linked discussion", "UpdatedAt": 30}},
+            "agy-multi": {"summary": {"AppDataDir": "antigravity-cli", "WorkspaceURIs": [neighbor, main, linked], "Title": "Multiple roots", "UpdatedAt": 40}},
+            "agy-neighbor": {"summary": {"AppDataDir": "antigravity-cli", "WorkspaceURIs": [neighbor], "Title": "Neighbor"}},
+            "agy-nested": {"summary": {"AppDataDir": "antigravity-cli", "WorkspaceURIs": [nested], "Title": "Nested repository"}}
+        }});
+        let root = fixture.path().join("catalog");
+        fs::create_dir_all(root.join("cache"))?;
+        fs::write(root.join(METADATA), metadata.to_string())?;
+        let source = root.join(transcript_path("agy-main").unwrap());
+        fs::create_dir_all(source.parent().unwrap())?;
+        fs::write(
+            source,
+            format!(
+                "{}\n",
+                json!({"source": "USER_EXPLICIT", "content": "project-only needle"})
+            ),
+        )?;
+        let mut catalog = Catalog::new(root);
+        let list = catalog.list_in_project(&linked, &scope, ListOptions::default())?;
+        assert_eq!(list.page.total, 4);
+        assert_eq!(list.sessions[0].provider_session_id, "agy-multi");
+        assert_eq!(list.sessions[0].cwd, linked);
+        assert_eq!(
+            list.sessions
+                .iter()
+                .find(|session| session.provider_session_id == "agy-main")
+                .unwrap()
+                .cwd,
+            main
+        );
+        assert_eq!(
+            list.sessions
+                .iter()
+                .find(|session| session.provider_session_id == "agy-child")
+                .unwrap()
+                .cwd,
+            child
+        );
+        assert_eq!(catalog.list(&linked, ListOptions::default())?.page.total, 2);
+        assert!(
+            catalog
+                .detail(&linked, "agy-main", DetailOptions::default())
+                .is_err()
+        );
+        let detail =
+            catalog.detail_in_project(&linked, &scope, "agy-main", DetailOptions::default())?;
+        assert_eq!(detail.summary.cwd, main);
+        assert_eq!(detail.events[0].text, "project-only needle");
+        assert_eq!(
+            catalog
+                .search_in_project(&linked, &scope, "agy-main", "needle", 0, None)?
+                .page
+                .total,
+            1
+        );
+        for id in ["agy-neighbor", "agy-nested"] {
+            assert!(
+                catalog
+                    .detail_in_project(&linked, &scope, id, DetailOptions::default())
+                    .is_err()
+            );
+            assert!(
+                catalog
+                    .search_in_project(&linked, &scope, id, "", 0, None)
+                    .is_err()
+            );
+        }
+        let filtered = catalog.list_in_project(
+            &linked,
+            &scope,
+            ListOptions {
+                query: child.to_str().unwrap(),
+                scope: SearchScope::Metadata,
+                ..Default::default()
+            },
+        )?;
+        assert_eq!(filtered.page.total, 1);
+        assert_eq!(filtered.sessions[0].provider_session_id, "agy-child");
+        let from_child = catalog.list_in_project(&child, &scope, ListOptions::default())?;
+        assert_eq!(from_child.sessions[0].cwd, std::cmp::min(main, linked));
+        Ok(())
+    }
 }

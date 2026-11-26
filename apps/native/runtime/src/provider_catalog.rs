@@ -6,6 +6,7 @@ use std::{
     io::{self, BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Component, Path, PathBuf},
     sync::LazyLock,
+    time::SystemTime,
 };
 
 use regex::Regex;
@@ -15,7 +16,9 @@ use serde_json::Value;
 
 use crate::history::{HistoryCursor, HistoryLine};
 
-const LIST_LIMIT: usize = 200;
+pub(crate) mod project_scope;
+use project_scope::ProjectScope;
+
 const MAX_LINE_BYTES: u64 = 8 * 1024 * 1024;
 const DEFAULT_EVENT_PAGE_LIMIT: i64 = 200;
 const MAX_EVENT_PAGE_LIMIT: i64 = 500;
@@ -23,10 +26,13 @@ const SESSION_NOT_FOUND: &str = "Provider session was not found in this working 
 const MAX_RECENT_REPLIES: usize = 4;
 const MAX_REPLY_UNITS: usize = 240;
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CatalogEntry {
     pub provider_session_id: String,
+    pub cwd: String,
+    #[serde(skip)]
+    transcript_path: PathBuf,
     pub title: String,
     pub updated_at: i64,
     pub model: Option<String>,
@@ -118,21 +124,302 @@ pub(crate) fn projects_root() -> Option<PathBuf> {
         .map(|config| config.join("projects"))
 }
 
-pub(crate) fn read(
-    root: Option<&Path>,
-    cwd: &str,
-    selected: Option<&str>,
-) -> Result<Vec<CatalogEntry>, &'static str> {
-    if selected.is_some_and(|id| !valid_id(id)) {
-        return Err("Invalid provider session ID");
+pub(crate) struct ProjectCatalog {
+    pub project_root: String,
+    pub entries: Vec<CatalogEntry>,
+}
+
+/// Cache only transcript summaries. Message bodies stay in their original files.
+#[derive(Default)]
+pub(crate) struct ProjectCatalogReader {
+    files: HashMap<PathBuf, CachedProjectEntry>,
+}
+
+struct CachedProjectEntry {
+    stamp: TranscriptStamp,
+    entry: CatalogEntry,
+}
+
+#[derive(PartialEq, Eq)]
+struct TranscriptStamp {
+    len: u64,
+    modified: Option<SystemTime>,
+    created: Option<SystemTime>,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+}
+
+impl TranscriptStamp {
+    fn read(file: &File) -> io::Result<Self> {
+        let metadata = file.metadata()?;
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+        Ok(Self {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+            created: metadata.created().ok(),
+            #[cfg(unix)]
+            device: metadata.dev(),
+            #[cfg(unix)]
+            inode: metadata.ino(),
+        })
     }
-    let Some((root, cwd, workspace)) = catalog_paths(root, cwd)? else {
-        return Ok(Vec::new());
-    };
-    let mut skipped = Skipped::default();
-    let result = scan(&root, &cwd, &workspace, selected, &mut skipped);
-    skipped.report();
-    result
+}
+
+impl ProjectCatalogReader {
+    pub(crate) fn read(
+        &mut self,
+        root: Option<&Path>,
+        cwd: &str,
+        workspace_root: Option<&str>,
+        selected: Option<&str>,
+    ) -> Result<ProjectCatalog, &'static str> {
+        self.read_with_cache(root, cwd, workspace_root, selected, selected.is_none())
+    }
+
+    fn read_with_cache(
+        &mut self,
+        root: Option<&Path>,
+        cwd: &str,
+        workspace_root: Option<&str>,
+        selected: Option<&str>,
+        reuse_cache: bool,
+    ) -> Result<ProjectCatalog, &'static str> {
+        if selected.is_some_and(|id| !valid_id(id)) {
+            return Err("Invalid provider session ID");
+        }
+        let scope = ProjectScope::discover(Path::new(cwd), workspace_root.map(Path::new))
+            .map_err(|_| "Could not resolve the catalog project directory")?;
+        let project_root = scope.project_root().to_string_lossy().into_owned();
+        let root = root.ok_or("Claude Code configuration directory is unavailable")?;
+        let root = match fs::canonicalize(root) {
+            Ok(root) => root,
+            Err(error) if missing(&error) => {
+                return Ok(ProjectCatalog {
+                    project_root,
+                    entries: Vec::new(),
+                });
+            }
+            Err(_) => return Err("Could not resolve the Claude Code projects directory"),
+        };
+        let mut skipped = Skipped::default();
+        let candidates =
+            project_candidates(&root, cwd, workspace_root, &scope, selected, &mut skipped)
+                .map_err(|_| "Could not list a Claude Code project directory")?;
+        let dates = Connection::open_in_memory()
+            .map_err(|_| "Could not initialize catalog timestamp parsing")?;
+        let mut timestamp = dates
+            .prepare(TIMESTAMP_SQL)
+            .map_err(|_| "Could not initialize catalog timestamp parsing")?;
+        let mut visited = BTreeSet::new();
+        let mut entries: HashMap<String, CatalogEntry> = HashMap::new();
+        for candidate in candidates {
+            let Some(id) = candidate.file_stem().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let indexed = (|| -> io::Result<Option<CatalogEntry>> {
+                let Some((file, path)) = open_transcript(&root, &candidate, &mut skipped)? else {
+                    return Ok(None);
+                };
+                visited.insert(path.clone());
+                let stamp = TranscriptStamp::read(&file)?;
+                if reuse_cache
+                    && let Some(cached) = self.files.get(&path)
+                    && cached.stamp == stamp
+                    && cached.entry.provider_session_id == id
+                {
+                    return Ok(Some(cached.entry.clone()));
+                }
+                let Some(mut entry) =
+                    index_transcript(file.try_clone()?, id, &mut timestamp, &mut skipped)?
+                else {
+                    self.files.remove(&path);
+                    return Ok(None);
+                };
+                entry.transcript_path = path.clone();
+                // An actively written transcript may change while we scan it. Return the
+                // observed summary, but only reuse complete, unchanged scans next time.
+                if reuse_cache
+                    && self.files.len() < 4096
+                    && TranscriptStamp::read(&file)? == stamp
+                    && recheck_transcript(&root, &candidate, &path, &file, &mut skipped)?
+                {
+                    self.files.insert(
+                        path,
+                        CachedProjectEntry {
+                            stamp,
+                            entry: entry.clone(),
+                        },
+                    );
+                }
+                Ok(Some(entry))
+            })();
+            match indexed {
+                Ok(Some(entry)) if scope.contains(Path::new(&entry.cwd)) => {
+                    match entries.get(&entry.provider_session_id) {
+                        Some(previous) if previous.updated_at >= entry.updated_at => {}
+                        _ => {
+                            entries.insert(entry.provider_session_id.clone(), entry);
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(error) if missing(&error) => {}
+                Err(_) => skipped.unreadable_files += 1,
+            }
+        }
+        if selected.is_none() {
+            self.files.retain(|path, _| visited.contains(path));
+        }
+        skipped.report();
+        let mut entries: Vec<_> = entries.into_values().collect();
+        sort_entries(&mut entries);
+        Ok(ProjectCatalog {
+            project_root,
+            entries,
+        })
+    }
+
+    pub(crate) fn detail(
+        &mut self,
+        root: Option<&Path>,
+        cwd: &str,
+        workspace_root: Option<&str>,
+        id: &str,
+        start_event_index: Option<i64>,
+        limit: Option<i64>,
+    ) -> Result<SessionDetail, &'static str> {
+        let entry = self
+            .read_with_cache(root, cwd, workspace_root, Some(id), true)?
+            .entries
+            .into_iter()
+            .next()
+            .ok_or(SESSION_NOT_FOUND)?;
+        let root =
+            fs::canonicalize(root.ok_or(SESSION_NOT_FOUND)?).map_err(|_| SESSION_NOT_FOUND)?;
+        let mut skipped = Skipped::default();
+        let (file, path) = open_transcript(&root, &entry.transcript_path, &mut skipped)
+            .map_err(|_| SESSION_NOT_FOUND)?
+            .ok_or(SESSION_NOT_FOUND)?;
+        #[cfg(windows)]
+        if !matches_windows_file(&path, &file).map_err(|_| SESSION_NOT_FOUND)? {
+            return Err("Provider session changed while reading its transcript");
+        }
+        let before = file.metadata().map_err(|_| SESSION_NOT_FOUND)?;
+        let length = before.len();
+        let dates = Connection::open_in_memory()
+            .map_err(|_| "Could not initialize catalog timestamp parsing")?;
+        let mut timestamp = dates
+            .prepare(TIMESTAMP_SQL)
+            .map_err(|_| "Could not initialize catalog timestamp parsing")?;
+        let start =
+            start_event_index.map(|start| usize::try_from(start.max(1)).unwrap_or(usize::MAX));
+        let limit = limit
+            .unwrap_or(DEFAULT_EVENT_PAGE_LIMIT)
+            .clamp(1, MAX_EVENT_PAGE_LIMIT) as usize;
+        let result = preview_page(
+            BufReader::new((&file).take(length)),
+            Path::new(&entry.cwd),
+            start,
+            limit,
+            &mut timestamp,
+            &mut skipped,
+        )
+        .map_err(|_| "Could not read the provider session transcript")?
+        .ok_or(SESSION_NOT_FOUND)?;
+        let after = file.metadata().map_err(|_| SESSION_NOT_FOUND)?;
+        if after.len() < length
+            || (after.len() == length && before.modified().ok() != after.modified().ok())
+            || !recheck_transcript(&root, &entry.transcript_path, &path, &file, &mut skipped)
+                .map_err(|_| SESSION_NOT_FOUND)?
+        {
+            return Err("Provider session changed while reading its transcript");
+        }
+        #[cfg(windows)]
+        if !matches_windows_file(&path, &file).map_err(|_| SESSION_NOT_FOUND)? {
+            return Err("Provider session changed while reading its transcript");
+        }
+        skipped.report();
+        Ok(result)
+    }
+}
+
+fn project_candidates(
+    root: &Path,
+    cwd: &str,
+    workspace_root: Option<&str>,
+    scope: &ProjectScope,
+    selected: Option<&str>,
+    skipped: &mut Skipped,
+) -> io::Result<Vec<PathBuf>> {
+    let mut prefixes: Vec<_> = scope
+        .roots()
+        .iter()
+        .flat_map(|root| [Some(display_path(root)), system_path_alias(root)])
+        .flatten()
+        .map(|root| encode(&root))
+        .collect();
+    prefixes.push(encode(&absolute(Path::new(cwd))?));
+    if let Some(root) = workspace_root
+        .map(Path::new)
+        .filter(|root| scope.contains(root))
+    {
+        prefixes.push(encode(&absolute(root)?));
+    }
+    let mut candidates = BTreeSet::new();
+    let mut visited = BTreeSet::new();
+    for bucket in fs::read_dir(root)? {
+        let bucket = bucket?;
+        let name = bucket.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !prefixes.iter().any(|prefix| {
+            name == prefix
+                || name
+                    .strip_prefix(prefix)
+                    .is_some_and(|suffix| suffix.starts_with('-'))
+        }) {
+            continue;
+        }
+        let Some(directory) = contained(root, &bucket.path(), skipped)? else {
+            continue;
+        };
+        if !directory.is_dir() || !visited.insert(directory.clone()) {
+            continue;
+        }
+        if let Some(id) = selected {
+            candidates.insert(directory.join(format!("{id}.jsonl")));
+            continue;
+        }
+        for file in fs::read_dir(directory)? {
+            let file = file?;
+            let path = file.path();
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "jsonl")
+                && path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .is_some_and(valid_id)
+            {
+                candidates.insert(path);
+            }
+        }
+    }
+    Ok(candidates.into_iter().collect())
+}
+
+fn sort_entries(entries: &mut [CatalogEntry]) {
+    entries.sort_unstable_by(|left, right| {
+        right
+            .updated_at
+            .cmp(&left.updated_at)
+            .then_with(|| left.title.cmp(&right.title))
+            .then_with(|| left.provider_session_id.cmp(&right.provider_session_id))
+    });
 }
 
 fn catalog_paths(
@@ -160,81 +447,26 @@ fn catalog_paths(
 
 const TIMESTAMP_SQL: &str = "SELECT ROUND(unixepoch(?1, 'subsec') * 1000)";
 
-fn scan(
-    root: &Path,
-    cwd: &Path,
-    workspace: &Path,
-    selected: Option<&str>,
-    skipped: &mut Skipped,
-) -> Result<Vec<CatalogEntry>, &'static str> {
-    let names = project_names(cwd, workspace);
-    let mut visited = BTreeSet::new();
-    let mut entries = HashMap::new();
-    // SQLite is already linked. Use its ISO-8601 parser for the CLI's timestamp
-    // strings, including offsets, while preserving numeric millisecond values.
-    let dates = Connection::open_in_memory()
-        .map_err(|_| "Could not initialize catalog timestamp parsing")?;
-    let mut timestamp = dates
-        .prepare(TIMESTAMP_SQL)
-        .map_err(|_| "Could not initialize catalog timestamp parsing")?;
-    for name in names {
-        let directory = match contained(root, &root.join(name), skipped) {
-            Ok(Some(directory)) if directory.is_dir() && visited.insert(directory.clone()) => {
-                directory
-            }
-            Ok(_) => continue,
-            Err(_) => return Err("Could not inspect a Claude Code project directory"),
-        };
-        let candidates = if let Some(id) = selected {
-            vec![directory.join(format!("{id}.jsonl"))]
-        } else {
-            fs::read_dir(&directory)
-                .and_then(|files| {
-                    files
-                        .map(|file| file.map(|file| file.path()))
-                        .collect::<io::Result<Vec<_>>>()
-                })
-                .map_err(|_| "Could not list a Claude Code project directory")?
-        };
-        for candidate in candidates {
-            let Some(id) = candidate
-                .file_name()
-                .and_then(|name| name.to_str())
-                .and_then(|name| name.strip_suffix(".jsonl"))
-                .filter(|id| valid_id(id))
-            else {
-                continue;
-            };
-            let entry = (|| {
-                let Some((file, _)) = open_transcript(root, &candidate, skipped)? else {
-                    return Ok(None);
-                };
-                index(file, id, workspace, &mut timestamp, skipped)
-            })();
-            match entry {
-                Ok(Some(entry)) => {
-                    entries.insert(entry.provider_session_id.clone(), entry);
-                }
-                Ok(None) => {}
-                Err(error) if missing(&error) => {}
-                Err(_) => skipped.unreadable_files += 1,
-            }
-        }
-    }
-    let mut entries: Vec<_> = entries.into_values().collect();
-    entries.sort_unstable_by(|left, right| {
-        right
-            .updated_at
-            .cmp(&left.updated_at)
-            .then_with(|| left.title.cmp(&right.title))
-            .then_with(|| left.provider_session_id.cmp(&right.provider_session_id))
-    });
-    entries.truncate(LIST_LIMIT);
-    Ok(entries)
+fn project_names(cwd: &Path, workspace: &Path) -> Vec<String> {
+    let mut names: Vec<_> = system_path_alias(workspace)
+        .map(|path| encode(&path))
+        .into_iter()
+        .collect();
+    names.extend([encode(cwd), encode(&display_path(workspace))]);
+    names
 }
 
-fn project_names(cwd: &Path, workspace: &Path) -> [String; 2] {
-    [encode(cwd), encode(&display_path(workspace))]
+pub(crate) fn system_path_alias(path: &Path) -> Option<PathBuf> {
+    if cfg!(target_os = "macos") {
+        let relative = path.strip_prefix("/private").ok()?;
+        if ["var", "tmp", "etc"]
+            .iter()
+            .any(|name| relative.starts_with(name))
+        {
+            return Some(Path::new("/").join(relative));
+        }
+    }
+    None
 }
 
 pub(crate) fn resume_transcript(root: &Path, cwd: &Path, id: &str) -> Option<PathBuf> {
@@ -1100,10 +1332,9 @@ fn preview_timestamp(date: Value, timestamp: &mut Statement<'_>) -> Option<Value
     }
 }
 
-fn index(
+fn index_transcript(
     file: File,
     id: &str,
-    workspace: &Path,
     timestamp: &mut Statement<'_>,
     skipped: &mut Skipped,
 ) -> io::Result<Option<CatalogEntry>> {
@@ -1113,6 +1344,8 @@ fn index(
     let mut title = TranscriptTitle::default();
     let mut entry = CatalogEntry {
         provider_session_id: id.to_owned(),
+        cwd: String::new(),
+        transcript_path: PathBuf::new(),
         title: String::new(),
         updated_at: 0,
         model: None,
@@ -1128,7 +1361,8 @@ fn index(
         let message = &row["message"];
         for mode in [&row["permissionMode"], &message["permissionMode"]] {
             if let Some(
-                mode @ ("default" | "manual" | "auto" | "acceptEdits" | "plan" | "dontAsk" | "bypassPermissions"),
+                mode @ ("default" | "manual" | "auto" | "acceptEdits" | "plan" | "dontAsk"
+                | "bypassPermissions"),
             ) = mode.as_str()
             {
                 entry.permission_mode = mode.to_owned();
@@ -1149,9 +1383,14 @@ fn index(
     let Some(origin) = effective_origin else {
         return Ok(None);
     };
-    if !matches_workspace(&origin, workspace)? || entry.message_count == 0 {
+    if entry.message_count == 0 {
         return Ok(None);
     }
+    let origin = absolute(Path::new(&origin))?;
+    entry.cwd = fs::canonicalize(&origin)
+        .unwrap_or(origin)
+        .to_string_lossy()
+        .into_owned();
     entry.title = title
         .into_title()
         .unwrap_or_else(|| "未命名 Claude 会话".into());
@@ -1536,6 +1775,16 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn read(
+        root: Option<&Path>,
+        cwd: &str,
+        selected: Option<&str>,
+    ) -> Result<Vec<CatalogEntry>, &'static str> {
+        ProjectCatalogReader::default()
+            .read(root, cwd, None, selected)
+            .map(|catalog| catalog.entries)
+    }
+
     fn transcript(cwd: &Path, timestamp: Value) -> Value {
         json!({
             "cwd": cwd, "timestamp": timestamp, "permissionMode": "plan",
@@ -1550,6 +1799,143 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         fs::write(path, body)
+    }
+
+    #[test]
+    fn project_catalog_includes_subdirectories_without_truncation_and_rejects_neighbors()
+    -> anyhow::Result<()> {
+        let fixture = tempfile::tempdir()?;
+        let workspace = fixture.path().join("project");
+        let child = workspace.join("feature");
+        let neighbor = fixture.path().join("project-neighbor");
+        let nested = workspace.join("independent");
+        fs::create_dir_all(&child)?;
+        fs::create_dir_all(&neighbor)?;
+        fs::create_dir_all(nested.join(".git"))?;
+        let projects = fixture.path().join("history");
+        for directory in [&workspace, &child, &neighbor, &nested] {
+            fs::create_dir_all(projects.join(encode(directory)))?;
+        }
+        for index in 0..205 {
+            let directory = if index == 0 { &workspace } else { &child };
+            write_rows(
+                &projects
+                    .join(encode(directory))
+                    .join(format!("session-{index}.jsonl")),
+                &[transcript(directory, json!(index))],
+            )?;
+        }
+        for directory in [&neighbor, &nested] {
+            write_rows(
+                &projects.join(encode(directory)).join("excluded.jsonl"),
+                &[transcript(directory, json!(999))],
+            )?;
+        }
+        let mut reader = ProjectCatalogReader::default();
+        let catalog = reader
+            .read(
+                Some(&projects),
+                child.to_str().unwrap(),
+                workspace.to_str(),
+                None,
+            )
+            .map_err(anyhow::Error::msg)?;
+        assert_eq!(
+            catalog.project_root,
+            fs::canonicalize(&workspace)?.to_string_lossy()
+        );
+        assert_eq!(catalog.entries.len(), 205);
+        assert_eq!(catalog.entries[0].provider_session_id, "session-204");
+        assert!(
+            catalog
+                .entries
+                .iter()
+                .all(|entry| entry.provider_session_id != "excluded")
+        );
+        assert!(
+            catalog
+                .entries
+                .iter()
+                .any(|entry| Path::new(&entry.cwd) == fs::canonicalize(&workspace).unwrap())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn project_catalog_refreshes_changed_metadata_and_previews_relocated_sources()
+    -> anyhow::Result<()> {
+        use std::io::Write;
+
+        let fixture = tempfile::tempdir()?;
+        let workspace = fixture.path().join("project");
+        let original = workspace.join("original");
+        let relocated = workspace.join("relocated");
+        fs::create_dir_all(&original)?;
+        fs::create_dir_all(&relocated)?;
+        let projects = fixture.path().join("history");
+        let bucket = projects.join(encode(&original));
+        fs::create_dir_all(&bucket)?;
+        let path = bucket.join("moving.jsonl");
+        write_rows(&path, &[transcript(&original, json!(1))])?;
+        let mut reader = ProjectCatalogReader::default();
+        let list = |reader: &mut ProjectCatalogReader| {
+            reader
+                .read(
+                    Some(&projects),
+                    relocated.to_str().unwrap(),
+                    workspace.to_str(),
+                    None,
+                )
+                .map_err(anyhow::Error::msg)
+        };
+        assert_eq!(list(&mut reader)?.entries[0].message_count, 1);
+        assert_eq!(reader.files.len(), 1);
+        let mut append = fs::OpenOptions::new().append(true).open(&path)?;
+        writeln!(
+            append,
+            "\n{}",
+            json!({"type": "relocated", "relocatedCwd": relocated})
+        )?;
+        writeln!(
+            append,
+            "{}",
+            json!({"type": "custom-title", "customTitle": "Moved conversation"})
+        )?;
+        writeln!(append, "{}", transcript(&relocated, json!(2)))?;
+        let catalog = list(&mut reader)?;
+        assert_eq!(
+            catalog.entries[0].cwd,
+            fs::canonicalize(&relocated)?.to_string_lossy()
+        );
+        assert_eq!(catalog.entries[0].title, "Moved conversation");
+        assert_eq!(catalog.entries[0].message_count, 2);
+        let preview = reader
+            .detail(
+                Some(&projects),
+                relocated.to_str().unwrap(),
+                workspace.to_str(),
+                "moving",
+                None,
+                None,
+            )
+            .map_err(anyhow::Error::msg)?;
+        assert_eq!(preview.page.total, 2);
+        let selected = reader
+            .read(
+                Some(&projects),
+                relocated.to_str().unwrap(),
+                workspace.to_str(),
+                Some("moving"),
+            )
+            .map_err(anyhow::Error::msg)?;
+        assert_eq!(
+            selected.entries[0].cwd,
+            fs::canonicalize(&relocated)?.to_string_lossy()
+        );
+        fs::remove_file(path)?;
+        assert!(list(&mut reader)?.entries.is_empty());
+        assert!(reader.files.is_empty());
+        Ok(())
     }
 
     #[test]
@@ -1583,7 +1969,7 @@ mod tests {
     }
 
     #[test]
-    fn list_filters_by_origin_and_names_then_sorts_and_caps() -> anyhow::Result<()> {
+    fn list_filters_by_origin_and_names_then_sorts_all_sessions() -> anyhow::Result<()> {
         let root = tempfile::tempdir()?;
         let cwd = root.path().join("project");
         let other = root.path().join("other");
@@ -1620,9 +2006,9 @@ mod tests {
         )?;
         let entries =
             read(Some(&projects), cwd.to_str().unwrap(), None).map_err(anyhow::Error::msg)?;
-        assert_eq!(entries.len(), 200);
+        assert_eq!(entries.len(), 202);
         assert_eq!(entries[0].provider_session_id, "valid-201");
-        assert_eq!(entries[199].provider_session_id, "valid-2");
+        assert_eq!(entries[201].provider_session_id, "valid-0");
         assert!(
             entries
                 .windows(2)
@@ -1649,8 +2035,7 @@ mod tests {
                 root.path().join("missing").to_str().unwrap(),
                 None
             )
-            .unwrap()
-            .is_empty()
+            .is_err()
         );
         Ok(())
     }
@@ -1802,14 +2187,8 @@ mod tests {
         let mut skipped = Skipped::default();
         let dates = Connection::open_in_memory()?;
         let mut date = dates.prepare("SELECT ROUND(unixepoch(?1, 'subsec') * 1000)")?;
-        let entry = index(
-            File::open(&path)?,
-            "valid",
-            &fs::canonicalize(cwd)?,
-            &mut date,
-            &mut skipped,
-        )?
-        .unwrap();
+        let entry =
+            index_transcript(File::open(&path)?, "valid", &mut date, &mut skipped)?.unwrap();
         assert_eq!(entry.title, "Chosen");
         assert_eq!(entry.model.as_deref(), Some("test-model"));
         assert_eq!(entry.permission_mode, "acceptEdits");
@@ -2371,15 +2750,22 @@ mod tests {
         )?;
         let mut skipped = Skipped::default();
         let projects = fs::canonicalize(projects)?;
-        let real = fs::canonicalize(&workspace)?;
         let entries =
-            scan(&projects, &alias, &real, None, &mut skipped).map_err(anyhow::Error::msg)?;
+            read(Some(&projects), alias.to_str().unwrap(), None).map_err(anyhow::Error::msg)?;
         assert_eq!(
             entries
                 .iter()
                 .map(|entry| entry.provider_session_id.as_str())
                 .collect::<Vec<_>>(),
             ["via-real", "via-alias"]
+        );
+        assert!(
+            open_transcript(
+                &projects,
+                &alias_bucket.join("escaping-file.jsonl"),
+                &mut skipped
+            )?
+            .is_none()
         );
         assert_eq!(skipped.outside_root, 1);
         let detail_by_alias = |id| detail(Some(&projects), alias.to_str().unwrap(), id, None, None);
@@ -2412,8 +2798,17 @@ mod tests {
         assert_eq!(skipped.outside_root, 2);
         fs::rename(&alias_bucket, projects.join("hidden-alias"))?;
         symlink(&outside, &alias_bucket)?;
+        let scope = ProjectScope::discover(&alias, None)?;
+        let _ = project_candidates(
+            &projects,
+            alias.to_str().unwrap(),
+            None,
+            &scope,
+            None,
+            &mut skipped,
+        )?;
         let entries =
-            scan(&projects, &alias, &real, None, &mut skipped).map_err(anyhow::Error::msg)?;
+            read(Some(&projects), alias.to_str().unwrap(), None).map_err(anyhow::Error::msg)?;
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].provider_session_id, "via-real");
         assert_eq!(skipped.outside_root, 3);

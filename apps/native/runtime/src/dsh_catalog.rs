@@ -3,7 +3,7 @@
 use std::{
     borrow::Cow,
     cmp::Ordering,
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     fs::{self, File, Metadata},
     io::{self, BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Component, Path, PathBuf},
@@ -15,6 +15,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::dsh_events::{DshUpdate, js_whitespace, valid_session_id};
+use crate::provider_catalog::project_scope::ProjectScope;
 
 const MIB: usize = 1024 * 1024;
 const MAX_LINE_BYTES: usize = 16 * MIB;
@@ -288,24 +289,79 @@ impl DshSessionCatalog {
         let query = normalize(options.query);
         let mut sessions = Vec::new();
         for path in self.paths(&workspace, None)? {
-            let Some(index) = self.index(&path, &workspace)? else {
-                continue;
-            };
-            let title = options
-                .title_for_session
-                .and_then(|title| title(&index.id))
-                .unwrap_or_else(|| index.title());
-            let metadata =
-                !query.is_empty() && normalize(&format!("{title} {}", index.id)).contains(&query);
-            let hits = if query.is_empty() || options.scope == SearchScope::Metadata {
-                Arc::from([])
-            } else {
-                self.hits(&index, &query)?
-            };
-            if query.is_empty() || metadata || !hits.is_empty() {
-                sessions.push(index.summary(title, &hits, metadata));
+            if let Some(index) = self.index(&path, &workspace)?
+                && let Some(summary) = self.summarize(&index, &query, &options, false)?
+            {
+                sessions.push(summary);
             }
         }
+        Ok(Self::finish_list(sessions, options))
+    }
+
+    pub(crate) fn list_in_project(
+        &mut self,
+        cwd: &Path,
+        scope: &ProjectScope,
+        options: ListOptions<'_>,
+    ) -> Result<SessionList> {
+        let query = normalize(options.query);
+        let mut candidates = Vec::new();
+        for path in self.project_paths(cwd, scope, None)? {
+            if let Some(index) = self.index_matching(&path, |origin| scope.contains(origin))? {
+                let summary = self.summarize(&index, &query, &options, true)?;
+                candidates.push((
+                    index.stamp.millis(),
+                    index.path.clone(),
+                    index.id.clone(),
+                    summary,
+                ));
+            }
+        }
+        candidates.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        let mut seen = HashSet::new();
+        let sessions = candidates
+            .into_iter()
+            .filter(|(_, _, id, _)| seen.insert(id.clone()))
+            .filter_map(|(_, _, _, summary)| summary)
+            .collect();
+        Ok(Self::finish_list(sessions, options))
+    }
+
+    fn summarize(
+        &mut self,
+        index: &Arc<Index>,
+        query: &str,
+        options: &ListOptions<'_>,
+        project: bool,
+    ) -> Result<Option<SessionSummary>> {
+        let title = options
+            .title_for_session
+            .and_then(|title| title(&index.id))
+            .unwrap_or_else(|| index.title());
+        let metadata_text = if project {
+            format!(
+                "{title} {} {} {}",
+                index.id,
+                index.cwd.display(),
+                index.model.as_deref().unwrap_or_default()
+            )
+        } else {
+            format!("{title} {}", index.id)
+        };
+        let metadata = !query.is_empty() && normalize(&metadata_text).contains(query);
+        let hits = if query.is_empty() || options.scope == SearchScope::Metadata {
+            Arc::from([])
+        } else {
+            self.hits(index, query)?
+        };
+        if query.is_empty() || metadata || !hits.is_empty() {
+            Ok(Some(index.summary(title, &hits, metadata)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn finish_list(mut sessions: Vec<SessionSummary>, options: ListOptions<'_>) -> SessionList {
         sessions.sort_by(|a, b| {
             b.updated_at
                 .cmp(&a.updated_at)
@@ -315,11 +371,11 @@ impl DshSessionCatalog {
         let sessions = sessions
             .drain(pagination.offset..pagination.next_offset)
             .collect();
-        Ok(SessionList {
+        SessionList {
             provider: "dsh",
             sessions,
             pagination,
-        })
+        }
     }
 
     pub fn detail(
@@ -329,6 +385,25 @@ impl DshSessionCatalog {
         options: DetailOptions<'_>,
     ) -> Result<SessionDetail> {
         let index = self.selected(cwd, id)?;
+        self.detail_index(index, options)
+    }
+
+    pub(crate) fn detail_in_project(
+        &mut self,
+        cwd: &Path,
+        scope: &ProjectScope,
+        id: &str,
+        options: DetailOptions<'_>,
+    ) -> Result<SessionDetail> {
+        let index = self.selected_in_project(cwd, scope, id)?;
+        self.detail_index(index, options)
+    }
+
+    fn detail_index(
+        &mut self,
+        index: Arc<Index>,
+        options: DetailOptions<'_>,
+    ) -> Result<SessionDetail> {
         let query = normalize(options.query);
         let total = index.events.len();
         let mut limit = options.limit.unwrap_or(200).clamp(1, 500) as usize;
@@ -402,6 +477,29 @@ impl DshSessionCatalog {
         limit: Option<i64>,
     ) -> Result<SessionSearch> {
         let index = self.selected(cwd, id)?;
+        self.search_index(index, query, offset, limit)
+    }
+
+    pub(crate) fn search_in_project(
+        &mut self,
+        cwd: &Path,
+        scope: &ProjectScope,
+        id: &str,
+        query: &str,
+        offset: Option<i64>,
+        limit: Option<i64>,
+    ) -> Result<SessionSearch> {
+        let index = self.selected_in_project(cwd, scope, id)?;
+        self.search_index(index, query, offset, limit)
+    }
+
+    fn search_index(
+        &mut self,
+        index: Arc<Index>,
+        query: &str,
+        offset: Option<i64>,
+        limit: Option<i64>,
+    ) -> Result<SessionSearch> {
         let query = normalize(query);
         let hits = if query.is_empty() {
             Arc::from([])
@@ -434,12 +532,112 @@ impl DshSessionCatalog {
         Err(CatalogError::Missing)
     }
 
+    fn selected_in_project(
+        &mut self,
+        cwd: &Path,
+        scope: &ProjectScope,
+        id: &str,
+    ) -> Result<Arc<Index>> {
+        if !is_session_id(id) {
+            return Err(CatalogError::InvalidId);
+        }
+        let mut selected = None::<Arc<Index>>;
+        for path in self.project_paths(cwd, scope, Some(id))? {
+            if let Some(index) = self.index_matching(&path, |origin| scope.contains(origin))? {
+                if selected.as_ref().is_none_or(|previous| {
+                    index.stamp.millis() > previous.stamp.millis()
+                        || (index.stamp.millis() == previous.stamp.millis()
+                            && index.path < previous.path)
+                }) {
+                    selected = Some(index);
+                }
+            }
+        }
+        selected.ok_or(CatalogError::Missing)
+    }
+
+    fn project_paths(
+        &self,
+        cwd: &Path,
+        scope: &ProjectScope,
+        id: Option<&str>,
+    ) -> Result<Vec<PathBuf>> {
+        let workspace = Workspace::new(cwd)?;
+        let mut roots = scope.roots().to_vec();
+        roots.extend(
+            scope
+                .roots()
+                .iter()
+                .filter_map(|root| crate::provider_catalog::system_path_alias(root)),
+        );
+        // Preserve a caller's symlink spelling for the buckets written before canonicalization.
+        for root in scope.roots() {
+            if let Ok(relative) = workspace.canonical.strip_prefix(root) {
+                if let Some(alias) = workspace
+                    .original
+                    .ancestors()
+                    .nth(relative.components().count())
+                {
+                    roots.push(alias.to_owned());
+                }
+            }
+        }
+        let keys: Vec<_> = roots
+            .iter()
+            .map(|root| encode_project_path(&root.to_string_lossy()))
+            .collect();
+        let all_directories = roots.iter().any(|root| root.parent().is_none());
+        let entries = match fs::read_dir(&self.root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+        let mut paths = Vec::new();
+        for entry in entries {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            let matching_bucket = all_directories
+                || keys.iter().any(|key| {
+                    name == key
+                        || name
+                            .strip_prefix(key.strip_suffix("--").unwrap_or(key))
+                            .is_some_and(|suffix| suffix.starts_with('-'))
+                });
+            if !matching_bucket {
+                continue;
+            }
+            if let Some(id) = id {
+                find_transcript(&entry.path().join(id), &mut paths)?;
+            } else {
+                for session in fs::read_dir(entry.path())? {
+                    let session = session?;
+                    if session.file_type()?.is_dir()
+                        && session.file_name().to_str().is_some_and(is_session_id)
+                    {
+                        find_transcript(&session.path(), &mut paths)?;
+                    }
+                }
+            }
+        }
+        paths.sort();
+        paths.dedup();
+        Ok(paths)
+    }
+
     fn paths(&self, workspace: &Workspace, id: Option<&str>) -> Result<Vec<PathBuf>> {
         let canonical = encode_project_path(&workspace.canonical.to_string_lossy());
         let original = encode_project_path(&workspace.original.to_string_lossy());
+        let alias = crate::provider_catalog::system_path_alias(&workspace.canonical)
+            .map(|path| encode_project_path(&path.to_string_lossy()))
+            .filter(|key| key != &original && key != &canonical);
         let mut paths = Vec::new();
-        for project in
-            std::iter::once(&original).chain((canonical != original).then_some(&canonical))
+        for project in std::iter::once(&original)
+            .chain((canonical != original).then_some(&canonical))
+            .chain(alias.as_ref())
         {
             let base = self.root.join(project);
             if let Some(id) = id {
@@ -464,6 +662,14 @@ impl DshSessionCatalog {
     }
 
     fn index(&mut self, path: &Path, workspace: &Workspace) -> Result<Option<Arc<Index>>> {
+        self.index_matching(path, |origin| origin == workspace.canonical)
+    }
+
+    fn index_matching(
+        &mut self,
+        path: &Path,
+        accepts: impl Fn(&Path) -> bool,
+    ) -> Result<Option<Arc<Index>>> {
         let file = File::open(path)?;
         let stamp = Stamp::new(&file.metadata()?)?;
         if let Some(at) = self
@@ -473,9 +679,9 @@ impl DshSessionCatalog {
         {
             let index = self.indexes.remove(at).expect("cached index exists");
             self.indexes.push_back(Arc::clone(&index));
-            return Ok((index.cwd == workspace.canonical).then_some(index));
+            return Ok(accepts(&index.cwd).then_some(index));
         }
-        let Some(index) = read_index(path, file, stamp, &workspace.canonical)? else {
+        let Some(index) = read_index(path, file, stamp, accepts)? else {
             return Ok(None);
         };
         let index = Arc::new(index);
@@ -859,7 +1065,12 @@ struct Frame {
     end: u64,
 }
 
-fn read_index(path: &Path, file: File, stamp: Stamp, cwd: &Path) -> Result<Option<Index>> {
+fn read_index(
+    path: &Path,
+    file: File,
+    stamp: Stamp,
+    accepts: impl Fn(&Path) -> bool,
+) -> Result<Option<Index>> {
     let mut index = None::<Index>;
     let mut previous_seq = -1;
     let mut accept = |row: Value, line| {
@@ -867,7 +1078,7 @@ fn read_index(path: &Path, file: File, stamp: Stamp, cwd: &Path) -> Result<Optio
             index.push(&row, line, &mut previous_seq)?;
         } else {
             let header = Index::header(&row, path, stamp)?;
-            if header.cwd != cwd {
+            if !accepts(&header.cwd) {
                 return Ok(false);
             }
             index = Some(header);
@@ -1338,6 +1549,188 @@ impl DshTitleState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn git(path: &Path, args: &[&str]) {
+        let output = matou_native_core::git_repo::git_command(path)
+            .unwrap()
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn repository(path: &Path) {
+        fs::create_dir_all(path).unwrap();
+        git(path, &["init", "--quiet"]);
+        git(
+            path,
+            &[
+                "-c",
+                "user.name=Catalog Test",
+                "-c",
+                "user.email=catalog@example.invalid",
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                "initial",
+            ],
+        );
+    }
+
+    fn project_transcript(root: &Path, directory: &Path, origin: &Path, id: &str) {
+        let path = root
+            .join(encode_project_path(&directory.to_string_lossy()))
+            .join(id);
+        fs::create_dir_all(&path).unwrap();
+        let rows = [
+            serde_json::json!({"type":"session", "version":4, "id":id, "cwd":origin, "createdAt":1000}),
+            serde_json::json!({"type":"request/header", "seq":0, "data":{"header":{"config":{"model":"fixture-model"}}}}),
+            serde_json::json!({"type":"user/message", "seq":1, "surfaceOp":"append", "data":{"content":[{"text":format!("needle conversation {id}")}]}}),
+        ];
+        let text = rows
+            .into_iter()
+            .map(|row| format!("{row}\n"))
+            .collect::<String>();
+        fs::write(path.join("session.v4.jsonl"), text).unwrap();
+    }
+
+    #[test]
+    fn project_catalog_lists_worktrees_and_subdirectories_and_preserves_exact_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let main = temp.path().join("project");
+        repository(&main);
+        let main = main.canonicalize().unwrap();
+        let linked = main.parent().unwrap().join("linked");
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "--detach",
+                linked.to_str().unwrap(),
+            ],
+        );
+        let subdirectory = main.join("src");
+        fs::create_dir(&subdirectory).unwrap();
+        let sibling = main.parent().unwrap().join("project-other");
+        repository(&sibling);
+        let nested = main.join("vendor/independent");
+        repository(&nested);
+        let root = temp.path().join("histories");
+        for (id, cwd) in [
+            ("main", &main),
+            ("linked", &linked),
+            ("child", &subdirectory),
+            ("sibling", &sibling),
+            ("nested", &nested),
+        ] {
+            project_transcript(&root, cwd, cwd, id);
+        }
+        // A misleading bucket name must never override the cwd in the provider's header.
+        project_transcript(&root, &main, &sibling, "misplaced");
+        let scope = ProjectScope::discover(&linked, Some(&main)).unwrap();
+        let mut catalog = DshSessionCatalog::new(root);
+        let exact = catalog.list(&linked, ListOptions::default()).unwrap();
+        assert_eq!(exact.sessions.len(), 1);
+        assert_eq!(exact.sessions[0].provider_session_id, "linked");
+        let project = catalog
+            .list_in_project(&linked, &scope, ListOptions::default())
+            .unwrap();
+        let ids: HashSet<_> = project
+            .sessions
+            .iter()
+            .map(|entry| entry.provider_session_id.as_str())
+            .collect();
+        assert_eq!(ids, HashSet::from(["main", "linked", "child"]));
+        let detail = catalog
+            .detail_in_project(&linked, &scope, "main", DetailOptions::default())
+            .unwrap();
+        assert_eq!(detail.summary.cwd, main.to_string_lossy());
+        assert!(detail.events[0].text.contains("needle conversation main"));
+        assert_eq!(
+            catalog
+                .search_in_project(&linked, &scope, "main", "needle", None, None)
+                .unwrap()
+                .pagination
+                .total,
+            1
+        );
+        assert!(matches!(
+            catalog.validate_history(&linked, "main"),
+            Err(CatalogError::Missing)
+        ));
+        for excluded in ["sibling", "nested", "misplaced"] {
+            assert!(matches!(
+                catalog.detail_in_project(&linked, &scope, excluded, DetailOptions::default()),
+                Err(CatalogError::Missing)
+            ));
+        }
+        let by_path = catalog
+            .list_in_project(
+                &linked,
+                &scope,
+                ListOptions {
+                    query: subdirectory.to_str().unwrap(),
+                    scope: SearchScope::Metadata,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(by_path.sessions.len(), 1);
+        assert_eq!(by_path.sessions[0].provider_session_id, "child");
+        let by_model = catalog
+            .list_in_project(
+                &linked,
+                &scope,
+                ListOptions {
+                    query: "fixture-model",
+                    scope: SearchScope::Metadata,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(by_model.sessions.len(), 3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_catalog_recovers_alias_buckets_and_deduplicates_session_ids() {
+        let temp = tempfile::tempdir().unwrap();
+        let main = temp.path().join("project");
+        repository(&main);
+        let alias = temp.path().join("alias");
+        std::os::unix::fs::symlink(&main, &alias).unwrap();
+        let child = main.join("src");
+        fs::create_dir(&child).unwrap();
+        let root = temp.path().join("histories");
+        project_transcript(&root, &main, &main, "shared");
+        project_transcript(&root, &alias, &alias, "shared");
+        project_transcript(&root, &alias, &alias, "alias-only");
+        let scope = ProjectScope::discover(&alias.join("src"), None).unwrap();
+        let mut catalog = DshSessionCatalog::new(root);
+        let list = catalog
+            .list_in_project(&alias.join("src"), &scope, ListOptions::default())
+            .unwrap();
+        assert_eq!(list.sessions.len(), 2);
+        let detail = catalog
+            .detail_in_project(
+                &alias.join("src"),
+                &scope,
+                "alias-only",
+                DetailOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            detail.summary.cwd,
+            main.canonicalize().unwrap().to_string_lossy()
+        );
+    }
 
     #[test]
     fn project_encoding_and_iso_fallback_match_provider_boundaries() {

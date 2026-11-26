@@ -788,6 +788,181 @@ exec /bin/cat
     host.shutdown()
 }
 
+#[test]
+fn dsh_project_catalog_previews_searches_and_loads_another_worktree() -> Result<()> {
+    use matou_native_runtime::host::{ProjectSessionCatalogOperation, ProjectSessionProvider};
+
+    let root = tempfile::tempdir()?;
+    let options = options(root.path())?;
+    git(&options.workspace, &["init", "--initial-branch=main"])?;
+    git(
+        &options.workspace,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "fixture",
+        ],
+    )?;
+    let linked = root.path().join("dsh-linked");
+    git(
+        &options.workspace,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "dsh-linked",
+            linked.to_str().unwrap(),
+        ],
+    )?;
+    let unrelated = root.path().join("unrelated");
+    fs::create_dir(&unrelated)?;
+    let history = root.path().join("dsh-history");
+    for (cwd, id) in [(&linked, "dsh-linked-saved"), (&unrelated, "dsh-unrelated")] {
+        let directory = history
+            .join(encode_project_path(cwd.to_str().unwrap()))
+            .join(id);
+        fs::create_dir_all(&directory)?;
+        fs::write(
+            directory.join("session.v4.jsonl"),
+            format!(
+                "{}\n{}\n",
+                json!({"type":"session","version":4,"id":id,"cwd":cwd,"createdAt":1000}),
+                json!({"type":"user/message","seq":1,"surfaceOp":"append","data":{"content":[{"text":"needle conversation"}]}})
+            ),
+        )?;
+    }
+    let stub = root.path().join("dsh-project-fixture");
+    executable(
+        &stub,
+        r#"#!/bin/sh
+set -eu
+if [ "$2" = --dump-config ]; then
+  printf '%s\n' '- id: dsh-tui' '  config:' '    backend: dsh'
+  exit 0
+fi
+test "$1" = dsh-tui && test "$2" = --patch
+printf '%s\n' "$@" > "$HOME/dsh-argv"
+pwd -P > "$HOME/dsh-cwd"
+/bin/cat "$3" > "$HOME/dsh-patch"
+printf 'DSH FIXTURE READY\n'
+exec /bin/cat
+"#,
+    )?;
+    let mut environment = provider_environment(&options);
+    environment.insert("MATOU_DSH_COMMAND".into(), stub.into_os_string());
+    let mut host = RuntimeHost::start_with_offline_fixtures(
+        options.clone(),
+        OfflineFixtures {
+            dsh_session_root: Some(history),
+            provider_environment: Some(environment),
+            ..Default::default()
+        },
+    )?;
+    let (_, session) = ready(&host)?;
+    let cwd = options.workspace.display().to_string();
+    let project = |request_id, operation| -> Result<Value> {
+        send(
+            &host,
+            Command::ProjectSessionCatalog {
+                request_id,
+                provider: ProjectSessionProvider::Dsh,
+                cwd: cwd.clone(),
+                workspace_root: Some(cwd.clone()),
+                operation,
+            },
+        )?;
+        next(&host, |event| match event {
+            Event::Graph(graph) => [
+                "providerSessionCatalogResults",
+                "providerSessionDetailResults",
+            ]
+            .iter()
+            .find_map(|key| {
+                graph[key]
+                    .as_array()?
+                    .iter()
+                    .find(|row| row["requestId"] == request_id)
+                    .cloned()
+            }),
+            _ => None,
+        })
+    };
+    let list = project(
+        101,
+        ProjectSessionCatalogOperation::List {
+            query: String::new(),
+            offset: None,
+            limit: None,
+        },
+    )?;
+    assert_eq!(list["total"], 1, "{list}");
+    assert_eq!(list["sessions"][0]["providerSessionId"], "dsh-linked-saved");
+    let detail = project(
+        102,
+        ProjectSessionCatalogOperation::Detail {
+            provider_session_id: "dsh-linked-saved".into(),
+            start_event_index: None,
+            before_event_index: None,
+            around_event_index: None,
+            limit: None,
+        },
+    )?;
+    assert_eq!(
+        detail["events"][0]["text"], "needle conversation",
+        "{detail}"
+    );
+    let search = project(
+        103,
+        ProjectSessionCatalogOperation::Search {
+            provider_session_id: "dsh-linked-saved".into(),
+            query: "needle".into(),
+            offset: None,
+            limit: None,
+        },
+    )?;
+    assert_eq!(search["search"], true);
+    assert_eq!(search["total"], 1, "{search}");
+    let loaded = result(
+        &host,
+        Command::LoadDshSession {
+            request_id: 104,
+            session_id: session.clone(),
+            provider_session_id: "dsh-linked-saved".into(),
+        },
+        104,
+        "dshSessionLoadResult",
+    )?;
+    assert_eq!(loaded["status"], "queued");
+    marker(&options.shell_home.join("dsh-argv"), |value| {
+        value.contains("--resume\ndsh-linked-saved")
+    })?;
+    let resumed_cwd = marker(&options.shell_home.join("dsh-cwd"), |value| {
+        !value.trim().is_empty()
+    })?;
+    assert_eq!(
+        Path::new(resumed_cwd.trim()),
+        linked.canonicalize()?
+    );
+    let patch = marker(&options.shell_home.join("dsh-patch"), |value| {
+        value.contains("runId:")
+    })?;
+    let (url, run) = dsh_registration(&patch)?;
+    post(&url, &dsh_ready(&run, &linked, "dsh-linked-saved"))?;
+    identity(&host, &session, "dsh-linked-saved")?;
+    let database = rusqlite::Connection::open(options.data_root.join("matou.sqlite"))?;
+    let card =
+        matou_native_core::sessions::get_session(&database, &session)?.context("loaded card")?;
+    assert_eq!(Path::new(&card.cwd), linked.canonicalize()?);
+    host.shutdown()
+}
+
 fn dsh_registration(patch: &str) -> Result<(String, String)> {
     let key = |name: &str| -> Result<String> {
         let value = patch

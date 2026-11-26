@@ -907,7 +907,9 @@ fn runtime_provider_binding(
                     AND restore_state <> 'failed') AS resumable
              FROM provider_bindings WHERE session_id = ?1 AND provider = ?2
                AND EXISTS (SELECT 1 FROM sessions WHERE id = ?1 AND kind = ?2)
-             ORDER BY CASE WHEN restore_state IN ('restoring', 'failed') THEN 0
+             ORDER BY CASE WHEN json_valid(metadata_json)
+                        THEN json_type(metadata_json, '$.catalogRollback') IS NOT NULL ELSE 0 END DESC,
+                      CASE WHEN restore_state IN ('restoring', 'failed') THEN 0
                            WHEN resume_state IN ('available', 'resumed')
                              AND validated_at IS NOT NULL AND invalidated_at IS NULL
                              AND user_exited_at IS NULL THEN 1 ELSE 2 END,
@@ -1132,6 +1134,24 @@ struct CatalogRollback {
     target_work_status: String,
     target_activity: i64,
     previous_binding: Option<CatalogBindingSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    target_cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    target_execution_context_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    target_environment: Option<CatalogEnvironmentSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    created_context: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CatalogEnvironmentSnapshot {
+    local_execution_context_id: String,
+    managed_worktree_id: Option<String>,
+    active_target: String,
+    state: String,
+    error_message: Option<String>,
+    updated_at: i64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1146,8 +1166,9 @@ struct CatalogBindingSnapshot {
     metadata_json: String,
 }
 
-pub struct ClaudeCatalogReplacement<'a> {
+pub struct CatalogReplacement<'a> {
     pub takeover_from: Option<&'a str>,
+    pub source_cwd: Option<&'a str>,
 }
 
 pub fn load_provider_catalog_binding(
@@ -1175,7 +1196,7 @@ pub fn load_provider_catalog_binding_with_rollback(
     input: &ClaudeCatalogLoad<'_>,
     provider: &str,
     completed_turn: bool,
-    replacement: Option<ClaudeCatalogReplacement<'_>>,
+    replacement: Option<CatalogReplacement<'_>>,
     now: i64,
 ) -> Result<DomainCommit> {
     ensure!(
@@ -1284,7 +1305,7 @@ pub fn load_provider_catalog_binding_with_rollback(
                 ),
             ),
         ]);
-        if replacement.is_some() && provider == "claude-code" {
+        if replacement.is_some() {
             let target_work_status = tx.query_row(
                 "SELECT work_status FROM sessions WHERE id = ?",
                 [input.session_id],
@@ -1320,18 +1341,34 @@ pub fn load_provider_catalog_binding_with_rollback(
                 )?;
                 metadata.insert("catalogTakeoverFrom".into(), json!(expected_source));
             }
-            metadata.insert(
-                "catalogRollback".into(),
-                serde_json::to_value(CatalogRollback {
-                    source_binding,
-                    target_kind: session.kind.clone(),
-                    target_title: session.title.clone(),
-                    target_status: session.status.clone(),
-                    target_work_status,
-                    target_activity: session.last_activity_at,
-                    previous_binding,
-                })?,
-            );
+            let mut rollback = CatalogRollback {
+                source_binding,
+                target_kind: session.kind.clone(),
+                target_title: session.title.clone(),
+                target_status: session.status.clone(),
+                target_work_status,
+                target_activity: session.last_activity_at,
+                previous_binding,
+                target_cwd: None,
+                target_execution_context_id: None,
+                target_environment: None,
+                created_context: None,
+            };
+            if let Some(source_cwd) = replacement.as_ref().and_then(|value| value.source_cwd)
+                && source_cwd != session.cwd
+            {
+                relocate_catalog_target(
+                    tx,
+                    command,
+                    &session,
+                    &workspace_id,
+                    source_cwd,
+                    &mut rollback,
+                    now,
+                )?;
+                metadata.insert("cwd".into(), json!(source_cwd));
+            }
+            metadata.insert("catalogRollback".into(), serde_json::to_value(rollback)?);
         } else {
             expire_other_catalog_bindings(tx, input.session_id, provider, binding_id, now)?;
         }
@@ -1403,6 +1440,87 @@ pub fn load_provider_catalog_binding_with_rollback(
     })
 }
 
+fn relocate_catalog_target(
+    db: &Connection,
+    command: &CommandMetadata,
+    session: &Session,
+    workspace_id: &str,
+    source_cwd: &str,
+    rollback: &mut CatalogRollback,
+    now: i64,
+) -> Result<()> {
+    ensure!(
+        Path::new(source_cwd).is_absolute(),
+        "Catalog conversation directory must be absolute"
+    );
+    ensure!(
+        !db.prepare("SELECT 1 FROM session_environment_transitions WHERE session_id = ?")?
+            .exists([&session.id])?,
+        "Card environment is already changing"
+    );
+    rollback.target_cwd = Some(session.cwd.clone());
+    rollback.target_execution_context_id = Some(session.execution_context_id.clone());
+    rollback.target_environment = db
+        .query_row(
+            "SELECT local_execution_context_id, managed_worktree_id, active_target, state,
+                error_message, updated_at FROM session_environment_bindings WHERE session_id = ?",
+            [&session.id],
+            |row| {
+                Ok(CatalogEnvironmentSnapshot {
+                    local_execution_context_id: row.get(0)?,
+                    managed_worktree_id: row.get(1)?,
+                    active_target: row.get(2)?,
+                    state: row.get(3)?,
+                    error_message: row.get(4)?,
+                    updated_at: row.get(5)?,
+                })
+            },
+        )
+        .optional()?;
+    let context_cwd: String = db.query_row(
+        "SELECT cwd FROM execution_contexts WHERE id = ?",
+        [&session.execution_context_id],
+        |row| row.get(0),
+    )?;
+    let source_path = Path::new(source_cwd);
+    let context_path = Path::new(&context_cwd);
+    let within_context = source_path.starts_with(context_path)
+        && !source_path
+            .ancestors()
+            .take_while(|path| *path != context_path)
+            .any(|path| path.join(".git").exists());
+    if !within_context {
+        // Contexts can be shared by sibling cards. Give this card its own local
+        // context instead of changing the directory beneath those siblings.
+        let context_id = format!("catalog-context:{}", command.command_id);
+        db.execute(
+            "INSERT INTO execution_contexts (id, workspace_id, kind, cwd, created_at)
+             VALUES (?, ?, 'plain-directory', ?, ?)",
+            params![context_id, workspace_id, source_cwd, now],
+        )?;
+        db.execute(
+            "INSERT INTO session_environment_bindings
+                 (session_id, local_execution_context_id, active_target, state, updated_at)
+             VALUES (?, ?, 'local', 'ready', ?)
+             ON CONFLICT(session_id) DO UPDATE SET
+                 local_execution_context_id = excluded.local_execution_context_id,
+                 active_target = 'local', state = 'ready', error_message = NULL,
+                 updated_at = excluded.updated_at",
+            params![session.id, context_id, now],
+        )?;
+        db.execute(
+            "UPDATE sessions SET execution_context_id = ? WHERE id = ?",
+            params![context_id, session.id],
+        )?;
+        rollback.created_context = Some(context_id);
+    }
+    db.execute(
+        "UPDATE sessions SET cwd = ? WHERE id = ?",
+        params![source_cwd, session.id],
+    )?;
+    Ok(())
+}
+
 fn expire_other_catalog_bindings(
     db: &Connection,
     session: &str,
@@ -1419,13 +1537,59 @@ fn expire_other_catalog_bindings(
     Ok(())
 }
 
-fn rollback_claude_catalog_binding(
+fn rollback_catalog_binding(
     db: &Connection,
     session: &Session,
     binding_id: &str,
     rollback: CatalogRollback,
     now: i64,
 ) -> Result<()> {
+    if let (Some(cwd), Some(context)) =
+        (&rollback.target_cwd, &rollback.target_execution_context_id)
+    {
+        if let Some(environment) = &rollback.target_environment {
+            db.execute(
+                "INSERT INTO session_environment_bindings
+                     (session_id, local_execution_context_id, managed_worktree_id, active_target,
+                      state, error_message, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(session_id) DO UPDATE SET
+                     local_execution_context_id = excluded.local_execution_context_id,
+                     managed_worktree_id = excluded.managed_worktree_id,
+                     active_target = excluded.active_target, state = excluded.state,
+                     error_message = excluded.error_message, updated_at = excluded.updated_at",
+                params![
+                    session.id,
+                    environment.local_execution_context_id,
+                    environment.managed_worktree_id,
+                    environment.active_target,
+                    environment.state,
+                    environment.error_message,
+                    environment.updated_at
+                ],
+            )?;
+        } else {
+            db.execute(
+                "DELETE FROM session_environment_bindings WHERE session_id = ?",
+                [&session.id],
+            )?;
+        }
+        db.execute(
+            "UPDATE sessions SET cwd = ?, execution_context_id = ? WHERE id = ?",
+            params![cwd, context, session.id],
+        )?;
+        if let Some(created) = &rollback.created_context {
+            db.execute(
+                "DELETE FROM execution_contexts WHERE id = ?1
+                   AND NOT EXISTS (SELECT 1 FROM sessions WHERE execution_context_id = ?1)
+                   AND NOT EXISTS (SELECT 1 FROM tasks WHERE execution_context_id = ?1)
+                   AND NOT EXISTS (SELECT 1 FROM worktrees WHERE execution_context_id = ?1)
+                   AND NOT EXISTS (SELECT 1 FROM session_environment_bindings
+                                   WHERE local_execution_context_id = ?1)",
+                [created],
+            )?;
+        }
+    }
     if let Some(previous) = rollback.previous_binding {
         db.execute(
             "UPDATE provider_bindings SET resume_state = ?, restore_state = ?, restore_error = ?,
@@ -1480,15 +1644,31 @@ pub fn cancel_claude_catalog_load(
     revision: i64,
     now: i64,
 ) -> Result<()> {
+    cancel_provider_catalog_load(db, command, session_id, "claude-code", revision, now)
+}
+
+pub fn cancel_provider_catalog_load(
+    db: &mut Connection,
+    command: &CommandMetadata,
+    session_id: &str,
+    provider: &str,
+    revision: i64,
+    now: i64,
+) -> Result<()> {
     execute(db, command, now, |tx, _| {
-        let Some(binding) = claude_binding(tx, session_id)? else {
+        let binding = if provider == "claude-code" {
+            claude_binding(tx, session_id)?
+        } else {
+            runtime_provider_binding(tx, session_id, provider)?
+        };
+        let Some(binding) = binding else {
             return Ok(Value::Null);
         };
         if binding.metadata["spawnRevision"] == revision
             && let Some(rollback) = binding.metadata.get("catalogRollback")
         {
             let session = require_session(tx, session_id)?;
-            rollback_claude_catalog_binding(
+            rollback_catalog_binding(
                 tx,
                 &session,
                 &binding.id,
@@ -1507,8 +1687,7 @@ pub fn rollback_interrupted_catalog_loads(db: &mut Connection, now: i64) -> Resu
     let staged = {
         let mut query = tx.prepare(
             "SELECT id, session_id, json_extract(metadata_json, '$.catalogRollback')
-             FROM provider_bindings WHERE provider = 'claude-code' AND restore_state = 'restoring'
-               AND CASE WHEN json_valid(metadata_json)
+             FROM provider_bindings WHERE CASE WHEN json_valid(metadata_json)
                    THEN json_type(metadata_json, '$.catalogRollback') = 'object' ELSE 0 END",
         )?;
         query
@@ -1523,7 +1702,7 @@ pub fn rollback_interrupted_catalog_loads(db: &mut Connection, now: i64) -> Resu
     };
     for (binding_id, session_id, rollback) in staged {
         let session = require_session(&tx, &session_id)?;
-        rollback_claude_catalog_binding(
+        rollback_catalog_binding(
             &tx,
             &session,
             &binding_id,
@@ -1577,7 +1756,7 @@ pub fn change_claude_restore(
         let session = require_session(tx, session_id)?;
         let rollback = error.and_then(|_| metadata.remove("catalogRollback"));
         if let Some(rollback) = rollback {
-            rollback_claude_catalog_binding(
+            rollback_catalog_binding(
                 tx,
                 &session,
                 &binding.id,
@@ -1770,29 +1949,39 @@ fn change_runtime_provider_restore(
                 "Codex restore requires the current live run"
             );
         }
-        if matches!(change, ClaudeRestore::Fresh) {
-            tx.execute(
-                "UPDATE provider_bindings SET resume_state = 'expired', restore_state = 'none',
-                     restore_error = NULL, invalidated_at = COALESCE(invalidated_at, ?)
-                 WHERE session_id = ? AND provider = ? AND id <> ?",
-                params![now, session_id, provider, target.unwrap_or_default()],
+        if let Some(rollback) = error.and_then(|_| metadata.remove("catalogRollback")) {
+            rollback_catalog_binding(
+                tx,
+                &session,
+                target.context("Catalog rollback requires a provider binding")?,
+                serde_json::from_value(rollback)?,
+                now,
             )?;
-        }
-        if let Some(id) = target {
-            tx.execute(
-                "UPDATE provider_bindings SET resume_state = ?, restore_state = ?, restore_error = ?,
-                    metadata_json = ?, updated_at = ?, user_exited_at = NULL,
-                    invalidated_at = CASE WHEN ? = 'available' THEN NULL ELSE ? END
-                 WHERE id = ?",
-                params![resume, restore, error, serde_json::to_string(&metadata)?, now, resume, now, id],
-            )?;
-        }
-        if let Some(work) = work {
-            tx.execute(
-                "UPDATE sessions SET work_status = ?, updated_at = ?, version = version + 1
-                 WHERE id = ?",
-                params![work, now, session_id],
-            )?;
+        } else {
+            if matches!(change, ClaudeRestore::Fresh) {
+                tx.execute(
+                    "UPDATE provider_bindings SET resume_state = 'expired', restore_state = 'none',
+                         restore_error = NULL, invalidated_at = COALESCE(invalidated_at, ?)
+                     WHERE session_id = ? AND provider = ? AND id <> ?",
+                    params![now, session_id, provider, target.unwrap_or_default()],
+                )?;
+            }
+            if let Some(id) = target {
+                tx.execute(
+                    "UPDATE provider_bindings SET resume_state = ?, restore_state = ?, restore_error = ?,
+                        metadata_json = ?, updated_at = ?, user_exited_at = NULL,
+                        invalidated_at = CASE WHEN ? = 'available' THEN NULL ELSE ? END
+                     WHERE id = ?",
+                    params![resume, restore, error, serde_json::to_string(&metadata)?, now, resume, now, id],
+                )?;
+            }
+            if let Some(work) = work {
+                tx.execute(
+                    "UPDATE sessions SET work_status = ?, updated_at = ?, version = version + 1
+                     WHERE id = ?",
+                    params![work, now, session_id],
+                )?;
+            }
         }
         let mut payload = json!({
             "sessionId": session_id, "provider": provider, "bindingId": target,
@@ -2110,8 +2299,7 @@ fn record_provider_identity(
             .as_ref()
             .and_then(|(_, metadata)| serde_json::from_str(metadata).ok())
             .unwrap_or_default();
-        if provider == "claude-code"
-            && input.expected_id.is_some()
+        if input.expected_id.is_some()
             && let Some(rollback) = metadata.remove("catalogRollback")
         {
             let rollback: CatalogRollback = serde_json::from_value(rollback)?;
@@ -2835,6 +3023,239 @@ mod tests {
         let mut db = shell_session_fixture(Connection::open_in_memory()?)?;
         promote_shell_to_claude(&mut db, &command("promote"), "session", 3)?;
         Ok(db)
+    }
+
+    #[test]
+    fn catalog_load_changes_only_target_directory_and_rolls_back_environment() -> Result<()> {
+        for managed in [false, true] {
+            let mut db = shell_session_fixture(Connection::open_in_memory()?)?;
+            if managed {
+                db.execute_batch(
+                    "INSERT INTO execution_contexts (id, workspace_id, kind, cwd, created_at)
+                     VALUES ('worktree-context', 'workspace', 'git-worktree', '/worktree', 3);
+                     INSERT INTO worktrees (id, execution_context_id, repository_root, worktree_path,
+                         branch_name, state, created_at, updated_at)
+                     VALUES ('worktree', 'worktree-context', '/workspace', '/worktree',
+                         'feature', 'ready', 3, 3);
+                     UPDATE sessions SET execution_context_id = 'worktree-context', cwd = '/worktree'
+                     WHERE id = 'session';
+                     UPDATE session_environment_bindings SET managed_worktree_id = 'worktree',
+                         active_target = 'worktree' WHERE session_id = 'session';",
+                )?;
+            }
+            let before = require_session(&db, "session")?;
+            let environment_before: (String, Option<String>, String) = db.query_row(
+                "SELECT local_execution_context_id, managed_worktree_id, active_target
+                 FROM session_environment_bindings WHERE session_id = 'session'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            load_provider_catalog_binding_with_rollback(
+                &mut db,
+                &command("catalog-other-directory"),
+                &ClaudeCatalogLoad {
+                    binding_id: "loaded",
+                    session_id: "session",
+                    scene_id: "scene",
+                    cwd: &before.cwd,
+                    provider_session_id: "conversation",
+                    title: "Existing conversation",
+                    model: None,
+                    permission_mode: "default",
+                },
+                "claude-code",
+                false,
+                Some(CatalogReplacement {
+                    takeover_from: None,
+                    source_cwd: Some("/other-worktree"),
+                }),
+                4,
+            )?;
+            let loaded = require_session(&db, "session")?;
+            assert_eq!(loaded.cwd, "/other-worktree");
+            assert_ne!(loaded.execution_context_id, before.execution_context_id);
+            let environment = crate::hierarchy::session_environment::binding(&db, "session")?
+                .context("environment after catalog load")?;
+            assert_eq!(
+                environment.target,
+                crate::hierarchy::session_environment::Target::Local
+            );
+            assert_eq!(environment.local_path, loaded.cwd);
+            let original_context: String = db.query_row(
+                "SELECT cwd FROM execution_contexts WHERE id = ?",
+                [&before.execution_context_id],
+                |row| row.get(0),
+            )?;
+            assert_eq!(original_context, before.cwd);
+
+            // The same persisted snapshot is used after a runtime restart.
+            rollback_interrupted_catalog_loads(&mut db, 5)?;
+            let restored = require_session(&db, "session")?;
+            assert_eq!(restored.cwd, before.cwd);
+            assert_eq!(restored.execution_context_id, before.execution_context_id);
+            assert_eq!(restored.kind, before.kind);
+            let environment_after: (String, Option<String>, String) = db.query_row(
+                "SELECT local_execution_context_id, managed_worktree_id, active_target
+                 FROM session_environment_bindings WHERE session_id = 'session'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            assert_eq!(environment_after, environment_before);
+            assert!(
+                !db.prepare("SELECT 1 FROM execution_contexts WHERE id = ?")?
+                    .exists([&loaded.execution_context_id])?
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn catalog_load_in_context_subdirectory_preserves_context_and_cancels_cleanly() -> Result<()> {
+        let mut db = shell_session_fixture(Connection::open_in_memory()?)?;
+        let before = require_session(&db, "session")?;
+        load_provider_catalog_binding_with_rollback(
+            &mut db,
+            &command("catalog-subdirectory"),
+            &ClaudeCatalogLoad {
+                binding_id: "loaded",
+                session_id: "session",
+                scene_id: "scene",
+                cwd: &before.cwd,
+                provider_session_id: "conversation",
+                title: "Existing conversation",
+                model: None,
+                permission_mode: "default",
+            },
+            "claude-code",
+            false,
+            Some(CatalogReplacement {
+                takeover_from: None,
+                source_cwd: Some("/workspace/subdirectory"),
+            }),
+            4,
+        )?;
+        let loaded = require_session(&db, "session")?;
+        assert_eq!(loaded.cwd, "/workspace/subdirectory");
+        assert_eq!(loaded.execution_context_id, before.execution_context_id);
+        cancel_claude_catalog_load(&mut db, &command("cancel"), "session", 4, 5)?;
+        let restored = require_session(&db, "session")?;
+        assert_eq!(restored.cwd, before.cwd);
+        assert_eq!(restored.execution_context_id, before.execution_context_id);
+        Ok(())
+    }
+
+    #[test]
+    fn catalog_load_relocates_and_finishes_each_runtime_provider_transaction() -> Result<()> {
+        for provider in ["codex", "dsh", "antigravity"] {
+            for outcome in ["failure", "cancel", "restart", "confirm"] {
+                let mut db = shell_session_fixture(Connection::open_in_memory()?)?;
+                db.execute(
+                    "UPDATE sessions SET kind = ? WHERE id = 'session'",
+                    [provider],
+                )?;
+                db.execute(
+                    "INSERT INTO provider_bindings (id, session_id, provider, provider_session_id,
+                         resume_state, restore_state, metadata_json, created_at, updated_at, validated_at)
+                     VALUES ('previous', 'session', ?, 'previous-conversation', 'available',
+                         'none', '{}', 3, 100, 100)",
+                    [provider],
+                )?;
+                let before = require_session(&db, "session")?;
+                load_provider_catalog_binding_with_rollback(
+                    &mut db,
+                    &command("catalog-relocate"),
+                    &ClaudeCatalogLoad {
+                        binding_id: "loaded",
+                        session_id: "session",
+                        scene_id: "scene",
+                        cwd: &before.cwd,
+                        provider_session_id: "conversation",
+                        title: "Existing conversation",
+                        model: None,
+                        permission_mode: "default",
+                    },
+                    provider,
+                    false,
+                    Some(CatalogReplacement {
+                        takeover_from: None,
+                        source_cwd: Some("/other-worktree"),
+                    }),
+                    4,
+                )?;
+                let pending = runtime_provider_binding(&db, "session", provider)?
+                    .context("staged catalog binding")?;
+                assert_eq!(pending.id, "loaded", "{provider}/{outcome}");
+                assert_eq!(require_session(&db, "session")?.cwd, "/other-worktree");
+                match outcome {
+                    "failure" => {
+                        change_runtime_provider_restore(
+                            &mut db,
+                            &command("failed"),
+                            "session",
+                            provider,
+                            ClaudeRestore::Fail {
+                                binding_id: "loaded",
+                                error: "resume failed",
+                            },
+                            "Provider",
+                            5,
+                        )?;
+                    }
+                    "cancel" => cancel_provider_catalog_load(
+                        &mut db,
+                        &command("cancel"),
+                        "session",
+                        provider,
+                        4,
+                        5,
+                    )?,
+                    "restart" => rollback_interrupted_catalog_loads(&mut db, 5)?,
+                    "confirm" => {
+                        start_claude_run(&mut db, "run", "generation", 5)?;
+                        record_provider_identity(
+                            &mut db,
+                            &command("confirmed"),
+                            &ProviderIdentity {
+                                binding_id: "unused",
+                                session_id: "session",
+                                run_id: "run",
+                                generation: "generation",
+                                provider_session_id: "conversation",
+                                expected_id: Some("conversation"),
+                                launch_metadata: &Value::Null,
+                                observed_metadata: &Value::Null,
+                                event_name: if provider == "dsh" {
+                                    "ready"
+                                } else {
+                                    "SessionStart"
+                                },
+                                first_for_run: true,
+                            },
+                            provider,
+                            None,
+                            6,
+                        )?;
+                        rollback_interrupted_catalog_loads(&mut db, 7)?;
+                    }
+                    _ => unreachable!(),
+                }
+                let after = require_session(&db, "session")?;
+                let binding = runtime_provider_binding(&db, "session", provider)?
+                    .context("catalog result binding")?;
+                if outcome == "confirm" {
+                    assert_eq!(after.cwd, "/other-worktree");
+                    assert_eq!(binding.id, "loaded");
+                    assert!(binding.metadata.get("catalogRollback").is_none());
+                } else {
+                    assert_eq!(after.cwd, before.cwd, "{provider}/{outcome}");
+                    assert_eq!(after.execution_context_id, before.execution_context_id);
+                    assert_eq!(binding.id, "previous");
+                    assert_eq!(binding.restore_state, "none");
+                    assert!(binding.resumable);
+                }
+            }
+        }
+        Ok(())
     }
 
     #[test]

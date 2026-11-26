@@ -12,10 +12,13 @@ use rusqlite::Connection;
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use crate::provider_catalog::project_scope::ProjectScope;
+
 const MAX_LINE: u64 = 8 * 1024 * 1024;
 const HEADER_CACHE_LIMIT: usize = 256;
 const ANCESTOR_LIMIT: usize = 5;
 const NOT_FOUND: &str = "Codex 会话不存在或不属于当前工作目录";
+const PROJECT_NOT_FOUND: &str = "Codex 会话不存在或不属于当前项目";
 const INVALID_ID: &str = "Codex 会话标识必须是完整 UUID";
 const CORRUPT: &str = "Codex 会话文件已损坏";
 const UNREADABLE: &str = "无法读取 Codex 会话文件";
@@ -53,7 +56,7 @@ pub(crate) struct CatalogEntry {
     pub model: Option<String>,
     pub permission_mode: &'static str,
     pub has_completed_turn: bool,
-    cwd: PathBuf,
+    pub(crate) cwd: PathBuf,
     updated_at: i64,
     message_count: usize,
     match_count: usize,
@@ -181,6 +184,24 @@ impl Catalog {
         cwd: &str,
         options: &ListOptions,
     ) -> Result<Page<CatalogEntry>, &'static str> {
+        self.list_scoped(cwd, None, options)
+    }
+
+    pub(crate) fn list_in_project(
+        &mut self,
+        cwd: &str,
+        scope: &ProjectScope,
+        options: &ListOptions,
+    ) -> Result<Page<CatalogEntry>, &'static str> {
+        self.list_scoped(cwd, Some(scope), options)
+    }
+
+    fn list_scoped(
+        &mut self,
+        cwd: &str,
+        scope: Option<&ProjectScope>,
+        options: &ListOptions,
+    ) -> Result<Page<CatalogEntry>, &'static str> {
         let db = dates()?;
         let query = normalized(&options.query);
         let full_text = !query.is_empty() && options.full_text;
@@ -191,15 +212,23 @@ impl Catalog {
                 if full_text { Ok(()) } else { Err(error) }
             },
         )?;
-        let in_workspace = workspace_headers(cwd, &headers)?;
+        let in_workspace = scoped_headers(cwd, &headers, scope)?;
         let archive = full_text.then(|| newest_headers(headers.iter()));
         let titles = self.titles(cwd, &db)?;
         let mut entries = Vec::new();
         for header in in_workspace.into_values() {
             let mut entry = entry(header, &titles, &db);
-            let metadata_match = !query.is_empty()
-                && normalized(&format!("{} {}", entry.title, entry.provider_session_id))
-                    .contains(&query);
+            let metadata = if scope.is_some() {
+                format!(
+                    "{} {} {}",
+                    entry.title,
+                    entry.provider_session_id,
+                    entry.cwd.display()
+                )
+            } else {
+                format!("{} {}", entry.title, entry.provider_session_id)
+            };
+            let metadata_match = !query.is_empty() && normalized(&metadata).contains(&query);
             if let Some(archive) = &archive {
                 let (window, hits) = self.search_header(&db, archive, header, &query, 0, 4)?;
                 entry.match_count = window.total;
@@ -225,17 +254,36 @@ impl Catalog {
     }
 
     pub(crate) fn load(&mut self, cwd: &str, id: &str) -> Result<CatalogEntry, &'static str> {
-        self.load_entry(cwd, id).map_err(|error| match error {
+        self.load_entry(cwd, id, None).map_err(|error| match error {
             NOT_FOUND => "Provider session was not found in this working directory",
             INVALID_ID => "Invalid provider session ID",
             _ => error,
         })
     }
 
-    fn load_entry(&mut self, cwd: &str, id: &str) -> Result<CatalogEntry, &'static str> {
+    pub(crate) fn load_in_project(
+        &mut self,
+        cwd: &str,
+        scope: &ProjectScope,
+        id: &str,
+    ) -> Result<CatalogEntry, &'static str> {
+        self.load_entry(cwd, id, Some(scope))
+            .map_err(|error| match error {
+                NOT_FOUND | PROJECT_NOT_FOUND => "Provider session was not found in this project",
+                INVALID_ID => "Invalid provider session ID",
+                _ => error,
+            })
+    }
+
+    fn load_entry(
+        &mut self,
+        cwd: &str,
+        id: &str,
+        scope: Option<&ProjectScope>,
+    ) -> Result<CatalogEntry, &'static str> {
         let db = dates()?;
         let headers = self.selection_headers(cwd, id, &db)?;
-        let header = selected(cwd, id, &headers)?;
+        let header = selected(cwd, id, &headers, scope)?;
         let mut entry = entry(header, &self.titles(cwd, &db)?, &db);
         let (_, index) = self.open_index(&db, header)?;
         entry.model.clone_from(&index.model);
@@ -251,9 +299,33 @@ impl Catalog {
         around: Option<i64>,
         max: Option<i64>,
     ) -> Result<Value, &'static str> {
+        self.detail_scoped(cwd, id, start, around, max, None)
+    }
+
+    pub(crate) fn detail_in_project(
+        &mut self,
+        cwd: &str,
+        scope: &ProjectScope,
+        id: &str,
+        start: Option<i64>,
+        around: Option<i64>,
+        max: Option<i64>,
+    ) -> Result<Value, &'static str> {
+        self.detail_scoped(cwd, id, start, around, max, Some(scope))
+    }
+
+    fn detail_scoped(
+        &mut self,
+        cwd: &str,
+        id: &str,
+        start: Option<i64>,
+        around: Option<i64>,
+        max: Option<i64>,
+        scope: Option<&ProjectScope>,
+    ) -> Result<Value, &'static str> {
         let db = dates()?;
         let headers = self.selection_headers(cwd, id, &db)?;
-        let header = selected(cwd, id, &headers)?;
+        let header = selected(cwd, id, &headers, scope)?;
         let mut history = self.open_history(&db, &newest_headers(headers.iter()), header)?;
         let total = history.total();
         let limit = limit(max, 200, 500);
@@ -308,9 +380,33 @@ impl Catalog {
         from: Option<i64>,
         max: Option<i64>,
     ) -> Result<Page<Hit>, &'static str> {
+        self.search_scoped(cwd, id, query, from, max, None)
+    }
+
+    pub(crate) fn search_in_project(
+        &mut self,
+        cwd: &str,
+        scope: &ProjectScope,
+        id: &str,
+        query: &str,
+        from: Option<i64>,
+        max: Option<i64>,
+    ) -> Result<Page<Hit>, &'static str> {
+        self.search_scoped(cwd, id, query, from, max, Some(scope))
+    }
+
+    fn search_scoped(
+        &mut self,
+        cwd: &str,
+        id: &str,
+        query: &str,
+        from: Option<i64>,
+        max: Option<i64>,
+        scope: Option<&ProjectScope>,
+    ) -> Result<Page<Hit>, &'static str> {
         let db = dates()?;
         let headers = self.selection_headers(cwd, id, &db)?;
-        let header = selected(cwd, id, &headers)?;
+        let header = selected(cwd, id, &headers, scope)?;
         let (window, items) = self.search_header(
             &db,
             &newest_headers(headers.iter()),
@@ -620,11 +716,33 @@ fn workspace_headers<'a>(
     ))
 }
 
-fn selected<'a>(cwd: &str, id: &str, headers: &'a [Header]) -> Result<&'a Header, &'static str> {
-    workspace_headers(cwd, headers)?
+fn scoped_headers<'a>(
+    cwd: &str,
+    headers: &'a [Header],
+    scope: Option<&ProjectScope>,
+) -> Result<HashMap<&'a str, &'a Header>, &'static str> {
+    match scope {
+        Some(scope) => Ok(newest_headers(
+            headers.iter().filter(|header| scope.contains(&header.cwd)),
+        )),
+        None => workspace_headers(cwd, headers),
+    }
+}
+
+fn selected<'a>(
+    cwd: &str,
+    id: &str,
+    headers: &'a [Header],
+    scope: Option<&ProjectScope>,
+) -> Result<&'a Header, &'static str> {
+    scoped_headers(cwd, headers, scope)?
         .get(id.to_ascii_lowercase().as_str())
         .copied()
-        .ok_or(NOT_FOUND)
+        .ok_or(if scope.is_some() {
+            PROJECT_NOT_FOUND
+        } else {
+            NOT_FOUND
+        })
 }
 
 pub(crate) fn root() -> Option<PathBuf> {
@@ -1385,6 +1503,185 @@ mod tests {
         );
         assert_fallback(&mut catalog)?;
         println!("malformed ancestor header falls back while direct detail reports corruption");
+        Ok(())
+    }
+
+    #[test]
+    fn codex_project_catalog_shares_worktrees_and_keeps_exact_history() -> TestResult {
+        use matou_native_core::git_repo::git_command;
+
+        let temp = tempfile::tempdir()?;
+        let project = temp.path().join("project");
+        let worktree = temp.path().join("linked");
+        fs::create_dir(&project)?;
+        let git = |path: &Path, args: &[&str]| -> TestResult {
+            let result = git_command(path)?.args(args).output()?;
+            anyhow::ensure!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            Ok(())
+        };
+        git(&project, &["init", "--quiet"])?;
+        git(
+            &project,
+            &[
+                "-c",
+                "user.name=Catalog Test",
+                "-c",
+                "user.email=catalog@example.invalid",
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                "initial",
+            ],
+        )?;
+        git(
+            &project,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "--detach",
+                worktree.to_str().unwrap(),
+            ],
+        )?;
+        let nested = project.join("independent");
+        fs::create_dir(&nested)?;
+        git(&nested, &["init", "--quiet"])?;
+        let subdir = project.join("src");
+        let sibling = temp.path().join("project-other");
+        fs::create_dir(&subdir)?;
+        fs::create_dir(&sibling)?;
+        let home = temp.path().join("codex");
+        let sessions = home.join("sessions/2026/11/26");
+        let main_id = "00100000-0000-4000-8000-000000000001";
+        let linked_id = "00100000-0000-4000-8000-000000000002";
+        let subdir_id = "00100000-0000-4000-8000-000000000003";
+        let nested_id = "00100000-0000-4000-8000-000000000004";
+        let sibling_id = "00100000-0000-4000-8000-000000000005";
+        let row = |text: &str| json!({"type":"response_item","payload":{"type":"message","role":"user","content":text}});
+        fixture(
+            &sessions,
+            &project,
+            main_id,
+            "main",
+            json!({}),
+            &[row("older")],
+            10,
+        )?;
+        fixture(
+            &sessions,
+            &project,
+            main_id,
+            "main-new",
+            json!({}),
+            &[row("newest main")],
+            20,
+        )?;
+        // An unrelated copy with the same UUID must not shadow the in-project copy.
+        fixture(
+            &sessions,
+            &sibling,
+            main_id,
+            "foreign-copy",
+            json!({}),
+            &[row("foreign")],
+            30,
+        )?;
+        fixture(
+            &sessions,
+            &worktree,
+            linked_id,
+            "linked",
+            json!({}),
+            &[row("worktree needle")],
+            20,
+        )?;
+        fixture(&sessions, &subdir, subdir_id, "src", json!({}), &[], 20)?;
+        fixture(&sessions, &nested, nested_id, "nested", json!({}), &[], 20)?;
+        fixture(
+            &sessions,
+            &sibling,
+            sibling_id,
+            "sibling",
+            json!({}),
+            &[],
+            20,
+        )?;
+        let mut catalog = Catalog::new(Some(home));
+        let cwd = project.to_str().unwrap();
+        let scope = ProjectScope::discover(&worktree, Some(&project))?;
+        let page = catalog
+            .list_in_project(cwd, &scope, &ListOptions::default())
+            .checked()?;
+        assert_eq!(page.window.total, 3);
+        assert!(
+            page.items
+                .iter()
+                .any(|entry| entry.provider_session_id == linked_id)
+        );
+        assert_eq!(
+            page.items
+                .iter()
+                .filter(|entry| entry.provider_session_id == main_id)
+                .count(),
+            1
+        );
+        let loaded = catalog.load_in_project(cwd, &scope, linked_id).checked()?;
+        assert_eq!(loaded.cwd, fs::canonicalize(&worktree)?);
+        assert!(catalog.load_in_project(cwd, &scope, nested_id).is_err());
+        assert!(catalog.load_in_project(cwd, &scope, sibling_id).is_err());
+        let detail = catalog
+            .detail_in_project(cwd, &scope, linked_id, None, None, None)
+            .checked()?;
+        assert_eq!(detail["events"][0]["text"], "worktree needle");
+        let main_detail = catalog
+            .detail_in_project(cwd, &scope, main_id, None, None, None)
+            .checked()?;
+        assert_eq!(main_detail["events"][0]["text"], "newest main");
+        assert_eq!(
+            catalog
+                .search_in_project(cwd, &scope, linked_id, "needle", None, None)
+                .checked()?
+                .window
+                .total,
+            1
+        );
+        let filtered = catalog
+            .list_in_project(
+                cwd,
+                &scope,
+                &ListOptions {
+                    query: worktree.to_string_lossy().into_owned(),
+                    ..Default::default()
+                },
+            )
+            .checked()?;
+        assert_eq!(filtered.window.total, 1);
+        assert_eq!(filtered.items[0].provider_session_id, linked_id);
+        assert_eq!(
+            catalog
+                .list(cwd, &ListOptions::default())
+                .checked()?
+                .window
+                .total,
+            1
+        );
+        assert!(catalog.detail(cwd, linked_id, None, None, None).is_err());
+        assert!(
+            catalog
+                .search(cwd, linked_id, "needle", None, None)
+                .is_err()
+        );
+        assert!(catalog.load(cwd, linked_id).is_err());
+        assert!(
+            catalog
+                .detail(worktree.to_str().unwrap(), linked_id, None, None, None)
+                .is_ok()
+        );
         Ok(())
     }
 

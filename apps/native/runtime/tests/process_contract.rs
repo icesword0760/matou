@@ -1221,6 +1221,204 @@ fn seed_catalog(root: &Path, workspace: &Path, id: &str) -> Result<PathBuf> {
 }
 
 #[test]
+fn project_catalog_lists_worktrees_and_resumes_in_the_selected_directory() -> Result<()> {
+    use matou_native_core::sessions::{claude_binding, get_session, list_runs};
+
+    let root = tempfile::tempdir()?;
+    let stub = root.path().join("claude-project-catalog-stub");
+    fs::write(
+        &stub,
+        r#"#!/bin/sh
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --settings) settings="$2"; shift ;;
+    --resume) conversation="$2"; shift ;;
+  esac
+  shift
+done
+printf '%s' "$settings" > "$0.settings"
+pwd -P > "$0.cwd"
+printf 'project conversation %s ready\n' "$conversation"
+exec /bin/sleep 60
+"#,
+    )?;
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o700))?;
+    let mut child = RuntimeChild::spawn_configured(
+        root.path(),
+        &format!("PROMPT='{PROMPT} '\n"),
+        Path::new("/bin/zsh"),
+        Some(&stub),
+    )?;
+    child.hello()?;
+
+    let git = |cwd: &Path, args: &[&str]| -> Result<()> {
+        let output = ProcessCommand::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(args)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()?;
+        ensure!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(())
+    };
+    git(&child.workspace, &["init", "--initial-branch=main"])?;
+    git(
+        &child.workspace,
+        &[
+            "-c",
+            "user.name=Catalog Fixture",
+            "-c",
+            "user.email=catalog@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "fixture",
+        ],
+    )?;
+    let linked = root.path().join("linked worktree");
+    git(
+        &child.workspace,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "catalog-linked",
+            linked.to_str().context("linked path")?,
+        ],
+    )?;
+    let subdirectory = child.workspace.join("nested");
+    let unrelated = root.path().join("工作 区-unrelated");
+    fs::create_dir_all(&subdirectory)?;
+    fs::create_dir_all(&unrelated)?;
+    git(&unrelated, &["init", "--initial-branch=main"])?;
+    for (directory, id) in [
+        (child.workspace.as_path(), "catalog-main"),
+        (linked.as_path(), "catalog-linked"),
+        (subdirectory.as_path(), "catalog-nested"),
+        (unrelated.as_path(), "catalog-unrelated"),
+    ] {
+        seed_catalog(root.path(), directory, id)?;
+    }
+
+    for directory in [linked.clone(), child.workspace.clone()] {
+        child.send(Command::ListProviderSessions {
+            cwd: directory.to_string_lossy().into_owned(),
+            workspace_root: Some(child.workspace.to_string_lossy().into_owned()),
+        })?;
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            if let Event::Graph(graph) = child.event(deadline, true)?
+                && let Some(catalog) = graph["providerSessionCatalogResults"].get(0)
+            {
+                assert!(catalog["error"].is_null(), "{catalog}");
+                assert_eq!(
+                    Path::new(catalog["projectRoot"].as_str().context("project root")?),
+                    child.workspace.canonicalize()?
+                );
+                let mut ids: Vec<_> = catalog["sessions"]
+                    .as_array()
+                    .context("catalog sessions")?
+                    .iter()
+                    .map(|row| row["providerSessionId"].as_str().unwrap())
+                    .collect();
+                ids.sort_unstable();
+                assert_eq!(ids, ["catalog-linked", "catalog-main", "catalog-nested"]);
+                break;
+            }
+        }
+    }
+
+    child.send(Command::GetProviderSession {
+        request_id: None,
+        cwd: child.workspace.to_string_lossy().into_owned(),
+        workspace_root: Some(child.workspace.to_string_lossy().into_owned()),
+        provider_session_id: "catalog-linked".into(),
+        start_event_index: None,
+        limit: None,
+    })?;
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        if let Event::Graph(graph) = child.event(deadline, true)?
+            && let Some(detail) = graph["providerSessionDetailResults"].get(0)
+        {
+            assert!(detail["error"].is_null(), "{detail}");
+            assert_eq!(detail["cwd"], child.workspace.to_string_lossy().as_ref());
+            assert_eq!(detail["events"][0]["text"], "Synthetic command fixture");
+            break;
+        }
+    }
+    child.send(Command::LoadProviderSession {
+        session_id: child.session.clone(),
+        provider_session_id: "catalog-unrelated".into(),
+        takeover_from: None,
+    })?;
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        if let Event::Graph(graph) = child.event(deadline, true)?
+            && let Some(error) = graph["providerSessionLoadErrors"].get(0)
+        {
+            assert_eq!(error["providerSessionId"], "catalog-unrelated");
+            assert_eq!(error["error"], "Provider session was not found in this project");
+            break;
+        }
+    }
+    child.send(Command::LoadProviderSession {
+        session_id: child.session.clone(),
+        provider_session_id: "catalog-linked".into(),
+        takeover_from: None,
+    })?;
+    child.frame(|_, screen, _| {
+        screen_has_line(screen, "project conversation catalog-linked ready")
+    })?;
+    assert_eq!(
+        Path::new(fs::read_to_string(stub.with_extension("cwd"))?.trim()),
+        linked.canonicalize()?
+    );
+    post_permission_identity(
+        Path::new(&fs::read_to_string(stub.with_extension("settings"))?),
+        "catalog-linked",
+        "default",
+    )?;
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        if let Event::Graph(graph) = child.event(deadline, true)?
+            && graph["providerIdentityEvents"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|event| {
+                    event["result"] == "confirmed"
+                        && event["sessionId"] == child.session
+                        && event["providerSessionId"] == "catalog-linked"
+                })
+        {
+            break;
+        }
+    }
+    let db = startup::open_read_only(&child.data.join("matou.sqlite"))?;
+    let saved = get_session(&db, &child.session)?.context("loaded card")?;
+    assert_eq!(Path::new(&saved.cwd), linked.canonicalize()?);
+    let binding = claude_binding(&db, &child.session)?.context("loaded conversation")?;
+    assert_eq!(binding.provider_session_id, "catalog-linked");
+    assert_eq!(binding.restore_state, "none");
+    assert_eq!(list_runs(&db, &child.session)?.len(), 2);
+    child.send(Command::Shutdown)?;
+    child.closed()?;
+    let (status, stderr) = child.wait()?;
+    ensure!(status.success(), "runtime shutdown: {stderr}");
+    let saved = get_session(&db, &child.session)?.context("persisted loaded card")?;
+    assert_eq!(Path::new(&saved.cwd), linked.canonicalize()?);
+    Ok(())
+}
+
+#[test]
 fn parked_startup_card_reads_its_binding_until_explicit_recovery() -> Result<()> {
     use matou_native_core::{
         hierarchy::canvas::{
@@ -1373,6 +1571,7 @@ fn parked_startup_card_reads_its_binding_until_explicit_recovery() -> Result<()>
     child.send(Command::GetProviderSession {
         request_id: None,
         cwd: seed.workspace.to_string_lossy().into_owned(),
+        workspace_root: None,
         provider_session_id: "bound-0".into(),
         start_event_index: None,
         limit: None,
@@ -4492,6 +4691,7 @@ exec /bin/sleep 60
     child.send(Command::GetProviderSession {
         request_id: Some(42),
         cwd: child.workspace.to_string_lossy().into_owned(),
+        workspace_root: None,
         provider_session_id: "fork-source".into(),
         start_event_index: Some(1),
         limit: None,
@@ -5506,7 +5706,7 @@ fn catalog_rejects_absent_ids_and_closing_a_pending_load_stops_its_only_run() ->
             assert_eq!(error["providerSessionId"], "absent");
             assert_eq!(
                 error["error"],
-                "Provider session was not found in this working directory"
+                "Provider session was not found in this project"
             );
             break;
         }

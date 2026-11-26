@@ -2042,7 +2042,10 @@ mod probe {
         storage::CommandMetadata,
         workspace_paths::WorkspacePathState,
     };
-    use matou_native_runtime::host::{Command, Event, LaunchOptions, RecoveryState, RuntimeHost};
+    use matou_native_runtime::host::{
+        Command, Event, LaunchOptions, ProjectSessionCatalogOperation, ProjectSessionProvider,
+        RecoveryState, RuntimeHost,
+    };
 
     use crate::{
         assets::NativeAssets,
@@ -6044,7 +6047,7 @@ mod probe {
                 .update(cx, |view, window, cx| view.assert_loader_open(window, cx))
                 .unwrap();
             assert!(
-                matches!(commands(&sink).as_slice(), [Command::ListProviderSessions { cwd: path }]
+                matches!(commands(&sink).as_slice(), [Command::ListProviderSessions { cwd: path, .. }]
                 if path == &cwd)
             );
         };
@@ -6058,7 +6061,7 @@ mod probe {
         let detail = |id: &str, start: Option<i64>, limit: Option<i64>| {
             assert!(
                 matches!(commands(&sink).as_slice(), [Command::GetProviderSession {
-                cwd: path, provider_session_id, start_event_index, limit: count,
+                cwd: path, provider_session_id, start_event_index, limit: count, ..
             }] if path == &cwd && provider_session_id == id && *start_event_index == start && *count == limit)
             );
         };
@@ -6139,16 +6142,17 @@ mod probe {
         assert_closed(cx);
 
         open(cx);
+        let linked_cwd = format!("{cwd}/linked-worktree");
         graph(
             &fixture,
             cx,
             "providerSessionCatalogResults",
-            json!({"cwd":cwd,"sessions":[
+            json!({"cwd":cwd,"projectRoot":cwd,"sessions":[
                 {"providerSessionId":"history-a","title":"Alpha planning","updatedAt":1730000000000_i64,
-                 "messageCount":205,"model":"Sonnet","permissionMode":"plan",
+                 "messageCount":205,"model":"Sonnet","permissionMode":"plan","cwd":cwd,
                  "loadedBy":{"sessionId":PARENT,"title":"分支主会话"}},
                 {"providerSessionId":"history-b","title":"Beta draft","updatedAt":1720000000000_i64,
-                 "messageCount":0,"model":"Haiku","permissionMode":"default",
+                 "messageCount":0,"model":"Haiku","permissionMode":"default","cwd":linked_cwd,
                  "loadedBy":{"sessionId":PEER,"title":"目标卡"}}
             ]}),
             false,
@@ -6237,6 +6241,9 @@ mod probe {
         press(window, cx, "down");
         list(cx, &["history-a", "history-b"], Some("history-b"));
         detail("history-b", None, None);
+        filter(cx, "linked-worktree");
+        list(cx, &["history-b"], Some("history-b"));
+        filter(cx, "");
         graph(
             &fixture,
             cx,
@@ -8150,11 +8157,11 @@ mod probe {
         let list_request = || {
             std::iter::from_fn(|| sink.try_recv().ok())
                 .find_map(|command| {
-                    if let Command::ListCodexSessions {
+                    if let Command::ProjectSessionCatalog {
                         request_id,
+                        provider: ProjectSessionProvider::Codex,
                         cwd,
-                        offset,
-                        limit,
+                        operation: ProjectSessionCatalogOperation::List { offset, limit, .. },
                         ..
                     } = command
                     {
@@ -8172,7 +8179,7 @@ mod probe {
                 unreachable!()
             };
             graph["providerSessionCatalogResults"] = json!([{
-                "provider": "codex", "cwd": cwd, "requestId": request_id,
+                "provider": "codex", "cwd": cwd, "projectRoot": cwd, "requestId": request_id,
                 "total": 2, "offset": 0, "limit": 50, "nextOffset": 2, "hasMore": false,
                 "sessions": [
                     {"providerSessionId":"codex-first","title":"第一个会话","updatedAt":2,"permissionMode":"default","messageCount":0,"loadedBy":{"sessionId":PARENT,"title":"主卡"}},
@@ -8200,9 +8207,14 @@ mod probe {
         assert_state(cx, "codex-second", true, true);
         let preview = std::iter::from_fn(|| sink.try_recv().ok())
             .filter_map(|command| {
-                if let Command::GetCodexSession {
+                if let Command::ProjectSessionCatalog {
                     request_id,
-                    provider_session_id,
+                    provider: ProjectSessionProvider::Codex,
+                    operation:
+                        ProjectSessionCatalogOperation::Detail {
+                            provider_session_id,
+                            ..
+                        },
                     ..
                 } = command
                     && provider_session_id == "codex-second"
@@ -8349,7 +8361,7 @@ mod probe {
                 "permissionMode": "default", "messageCount": 1,
             })).collect::<Vec<_>>();
             graph["providerSessionCatalogResults"] = json!([{
-                "provider":"codex", "cwd":cwd, "requestId":request_id,
+                "provider":"codex", "cwd":cwd, "projectRoot":cwd, "requestId":request_id,
                 "total":70,"offset":offset,"nextOffset":next_offset,"hasMore":has_more,"sessions":rows
             }]);
             deliver(window, cx, Event::Graph(graph));
@@ -8372,9 +8384,13 @@ mod probe {
         press(window, cx, "enter");
         let request = std::iter::from_fn(|| sink.try_recv().ok())
             .find_map(|command| match command {
-                Command::ListCodexSessions {
+                Command::ProjectSessionCatalog {
                     request_id,
-                    offset: Some(50),
+                    provider: ProjectSessionProvider::Codex,
+                    operation:
+                        ProjectSessionCatalogOperation::List {
+                            offset: Some(50), ..
+                        },
                     ..
                 } => Some(request_id),
                 _ => None,

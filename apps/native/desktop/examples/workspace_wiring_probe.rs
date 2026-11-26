@@ -3011,8 +3011,14 @@ mod workspace {
                 assert!(
                     std::iter::from_fn(|| sink.try_recv().ok()).any(|command| matches!(
                         (provider, command),
-                        ("codex", Command::ListCodexSessions { .. })
-                            | ("antigravity", Command::ListAntigravitySessions { .. }),
+                        ("codex", Command::ProjectSessionCatalog {
+                            provider: ProjectSessionProvider::Codex,
+                            operation: ProjectSessionCatalogOperation::List { .. }, ..
+                        })
+                            | ("antigravity", Command::ProjectSessionCatalog {
+                                provider: ProjectSessionProvider::Antigravity,
+                                operation: ProjectSessionCatalogOperation::List { .. }, ..
+                            }),
                     ))
                 );
             }

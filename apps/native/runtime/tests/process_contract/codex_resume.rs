@@ -1989,6 +1989,132 @@ fn catalog_sibling(
 }
 
 #[test]
+fn codex_project_catalog_previews_searches_and_loads_another_worktree() -> Result<()> {
+    use matou_native_runtime::host::{ProjectSessionCatalogOperation, ProjectSessionProvider};
+
+    let root = tempfile::tempdir()?;
+    let (mut child, home) = spawn_catalog_fixture(root.path())?;
+    let git = |args: &[&str]| -> Result<()> {
+        let output = ProcessCommand::new("/usr/bin/git")
+            .current_dir(&child.workspace)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .args(args)
+            .output()?;
+        ensure!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(())
+    };
+    git(&["init", "--initial-branch=main"])?;
+    git(&[
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "fixture",
+    ])?;
+    let linked = root.path().join("codex-linked");
+    git(&[
+        "worktree",
+        "add",
+        "-b",
+        "codex-linked",
+        linked.to_str().unwrap(),
+    ])?;
+    let unrelated = root.path().join("unrelated");
+    fs::create_dir(&unrelated)?;
+    let rollout = catalog_fixture(&home, &linked, UUID, "Linked conversation")?;
+    catalog_fixture(&home, &unrelated, FOREIGN, "Unrelated conversation")?;
+    let cwd = child.workspace.display().to_string();
+    let project = |request_id, operation| Command::ProjectSessionCatalog {
+        request_id,
+        provider: ProjectSessionProvider::Codex,
+        cwd: cwd.clone(),
+        workspace_root: Some(cwd.clone()),
+        operation,
+    };
+    child.send(project(
+        101,
+        ProjectSessionCatalogOperation::List {
+            query: String::new(),
+            offset: None,
+            limit: None,
+        },
+    ))?;
+    let list = catalog_receipt(&mut child, "providerSessionCatalogResults", |row| {
+        row["requestId"] == 101
+    })?;
+    assert_eq!(list["total"], 1, "{list}");
+    assert_eq!(list["sessions"][0]["providerSessionId"], UUID);
+    child.send(project(
+        102,
+        ProjectSessionCatalogOperation::Detail {
+            provider_session_id: UUID.into(),
+            start_event_index: None,
+            before_event_index: None,
+            around_event_index: None,
+            limit: None,
+        },
+    ))?;
+    let detail = catalog_receipt(&mut child, "providerSessionDetailResults", |row| {
+        row["requestId"] == 102
+    })?;
+    assert_eq!(
+        detail["events"][0]["text"], "Find the synthetic needle",
+        "{detail}"
+    );
+    child.send(project(
+        103,
+        ProjectSessionCatalogOperation::Search {
+            provider_session_id: UUID.into(),
+            query: "needle".into(),
+            offset: None,
+            limit: None,
+        },
+    ))?;
+    let search = catalog_receipt(&mut child, "providerSessionDetailResults", |row| {
+        row["requestId"] == 103
+    })?;
+    assert_eq!(search["search"], true);
+    assert_eq!(search["total"], 1, "{search}");
+    let session = child.session.clone();
+    load_catalog(&mut child, &session, UUID)?;
+    child.frame(|_, screen, _| screen_has_line(screen, "FIXTURE CODEX RESUME"))?;
+    assert_eq!(
+        Path::new(fs::read_to_string(home.join("cwd"))?.trim()).canonicalize()?,
+        linked.canonicalize()?
+    );
+    assert_eq!(
+        post_hook(&current_hook_url(&home)?, started(UUID, &rollout))?,
+        200
+    );
+    catalog_receipt(&mut child, "providerIdentityEvents", |row| {
+        row["sessionId"] == session
+            && row["providerSessionId"] == UUID
+            && row["result"] == "confirmed"
+    })?;
+    let db = open_data(&child)?;
+    assert_eq!(
+        Path::new(
+            &matou_native_core::sessions::get_session(&db, &session)?
+                .unwrap()
+                .cwd
+        )
+        .canonicalize()?,
+        linked.canonicalize()?
+    );
+    shutdown(child)
+}
+
+#[test]
 fn codex_catalog_load_replaces_same_card_and_rejects_duplicate_and_occupied() -> Result<()> {
     const ANCESTOR: &str = "01a1ddc1-88fd-7fc1-8c66-ab8d38719daf";
     let root = tempfile::tempdir()?;
@@ -2162,7 +2288,7 @@ fn codex_catalog_missing_selection_and_failed_respawn_recover_without_new_uuid()
     })?;
     assert_eq!(
         missing["error"],
-        "Provider session was not found in this working directory"
+        "Provider session was not found in this project"
     );
     assert_eq!(list_runs(&db, &session)?.last().unwrap().id, old.id);
     assert!(codex_binding(&db, &session)?.is_none());

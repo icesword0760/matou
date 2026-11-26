@@ -3,8 +3,12 @@
 //! No SQLite, PTY, or Ghostty handle is accessed on the GPUI thread. The current
 //! vertical slice hosts the owner in a background thread; standalone runtime
 //! transport and additional windows remain separate migration work.
+mod project_session_catalog;
 #[path = "provider_model_discovery.rs"]
 mod provider_model_discovery;
+
+use project_session_catalog::{ProjectCatalogRequest, project_scope};
+pub use project_session_catalog::{ProjectSessionCatalogOperation, ProjectSessionProvider};
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
@@ -83,7 +87,7 @@ use matou_native_core::{
     },
     pty::{LaunchProfile, ShellLaunch},
     sessions::{
-        ClaudeCatalogLoad, ClaudeCatalogReplacement, ClaudeRestore, ClaudeRoleLaunchPreferences,
+        CatalogReplacement, ClaudeCatalogLoad, ClaudeRestore, ClaudeRoleLaunchPreferences,
         InterfaceLocale, LOCALE_FILE, LocalePreference, ProviderBinding, current_interface_locale,
         read_claude_role_launch_preferences, read_claude_time_zone, read_locale_preference,
         save_claude_model_preferences, save_claude_time_zone,
@@ -788,11 +792,15 @@ pub enum Command {
     },
     ListProviderSessions {
         cwd: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace_root: Option<String>,
     },
     GetProviderSession {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<u64>,
         cwd: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace_root: Option<String>,
         provider_session_id: String,
         start_event_index: Option<i64>,
         limit: Option<i64>,
@@ -805,6 +813,13 @@ pub enum Command {
         provider_session_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         takeover_from: Option<String>,
+    },
+    ProjectSessionCatalog {
+        request_id: u64,
+        provider: ProjectSessionProvider,
+        cwd: String,
+        workspace_root: Option<String>,
+        operation: ProjectSessionCatalogOperation,
     },
     ListCodexSessions {
         request_id: u64,
@@ -5713,10 +5728,12 @@ fn run_writable(
                                 shell_submissions.remove(id);
                                 shell_promotions.remove(id);
                                 if let Some(load) = catalog_loads.remove(id) {
-                                    if load.provider == "claude-code"
-                                        && let Some(revision) = load.spawn_revision
-                                    {
-                                        owner.cancel_claude_catalog_load(id, revision)?;
+                                    if let Some(revision) = load.spawn_revision {
+                                        owner.cancel_provider_catalog_load(
+                                            id,
+                                            load.provider,
+                                            revision,
+                                        )?;
                                     }
                                     let error =
                                         anyhow!("Card was closed while loading the conversation");
@@ -6556,12 +6573,18 @@ fn run_writable(
                     }
                     continue;
                 }
-                Command::ListProviderSessions { cwd } => {
+                Command::ListProviderSessions {
+                    cwd,
+                    workspace_root,
+                } => {
                     if let Err(
                         mpsc::TrySendError::Full(CatalogRequest::Index { cwd, .. })
                         | mpsc::TrySendError::Disconnected(CatalogRequest::Index { cwd, .. }),
-                    ) = catalog_requests.try_send(CatalogRequest::Index { cwd, load: None })
-                    {
+                    ) = catalog_requests.try_send(CatalogRequest::Index {
+                        cwd,
+                        workspace_root,
+                        load: None,
+                    }) {
                         catalog_lists.push(json!({"cwd": cwd, "error": CATALOG_BUSY}));
                     }
                     continue;
@@ -6569,6 +6592,7 @@ fn run_writable(
                 Command::GetProviderSession {
                     request_id,
                     cwd,
+                    workspace_root,
                     provider_session_id,
                     start_event_index,
                     limit,
@@ -6579,11 +6603,44 @@ fn run_writable(
                     ) = catalog_requests.try_send(CatalogRequest::Detail(CatalogDetailRequest {
                         request_id,
                         cwd,
+                        workspace_root,
                         provider_session_id,
                         start_event_index,
                         limit,
                     })) {
                         catalog_details.push(request.result(Err(CATALOG_BUSY)));
+                    }
+                    continue;
+                }
+                Command::ProjectSessionCatalog {
+                    request_id,
+                    provider,
+                    cwd,
+                    workspace_root,
+                    operation,
+                } => {
+                    let request = ProjectCatalogRequest {
+                        request_id,
+                        provider,
+                        cwd,
+                        workspace_root,
+                        operation,
+                    };
+                    if let Err(error) = catalog_requests.try_send(CatalogRequest::Project(request))
+                    {
+                        let request = match error {
+                            mpsc::TrySendError::Full(CatalogRequest::Project(request))
+                            | mpsc::TrySendError::Disconnected(CatalogRequest::Project(request)) => {
+                                request
+                            }
+                            _ => unreachable!(),
+                        };
+                        let rows = if request.is_list() {
+                            &mut catalog_lists
+                        } else {
+                            &mut catalog_details
+                        };
+                        rows.push(request.reply(Err(anyhow!(CATALOG_BUSY))));
                     }
                     continue;
                 }
@@ -6870,9 +6927,14 @@ fn run_writable(
                                     )
                             })
                             .context("Card is no longer available")?;
+                        let workspace_root = owner
+                            .session_workspace(&session_id)?
+                            .map(|workspace_id| owner.workspace_path_target(&workspace_id))
+                            .transpose()?;
                         catalog_requests
                             .try_send(CatalogRequest::Index {
                                 cwd: stored.cwd,
+                                workspace_root,
                                 load: Some(CatalogLoadTarget {
                                     provider,
                                     scene_id: scene_id.clone().context("No active scene")?,
@@ -7412,26 +7474,38 @@ fn run_writable(
                     catalog_details.push(result);
                     continue;
                 }
+                CatalogReply::Project { list, mut result } => {
+                    if list {
+                        annotate_project_catalog_owners(&owner, &catalog_loads, &mut result);
+                        catalog_lists.push(result);
+                    } else {
+                        catalog_details.push(result);
+                    }
+                    continue;
+                }
                 CatalogReply::Recent(event) => {
                     send.send_blocking(event)?;
                     continue;
                 }
                 CatalogReply::Index { cwd, result } => {
-                    let result = result.and_then(|mut entries| {
-                        let ids: Vec<_> = entries
+                    let result = result.and_then(|mut catalog| {
+                        let ids: Vec<_> = catalog
+                            .entries
                             .iter()
                             .map(|entry| entry.provider_session_id.as_str())
                             .collect();
                         let mut owners = owner
                             .catalog_binding_owners("claude-code", &ids)
                             .map_err(|_| "Could not read provider session bindings")?;
-                        for entry in &mut entries {
+                        for entry in &mut catalog.entries {
                             entry.loaded_by = owners.remove(&entry.provider_session_id);
                         }
-                        Ok(entries)
+                        Ok(catalog)
                     });
                     catalog_lists.push(match result {
-                        Ok(sessions) => json!({"cwd": cwd, "sessions": sessions}),
+                        Ok(catalog) => json!({
+                            "cwd": cwd, "projectRoot": catalog.project_root, "sessions": catalog.entries
+                        }),
                         Err(error) => json!({"cwd": cwd, "error": error}),
                     });
                     continue;
@@ -7516,6 +7590,16 @@ fn run_writable(
                     "Card already has a running or starting process"
                 );
                 let entry = result.map_err(|error| anyhow!(error))?;
+                let source = entry.source_cwd.as_str();
+                let source_cwd = (source != cwd
+                    && std::fs::canonicalize(&cwd).ok().as_deref() != Some(Path::new(source)))
+                .then_some(source);
+                if let Some(source) = source_cwd {
+                    ensure!(
+                        Path::new(source).is_dir(),
+                        "The conversation's original directory is no longer available"
+                    );
+                }
                 anyhow::ensure!(
                     owner.session(&session_id)?.is_some_and(|session| {
                         session.archived_at.is_none() && session.cwd == cwd
@@ -7612,10 +7696,12 @@ fn run_writable(
                     },
                     provider,
                     entry.completed_turn,
-                    (provider == "claude-code"
-                        && (load.takeover_from.is_some() || load.target_stopped))
-                        .then_some(ClaudeCatalogReplacement {
+                    (source_cwd.is_some()
+                        || (provider == "claude-code"
+                            && (load.takeover_from.is_some() || load.target_stopped)))
+                        .then_some(CatalogReplacement {
                             takeover_from: load.takeover_from.as_deref(),
+                            source_cwd,
                         }),
                 )?;
                 Ok(Some((workspace_id, revision)))
@@ -8310,10 +8396,8 @@ fn run_writable(
                         shell_submissions.remove(id);
                         shell_promotions.remove(id);
                         if let Some(load) = catalog_loads.remove(id) {
-                            if load.provider == "claude-code"
-                                && let Some(revision) = load.spawn_revision
-                            {
-                                owner.cancel_claude_catalog_load(id, revision)?;
+                            if let Some(revision) = load.spawn_revision {
+                                owner.cancel_provider_catalog_load(id, load.provider, revision)?;
                             }
                             let error = anyhow!("Card was closed while loading the conversation");
                             if !load.antigravity_requests.is_empty() {
@@ -9249,8 +9333,10 @@ struct CatalogLoadTarget {
 }
 
 enum CatalogRequest {
+    Project(ProjectCatalogRequest),
     Index {
         cwd: String,
+        workspace_root: Option<String>,
         load: Option<CatalogLoadTarget>,
     },
     Detail(CatalogDetailRequest),
@@ -9297,6 +9383,7 @@ impl CatalogRecentRequest {
 struct CatalogDetailRequest {
     request_id: Option<u64>,
     cwd: String,
+    workspace_root: Option<String>,
     provider_session_id: String,
     start_event_index: Option<i64>,
     limit: Option<i64>,
@@ -9327,12 +9414,17 @@ struct CatalogSelection {
     model: Option<String>,
     permission_mode: String,
     completed_turn: bool,
+    source_cwd: String,
 }
 
 enum CatalogReply {
+    Project {
+        list: bool,
+        result: Value,
+    },
     Index {
         cwd: String,
-        result: Result<Vec<provider_catalog::CatalogEntry>, &'static str>,
+        result: Result<provider_catalog::ProjectCatalog, &'static str>,
     },
     Load {
         cwd: String,
@@ -9356,6 +9448,45 @@ fn codex_catalog_result(request_id: u64, cwd: &str, result: Result<Value, &'stat
     result
 }
 
+fn annotate_project_catalog_owners(
+    owner: &ShellOwner,
+    pending: &HashMap<String, CatalogLoad>,
+    result: &mut Value,
+) {
+    let Some(provider) = result["provider"].as_str().map(str::to_owned) else {
+        return;
+    };
+    let Some(rows) = result["sessions"].as_array_mut() else {
+        return;
+    };
+    let ids: Vec<_> = rows
+        .iter()
+        .filter_map(|row| row["providerSessionId"].as_str())
+        .collect();
+    let Ok(mut owners) = owner.catalog_binding_owners(&provider, &ids) else {
+        result["error"] = json!("Could not read provider session bindings");
+        return;
+    };
+    for (card, load) in pending {
+        if load.provider == provider
+            && ids.contains(&load.provider_session_id.as_str())
+            && let Ok(Some(session)) = owner.session(card)
+        {
+            owners
+                .entry(load.provider_session_id.clone())
+                .or_insert_with(|| json!({"sessionId": card, "title": session.title}));
+        }
+    }
+    for row in rows {
+        if let Some(bound) = row["providerSessionId"]
+            .as_str()
+            .and_then(|id| owners.remove(id))
+        {
+            row["loadedBy"] = bound;
+        }
+    }
+}
+
 fn start_provider_catalog(
     dsh_root: Option<PathBuf>,
     codex_root: Option<PathBuf>,
@@ -9367,65 +9498,97 @@ fn start_provider_catalog(
     thread::Builder::new()
         .name("provider-catalog".into())
         .spawn(move || {
+            let mut claude = provider_catalog::ProjectCatalogReader::default();
             let mut codex = codex_catalog::Catalog::new(codex_root);
             let mut dsh = dsh_root.map(DshSessionCatalog::new);
             let mut antigravity = AntigravityCatalog::new(antigravity_root);
             for request in incoming {
                 let reply = match request {
-                    CatalogRequest::Index { cwd, load: None } => {
-                        let result = provider_catalog::read(root.as_deref(), &cwd, None);
+                    CatalogRequest::Project(request) => {
+                        let result = request.run(&mut codex, dsh.as_mut(), &mut antigravity);
+                        CatalogReply::Project {
+                            list: request.is_list(),
+                            result: request.reply(result),
+                        }
+                    }
+                    CatalogRequest::Index { cwd, workspace_root, load: None } => {
+                        let result = claude.read(
+                            root.as_deref(), &cwd, workspace_root.as_deref(), None,
+                        );
                         CatalogReply::Index { cwd, result }
                     }
                     CatalogRequest::Index {
                         cwd,
+                        workspace_root,
                         load: Some(target),
                     } => {
                         let id = target.provider_session_id.as_str();
-                        let result = if target.provider == "codex" {
-                            codex.load(&cwd, id).map(|entry| CatalogSelection {
-                                provider_session_id: entry.provider_session_id,
-                                title: entry.title,
-                                model: entry.model,
-                                permission_mode: entry.permission_mode.to_owned(),
-                                completed_turn: entry.has_completed_turn,
-                            })
-                        } else if target.provider == "antigravity" {
-                            antigravity.detail(Path::new(&cwd), id, antigravity_catalog::DetailOptions {
-                                limit: Some(1), ..Default::default()
-                            }).map(|detail| CatalogSelection {
-                                provider_session_id: detail.summary.provider_session_id,
-                                title: detail.summary.title,
-                                model: None,
-                                permission_mode: detail.summary.permission_mode.to_owned(),
-                                completed_turn: false,
-                            }).map_err(|_| "Antigravity session history is unavailable in this working directory")
-                        } else if target.provider == "dsh" {
-                            dsh.as_mut().ok_or("DSH session directory is unavailable").and_then(|catalog| {
-                                catalog.detail(Path::new(&cwd), id, dsh_catalog::DetailOptions {limit: Some(1), ..Default::default()})
-                                    .map_err(|_| "DSH session is unreadable or belongs to another working directory")
-                                    .map(|detail| CatalogSelection {
-                                        provider_session_id: detail.summary.provider_session_id,
-                                        title: detail.summary.title,
-                                        model: detail.summary.model,
-                                        permission_mode: detail.summary.permission_mode.to_owned(),
-                                        completed_turn: false,
-                                    })
-                            })
-                        } else {
-                            provider_catalog::read(root.as_deref(), &cwd, Some(id))
-                                .and_then(|entries| {
-                                    entries.into_iter().next().ok_or(
-                                        "Provider session was not found in this working directory",
-                                    )
-                                })
-                                .map(|entry| CatalogSelection {
+                        let result = (|| {
+                            if target.provider == "claude-code" {
+                                let entry = claude
+                                    .read(root.as_deref(), &cwd, workspace_root.as_deref(), Some(id))?
+                                    .entries
+                                    .into_iter()
+                                    .next()
+                                    .ok_or("Provider session was not found in this project")?;
+                                return Ok(CatalogSelection {
                                     provider_session_id: entry.provider_session_id,
                                     title: entry.title,
                                     model: entry.model,
                                     permission_mode: entry.permission_mode,
                                     completed_turn: false,
-                                })
-                        };
+                                    source_cwd: entry.cwd,
+                                });
+                            }
+                            let scope = project_scope(&cwd, workspace_root.as_deref())?;
+                            let path = Path::new(&cwd);
+                            match target.provider {
+                                "codex" => {
+                                    let entry = codex.load_in_project(&cwd, &scope, id)?;
+                                    Ok(CatalogSelection {
+                                        provider_session_id: entry.provider_session_id,
+                                        title: entry.title,
+                                        model: entry.model,
+                                        permission_mode: entry.permission_mode.to_owned(),
+                                        completed_turn: entry.has_completed_turn,
+                                        source_cwd: entry.cwd.to_string_lossy().into_owned(),
+                                    })
+                                }
+                                "dsh" => {
+                                    let detail = dsh
+                                        .as_mut()
+                                        .ok_or("DSH session directory is unavailable")?
+                                        .detail_in_project(path, &scope, id, dsh_catalog::DetailOptions {
+                                            limit: Some(1), ..Default::default()
+                                        })
+                                        .map_err(|_| "DSH session is unreadable or belongs to another working directory")?;
+                                    Ok(CatalogSelection {
+                                        provider_session_id: detail.summary.provider_session_id,
+                                        title: detail.summary.title,
+                                        model: detail.summary.model,
+                                        permission_mode: detail.summary.permission_mode.to_owned(),
+                                        completed_turn: false,
+                                        source_cwd: detail.summary.cwd,
+                                    })
+                                }
+                                "antigravity" => {
+                                    let detail = antigravity
+                                        .detail_in_project(path, &scope, id, antigravity_catalog::DetailOptions {
+                                            limit: Some(1), ..Default::default()
+                                        })
+                                        .map_err(|_| "Antigravity session history is unavailable in this working directory")?;
+                                    Ok(CatalogSelection {
+                                        provider_session_id: detail.summary.provider_session_id,
+                                        title: detail.summary.title,
+                                        model: None,
+                                        permission_mode: detail.summary.permission_mode.to_owned(),
+                                        completed_turn: false,
+                                        source_cwd: detail.summary.cwd.to_string_lossy().into_owned(),
+                                    })
+                                }
+                                _ => unreachable!("unsupported catalog provider"),
+                            }
+                        })();
                         CatalogReply::Load {
                             cwd,
                             target,
@@ -9487,13 +9650,24 @@ fn start_provider_catalog(
                         CatalogReply::Recent(request.event(preview))
                     }
                     CatalogRequest::Detail(request) => {
-                        let result = provider_catalog::detail(
-                            root.as_deref(),
-                            &request.cwd,
-                            &request.provider_session_id,
-                            request.start_event_index,
-                            request.limit,
-                        );
+                        let result = if let Some(workspace_root) = request.workspace_root.as_deref() {
+                            claude.detail(
+                                root.as_deref(),
+                                &request.cwd,
+                                Some(workspace_root),
+                                &request.provider_session_id,
+                                request.start_event_index,
+                                request.limit,
+                            )
+                        } else {
+                            provider_catalog::detail(
+                                root.as_deref(),
+                                &request.cwd,
+                                &request.provider_session_id,
+                                request.start_event_index,
+                                request.limit,
+                            )
+                        };
                         CatalogReply::Detail(request.result(result))
                     }
                 };

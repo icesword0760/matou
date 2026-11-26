@@ -2062,7 +2062,7 @@ impl ShellOwner {
         input: &sessions::ClaudeCatalogLoad<'_>,
         provider: &str,
         completed_turn: bool,
-        replacement: Option<sessions::ClaudeCatalogReplacement<'_>>,
+        replacement: Option<sessions::CatalogReplacement<'_>>,
     ) -> Result<i64> {
         let id = (self.next_id)();
         let commit = sessions::load_provider_catalog_binding_with_rollback(
@@ -2097,16 +2097,18 @@ impl ShellOwner {
         )
     }
 
-    pub(crate) fn cancel_claude_catalog_load(
+    pub(crate) fn cancel_provider_catalog_load(
         &mut self,
         session_id: &str,
+        provider: &str,
         revision: i64,
     ) -> Result<()> {
         let id = (self.next_id)();
-        sessions::cancel_claude_catalog_load(
+        sessions::cancel_provider_catalog_load(
             &mut self.connection,
             &command(id.clone(), "session.cancel-catalog-load", id),
             session_id,
+            provider,
             revision,
             now(),
         )

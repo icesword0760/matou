@@ -39,8 +39,9 @@ use matou_native_runtime::history::{
 };
 use matou_native_runtime::history_worker::{HistoryReply, HistoryRequest};
 use matou_native_runtime::host::{
-    DATABASE_RECOVERY_INTERRUPTED, RecentReplies, STORAGE_READ_ONLY_TITLE, StoragePhase,
-    database_recovery_request_id, deferred_summary_text, save_locale_preference,
+    DATABASE_RECOVERY_INTERRUPTED, ProjectSessionCatalogOperation, ProjectSessionProvider,
+    RecentReplies, STORAGE_READ_ONLY_TITLE, StoragePhase, database_recovery_request_id,
+    deferred_summary_text, save_locale_preference,
 };
 use matou_native_runtime::protocol::{
     ClaudeModelCatalogReply, ClaudeModelPreferencesReply, ProviderSettingsReply,
@@ -886,6 +887,7 @@ struct LoaderOwner {
 struct LoaderSession {
     id: String,
     title: String,
+    cwd: Option<String>,
     model: Option<String>,
     permission_mode: String,
     message_count: usize,
@@ -899,6 +901,7 @@ impl LoaderSession {
         Some(Self {
             id: value["providerSessionId"].as_str()?.into(),
             title: value["title"].as_str()?.into(),
+            cwd: value["cwd"].as_str().map(str::to_owned),
             model: value["model"].as_str().map(str::to_owned),
             permission_mode: value["permissionMode"].as_str()?.into(),
             message_count: value["messageCount"]
@@ -1064,6 +1067,7 @@ struct SessionLoader {
     scene_id: String,
     session_id: String,
     cwd: String,
+    project_root: Option<String>,
     input: Entity<RenameInput>,
     sessions: Vec<LoaderSession>,
     selected: Option<String>,
@@ -1084,6 +1088,14 @@ struct SessionLoader {
 impl SessionLoader {
     fn remote_catalog(&self) -> bool {
         matches!(self.provider, "codex" | "dsh" | "antigravity")
+    }
+
+    fn project_provider(&self) -> ProjectSessionProvider {
+        match self.provider {
+            "dsh" => ProjectSessionProvider::Dsh,
+            "antigravity" => ProjectSessionProvider::Antigravity,
+            _ => ProjectSessionProvider::Codex,
+        }
     }
 
     fn selected_session(&self) -> Option<&LoaderSession> {
@@ -1164,9 +1176,14 @@ impl SessionLoader {
         } else {
             self.input.read(cx).text.trim().to_lowercase()
         };
-        let cwd_matches = query.is_empty() || self.cwd.to_lowercase().contains(&query);
         self.sessions.iter().filter(move |session| {
-            cwd_matches
+            query.is_empty()
+                || session
+                    .cwd
+                    .as_deref()
+                    .unwrap_or(&self.cwd)
+                    .to_lowercase()
+                    .contains(&query)
                 || session.title.to_lowercase().contains(&query)
                 || session.id.to_lowercase().contains(&query)
                 || session
@@ -1250,7 +1267,7 @@ const WORKSPACE_PATH_UNAVAILABLE: &str = "工作区目录不可用，请先在�
 const SESSION_LOADER_TITLE: &str = "载入 Claude Code 会话";
 const SESSION_LOADER_FILTER_PLACEHOLDER: &str = "筛选左侧：标题、路径、模型或会话 ID";
 const SESSION_LOADER_RUNNING_WARNING: &str = "当前卡片正在运行，继续会结束当前进程。";
-const SESSION_LOADER_NO_SESSIONS: &str = "当前工作空间内没有 Claude Code 会话";
+const SESSION_LOADER_NO_SESSIONS: &str = "当前项目内没有 Claude Code 会话";
 const SESSION_LOADER_NO_MATCHES: &str = "左侧没有匹配的会话";
 const SESSION_LOADER_LOADING_MORE: &str = "正在载入更多会话…";
 const SESSION_LOADER_SELECT_SESSION: &str = "选择会话查看内容";
@@ -1294,6 +1311,10 @@ fn loader_load_error(error: String, locale: InterfaceLocale) -> String {
             "The source card still has a running process" => "来源卡片仍有进程正在运行",
             "The completed takeover is no longer available" => "已接管的会话已不可用",
             "The session owner changed" => "会话的持有卡片已变更",
+            "Provider session was not found in this project" => "在这个项目中找不到该会话",
+            "The conversation's original directory is no longer available" => {
+                "会话原来的工作目录已不可用"
+            }
             _ => return error,
         };
         return translated.into();
@@ -11368,6 +11389,7 @@ impl Workspace {
             scene_id,
             session_id: id.to_owned(),
             cwd,
+            project_root: None,
             input,
             sessions: Vec::new(),
             selected,
@@ -11446,6 +11468,7 @@ impl Workspace {
                 .or_else(|| state.selected.clone()),
         );
         state.provider = provider;
+        state.project_root = None;
         state.restore_selection = state.remembered.selected(provider);
         state.pending_list = None;
         state.pending_detail = None;
@@ -11481,28 +11504,17 @@ impl Workspace {
             } else {
                 50
             });
-            match state.provider {
-                "dsh" => Command::ListDshSessions {
-                    request_id,
-                    cwd,
+            Command::ProjectSessionCatalog {
+                request_id,
+                provider: state.project_provider(),
+                cwd,
+                workspace_root: self
+                    .hierarchy
+                    .as_ref()
+                    .and_then(|hierarchy| hierarchy.workspace.as_ref())
+                    .map(|workspace| workspace.root_directory.clone()),
+                operation: ProjectSessionCatalogOperation::List {
                     query,
-                    full_text: false,
-                    offset,
-                    limit,
-                },
-                "antigravity" => Command::ListAntigravitySessions {
-                    request_id,
-                    cwd,
-                    query,
-                    full_text: false,
-                    offset,
-                    limit,
-                },
-                _ => Command::ListCodexSessions {
-                    request_id,
-                    cwd,
-                    query,
-                    full_text: false,
                     offset,
                     limit,
                 },
@@ -11510,6 +11522,11 @@ impl Workspace {
         } else {
             Command::ListProviderSessions {
                 cwd: state.cwd.clone(),
+                workspace_root: self
+                    .hierarchy
+                    .as_ref()
+                    .and_then(|hierarchy| hierarchy.workspace.as_ref())
+                    .map(|workspace| workspace.root_directory.clone()),
             }
         };
         match self.commands.send_at(self.runtime_generation, command) {
@@ -11682,36 +11699,55 @@ impl Workspace {
         };
         let limit = page.map(|(_, limit)| limit);
         let command = if let Some(request_id) = request_id {
-            match state.provider {
-                "dsh" => Command::GetDshSession {
+            if !state.history {
+                Command::ProjectSessionCatalog {
                     request_id,
+                    provider: state.project_provider(),
                     cwd: state.cwd.clone(),
-                    provider_session_id: id.clone(),
-                    before_event_index: page.map(|(start, count)| start + count),
-                    around_event_index: around,
-                    limit,
-                },
-                "antigravity" => Command::GetAntigravitySession {
-                    request_id,
-                    cwd: state.cwd.clone(),
-                    provider_session_id: id.clone(),
-                    before_event_index: page.map(|(start, count)| start + count),
-                    around_event_index: around,
-                    limit,
-                },
-                _ => Command::GetCodexSession {
-                    request_id,
-                    cwd: state.cwd.clone(),
-                    provider_session_id: id.clone(),
-                    start_event_index: start,
-                    around_event_index: around,
-                    limit,
-                },
+                    workspace_root: state.project_root.clone(),
+                    operation: ProjectSessionCatalogOperation::Detail {
+                        provider_session_id: id.clone(),
+                        start_event_index: start,
+                        before_event_index: page.map(|(start, count)| start + count),
+                        around_event_index: around,
+                        limit,
+                    },
+                }
+            } else {
+                match state.provider {
+                    "dsh" => Command::GetDshSession {
+                        request_id,
+                        cwd: state.cwd.clone(),
+                        provider_session_id: id.clone(),
+                        before_event_index: page.map(|(start, count)| start + count),
+                        around_event_index: around,
+                        limit,
+                    },
+                    "antigravity" => Command::GetAntigravitySession {
+                        request_id,
+                        cwd: state.cwd.clone(),
+                        provider_session_id: id.clone(),
+                        before_event_index: page.map(|(start, count)| start + count),
+                        around_event_index: around,
+                        limit,
+                    },
+                    _ => Command::GetCodexSession {
+                        request_id,
+                        cwd: state.cwd.clone(),
+                        provider_session_id: id.clone(),
+                        start_event_index: start,
+                        around_event_index: around,
+                        limit,
+                    },
+                }
             }
         } else {
             Command::GetProviderSession {
                 request_id: None,
                 cwd: state.cwd.clone(),
+                workspace_root: (!state.history)
+                    .then(|| state.project_root.clone())
+                    .flatten(),
                 provider_session_id: id.clone(),
                 start_event_index: start,
                 limit,
@@ -11789,26 +11825,12 @@ impl Workspace {
         let provider_session_id = id.clone();
         let query = state.search_query.clone();
         let offset = Some(offset as i64);
-        let command = match state.provider {
-            "dsh" => Command::SearchDshSession {
-                request_id,
-                cwd,
-                provider_session_id,
-                query,
-                offset,
-                limit: None,
-            },
-            "antigravity" => Command::SearchAntigravitySession {
-                request_id,
-                cwd,
-                provider_session_id,
-                query,
-                offset,
-                limit: None,
-            },
-            _ => Command::SearchCodexSession {
-                request_id,
-                cwd,
+        let command = Command::ProjectSessionCatalog {
+            request_id,
+            provider: state.project_provider(),
+            cwd,
+            workspace_root: state.project_root.clone(),
+            operation: ProjectSessionCatalogOperation::Search {
                 provider_session_id,
                 query,
                 offset,
@@ -11996,8 +12018,9 @@ impl Workspace {
             title: session.title.clone(),
             previous_revision,
             request_id,
-            wait_for_identity: state.provider == "claude-code"
-                && (takeover_from.is_some() || confirmed_running),
+            wait_for_identity: session.cwd.as_ref().is_some_and(|cwd| cwd != &state.cwd)
+                || (state.provider == "claude-code"
+                    && (takeover_from.is_some() || confirmed_running)),
         };
         let command = match (state.provider, request_id) {
             ("dsh", Some(request_id)) => Command::LoadDshSession {
@@ -12060,6 +12083,7 @@ impl Workspace {
             return;
         }
         if let Some(rows) = result["sessions"].as_array() {
+            state.project_root = result["projectRoot"].as_str().map(str::to_owned);
             let rows: Vec<_> = rows.iter().filter_map(LoaderSession::from_graph).collect();
             state.list_total = result["total"]
                 .as_u64()
@@ -15654,11 +15678,21 @@ impl Workspace {
                 .as_deref()
                 .filter(|model| !model.is_empty())
                 .unwrap_or(provider_name);
-            let meta = format!(
+            let mut meta = format!(
                 "{} · {}",
                 loader_relative_time(session.updated_at, self.locale),
                 model
             );
+            if let Some(cwd) = &session.cwd
+                && state.project_root.is_some()
+            {
+                let directory = std::path::Path::new(cwd);
+                let label = directory
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(cwd);
+                meta = format!("{label} · {meta}");
+            }
             let detail = (!is_codex).then(|| {
                 let entries = loader_content_count(session.message_count as usize, self.locale);
                 format!(
@@ -15688,6 +15722,9 @@ impl Workspace {
                         "session-loader-row-{}",
                         session.id
                     )))
+                    .when_some(session.cwd.clone(), |row, cwd| {
+                        row.tooltip(move |_, cx| cx.new(|_| CardTooltip(cwd.clone().into())).into())
+                    })
                     .w_full()
                     .h(row_height - px(6.))
                     .flex_none()
@@ -15851,23 +15888,21 @@ impl Workspace {
                     .child(ui_text(if filter_empty {
                         if state.provider == "antigravity" {
                             self.locale.text(
-                                "当前工作空间内没有 Antigravity 会话",
-                                "No Antigravity sessions in this workspace",
+                                "当前项目内没有 Antigravity 会话",
+                                "No Antigravity sessions in this project",
                             )
                         } else if state.provider == "dsh" {
-                            self.locale.text(
-                                "当前工作空间内没有 DSH 会话",
-                                "No DSH sessions in this workspace",
-                            )
+                            self.locale
+                                .text("当前项目内没有 DSH 会话", "No DSH sessions in this project")
                         } else if is_codex {
                             self.locale.text(
-                                "当前工作空间内没有 Codex 会话",
-                                "No Codex sessions in this workspace",
+                                "当前项目内没有 Codex 会话",
+                                "No Codex sessions in this project",
                             )
                         } else {
                             self.locale.text(
                                 SESSION_LOADER_NO_SESSIONS,
-                                "No Claude Code sessions in this workspace",
+                                "No Claude Code sessions in this project",
                             )
                         }
                     } else {
@@ -16670,6 +16705,11 @@ impl Workspace {
                             .child(
                                 ui_text(if state.history {
                                     target_title
+                                } else if let Some(project_root) = &state.project_root {
+                                    format!(
+                                        "{} · {project_root}",
+                                        self.locale.text("项目", "Project")
+                                    )
                                 } else {
                                     state.cwd.clone()
                                 })
@@ -21810,6 +21850,7 @@ fn terminal_history_command(
         LaunchProfile::ClaudeCode => Command::GetProviderSession {
             request_id,
             cwd,
+            workspace_root: None,
             provider_session_id,
             start_event_index: page.start(),
             limit,

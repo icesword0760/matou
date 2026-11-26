@@ -64,6 +64,7 @@ set -eu
 trace="$AGY_TEST_TRACES/$MATOU_PROVIDER_HOOK_TOKEN"
 mkdir "$trace"
 printf '%s\n' "$@" > "$trace/args"
+pwd -P > "$trace/cwd"
 printf '%s\n' "$HOME" "$MATOU_PROVIDER_HOOK_URL" "$MATOU_PROVIDER_HOOK_TOKEN" \
   "$MATOU_ANTIGRAVITY_SYSTEM_MESSAGE_FILE" > "$trace/launch"
 echo AGY_FIXTURE_READY
@@ -517,6 +518,150 @@ fn browse(fixture: &Fixture, host: &RuntimeHost) -> Result<()> {
     assert_eq!(search["result"]["total"], 2, "{search}");
     assert_eq!(search["result"]["hits"][0]["eventIndex"], 2);
     Ok(())
+}
+
+#[test]
+fn project_catalog_previews_searches_and_loads_another_worktree() -> Result<()> {
+    use matou_native_runtime::host::{ProjectSessionCatalogOperation, ProjectSessionProvider};
+
+    let fixture = Fixture::new()?;
+    let git = |args: &[&str]| -> Result<()> {
+        let output = Process::new("/usr/bin/git")
+            .current_dir(&fixture.cwd)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .args(args)
+            .output()?;
+        ensure!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(())
+    };
+    git(&["init", "--initial-branch=main"])?;
+    git(&[
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "fixture",
+    ])?;
+    let linked = fixture.cwd.parent().unwrap().join("agy-linked");
+    git(&[
+        "worktree",
+        "add",
+        "-b",
+        "agy-linked",
+        linked.to_str().unwrap(),
+    ])?;
+    let unrelated = fixture.cwd.parent().unwrap().join("unrelated");
+    fs::create_dir(&unrelated)?;
+    fixture.write_history("Linked conversation")?;
+    let mut metadata: Value = serde_json::from_slice(&fs::read(fixture.history_file())?)?;
+    metadata["conversations"][SOURCE]["summary"]["WorkspaceURIs"] = json!([linked]);
+    metadata["conversations"][OTHER]["summary"]["WorkspaceURIs"] = json!([unrelated]);
+    fs::write(fixture.history_file(), serde_json::to_vec(&metadata)?)?;
+
+    let mut host = fixture.start()?;
+    let (_, session) = ready(&host)?;
+    let cwd = fixture.cwd.display().to_string();
+    let project = |request_id, operation| -> Result<Value> {
+        send(
+            &host,
+            Command::ProjectSessionCatalog {
+                request_id,
+                provider: ProjectSessionProvider::Antigravity,
+                cwd: cwd.clone(),
+                workspace_root: Some(cwd.clone()),
+                operation,
+            },
+        )?;
+        let projection = graph(&host, |graph| {
+            [
+                "providerSessionCatalogResults",
+                "providerSessionDetailResults",
+            ]
+            .iter()
+            .any(|key| {
+                graph[key]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|row| row["requestId"] == request_id)
+            })
+        })?;
+        [
+            "providerSessionCatalogResults",
+            "providerSessionDetailResults",
+        ]
+        .iter()
+        .find_map(|key| {
+            projection[key]
+                .as_array()?
+                .iter()
+                .find(|row| row["requestId"] == request_id)
+                .cloned()
+        })
+        .context("project catalog reply")
+    };
+    let list = project(
+        101,
+        ProjectSessionCatalogOperation::List {
+            query: String::new(),
+            offset: None,
+            limit: None,
+        },
+    )?;
+    assert_eq!(list["total"], 1, "{list}");
+    assert_eq!(list["sessions"][0]["providerSessionId"], SOURCE);
+    let detail = project(
+        102,
+        ProjectSessionCatalogOperation::Detail {
+            provider_session_id: SOURCE.into(),
+            start_event_index: None,
+            before_event_index: None,
+            around_event_index: None,
+            limit: None,
+        },
+    )?;
+    assert_eq!(
+        detail["events"][0]["text"], "find fixture needle",
+        "{detail}"
+    );
+    let search = project(
+        103,
+        ProjectSessionCatalogOperation::Search {
+            provider_session_id: SOURCE.into(),
+            query: "needle".into(),
+            offset: None,
+            limit: None,
+        },
+    )?;
+    assert_eq!(search["search"], true);
+    assert_eq!(search["total"], 2, "{search}");
+    assert_eq!(
+        load(&host, 104, &session, SOURCE)?["result"]["status"],
+        "restoring"
+    );
+    let run = fixture.run(1)?;
+    assert_eq!(run.resume_arg(), Some(SOURCE));
+    assert_eq!(
+        Path::new(fs::read_to_string(run.trace.join("cwd"))?.trim()),
+        linked.canonicalize()?
+    );
+    run.status(SOURCE, "idle")?;
+    identity(&host, &session, "confirmed")?;
+    let database = rusqlite::Connection::open(fixture.data.join("matou.sqlite"))?;
+    let card =
+        matou_native_core::sessions::get_session(&database, &session)?.context("loaded card")?;
+    assert_eq!(Path::new(&card.cwd), linked.canonicalize()?);
+    host.shutdown()
 }
 
 #[test]
