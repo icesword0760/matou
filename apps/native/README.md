@@ -1,127 +1,86 @@
 # Matou native workspace
 
-This workspace implements the frozen Matou behavior in Rust. It currently contains
-the SQLite persistence, initial window hierarchy, live Shell runtime and an initial
-GPUI desktop window. This is an incomplete migration, not a parity release.
-Product scope and acceptance remain in
-`docs/native-parity/OBJECTIVE.md`, `STATUS.md` and `MATRIX.md` at the repository root.
+Matou builds as a Rust workspace on macOS and Windows. The GPUI desktop draws
+windows and terminal sessions. The runtime owns session processes and platform
+PTYs, while core persists workspace metadata in SQLite and terminal output in a
+segmented journal. The terminal crate embeds `libghostty-vt`. The Python
+account sidecar and Go model router are built separately for release packaging.
 
-## Current modules
+## Prepare a checkout
 
-- `core::storage`: frozen schema migration, atomic domain mutation/events/receipt,
-  deduplicated command replay and request conflict detection.
-- `core::hierarchy`: default workspace/task/canvas/Shell creation and persisted
-  window navigation readback. The runtime caller will supply resolved paths,
-  generated identities, locale messages and timestamps.
-- `terminal`: thread-affine libghostty-vt parser, owned screen cells, frozen
-  light/dark themes, cursor/soft-wrap metadata, scrollback, PTY replies and
-  synchronized-output hold. The caller owns the PTY and displayed-frame timing.
-- `core::shell_history`: completed-command stream collector, existing SQLite
-  block retention and restoration text. The runtime supplies IDs, timestamps,
-  the restoration preference and localized divider text.
-- `core::ownership`: atomic data-directory owner publication, live-process
-  exclusion, stale takeover and generation-safe release before opening SQLite.
-- `core::backup` and `core::recovery_marker`: SQLite online backups, validated
-  retention/restore, stable recovery generations and durable resolution records.
-- `core::startup`: owner-first inspection, pre-migration backups, read-only
-  fallback and corruption/WAL recovery state. It opens only the caller-supplied
-  data root; the app entry point and recovery actions remain to be connected.
-- `core::sessions`: ordinary-Shell creation, run lifecycle, title/cwd updates
-  and archive transactions, preserving existing events and replay receipts.
-- `core::journal` and `core::durability`: ordered segmented output, indexes,
-  compression, recovery and bounded storage-fault pause/retry.
-- `core::pty`: real platform PTY launch, environment, resize, process control
-  and exit status, including the existing zsh integration.
-- `runtime::session` and `runtime::worker`: real Shell/terminal owner threads,
-  incremental decoding/batching, persisted event delivery, credited log replay,
-  terminal replies and shutdown. `WorkerCommand` carries typed reply channels
-  so the central owner need not block on another session's disk or PTY.
-- `core::session_graph`: existing graph projection and work-status transactions,
-  including domain events and replay receipts.
-- `runtime::derived`: source-compatible Shell OSC state/cwd tracking and the
-  existing four-line graph summary filters.
-- `runtime::owner`: consumes the writable startup connection/lease, interrupts
-  previous-generation runs, records real PTY runs, and serializes completed
-  history, cwd, work status and graph summaries. `OwnerEvent::Domain` exposes
-  committed event ranges; saved output/exit callbacks are independent of display
-  credit and are never rerun during display replay. Worker run identities reject
-  late events after relaunch. This owner runs off the UI thread.
+Run the commands from the repository root. Install stable Rust with the host
+target, Git, curl, Python 3.12+ and Zig 0.17.0. macOS needs the Xcode Command
+Line Tools. Windows needs the MSVC C++ build tools and Windows SDK.
 
-- `desktop`: real GPUI window, source-derived initial Shell layout and native
-  terminal painting/input/selection, connected to the domain owner off the UI
-  thread. Normal app quit drains the owner. New canvas, horizontal Shell, tab selection and card focus are wired; other controls and full interaction/visual parity remain open.
-
-The desktop accepts only explicit absolute data/workspace/Shell-home paths.
-The isolated launcher supplies disposable paths and a distinct application ID.
-Recovery choices, clean-exit backup, separate runtime process/IPC, remaining hierarchy
-actions and controls, full packaging and platform acceptance remain open.
-
-## Run the current Mac slice
+On Apple Silicon:
 
 ```sh
 python3 apps/native/scripts/prepare-gpui.py
-cargo build --locked --manifest-path apps/native/Cargo.toml -p matou-native-desktop
-python3 tooling/native/launch-native.py --binary apps/native/target/debug/matou-native-desktop
+python3 apps/native/terminal/scripts/build-libs.py --target aarch64-apple-darwin
+cargo fetch --manifest-path apps/native/Cargo.toml --locked
 ```
 
-The launcher creates `artifacts/native-parity/native/MatouNative.app`, signs it
-ad-hoc, and reuses its own recorded temporary environment on later launches.
-Quit that app before refreshing the bundle. It does not replace the installed
-Matou. A custom `CARGO_TARGET_DIR` requires passing its actual binary path.
+On Intel Macs use `x86_64-apple-darwin`. In PowerShell on Windows x64:
 
-`prepare-gpui.py` verifies the pinned GPUI 0.2.2 archive and applies the checked-in
-macOS font patch in an ignored source directory. This supplies the frozen
-renderer's synthetic italic for explicitly selected fonts without an italic
-face, including the Chinese history boundary hints. Existing italic faces and
-emoji fallback keep their original rendering. Font advances stay unchanged.
-The upstream license remains in the prepared source. Run the preparation step
-on a new checkout before either platform's Cargo build; the patch's runtime
-changes are macOS-only.
+```powershell
+python apps/native/scripts/prepare-gpui.py
+python apps/native/terminal/scripts/build-libs.py --target x86_64-pc-windows-msvc
+$ghostty = Join-Path $PWD 'apps/native/terminal/vendor/ghostty-vt/windows-x86_64/bin'
+$env:PATH = "$ghostty;$env:PATH"
+cargo fetch --manifest-path apps/native/Cargo.toml --locked
+```
 
-## Check the implemented contracts
+On Windows ARM64 use `aarch64-pc-windows-msvc` and `windows-aarch64/bin` with
+the matching toolchain. The preparation scripts verify GPUI 0.2.2 and
+libghostty-vt 1.0.1 before applying the checked-in adaptations. The terminal
+build records its inputs in `matou-build.json` and uses Matou's Unicode 6 width
+policy. macOS links a static archive. Windows loads the matching DLL.
 
-From the repository root with Rust/Cargo installed:
+## Build and test
 
 ```sh
-cargo test --manifest-path apps/native/Cargo.toml -p matou-native-core
-cargo test --manifest-path apps/native/Cargo.toml -p matou-native-runtime
-cargo fmt --manifest-path apps/native/Cargo.toml --all --check
+pnpm build:native
+cargo build --manifest-path apps/native/Cargo.toml --offline --locked -p matou-native-runtime
+pnpm test:native
 ```
 
-The terminal library is built from the pinned libghostty-vt 1.0.1 release with
-Zig 0.17.x. Its generated width table uses the frozen renderer's Unicode 6
-policy: the upstream default counts some characters differently (for example,
-🙂), changing wrapping and cursor positions. Original PTY bytes are preserved.
-Upstream Unicode/grapheme properties other than width remain unchanged.
+The debug runtime build provides the executable used by the process tests.
+The macOS `pnpm test` entry also runs naming, Node tooling and Python account
+sidecar tests. Use `pnpm check:native-clean-install` for the focused runtime gate
+in the [clean-install plan](../../docs/superpowers/plans/2026-11-26-native-clean-install-plan.md).
+
+Checked-in fixtures live in [core](core/tests/fixtures),
+[desktop](desktop/tests/fixtures), [runtime](runtime/tests/fixtures) and
+[terminal](terminal/tests/fixtures). Release test fixtures are under
+[tooling/packaging/fixtures](../../tooling/packaging/fixtures). The original
+fixture exporters remain in the local tag `archive/electron-0.2-final`.
+Keep reference fixtures independent of the implementation under test.
+
+## Launch an isolated macOS build
 
 ```sh
-python3 apps/native/terminal/scripts/build-libs.py --zig /absolute/path/to/zig
-cargo test --locked --manifest-path apps/native/Cargo.toml -p matou-native-terminal
+python3 tooling/native/launch-native.py --binary apps/native/target/release/matou-native-desktop
 ```
 
-`build-libs.py` verifies the pinned source/dependency archives, patches only the
-width lookup generator in an ignored copy, and records its inputs in the
-installed library's `matou-build.json`. Windows cross-builds use
-`--target x86_64-pc-windows-msvc`; Mac Intel uses `--target x86_64-apple-darwin`.
-macOS links a uniquely named static archive; Windows uses the matching DLL.
-Do not replace this library with unmodified upstream release binaries.
-The checked-in width ranges were generated from the frozen JS dependency.
-MIT attribution is retained beside the generated table and installed library.
-
-Tests use temporary databases and checked-in fixtures captured from the
-reference runtime. The original fixture exporters are in the archived source.
+The launcher uses the sibling `matou-native-runtime` binary. It creates the
+ad-hoc signed bundle `artifacts/native-parity/native/MatouNative.app` and
+reuses a separate test data directory on subsequent launches. Quit that app
+before refreshing the bundle. With `CARGO_TARGET_DIR` set, pass the binary
+path from that directory.
 
 ## Package native releases
 
-Release metadata lives in `apps/native/release-config.json`. Its default version
-must match the desktop crate's Cargo package version. Run `pnpm package:mac` or
-`pnpm package:win` on the respective platform. The native packaging tools and
-fixtures live under `tooling/packaging/`. On macOS, `pnpm accounts:build` and
-`pnpm router:build` populate `apps/native/package-resources/`. On Windows,
-`pnpm accounts:build` populates `tooling/claude-accounts/dist/` and the release
-takes the matching router output directory through `--model-router`.
-Third-party license notices live under `apps/native/third-party/`.
+Release metadata and signing defaults live in
+[release-config.json](release-config.json). The packagers are in
+[tooling/packaging](../../tooling/packaging).
 
+- macOS uses `pnpm package:mac`. Run `pnpm accounts:build` and
+  `pnpm router:build` to stage matching sidecars in
+  `apps/native/package-resources/`.
+- Windows uses `pnpm package:win --model-router <directory>`. Run
+  `pnpm accounts:build` on the matching architecture to stage the account
+  engine in `tooling/claude-accounts/dist/`. Pass the matching router output
+  printed by `pnpm router:build`.
 
-Do not regenerate expected fixtures from Rust, or regenerate the frozen source
-contract merely to make a failing native test pass.
+See the [release guide](../../docs/release/cloud-updates.md) for artifact names,
+updater feeds and signing. Native license files are under [third-party](third-party).

@@ -6,16 +6,14 @@
 
 <p align="center">
   <strong>A multi-agent desktop workbench for Claude Code</strong><br>
-  Run many Claude Code agents side by side on macOS —<br>
+  Run many Claude Code agents side by side —<br>
   session management, natural-language collaboration across sessions, DAG visualization, tiered notifications, an agent HUD, Git worktrees, and switching between Claude accounts and model providers.
 </p>
 
 <p align="center">
   <a href="https://github.com/icesword0760/matou/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/icesword0760/matou/actions/workflows/ci.yml/badge.svg"></a>
   <a href="LICENSE"><img alt="License: GPL-3.0" src="https://img.shields.io/github/license/icesword0760/matou?color=blue"></a>
-  <img alt="Platform: macOS" src="https://img.shields.io/badge/platform-macOS-000000?logo=apple&logoColor=white">
-  <img alt="Node 22.16 or newer" src="https://img.shields.io/badge/node-%E2%89%A5%2022.16-339933?logo=node.js&logoColor=white">
-  <img alt="Electron 43" src="https://img.shields.io/badge/electron-43-47848F?logo=electron&logoColor=white">
+  <img alt="Source build platforms: macOS and Windows" src="https://img.shields.io/badge/build-macOS%20%7C%20Windows-000000">
   <img alt="Status: early preview" src="https://img.shields.io/badge/status-early%20preview-orange">
 </p>
 
@@ -32,7 +30,7 @@
 
 Matou (码头, "the dock") is a desktop workbench for AI-assisted programming. It puts your Claude Code sessions, tasks, branches and context into one recoverable workspace, so you can push several coding agents forward at once and still know what each one is doing, what it needs, and where it branched off from.
 
-> **Status**: early preview, macOS (Apple Silicon) only. Installer on the [Releases](https://github.com/icesword0760/matou/releases/latest) page.
+> **Status**: early preview. The public macOS download is on the [Releases](https://github.com/icesword0760/matou/releases/latest) page.
 >
 > **Demo video**: [4-minute walkthrough on YouTube](https://youtu.be/1OYvkryUNFo) · [34-second cut](https://youtu.be/gNwf-YyB6oQ)
 >
@@ -195,8 +193,6 @@ It works in any terminal, so Matou is not required. Install it from [its own rep
 
 > "Create three child cards from these three plans and validate performance, compatibility and rollback separately."
 
-**Code signing and notarization (not done).** The installer is not signed by Apple yet, so the first launch needs a manual override; an Intel build is not provided yet.
-
 ## Who it is for
 
 - Independent developers running several Claude Code sessions at once
@@ -208,86 +204,65 @@ It works in any terminal, so Matou is not required. Install it from [its own rep
 
 ## Install
 
-1. Download the latest `Matou-<version>-mac-arm64.dmg` (Apple Silicon) from [Releases](https://github.com/icesword0760/matou/releases/latest).
+1. Download `Matou-<version>-mac-arm64.dmg` for Apple Silicon. [Releases](https://github.com/icesword0760/matou/releases/latest)
 2. Open the DMG and drag **码头** into Applications.
-3. The installer is not signed or notarized yet, so macOS will say it cannot verify the developer. Either open **System Settings → Privacy & Security** and click **Open Anyway** at the bottom, or run:
+3. If macOS blocks the verified download on first launch, open **System Settings → Privacy & Security** and choose **Open Anyway**.
+
+Make sure the Claude Code CLI is installed and logged in. Available installers are listed on the release page. The source tree also builds for Windows.
+
+## Build from source
+
+Use stable Rust with Cargo, Python 3.12 or newer, Zig 0.17.0, Git and curl. Use the Xcode command line tools on macOS and the Visual Studio C++ build tools with the Windows SDK on Windows. The developer scripts use Node.js 22.16+ and pnpm 10.17.1. Install uv for the account sidecar tests and build.
+
+Prepare the pinned GPUI and terminal library, then fetch the locked Rust dependencies. These commands use the Apple Silicon target.
 
 ```bash
-xattr -dr com.apple.quarantine /Applications/码头.app
+python3 apps/native/scripts/prepare-gpui.py
+python3 apps/native/terminal/scripts/build-libs.py --target aarch64-apple-darwin
+cargo fetch --manifest-path apps/native/Cargo.toml --locked
+pnpm build:native
 ```
 
-Make sure the Claude Code CLI is installed and logged in on this machine. New versions are announced inside the app.
-
-## Run from source
-
-### Requirements
-
-- macOS (the only supported platform; Linux and Windows are untested)
-- Node.js `>=22.16.0`
-- pnpm `10.17.1` (enable with `corepack enable`)
-- Claude Code CLI installed and logged in
-
-### Start
-
-```bash
-git clone https://github.com/icesword0760/matou.git
-cd matou
-corepack enable
-pnpm install
-pnpm dev
-```
-
-`pnpm install` fixes the executable bit on node-pty's macOS `spawn-helper`; `pnpm dev` builds the packages and the runtime before launching Electron, so the first start takes a few minutes.
+On Intel Macs use `x86_64-apple-darwin`. On Windows use `python` and target `x86_64-pc-windows-msvc` or `aarch64-pc-windows-msvc` to match your Rust toolchain. For the Windows DLL path and the isolated macOS launcher, see the native workspace guide. [Native workspace](apps/native/README.md)
 
 ## Common commands
 
-```bash
-pnpm test               # unit and integration tests
-pnpm typecheck          # workspace-wide type check
-pnpm build              # production build
-pnpm test:e2e           # full Electron → Runtime → PTY → xterm journeys
-pnpm check:identifiers  # brand and naming gate
-```
+| Command | Purpose |
+| --- | --- |
+| `pnpm test` | Run the identifier check, tooling tests, Python sidecar tests and Rust workspace tests on macOS |
+| `pnpm test:native` | Run the Rust workspace tests on macOS or Windows after dependency preparation |
+| `pnpm package:mac` | Create the signed macOS DMG and ZIP with the prepared sidecars |
+| `pnpm package:win --model-router <directory>` | Build the Windows installer with the matching router and account sidecar |
+| `pnpm install:mac --source <absolute-path.app>` | Replace the locally installed app using the signed bundle after quitting Matou |
+
+Build the debug runtime before running the Rust workspace tests. Release packaging has platform-specific inputs and signing requirements. [Native workspace](apps/native/README.md) · [Release guide](docs/release/cloud-updates.md)
 
 ## Project layout
 
 ```text
-apps/
-├── desktop/              Electron main, preload, React renderer, xterm
-└── runtime/              UtilityProcess, PTY, sessions, journal, SQLite
+apps/native/
+├── desktop/               GPUI desktop and terminal rendering
+├── runtime/               Session owner, platform PTYs, agent integration and mt CLI
+├── core/                  Domain logic, SQLite and journal
+└── terminal/              Rust bindings for libghostty-vt
 
-packages/
-├── contracts/            cross-process protocol and runtime validation
-├── domain/               domain types and invariants
-└── ui/                   shared UI boundary
-
-docs/
-├── architecture/         processes, domain, protocol and ADRs
-├── prd/                  product requirements and interaction specs
-├── acceptance/           acceptance records and run evidence
-└── parity/               behaviour parity matrices
-
-tests/e2e/                real Electron user journeys
+tooling/claude-accounts/   Python account sidecar
+tooling/model-router/      Go model router build and staging
+tooling/packaging/         Native macOS and Windows packagers
+docs/                     Product specs, acceptance records and release guides
 ```
 
 ## Architecture and quality
 
-- Electron main creates and supervises an app-scoped runtime UtilityProcess; terminal data reaches the renderer directly over `MessageChannelMain`.
-- The runtime manages PTYs with node-pty and throttles output with a credit window and cumulative ACKs.
-- The renderer only consumes rebuildable projections; sessions, hierarchy, persistence and process lifecycle live in the runtime.
-- SQLite stores structural metadata; a segmented journal stores terminal output and recovery checkpoints.
-- The cross-process protocol uses an exact version handshake and Zod schema validation.
-- The renderer keeps `nodeIntegration: false`, `contextIsolation: true`, `sandbox: true`.
+The Rust desktop uses GPUI for windows and `libghostty-vt` for terminal state. The native runtime owns PTY processes and sessions. SQLite holds workspace metadata, and a segmented journal stores terminal output and recovery checkpoints. A Python sidecar manages local Claude account operations. A Go sidecar routes model requests for configured providers.
 
-Further reading (Chinese): [process model](docs/architecture/process-model.md) · [domain model](docs/architecture/domain-model.md) · [event and stream protocol](docs/architecture/event-and-stream-protocol.md) · [ADR-0001](docs/architecture/adr/0001-app-scoped-utility-process.md)
+The previous Electron source is archived in the local Git tag `archive/electron-0.2-final`.
 
 ## FAQ
 
-**Windows or Linux?** Not yet — macOS on Apple Silicon only for now. The runtime (PTY, journal, SQLite, protocol) is platform-neutral; the blockers are macOS-specific window code and testing. Track [#2](https://github.com/icesword0760/matou/issues/2) for Windows/Linux and [#3](https://github.com/icesword0760/matou/issues/3) for Intel Macs.
+**Which platforms does the source support?** macOS and Windows. See Releases for published downloads and the native workspace guide for build targets.
 
 **How is this different from other Claude Code session managers?** Most of them give you a list of sessions or worktrees to switch between. Matou puts three views on the same sessions: cards you scroll through and talk to in parallel, a DAG of how they forked from each other, and a board for where each piece of work stands. Sessions can also read and steer each other with `mt` commands from inside Claude Code, so hand-offs do not go through your clipboard.
-
-**Why Electron?** xterm.js for the terminal, React for the canvas and DAG, and an isolated UtilityProcess for the runtime. The renderer runs with `nodeIntegration: false`, `contextIsolation: true` and `sandbox: true`. It also keeps the door open for other platforms later.
 
 **Does anything leave my machine?** Matou itself sends only a few kinds of requests: the update check; if you save Claude accounts, their usage, read from Anthropic through claude-swap; and when you click Get models, a model-list request to the provider you are setting up. Session metadata and terminal output stay on disk in the app's data directory. Claude Code talks to Anthropic, or to the provider you switched to, exactly as it does in a plain terminal. Saved account credentials are kept locally by claude-swap; provider API keys stay in Matou's local configuration and go only to that provider.
 
@@ -296,7 +271,7 @@ Further reading (Chinese): [process model](docs/architecture/process-model.md) �
 ## Feedback
 
 - Open an [issue](https://github.com/icesword0760/matou/issues) for bugs or ideas.
-- For recovery, fork, notification or multi-window problems, please include reproduction steps, your macOS version and shareable demo data.
+- For recovery, fork, notification or multi-window problems, please include reproduction steps, your OS version and shareable demo data.
 - Chinese-speaking users can also join the QQ feedback group **454249629** (QR code in the [Chinese README](README.zh-CN.md#反馈与交流)).
 
 ## License

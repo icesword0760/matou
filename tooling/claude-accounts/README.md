@@ -11,7 +11,7 @@ exec'd official CLI and browser children are not subject to that Python hook.
 No User-Agent impersonation or official CLI binary modification is used.
 
 - `pnpm accounts:setup`: prepare the project-local development environment (uv + Python 3.12+).
-- `pnpm test:accounts`: main-process orchestration tests and real-library fixture tests.
+- `pnpm test:accounts`: Python bridge, isolated-browser and pinned-library fixture tests.
 - `pnpm accounts:build`: build a self-contained native sidecar for the current OS/architecture.
 - One request on stdin, one redacted JSON response on stdout. Login keeps stdin open for a single attempt-bound authorization-code message. No secret arguments.
 - On startup only version detection is harmless; `snapshot` can access the system Keychain.
@@ -29,8 +29,9 @@ upstream CLI-compatible refresh/config locks. Known foreign token families are
 never assigned to another account; offline identity relies on official local
 metadata rather than a remote identity oracle.
 
-Production packages carry the interpreter; users do not install Python or uv. Developers and
-release builders install uv. Build natively for each release architecture; do not reuse an
+On macOS, the build stages the sidecar under `apps/native/package-resources/claude-accounts/`.
+On Windows, it writes to `tooling/claude-accounts/dist/`. Production packages carry the
+interpreter. Developers and release builders install uv. Build natively for each release architecture; do not reuse an
 arm64 sidecar in an x64 or universal app.
 
 ## Isolated browser sign-in

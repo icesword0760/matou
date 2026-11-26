@@ -101,7 +101,7 @@
 
 ## 工作一 · Rust 派活与 Claude Hook（对应 V1、V2）
 
-**现有入口**　`apps/native/runtime/src/host.rs`（`LaunchOptions::from_args`）、`mt_cli.rs`、`provider_hook.rs`、`owner.rs`、`apps/native/core/src/dispatch_roles.rs`。行为对照基线：`apps/runtime/control-assets/providers/claude-plugin/hooks/session-start.mjs` 与 `skills/agent-foreman/scripts/foreman.mjs`。
+**现有入口**　`apps/native/runtime/src/host.rs`（`LaunchOptions::from_args`）、`mt_cli.rs`、`provider_hook.rs`、`owner.rs`、`apps/native/core/src/dispatch_roles.rs`。行为对照基线见 `archive/electron-0.2-final` 标签中的 `apps/runtime/control-assets/providers/claude-plugin/`，对照文件为 `hooks/session-start.mjs` 与 `skills/agent-foreman/scripts/foreman.mjs`。
 
 **交接接口**　`matou-native-runtime` 新增私有入口 `--mt-foreman <现有参数>`、`--hook claude-session-start`（工作二在同一分派处挂 `--hook agy`）。Hook 沿用 stdin/stdout JSON；用户与模型可见的 `mt`、`mt-foreman` 命令名保持不变。
 
@@ -113,7 +113,7 @@
 
 ## 工作二 · Windows 安装、更新与双端兼容拉齐（对应 V2、V3、V5，M2 含 V6）
 
-**现有入口**　`tooling/release-native-win.mjs`、`tooling/native-parity/package-native-win.mjs`、`tooling/native-release-helpers.mjs`、`apps/native/core/src/update_policy.rs`、`apps/native/runtime/src/update_http.rs`、`update_download.rs`、`codex_launch.rs`、`antigravity_launch.rs`、`dsh_launch.rs`、`provider_hook.rs`（含 `claude_config_counts`）、`context_guard/interceptor.rs`。
+**现有入口**　`tooling/release-native-win.mjs`、`tooling/packaging/package-native-win.mjs`、`tooling/native-release-helpers.mjs`、`apps/native/core/src/update_policy.rs`、`apps/native/runtime/src/update_http.rs`、`update_download.rs`、`codex_launch.rs`、`antigravity_launch.rs`、`dsh_launch.rs`、`provider_hook.rs`（含 `claude_config_counts`）、`context_guard/interceptor.rs`。
 
 **交接接口**　Windows 公开安装器统一打包同一构建的桌面、Runtime、Ghostty DLL、Claude 账户引擎和模型路由器；与工作五对齐稳定的 AppUserModelID 和开始菜单快捷方式。
 
@@ -179,7 +179,7 @@
 ~~~sh
 pnpm check:identifiers
 pnpm check:native-clean-install
-node --test tooling/release-native-win.test.mjs tooling/native-parity/package-native-win.test.mjs
+node --test tooling/release-native-win.test.mjs tooling/packaging/package-native-win.test.mjs
 cargo test --manifest-path apps/native/Cargo.toml -p matou-native-core --offline --locked --test git_repo_contract
 cargo test --manifest-path apps/native/Cargo.toml -p matou-native-runtime --offline --locked --test update_policy_contract --test update_http_contract
 cargo test --manifest-path apps/native/Cargo.toml -p matou-native-runtime --offline --locked --test antigravity_contract --test dsh_core_contract

@@ -6,16 +6,13 @@
 
 <p align="center">
   <strong>Claude Code 多智能体桌面工作台</strong><br>
-  A macOS desktop workbench for running many Claude Code agents side by side —<br>
-  session management, natural-language collaboration across sessions, DAG visualization, tiered notifications, an agent HUD, Git worktrees, and switching between Claude accounts and model providers.
+  并行管理多个 Claude Code 会话，支持跨会话协作、DAG、分级通知、Agent HUD、Git Worktree，以及账户和模型供应商切换。
 </p>
 
 <p align="center">
   <a href="https://github.com/icesword0760/matou/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/icesword0760/matou/actions/workflows/ci.yml/badge.svg"></a>
   <a href="LICENSE"><img alt="License: GPL-3.0" src="https://img.shields.io/github/license/icesword0760/matou?color=blue"></a>
-  <img alt="Platform: macOS" src="https://img.shields.io/badge/platform-macOS-000000?logo=apple&logoColor=white">
-  <img alt="Node 22.16 or newer" src="https://img.shields.io/badge/node-%E2%89%A5%2022.16-339933?logo=node.js&logoColor=white">
-  <img alt="Electron 43" src="https://img.shields.io/badge/electron-43-47848F?logo=electron&logoColor=white">
+  <img alt="Source build platforms: macOS and Windows" src="https://img.shields.io/badge/build-macOS%20%7C%20Windows-000000">
   <img alt="Status: early preview" src="https://img.shields.io/badge/status-early%20preview-orange">
 </p>
 
@@ -32,7 +29,7 @@
 
 码头（Matou）是一款面向 AI 编程的桌面工作台：把 Claude Code 会话、任务、分支和上下文放进同一个可恢复的工作现场。你可以同时推进多个编码智能体，又随时知道每个会话在做什么、需要什么、从哪里分出来。
 
-> **项目状态**：早期预览版，仅支持 macOS（Apple Silicon）。安装包见 [Releases](https://github.com/icesword0760/matou/releases/latest)。
+> **项目状态**：早期预览版。已公开的 macOS 安装包见 [Releases](https://github.com/icesword0760/matou/releases/latest)。
 >
 > **演示视频**：[B 站 5 分钟演示](https://www.bilibili.com/video/BV1uBbL6eEGa) · [YouTube 英文版](https://youtu.be/1OYvkryUNFo)
 >
@@ -196,8 +193,6 @@ Matou 持久化事项、页签、分屏、目录、焦点、终端输出和托�
 
 > “根据这三个方案创建三个子卡片，分别验证性能、兼容性和回滚路径。”
 
-**代码签名与公证（未完成）。** 当前安装包未经 Apple 签名，首次打开需要手动放行；Intel Mac 安装包也尚未提供。
-
 ## 适合谁
 
 - 同时运行多个 Claude Code 会话的独立开发者
@@ -209,86 +204,65 @@ Matou 持久化事项、页签、分屏、目录、焦点、终端输出和托�
 
 ## 下载安装
 
-1. 到 [Releases](https://github.com/icesword0760/matou/releases/latest) 下载最新的 `Matou-<版本>-mac-arm64.dmg`（Apple Silicon）。
+1. 下载适用于 Apple Silicon 的 `Matou-<版本>-mac-arm64.dmg`。[Releases](https://github.com/icesword0760/matou/releases/latest)
 2. 打开 DMG，把「码头」拖进「应用程序」。
-3. 安装包尚未签名和公证，首次打开时 macOS 会提示无法验证开发者。任选一种方式放行：打开「系统设置 → 隐私与安全性」，在页面底部点击「仍要打开」；或者在终端执行：
+3. 如果确认文件来源无误，但 macOS 首次启动时拦截了应用，可以到「系统设置 → 隐私与安全性」选择「仍要打开」。
+
+使用前请确认本机已安装并登录 Claude Code CLI。公开安装包以 Releases 页面为准，源码也可以在 Windows 上构建。
+
+## 从源码构建
+
+需要稳定版 Rust 和 Cargo、Python 3.12 以上、Zig 0.17.0、Git 和 curl。macOS 使用 Xcode Command Line Tools，Windows 使用 Visual Studio C++ 构建工具和 Windows SDK。开发脚本使用 Node.js 22.16 以上和 pnpm 10.17.1。测试或构建账户组件时还需要 uv。
+
+先准备固定版本的 GPUI 和终端库，再下载锁定的 Rust 依赖。以下命令使用 Apple Silicon 目标。
 
 ```bash
-xattr -dr com.apple.quarantine /Applications/码头.app
+python3 apps/native/scripts/prepare-gpui.py
+python3 apps/native/terminal/scripts/build-libs.py --target aarch64-apple-darwin
+cargo fetch --manifest-path apps/native/Cargo.toml --locked
+pnpm build:native
 ```
 
-使用前请确认本机已安装并登录 Claude Code CLI。之后有新版本时，应用内会提示更新。
-
-## 从源码运行
-
-### 环境要求
-
-- macOS（目前唯一支持的平台；Linux 和 Windows 未经验证）
-- Node.js `>=22.16.0`
-- pnpm `10.17.1`（通过 `corepack enable` 启用）
-- 已安装并登录的 Claude Code CLI
-
-### 启动
-
-```bash
-git clone https://github.com/icesword0760/matou.git
-cd matou
-corepack enable
-pnpm install
-pnpm dev
-```
-
-`pnpm install` 会自动校正 node-pty macOS 预构建包中 `spawn-helper` 的可执行权限；`pnpm dev` 会先构建 packages 和 runtime，再启动 Electron，首次启动需要几分钟。
+Intel Mac 使用 `x86_64-apple-darwin`。Windows 用 `python`，按 Rust 工具链选择 `x86_64-pc-windows-msvc` 或 `aarch64-pc-windows-msvc`。Windows 的 DLL 路径和 macOS 的隔离启动方式见原生工作区说明。[原生工作区](apps/native/README.md)
 
 ## 常用命令
 
-```bash
-pnpm test               # 单元与集成测试
-pnpm typecheck          # 全工作区类型检查
-pnpm build              # 生产构建
-pnpm test:e2e           # Electron → Runtime → PTY → xterm 完整链路
-pnpm check:identifiers  # 品牌与命名门禁
-```
+| 命令 | 用途 |
+| --- | --- |
+| `pnpm test` | 在 macOS 上运行命名检查、工具测试、Python 账户组件测试和 Rust 工作区测试 |
+| `pnpm test:native` | 准备依赖后在 macOS 或 Windows 上运行 Rust 工作区测试 |
+| `pnpm package:mac` | 使用准备好的随包组件生成签名的 macOS DMG 和 ZIP |
+| `pnpm package:win --model-router <目录>` | 使用对应架构的路由和账户组件构建 Windows 安装包 |
+| `pnpm install:mac --source <绝对路径.app>` | 退出码头后，用签名的应用包更新本机安装 |
+
+跑 Rust 全量测试前先编译调试版 runtime。两端打包所需的组件和签名见原生工作区说明及发版手册。[原生工作区](apps/native/README.md) · [发版手册](docs/release/cloud-updates.md)
 
 ## 项目结构
 
 ```text
-apps/
-├── desktop/              Electron Main、Preload、React Renderer、xterm
-└── runtime/              UtilityProcess、PTY、会话、Journal、SQLite
+apps/native/
+├── desktop/               GPUI 桌面和终端绘制
+├── runtime/               会话管理、平台 PTY、Agent 集成和 mt 命令
+├── core/                  领域逻辑、SQLite 和分段日志
+└── terminal/              libghostty-vt 的 Rust 绑定
 
-packages/
-├── contracts/            跨进程协议与运行时校验
-├── domain/               领域类型与不变量
-└── ui/                   共享 UI 边界
-
-docs/
-├── architecture/         进程、领域、协议与 ADR
-├── prd/                  产品需求与交互规格
-├── acceptance/           验收记录与运行证据
-└── parity/               产品行为对照矩阵
-
-tests/e2e/                真实 Electron 用户旅程
+tooling/claude-accounts/   Python 账户组件
+tooling/model-router/      Go 模型路由构建与准备
+tooling/packaging/         macOS 和 Windows 原生打包
+docs/                     产品规格、验收记录和发版指南
 ```
 
 ## 架构与质量
 
-- Electron Main 创建并监督 app-scoped Runtime UtilityProcess；终端数据通过 `MessageChannelMain` 直达 Renderer。
-- Runtime 使用 node-pty 管理 PTY，以 credit window 和累计 ACK 控制输出流量。
-- Renderer 只消费可重建投影；会话、层级、持久化和进程生命周期由 Runtime 维护。
-- SQLite 保存结构元数据，分段 Journal 保存终端输出与恢复检查点。
-- 跨进程协议使用精确版本握手与 Zod schema 校验。
-- Renderer 保持 `nodeIntegration: false`、`contextIsolation: true`、`sandbox: true`。
+Rust 桌面使用 GPUI 渲染窗口，使用 `libghostty-vt` 维护终端状态。原生运行时管理 PTY 进程和会话。SQLite 保存工作区元数据，分段日志保存终端输出和恢复检查点。Python 组件处理本地 Claude 账户操作，Go 组件为已配置的供应商转发模型请求。
 
-进一步阅读：[进程模型](docs/architecture/process-model.md) · [领域模型](docs/architecture/domain-model.md) · [事件与流协议](docs/architecture/event-and-stream-protocol.md) · [ADR-0001](docs/architecture/adr/0001-app-scoped-utility-process.md)
+旧版 Electron 源码保存在本地 Git 标签 `archive/electron-0.2-final`。
 
 ## 常见问题
 
-**支持 Windows 或 Linux 吗？** 暂不支持，目前只有 macOS（Apple Silicon）。运行时（PTY、日志、SQLite、协议）本身与平台无关，卡在 macOS 专属的窗口代码和测试。进度见 [#2](https://github.com/icesword0760/matou/issues/2)（Windows/Linux）和 [#3](https://github.com/icesword0760/matou/issues/3)（Intel Mac）。
+**源码支持哪些平台？** macOS 和 Windows。公开安装包见 Releases，构建目标见原生工作区说明。
 
 **和其他 Claude Code 会话管理工具有什么区别？** 多数工具给你的是一个会话或 worktree 列表，用来切换。码头把三个视图放在同一批会话上：横向滑动、可以同时对话的卡片，看它们如何互相 fork 出来的 DAG，以及每件事进行到哪一步的看板。会话之间还能在 Claude Code 里用 `mt` 命令互相读屏和派活，交接不经过你的剪贴板。
-
-**为什么用 Electron？** 终端用 xterm.js，画布和 DAG 用 React，运行时跑在独立的 UtilityProcess 里。渲染进程保持 `nodeIntegration: false`、`contextIsolation: true`、`sandbox: true`。这也为以后支持其他平台留了路。
 
 **数据会离开我的电脑吗？** 码头自己发出的请求只有几类：检查更新；保存了 Claude 账户时，通过 claude-swap 向 Anthropic 读取这些账户的用量；在供应商设置里点「获取模型」时，向你正在配置的服务查询模型列表。会话元数据和终端输出都保存在本机应用数据目录。Claude Code 与 Anthropic（或你切换到的供应商）之间的通信，和在普通终端里完全一样。账户凭据由 claude-swap 保存在本机；供应商的 API Key 保存在码头的本地配置里，只发给对应的服务。
 
@@ -297,7 +271,7 @@ tests/e2e/                真实 Electron 用户旅程
 ## 反馈与交流
 
 - 在 [Issues](https://github.com/icesword0760/matou/issues) 提交问题或建议。
-- 涉及恢复、分支、通知或多窗口问题时，请附上复现步骤、macOS 版本和可公开的演示数据。
+- 涉及恢复、分支、通知或多窗口问题时，请附上复现步骤、系统版本和可公开的演示数据。
 - 加入 QQ 体验反馈群 **454249629**，或扫码：
 
 <img src="assets/qq-group.png" width="200" alt="码头使用体验反馈群 QQ 群二维码">
