@@ -256,7 +256,7 @@ docs/                     产品规格、验收记录和发版指南
 
 Rust 桌面使用 GPUI 渲染窗口，使用 `libghostty-vt` 维护终端状态。原生运行时管理 PTY 进程和会话。SQLite 保存工作区元数据，分段日志保存终端输出和恢复检查点。Python 组件处理本地 Claude 账户操作，Go 组件为已配置的供应商转发模型请求。
 
-旧版 Electron 源码保存在本地 Git 标签 `archive/electron-0.2-final`。
+旧版 Electron 源码保存在 Git 标签 `archive/electron-0.2-final`。
 
 ## 常见问题
 

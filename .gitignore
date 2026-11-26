@@ -8,17 +8,16 @@ playwright-report/
 *.log
 *.tsbuildinfo
 .matou-data/
-# Keep the 14.7 GB of local legacy release outputs out of Git and the identifier scan.
-apps/desktop/package-resources/
-apps/desktop/release/
-apps/desktop/release-*/
 /apps/native/release/
 /apps/native/package-resources/
 output/
 .playwright-cli/
 .worktrees/
 .superpowers/
-apps/desktop/prototypes/
+
+# Local internal handoff and parity working notes (kept locally, excluded from remote)
+/docs/native-parity/
+/docs/handoff/2026-11-25-*.md
 
 # 宣发素材与视频流水线（本地保留，不入库）
 marketing/

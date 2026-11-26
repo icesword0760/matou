@@ -256,7 +256,7 @@ docs/                     Product specs, acceptance records and release guides
 
 The Rust desktop uses GPUI for windows and `libghostty-vt` for terminal state. The native runtime owns PTY processes and sessions. SQLite holds workspace metadata, and a segmented journal stores terminal output and recovery checkpoints. A Python sidecar manages local Claude account operations. A Go sidecar routes model requests for configured providers.
 
-The previous Electron source is archived in the local Git tag `archive/electron-0.2-final`.
+The previous Electron source is archived in the Git tag `archive/electron-0.2-final`.
 
 ## FAQ
 
