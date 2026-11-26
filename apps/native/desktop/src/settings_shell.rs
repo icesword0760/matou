@@ -134,6 +134,7 @@ const CLI_DEFAULT_MODEL: &str = "CLI 默认";
 const PROVIDER_LOGO_SIZE: f32 = 32.;
 const PROVIDER_ROW_GAP: f32 = 11.;
 const PROVIDER_NAME_MIN_W: f32 = 150.;
+const PROVIDER_NAME_READABLE_W: f32 = 128.;
 const PROVIDER_MODEL_MIN_W: f32 = 130.;
 const PROVIDER_NAME_GROW: f32 = 1.2;
 const PROVIDER_MODEL_GROW: f32 = 1.;
@@ -415,7 +416,23 @@ struct ProviderRowLayout {
     name_grow: f32,
     model_grow: f32,
     actions_min_w: f32,
+    actions_below: bool,
     horizontal_padding: f32,
+}
+
+fn settings_columns(viewport_width: f32) -> (f32, f32, f32) {
+    if viewport_width <= 680. {
+        (0., 18., 14.)
+    } else if viewport_width <= 940. {
+        (SETTINGS_NAV_WIDTH_NARROW, 21., 18.)
+    } else {
+        (SETTINGS_NAV_WIDTH, 24., 28.)
+    }
+}
+
+fn provider_container_width(viewport_width: f32) -> f32 {
+    let (nav_width, _, pad_x) = settings_columns(viewport_width);
+    (viewport_width - WORKSPACE_SIDEBAR_WIDTH - nav_width - 2. * pad_x).max(0.)
 }
 
 fn provider_actions_min_width(locale: InterfaceLocale) -> f32 {
@@ -439,11 +456,14 @@ fn provider_row_layout(
     } else {
         ProviderModelSlot::Column
     };
+    let actions_min_w = provider_actions_min_width(locale);
+    let readable_row_width = PROVIDER_LOGO_SIZE
+        + PROVIDER_NAME_READABLE_W
+        + actions_min_w
+        + 2. * (PROVIDER_ROW_GAP + PROVIDER_ROW_PAD_X + PROVIDER_ROW_BORDER_W);
     ProviderRowLayout {
         model,
-        // The stacked row lets the combined name/model cell shrink to zero;
-        // keeping the 150px name minimum there would push the three-button
-        // action track out of narrow settings windows.
+        // Inline details can shrink below the wider column minimum once actions move below.
         name_min_w: if stacked { 0. } else { PROVIDER_NAME_MIN_W },
         model_min_w: match model {
             ProviderModelSlot::Inline => 0.,
@@ -451,7 +471,8 @@ fn provider_row_layout(
         },
         name_grow: PROVIDER_NAME_GROW,
         model_grow: PROVIDER_MODEL_GROW,
-        actions_min_w: provider_actions_min_width(locale),
+        actions_min_w,
+        actions_below: container_width < readable_row_width,
         horizontal_padding: PROVIDER_ROW_PAD_X - if current { PROVIDER_ROW_BORDER_W } else { 0. },
     }
 }
@@ -6787,15 +6808,7 @@ impl SettingsShell {
         let switching = self.providers.switching().map(str::to_owned);
         let busy = self.busy();
         let viewport_width = f32::from(window.viewport_size().width);
-        let shell_width = self.shell_width(window);
-        let pad_x = if viewport_width <= 680. {
-            14.
-        } else if viewport_width <= 940. {
-            18.
-        } else {
-            28.
-        };
-        let container_width = (shell_width - pad_x * 2.).max(0.);
+        let container_width = provider_container_width(viewport_width);
         let palette = self.theme.effective().palette();
         let mut list = div()
             .id("provider-list")
@@ -7144,16 +7157,7 @@ impl SettingsShell {
             .flex_basis(px(0.))
             .flex_shrink();
         name_column.style().flex_grow = Some(layout.name_grow);
-        let mut row = self
-            .provider_list_row(provider, current, is_last)
-            .flex()
-            .items_center()
-            .min_h(px(62.))
-            .gap(px(PROVIDER_ROW_GAP))
-            .px(px(layout.horizontal_padding))
-            .py(px(10.))
-            .child(logo);
-        match layout.model {
+        let model_column = match layout.model {
             ProviderModelSlot::Inline => {
                 let model_column = model
                     .flex()
@@ -7161,7 +7165,8 @@ impl SettingsShell {
                     .gap(px(3.))
                     .w_full()
                     .min_w(px(layout.model_min_w));
-                row = row.child(name_column.child(model_column));
+                name_column = name_column.child(model_column);
+                None
             }
             ProviderModelSlot::Column => {
                 let mut model_column = model
@@ -7172,20 +7177,42 @@ impl SettingsShell {
                     .flex_basis(px(0.))
                     .flex_shrink();
                 model_column.style().flex_grow = Some(layout.model_grow);
-                row = row.child(name_column).child(model_column);
+                Some(model_column)
             }
-            ProviderModelSlot::Hidden => {
-                row = row.child(name_column);
-            }
+            ProviderModelSlot::Hidden => None,
+        };
+        let row = self
+            .provider_list_row(provider, current, is_last)
+            .flex()
+            .items_center()
+            .min_h(px(62.))
+            .gap(px(PROVIDER_ROW_GAP))
+            .px(px(layout.horizontal_padding))
+            .py(px(10.));
+        let actions = actions
+            .flex()
+            .flex_none()
+            .gap(px(PROVIDER_ACTIONS_GAP))
+            .justify_end();
+        if layout.actions_below {
+            return row
+                .flex_col()
+                .child(
+                    div()
+                        .flex()
+                        .w_full()
+                        .items_start()
+                        .gap(px(PROVIDER_ROW_GAP))
+                        .child(logo)
+                        .child(name_column)
+                        .children(model_column),
+                )
+                .child(actions.w_full().flex_wrap());
         }
-        row.child(
-            actions
-                .flex()
-                .flex_none()
-                .gap(px(PROVIDER_ACTIONS_GAP))
-                .w(px(layout.actions_min_w))
-                .justify_end(),
-        )
+        row.child(logo)
+            .child(name_column)
+            .children(model_column)
+            .child(actions.w(px(layout.actions_min_w)))
     }
 
     fn subscription_card(
@@ -10975,47 +11002,22 @@ mod provider_row_layout_tests {
     }
 
     #[::core::prelude::v1::test]
-    fn provider_row_tracks_fit_at_the_minimum_window_width() {
-        // The 720px minimum window leaves a 424px settings container,
-        // which uses the stacked layout.
-        let viewport_width = 720.;
-        let container_width = viewport_width - WORKSPACE_SIDEBAR_WIDTH - 2. * 18.;
-        let available = container_width - 2. - 2. * PROVIDER_ROW_PAD_X;
-        for locale in [InterfaceLocale::Chinese, InterfaceLocale::English] {
-            for current in [false, true] {
-                let layout = provider_row_layout(container_width, viewport_width, locale, current);
-                assert_eq!(layout.model, ProviderModelSlot::Inline);
-                assert!(
-                    minimum_row_width(layout) <= available,
-                    "{locale:?} current={current} needs {}px, has {available}px",
-                    minimum_row_width(layout)
-                );
+    fn provider_actions_move_below_details_when_the_settings_columns_leave_too_little_room() {
+        // The same 1024px screen gives the app about 1008 or 804 logical pixels.
+        for (viewport, width, actions_below) in [
+            (1008., 516., false),
+            (804., 362., true),
+            (720., 278., true),
+        ] {
+            assert_eq!(provider_container_width(viewport), width);
+            for locale in [InterfaceLocale::Chinese, InterfaceLocale::English] {
+                for current in [false, true] {
+                    let layout = provider_row_layout(width, viewport, locale, current);
+                    assert_eq!(layout.model, ProviderModelSlot::Inline);
+                    assert_eq!(layout.actions_below, actions_below, "{viewport} {locale:?}");
+                }
             }
         }
-    }
-
-    #[::core::prelude::v1::test]
-    fn provider_row_records_overflow_below_the_minimum_window_width() {
-        let viewport_width = 640.;
-        let container_width = viewport_width - WORKSPACE_SIDEBAR_WIDTH - 2. * 14.;
-        let available = container_width - 2. - 2. * PROVIDER_ROW_PAD_X;
-        let zh = provider_row_layout(
-            container_width,
-            viewport_width,
-            InterfaceLocale::Chinese,
-            false,
-        );
-        let en = provider_row_layout(
-            container_width,
-            viewport_width,
-            InterfaceLocale::English,
-            false,
-        );
-        assert_eq!(available, 326.);
-        assert!(minimum_row_width(zh) <= available);
-        // This viewport is below the supported 720px window minimum.
-        // Electron's compact subscription grid also overflows at this width.
-        assert_eq!(minimum_row_width(en) - available, 18.);
     }
 }
 
@@ -11491,15 +11493,8 @@ impl Render for SettingsShell {
                 probe.settings_canvas = Some(background);
             }
         });
-        let hide_nav = viewport_width <= 680.;
-        let (nav_width, pad_top, pad_x) = if hide_nav {
-            (0., 18., 14.)
-        } else if viewport_width <= 940. {
-            (SETTINGS_NAV_WIDTH_NARROW, 21., 18.)
-        } else {
-            (SETTINGS_NAV_WIDTH, 24., 28.)
-        };
-        let nav = if hide_nav {
+        let (nav_width, pad_top, pad_x) = settings_columns(viewport_width);
+        let nav = if nav_width == 0. {
             None
         } else {
             Some(self.render_nav(window, cx).w(px(nav_width)))
