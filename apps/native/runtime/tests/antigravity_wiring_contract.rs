@@ -64,7 +64,8 @@ set -eu
 trace="$AGY_TEST_TRACES/$MATOU_PROVIDER_HOOK_TOKEN"
 mkdir "$trace"
 printf '%s\n' "$@" > "$trace/args"
-printf '%s\n' "$HOME" "$MATOU_PROVIDER_HOOK_URL" > "$trace/launch"
+printf '%s\n' "$HOME" "$MATOU_PROVIDER_HOOK_URL" "$MATOU_PROVIDER_HOOK_TOKEN" \
+  "$MATOU_ANTIGRAVITY_SYSTEM_MESSAGE_FILE" > "$trace/launch"
 echo AGY_FIXTURE_READY
 touch "$trace/ready"
 while IFS= read -r line; do
@@ -173,11 +174,22 @@ done
         .with_context(|| format!("waiting for fixture PTY run {count}"))?;
         let launch = fs::read_to_string(trace.join("launch"))?;
         let mut lines = launch.lines();
-        assert_eq!(lines.next(), self.shell_home.to_str());
+        let home = PathBuf::from(lines.next().context("Missing fixture agent home")?);
+        assert_eq!(home, self.shell_home);
         let endpoint = lines
             .next()
             .context("Missing fixture hook endpoint")?
             .to_owned();
+        let token = lines
+            .next()
+            .context("Missing fixture hook token")?
+            .to_owned();
+        let system_message = PathBuf::from(
+            lines
+                .next()
+                .context("Missing fixture system message path")?,
+        );
+        assert!(system_message.starts_with(self.data.join("provider-hooks")));
         let args = fs::read_to_string(trace.join("args"))?
             .lines()
             .map(str::to_owned)
@@ -186,10 +198,13 @@ done
         let settings: Value = serde_json::from_slice(&fs::read(&args[1])?)?;
         assert_eq!(settings["statusLine"]["stack_with_default"], false);
         Ok(Run {
+            home,
             endpoint,
+            token,
+            system_message,
             statusline: settings["statusLine"]["command"]
                 .as_str()
-                .context("Missing statusline script")?
+                .context("Missing statusline command")?
                 .into(),
             args,
             trace,
@@ -206,7 +221,10 @@ done
 }
 
 struct Run {
+    home: PathBuf,
     endpoint: String,
+    token: String,
+    system_message: PathBuf,
     statusline: String,
     args: Vec<String>,
     trace: PathBuf,
@@ -259,22 +277,55 @@ impl Run {
             .parse()?)
     }
 
-    fn run_statusline(&self, conversation: &str, state: &str) -> Result<()> {
-        let mut process = Process::new("/bin/sh")
-            .args(["-c", &self.statusline])
+    fn run_native_hook(&self, command: &str, event: &str, payload: Value) -> Result<Vec<u8>> {
+        // This in-process RuntimeHost generates commands for the test host.
+        // Verify that executable and pass the generated arguments to the Cargo binary.
+        let test_host = std::env::current_exe()?;
+        let test_host = test_host.to_str().context("Invalid test host path")?;
+        let prefix = format!("'{}' ", test_host.replace('\'', "'\\''"));
+        let args: Vec<_> = command
+            .strip_prefix(&prefix)
+            .context("Native hook command does not select the current host")?
+            .split_ascii_whitespace()
+            .collect();
+        assert_eq!(args, ["--hook", "agy", event]);
+
+        let mut child = Process::new(env!("CARGO_BIN_EXE_matou-native-runtime"))
+            .args(args)
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &self.home)
+            .env("MATOU_PROVIDER_HOOK_URL", &self.endpoint)
+            .env("MATOU_PROVIDER_HOOK_TOKEN", &self.token)
+            .env(
+                "MATOU_ANTIGRAVITY_SYSTEM_MESSAGE_FILE",
+                &self.system_message,
+            )
             .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()?;
-        write!(
-            process
-                .stdin
-                .take()
-                .context("Missing fixture statusline input")?,
+        child
+            .stdin
+            .take()
+            .context("Missing native hook stdin")?
+            .write_all(&serde_json::to_vec(&payload)?)?;
+        let output = child.wait_with_output()?;
+        assert!(
+            output.status.success(),
             "{}",
-            json!({"conversation_id": conversation, "agent_state": state, "cycle_mode": "plan"})
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(output.stdout)
+    }
+
+    fn run_statusline(&self, conversation: &str, state: &str) -> Result<()> {
+        let output = self.run_native_hook(
+            &self.statusline,
+            "statusline",
+            json!({"conversation_id": conversation, "agent_state": state, "cycle_mode": "plan"}),
         )?;
-        assert!(process.wait()?.success());
+        assert!(output.is_empty());
         Ok(())
     }
 
@@ -494,8 +545,15 @@ fn promotion_installs_and_repairs_plugin_and_projects_authenticated_activity() -
     );
     assert!(first.args.windows(2).any(|args| args == ["--mode", "plan"]));
     assert!(first.resume_arg().is_none());
-    let managed_hook = plugin.join("hooks/session-start.sh");
+    let managed_hook = plugin.join("hooks.json");
     let contents = fs::read(&managed_hook)?;
+    let hooks: Value = serde_json::from_slice(&contents)?;
+    let startup = hooks["matou"]["SessionStart"][0]["command"]
+        .as_str()
+        .context("Missing managed SessionStart command")?;
+    for legacy in ["hooks/session-start.sh", "hooks/matou-hook.sh"] {
+        assert!(!plugin.join(legacy).exists());
+    }
     let version = fs::metadata(plugin.join("plugin.json"))?.modified()?;
     assert_eq!(
         fs::read_to_string(fixture.shell_home.join(".gemini/settings.json"))?,
@@ -507,24 +565,14 @@ fn promotion_installs_and_repairs_plugin_and_projects_authenticated_activity() -
     );
     assert!(!fixture.traces.join(".gemini").exists());
 
-    let mut start = Process::new(&managed_hook)
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .env("MATOU_PROVIDER_HOOK_URL", &first.endpoint)
-        .env(
-            "MATOU_PROVIDER_HOOK_TOKEN",
-            first.trace.file_name().unwrap(),
-        )
-        .stdin(Stdio::piped())
-        .spawn()?;
-    write!(
-        start.stdin.take().unwrap(),
-        "{}",
+    let injected = first.run_native_hook(
+        startup,
+        "session-start",
         json!({
             "data": {"conversationId": SOURCE, "cwd": fixture.cwd}, "event": "SessionStart",
-        })
+        }),
     )?;
-    assert!(start.wait()?.success());
+    assert_eq!(injected, fs::read(&first.system_message)?);
     assert_eq!(
         identity(&host, &session, "confirmed")?["providerSessionId"],
         SOURCE
