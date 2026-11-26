@@ -14,7 +14,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use cocoa::{
     appkit::{
-        NSApp, NSView, NSViewHeightSizable, NSViewWidthSizable, NSVisualEffectBlendingMode,
+        NSApp, NSScreen, NSView, NSViewHeightSizable, NSViewWidthSizable, NSVisualEffectBlendingMode,
         NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView, NSWindow,
         NSWindowOrderingMode,
     },
@@ -28,7 +28,7 @@ use core_foundation::{
     },
     string::CFString,
 };
-use gpui::{Rgba, Window, rgba};
+use gpui::{App, Bounds, Pixels, Rgba, Size, Window, point, px, rgba, size};
 use objc::{
     class,
     declare::MethodImplementation,
@@ -40,6 +40,31 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 const TERMINATE_NOW: usize = 1;
 const TERMINATE_LATER: usize = 2;
+
+pub fn initial_window_bounds(preferred: Size<Pixels>, cx: &App) -> Bounds<Pixels> {
+    let centered = Bounds::centered(None, preferred, cx);
+    let screens = unsafe { NSScreen::screens(nil) };
+    let primary: id = unsafe { msg_send![screens, firstObject] };
+    if primary.is_null() {
+        return centered;
+    }
+
+    let frame = unsafe { NSScreen::frame(primary) };
+    let visible = unsafe { NSScreen::visibleFrame(primary) };
+    // AppKit measures from the bottom of the screen. GPUI places windows from the top.
+    let work_area = Bounds::new(
+        point(
+            px((visible.origin.x - frame.origin.x) as f32),
+            px((frame.origin.y + frame.size.height - visible.origin.y - visible.size.height) as f32),
+        ),
+        size(px(visible.size.width as f32), px(visible.size.height as f32)),
+    );
+    if work_area.contains(&centered.origin) && work_area.contains(&centered.bottom_right()) {
+        centered
+    } else {
+        Bounds::centered_at(work_area.center(), preferred.min(&work_area.size))
+    }
+}
 
 #[cfg(debug_assertions)]
 pub mod window_diag {

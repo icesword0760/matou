@@ -392,7 +392,12 @@ impl Desktop {
             let bounds = windows_bounds::initial(preferred_size, cx);
             (bounds, min_size.min(&bounds.size))
         };
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "macos")]
+        let (initial_bounds, min_size) = {
+            let bounds = macos::initial_window_bounds(preferred_size, cx);
+            (bounds, min_size.min(&bounds.size))
+        };
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         let initial_bounds = Bounds::centered(None, preferred_size, cx);
         let options = WindowOptions {
             show: self.probe.is_none(),
