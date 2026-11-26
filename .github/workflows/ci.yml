@@ -74,7 +74,7 @@ jobs:
       - run: python3 apps/native/terminal/scripts/build-libs.py --target aarch64-apple-darwin
       - run: cargo fetch --manifest-path apps/native/Cargo.toml --locked
       - run: cargo build --manifest-path apps/native/Cargo.toml --offline --locked -p matou-native-runtime
-      - run: cargo test --manifest-path apps/native/Cargo.toml --offline --locked
+      - run: cargo test --manifest-path apps/native/Cargo.toml --offline --locked --no-fail-fast
         env:
           RUST_TEST_THREADS: '2'
 
@@ -115,6 +115,6 @@ jobs:
         run: Join-Path $env:GITHUB_WORKSPACE 'apps/native/terminal/vendor/ghostty-vt/windows-x86_64/bin' >> $env:GITHUB_PATH
       - run: cargo fetch --manifest-path apps/native/Cargo.toml --locked
       - run: cargo build --manifest-path apps/native/Cargo.toml --offline --locked -p matou-native-runtime
-      - run: cargo test --manifest-path apps/native/Cargo.toml --offline --locked
+      - run: cargo test --manifest-path apps/native/Cargo.toml --offline --locked --no-fail-fast
         env:
           RUST_TEST_THREADS: '2'

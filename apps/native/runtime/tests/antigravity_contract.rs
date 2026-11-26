@@ -31,9 +31,19 @@ fn sandbox() -> Result<TempDir> {
         .expect("runtime is inside the native workspace")
         .join("target");
     fs::create_dir_all(&directory)?;
+    let canonical = directory.canonicalize()?;
+    let base = if cfg!(windows) {
+        canonical
+            .to_string_lossy()
+            .strip_prefix(r"\\?\")
+            .map(PathBuf::from)
+            .unwrap_or(canonical)
+    } else {
+        canonical
+    };
     Ok(tempfile::Builder::new()
         .prefix("antigravity-contract-")
-        .tempdir_in(directory.canonicalize()?)?)
+        .tempdir_in(base)?)
 }
 
 fn environment(values: &[(&str, &str)]) -> BTreeMap<OsString, OsString> {
@@ -145,7 +155,14 @@ fn antigravity_launch_contract() -> Result<()> {
 
     let fresh = launch(LaunchMode::Fresh, PermissionMode::Default, None, None)?;
     let settings_arg = settings.as_os_str();
-    assert_eq!(fresh.executable, fake);
+    if cfg!(windows) {
+        assert_eq!(
+            fresh.executable.to_string_lossy().to_ascii_lowercase(),
+            fake.to_string_lossy().to_ascii_lowercase()
+        );
+    } else {
+        assert_eq!(fresh.executable, fake);
+    }
     assert_eq!(fresh.cwd, root);
     assert_eq!(
         fresh.argv,
