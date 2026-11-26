@@ -1,6 +1,54 @@
 use std::{fs, io, path::Path};
 
 use gpui::{App, Bounds, DisplayId, Pixels, Size, WindowBounds, point, px, size};
+use windows::Win32::{
+    Foundation::RECT,
+    UI::{
+        HiDpi::GetDpiForSystem,
+        WindowsAndMessaging::{
+            SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
+        },
+    },
+};
+
+pub fn initial(preferred: Size<Pixels>, cx: &App) -> Bounds<Pixels> {
+    let area = primary_work_area().or_else(|| cx.primary_display().map(|display| display.bounds()));
+    if let Some(area) = area {
+        // GPUI positions client bounds. Leave room for the visible Win32 window frame.
+        let client_area = area.inset(px(8.));
+        Bounds::centered_at(client_area.center(), preferred.min(&client_area.size))
+    } else {
+        Bounds::new(point(px(0.), px(0.)), preferred)
+    }
+}
+
+fn primary_work_area() -> Option<Bounds<Pixels>> {
+    let mut area = RECT::default();
+    unsafe {
+        SystemParametersInfoW(
+            SPI_GETWORKAREA,
+            0,
+            Some((&raw mut area).cast()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+    }
+    .ok()?;
+    if area.left >= area.right || area.top >= area.bottom {
+        return None;
+    }
+
+    // GPUI passes these bounds to SetWindowPlacement, whose primary work area starts at (0, 0).
+    // SPI_GETWORKAREA reports physical pixels. GPUI takes logical pixels.
+    let logical_scale = 96. / unsafe { GetDpiForSystem() } as f32;
+    let logical = |physical| px(physical as f32 * logical_scale);
+    Some(Bounds::new(
+        point(px(0.), px(0.)),
+        size(
+            logical(area.right - area.left),
+            logical(area.bottom - area.top),
+        ),
+    ))
+}
 
 pub fn load(path: &Path, minimum: Size<Pixels>, cx: &App) -> Option<(WindowBounds, DisplayId)> {
     let saved: serde_json::Value = serde_json::from_slice(&fs::read(path).ok()?).ok()?;

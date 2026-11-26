@@ -386,14 +386,18 @@ impl Desktop {
 
     fn open_window(self: &Rc<Self>, cx: &mut App) -> Result<WindowHandle<Workspace>> {
         let min_size = size(px(720.), px(480.));
+        let preferred_size = size(px(1200.), px(780.));
+        #[cfg(target_os = "windows")]
+        let (initial_bounds, min_size) = {
+            let bounds = windows_bounds::initial(preferred_size, cx);
+            (bounds, min_size.min(&bounds.size))
+        };
+        #[cfg(not(target_os = "windows"))]
+        let initial_bounds = Bounds::centered(None, preferred_size, cx);
         let options = WindowOptions {
             show: self.probe.is_none(),
             focus: self.probe.is_none(),
-            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
-                None,
-                size(px(1200.), px(780.)),
-                cx,
-            ))),
+            window_bounds: Some(WindowBounds::Windowed(initial_bounds)),
             window_min_size: Some(min_size),
             titlebar: Some(TitlebarOptions {
                 title: Some(if cfg!(target_os = "macos") {
