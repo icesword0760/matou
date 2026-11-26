@@ -707,7 +707,9 @@ impl RouterRequest {
                 error,
                 io::ErrorKind::ConnectionRefused
                     | io::ErrorKind::ConnectionReset
+                    | io::ErrorKind::ConnectionAborted
                     | io::ErrorKind::BrokenPipe
+                    | io::ErrorKind::UnexpectedEof
                     | io::ErrorKind::TimedOut
             )
     }

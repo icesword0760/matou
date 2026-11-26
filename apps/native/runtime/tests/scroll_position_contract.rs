@@ -536,8 +536,20 @@ fn capture_host_frames(grid: &Grid, case: FrameCase) -> Result<Value> {
         }
         // Keep the last frame unacknowledged while the whole batch is sent.
         host.commands.send(ack(previous_sequence))?;
-        let (_, screen, sequence, applied_request) =
-            wait_host_frame(&host, |session, _, _| session == id)?;
+        let (_, screen, sequence, applied_request) = loop {
+            let frame = wait_host_frame(&host, |session, _, _| session == id)?;
+            // A trailing pre-batch shell frame (request 0, initial rows) may already be queued
+            // right after `seed_end` before batch 0 is applied; acknowledge and consume it.
+            if index == 0
+                && request > 0
+                && frame.3 == 0
+                && frame.1.rows == usize::from(case.rows)
+            {
+                host.commands.send(ack(frame.2))?;
+                continue;
+            }
+            break frame;
+        };
         anyhow::ensure!(
             applied_request == request && target_rows.is_none_or(|rows| screen.rows == rows),
             "unexpected intermediate frame after batch {index}: request {applied_request}, rows {}",

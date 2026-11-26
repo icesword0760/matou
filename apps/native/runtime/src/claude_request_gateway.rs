@@ -1663,7 +1663,7 @@ async fn send_once(
             && let Some(cause) = error.source()
         {
             Fault::request_body(cause)
-        } else if error.is_incomplete_message() || error.is_closed() {
+        } else if error.is_incomplete_message() || error.is_closed() || error.is_canceled() {
             Fault::connection(io::ErrorKind::ConnectionReset)
         } else {
             Fault::transport(&error)
