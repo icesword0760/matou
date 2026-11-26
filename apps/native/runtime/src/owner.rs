@@ -9226,9 +9226,21 @@ mod provider_tests {
         );
 
         // Before confirmation, a mismatched identity still retires the restore run.
+        owner.retire_sessions(&[session.into()]);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while owner.has_shell_worker(session) && Instant::now() < deadline {
+            owner.poll(Duration::from_millis(25))?;
+        }
         let binding = owner.claude_binding(session)?.context("confirmed binding")?;
         owner.launch_claude(session.into(), terminal, plan(), Some(&binding))?;
-        let unconfirmed = owner.provider_scope(session).unwrap();
+        let unconfirmed = Scope {
+            profile: LaunchProfile::ClaudeCode,
+            session_id: session.into(),
+            run_id: owner.shells[session].run_id.clone(),
+            generation: owner.generation.clone(),
+            expected_id: Some(binding.provider_session_id.clone()),
+            fork_source_id: None,
+        };
         owner.apply_hook(
             unconfirmed.clone(),
             observation("Stop", Some("CURRENT-ID")),
