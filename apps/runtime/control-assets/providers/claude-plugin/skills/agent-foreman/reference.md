@@ -26,7 +26,7 @@
 |---|---|---|
 | `--agent` | `codex` | `dsh` 把任务派给 DSH CLI，`agy` 派给 Antigravity CLI（只在 `start` 时指定，之后的 `send` 沿用）。DSH 的 `--model` 可写 `flash`、`pro` 或完整型号，`--effort` 为 `off`/`low`/`high`/`max`。Antigravity 的 `--model` 默认 `gemini-pro-orchestrator`（Orchestrator，固定型号，没有推理档位，底栏和 ▶ 行不显示档位），也可写系列关键字 `hydrogen` / `argon` / `carbon` / `neon` / `flash`（用 `agy models` 解析该系列最新版）、家族名 `claude-opus-5-5` / `claude-sonnet-5-5` 或完整型号。Gemini 系列和 Claude 家族支持 `--effort low\|medium\|high\|xhigh`，默认 `high`。直接指定完整型号时无需查询目录，显式附加 `--effort` 会报错。用动态系列或 Claude 家族启动的任务可以通过 `send --effort` 重新解析档位。型号写错时 agy 直接拒绝，任务判失败、不重试；型号名含 `orchestrator` 时运行约定允许它派子代理（子代理先读原始交代、每步往 progress.log 记一行，因为子代理干活时主事件流是静默的），其他型号仍禁止；找不到模型或额度用完时直接失败，不重试、不换模型 |
 | `--model` / `--effort` | `sol` / `high` | Codex 默认 = 主力 sol 系列里版本最新的可用型号 + 高档推理。系列关键字 `astra`（前沿）、`sol`（主力）、`terra`（均衡）、`luna`（快速）都按「该系列最新版本」解析；`best` = 跨系列最高档（astra > sol > terra > luna，再比版本），不按目录排序。操作电脑界面的部分（computer use，含 Blender 建模）不换主模型，由脚本在运行约定里要求主 Codex 用 `spawn_agent` 派 terra 最新版子代理完成（必须带 `fork_turns="none"`，否则模型设置不生效）。`start` 和续跑时按所选系列解析；出现不认识的系列会 ⚠ 提醒确认；该系列没有可用型号时直接报错，不自动换系列。`codex debug models` 偶尔返回过时的内置目录，脚本会记住 7 天内见过的型号，不会因此降级。显式写型号名则直接用。模型繁忙时脚本会退避重试，持续失败就报告用户 |
-| `--speed` | `default` | Codex 的 `start` / `send` / `resume` 可指定 `default\|fast\|ultrafast\|priority\|flex`。显式速度优先，其次是非默认的 `CODEX_SERVICE_TIER`、码头设置及内置普通档 |
+| `--speed` | `default` | Codex 的 `start` / `send` / `resume` 可指定 `default\|fast\|ultrafast`。显式速度优先，其次是非默认的 `CODEX_SERVICE_TIER`、码头设置及内置标准档 |
 | `--idle-min` | 10 | 多久没动静判定卡住，结束本轮并重试 |
 | `--warn-min` | 3 | 多久没动静先发 ⏸ 提醒 |
 | `--max-min` | 45 | 单轮硬上限 |
@@ -40,7 +40,7 @@
 | `--no-watch` | 关 | 启动后不跟踪事件流 |
 | `--watch-min` | 29 | 跟踪多久后自动交回（退出码 8，任务继续运行），留在 Monitor 30 分钟上限以内 |
 
-环境变量：`CODEX_BIN`（Codex 可执行文件，默认 PATH 里的 `codex`）、`DSH_BIN`（默认 PATH 里的 `dsh`；找不到时运行约定里不出现 DSH 那一段）、`AGY_BIN`（默认 PATH 里的 `agy`）、`CODEX_SERVICE_TIER`（默认 `default`，普通速度档；非默认档会以中文名显示在 Matou 子 Agent 卡片标题里，如「· 超快」，未知值原样显示）、`FOREMAN_RUN_DIR`。
+环境变量：`CODEX_BIN`（Codex 可执行文件，默认 PATH 里的 `codex`）、`DSH_BIN`（默认 PATH 里的 `dsh`；找不到时运行约定里不出现 DSH 那一段）、`AGY_BIN`（默认 PATH 里的 `agy`）、`CODEX_SERVICE_TIER`（默认 `default`，标准速度档。兼容旧值 `priority`，按 `fast` 执行；环境变量里的无效值会跳过。Matou 子 Agent 卡片标题会显示中文档位名，如「· 超快」）、`FOREMAN_RUN_DIR`。
 
 新任务的显式命令行参数优先，其次为 `MATOU_FOREMAN_ROLES_FILE` 指定的码头配置、外部 `~/.claude/agent-foreman/config.json` 和内置默认值。续跑时沿用原执行者，重新读取码头的监督时间、重试次数、Codex 速度和二次转包策略。
 

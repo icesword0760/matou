@@ -72,3 +72,34 @@ test('status with a task still returns its detailed JSON', (t) => {
     pendingOwnerNotifications: [],
   });
 });
+
+test('legacy Foreman reports canonical Codex speeds and rejects an explicit flex speed', (t) => {
+  const { runs } = runStatus(t);
+  const rolesFile = path.join(path.dirname(runs), 'dispatch-roles.json');
+  const invoke = (envTier, ...args) => spawnSync(process.execPath, [script, ...args], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      FOREMAN_RUN_DIR: runs,
+      MATOU_FOREMAN_ROLES_FILE: rolesFile,
+      CODEX_SERVICE_TIER: envTier,
+    },
+  });
+  for (const [roleSpeed, envTier, expected] of [
+    ['ultrafast', 'priority', 'fast'],
+    ['priority', 'default', 'fast'],
+    ['flex', '', 'default'],
+  ]) {
+    fs.writeFileSync(rolesFile, JSON.stringify({
+      version: 1, defaultAgent: 'codex', agents: [{ id: 'codex', speed: roleSpeed }],
+    }));
+    const config = invoke(envTier, 'config');
+    assert.equal(config.status, 0, config.stderr);
+    assert.equal(JSON.parse(config.stdout).defaults.serviceTier, expected);
+  }
+  const rejected = invoke('', 'start', 'rejected', '--speed', 'flex');
+  assert.equal(rejected.status, 1);
+  assert.match(rejected.stderr, /Invalid --speed/);
+  assert.match(rejected.stderr, /--speed default\|fast\|ultrafast /);
+  assert.ok(!fs.existsSync(path.join(runs, 'rejected', 'state.json')));
+});

@@ -19,7 +19,7 @@ pub const ROLE_MAX_CHARS: usize = 2000;
 
 pub const CODEX_MODELS: [&str; 5] = ["sol", "best", "astra", "terra", "luna"];
 pub const CODEX_EFFORTS: [&str; 4] = ["low", "medium", "high", "xhigh"];
-pub const CODEX_SPEEDS: [&str; 5] = ["default", "fast", "ultrafast", "priority", "flex"];
+pub const CODEX_SPEEDS: [&str; 3] = ["default", "fast", "ultrafast"];
 
 pub const DSH_MODELS: [&str; 2] = ["deepseek-flash", "deepseek-v4-pro"];
 pub const DSH_EFFORTS: [&str; 4] = ["off", "low", "high", "max"];
@@ -188,13 +188,7 @@ pub fn effort_options(id: &str) -> &'static [(&'static str, &'static str)] {
 
 pub fn speed_options(id: &str) -> &'static [(&'static str, &'static str)] {
     match id {
-        "codex" => &[
-            ("default", "普通（默认）"),
-            ("fast", "快速"),
-            ("ultrafast", "超快"),
-            ("priority", "优先"),
-            ("flex", "弹性"),
-        ],
+        "codex" => &[("default", "标准"), ("fast", "快速"), ("ultrafast", "超快")],
         _ => &[],
     }
 }
@@ -225,11 +219,11 @@ fn valid_effort(id: &str, value: &str) -> bool {
     }
 }
 
-fn valid_speed(id: &str, value: &str) -> bool {
-    match id {
-        "codex" => CODEX_SPEEDS.contains(&value),
-        _ => false,
+pub fn normalize_codex_speed(value: &str) -> Option<&'static str> {
+    if value == "priority" {
+        return Some("fast");
     }
+    CODEX_SPEEDS.into_iter().find(|speed| *speed == value)
 }
 
 fn normalize_config(mut input: DispatchRolesConfig) -> DispatchRolesConfig {
@@ -252,12 +246,8 @@ fn normalize_config(mut input: DispatchRolesConfig) -> DispatchRolesConfig {
                 default_agent.effort
             };
             let speed = if default_agent.id == "codex" {
-                let candidate = existing.speed.as_deref().unwrap_or("default");
-                Some(if valid_speed("codex", candidate) {
-                    candidate.to_owned()
-                } else {
-                    "default".to_owned()
-                })
+                let speed = existing.speed.as_deref().and_then(normalize_codex_speed);
+                Some(speed.unwrap_or("default").to_owned())
             } else {
                 None
             };
@@ -371,9 +361,10 @@ pub fn format_roles_markdown(config: &DispatchRolesConfig) -> String {
             specs.push(format!("推理: {}", effort_label_zh(effort)));
         }
         if agent.id == "codex" {
+            let speed = agent.speed.as_deref().and_then(normalize_codex_speed);
             if let Some((_, label)) = speed_options("codex")
                 .iter()
-                .find(|(value, _)| *value != "default" && agent.speed.as_deref() == Some(*value))
+                .find(|(value, _)| *value != "default" && speed == Some(*value))
             {
                 specs.push(format!("速度: {label}"));
             }
@@ -627,6 +618,41 @@ mod tests {
         let reread = store.snapshot().unwrap();
         assert!(reread.exists);
         assert_eq!(reread.config, updated);
+    }
+
+    #[test]
+    fn legacy_codex_speeds_load_and_save_as_canonical_values() {
+        let root = tempfile::tempdir().unwrap();
+        let store = DispatchRolesStore::for_data_root(root.path());
+        assert_eq!(
+            speed_options("codex"),
+            &[("default", "标准"), ("fast", "快速"), ("ultrafast", "超快")]
+        );
+        for (legacy, canonical, summary) in [
+            ("priority", "fast", Some("速度: 快速")),
+            ("flex", "default", None),
+        ] {
+            let mut config = DispatchRolesConfig::default();
+            config.agents[0].speed = Some(legacy.into());
+            let original = serde_json::to_vec(&config).unwrap();
+            fs::write(store.path(), &original).unwrap();
+
+            let snapshot = store.snapshot().unwrap();
+            assert!(snapshot.exists);
+            assert_eq!(snapshot.config.agents[0].speed.as_deref(), Some(canonical));
+            let markdown = format_roles_markdown(&snapshot.config);
+            if let Some(summary) = summary {
+                assert!(markdown.contains(summary));
+            } else {
+                assert!(!markdown.contains("速度:"));
+            }
+            assert_eq!(fs::read(store.path()).unwrap(), original);
+
+            store.save(snapshot.config).unwrap();
+            let saved: DispatchRolesConfig =
+                serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+            assert_eq!(saved.agents[0].speed.as_deref(), Some(canonical));
+        }
     }
 
     #[test]

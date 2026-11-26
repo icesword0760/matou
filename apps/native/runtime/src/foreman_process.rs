@@ -8,7 +8,10 @@ use super::{
 };
 use crate::codex_launch::{config_root, resolve_executable};
 use anyhow::{Context, Result, bail, ensure};
-use matou_native_core::dispatch_roles::{DispatchRoleMode, DispatchRolesConfig, agy_effort_suffix};
+use matou_native_core::dispatch_roles::{
+    CODEX_SPEEDS as CODEX_TIERS, DispatchRoleMode, DispatchRolesConfig, agy_effort_suffix,
+    normalize_codex_speed as normalize_codex_tier, speed_options,
+};
 use matou_native_core::git_repo::git_command;
 use regex::Regex;
 use serde_json::{Map, Value, json};
@@ -26,7 +29,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const SUPERVISION_FIELDS: [&str; 4] = ["idleMin", "maxMin", "askWaitMin", "retries"];
 const STOP_POLL: Duration = Duration::from_millis(100);
 const MODEL_TIMEOUT: Duration = Duration::from_secs(20);
-const CODEX_TIERS: [&str; 5] = ["default", "fast", "ultrafast", "priority", "flex"];
 const AGY_SERIES: [&str; 5] = ["hydrogen", "argon", "carbon", "neon", "flash"];
 const AGY_FAMILIES: [&str; 2] = ["claude-opus-5-5", "claude-sonnet-5-5"];
 
@@ -97,8 +99,8 @@ fn parse(options: &[&str], resume: bool) -> Result<Arguments> {
                 values.insert("effort".into(), json!(next()?));
             }
             "--speed" => {
-                let value = next()?;
-                ensure!(CODEX_TIERS.contains(&value), "无效的 --speed");
+                let value = normalize_codex_tier(next()?)
+                    .with_context(|| format!("无效的 --speed，可选 {}", CODEX_TIERS.join("|")))?;
                 values.insert("speedOverride".into(), json!(value));
             }
             "--retries" => {
@@ -314,7 +316,7 @@ fn role_options(
             if let Some(speed) = role
                 .speed
                 .as_deref()
-                .filter(|speed| CODEX_TIERS.contains(speed))
+                .map(|speed| normalize_codex_tier(speed).unwrap_or("default"))
             {
                 options.insert("serviceTier".into(), json!(speed));
             }
@@ -802,24 +804,23 @@ fn agent_executable_with_path(agent: &str, cwd: &Path) -> Result<(PathBuf, Optio
     })
 }
 
-fn codex_tier(options: &Value) -> String {
+fn codex_tier(options: &Value) -> &'static str {
     options["speedOverride"]
         .as_str()
         .filter(|value| !value.is_empty())
-        .map(str::to_owned)
+        .map(|value| normalize_codex_tier(value).unwrap_or("default"))
         .or_else(|| {
             std::env::var("CODEX_SERVICE_TIER")
                 .ok()
-                .map(|value| value.trim().to_owned())
-                .filter(|value| !value.is_empty() && value != "default")
+                .and_then(|value| normalize_codex_tier(value.trim()))
+                .filter(|value| *value != "default")
         })
         .or_else(|| {
             options["serviceTier"]
                 .as_str()
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned)
+                .and_then(normalize_codex_tier)
         })
-        .unwrap_or_else(|| "default".into())
+        .unwrap_or("default")
 }
 
 fn dsh_patch(dir: &Path) -> PathBuf {
@@ -2001,20 +2002,14 @@ fn publish_status(state: &Value) {
             matou_native_core::dispatch_roles::effort_label_zh(effort)
         )
     });
-    let tier = (agent_id(state) == "codex")
-        .then(|| codex_tier(options))
-        .map(|tier| match tier.as_str() {
-            "default" => "普通".into(),
-            "fast" => "快速".into(),
-            "ultrafast" => "超快".into(),
-            "priority" => "优先".into(),
-            "flex" => "弹性".into(),
-            _ => tier,
-        });
+    let tier = (agent_id(state) == "codex").then(|| codex_tier(options));
+    let tier_label = speed_options("codex")
+        .iter()
+        .find_map(|&(value, label)| (tier == Some(value)).then_some(label));
     let specs = [
         (model != "best" && !model.is_empty()).then_some(model),
         effort.as_deref(),
-        tier.as_deref(),
+        tier_label,
     ]
     .into_iter()
     .flatten()

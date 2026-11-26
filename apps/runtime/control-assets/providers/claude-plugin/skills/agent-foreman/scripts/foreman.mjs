@@ -19,7 +19,8 @@ const AGY_QUOTA = /RESOURCE_EXHAUSTED|quota|Resets in|额度/i;
 const AGY_SERIES = ['hydrogen', 'argon', 'carbon', 'neon', 'flash'];
 const AGY_EFFORT_FAMILIES = ['claude-opus-5-5', 'claude-sonnet-5-5'];
 const AGENT_IDS = ['codex', 'dsh', 'agy'];
-const CODEX_SPEEDS = ['default', 'fast', 'ultrafast', 'priority', 'flex'];
+const CODEX_SPEEDS = ['default', 'fast', 'ultrafast'];
+const CODEX_SPEED_LABELS = { default: '标准', fast: '快速', ultrafast: '超快' };
 
 const DEFAULTS = { askWaitMin: 10, model: 'sol', effort: 'high', idleMin: 10, warnMin: 3, maxMin: 45, retries: 3, backoffMin: [2, 5, 10] };
 const validMinutes = (value) => typeof value === 'number' && Number.isFinite(value) && value > 0 && value <= 600;
@@ -87,7 +88,6 @@ function formatMatouRolesMarkdown(roles, defaultAgent = 'codex') {
   if (!roles) return '';
   const names = { codex: 'Codex', dsh: 'DSH', agy: 'Antigravity（反重力）' };
   const efforts = { off: '关闭', low: '低', medium: '中', high: '高', xhigh: '超高', max: '最高' };
-  const speeds = { fast: '快速', ultrafast: '超快', priority: '优先', flex: '弹性' };
   const enabled = roles.agents.filter((a) => a.enabled !== false);
   const disabled = roles.agents.filter((a) => a.enabled === false);
   const lines = ['## 用户自定义 Agent 生态位与默认配置（以本节为准）', ''];
@@ -98,11 +98,11 @@ function formatMatouRolesMarkdown(roles, defaultAgent = 'codex') {
     const effortFixed = a.id === 'agy' && /orchestrator/i.test(model);
     const suffix = a.id === 'agy' ? /-(low|medium|high|xhigh)$/i.exec(model)?.[1].toLowerCase() : null;
     const effort = suffix || (typeof a.effort === 'string' ? a.effort : '');
-    const speed = a.id === 'codex' && typeof a.speed === 'string' && a.speed !== 'default' ? a.speed : '';
+    const speed = a.id === 'codex' ? codexRoleSpeed(a) : undefined;
     const specs = [
       model ? `模型: ${model}` : null,
       effortFixed ? '无推理档位' : (effort ? `推理: ${Object.hasOwn(efforts, effort) ? efforts[effort] : effort}` : null),
-      speed ? `速度: ${Object.hasOwn(speeds, speed) ? speeds[speed] : speed}` : null,
+      speed && speed !== 'default' ? `速度: ${CODEX_SPEED_LABELS[speed]}` : null,
     ].filter(Boolean).join(' · ');
     const role = typeof a.role === 'object' ? '' : a.role;
     const roleText = String(role || '').replace(/\r\n?/g, '\n').trim().replace(/\n/g, '\n  ');
@@ -138,8 +138,13 @@ function configuredSubDispatchPeers(roles, agent) {
     }));
 }
 
+function normalizeCodexSpeed(speed) {
+  if (speed === 'priority') return 'fast';
+  return CODEX_SPEEDS.includes(speed) ? speed : undefined;
+}
+
 function codexRoleSpeed(role) {
-  return typeof role?.speed === 'string' ? role.speed.trim() || undefined : undefined;
+  return typeof role?.speed === 'string' ? normalizeCodexSpeed(role.speed) ?? 'default' : undefined;
 }
 
 function configuredDefaults(defaults, agent, ignored = [], roles = null) {
@@ -198,7 +203,7 @@ Options:
   agy defaults: --model gemini-pro-orchestrator (fixed; no effort levels).
   --model hydrogen|argon|carbon|neon|flash picks the newest at --effort low|medium|high|xhigh (high).
   --model claude-opus-5-5|claude-sonnet-5-5 picks a family model at the requested effort.
-  --speed default|fast|ultrafast|priority|flex (Codex; start/send/resume)
+  --speed default|fast|ultrafast (Codex; start/send/resume)
   --ask-wait-min N (10; start/send)
   --no-watch  --watch-min N (29)  --warn-min N (3)
   --model M (sol；系列最新版，可选 best/astra/sol/terra/luna 或型号)  --effort E (high)  --idle-min N (10)  --max-min N (45)
@@ -243,8 +248,8 @@ function parseArgs(argv) {
       case '--effort': opts.effort = next(); break;
       case '--speed':
         if (!['start', 'send', 'resume'].includes(cmd)) throw new Error(usage);
-        opts.speed = next();
-        if (!CODEX_SPEEDS.includes(opts.speed)) throw new Error(usage);
+        opts.speed = normalizeCodexSpeed(next());
+        if (!opts.speed) throw new Error(`Invalid --speed\n${usage}`);
         break;
       case '--_stop':
         if (cmd !== '_supervise') throw new Error(usage);
@@ -289,10 +294,10 @@ const networkNote = (state) => state.networkSampling ? '（网络也没有数据
 const quietDuration = (ms) => ms < 60_000 ? `${Math.floor(ms / 1000)} 秒` : `${Math.floor(ms / 60_000)} 分钟`;
 
 function resolveCodexServiceTier(options, env = process.env) {
-  if (options.speedOverride) return options.speedOverride;
-  const envTier = typeof env?.CODEX_SERVICE_TIER === 'string' ? env.CODEX_SERVICE_TIER.trim() : '';
+  if (options.speedOverride) return normalizeCodexSpeed(options.speedOverride) ?? 'default';
+  const envTier = normalizeCodexSpeed(env.CODEX_SERVICE_TIER?.trim());
   if (envTier && envTier !== 'default') return envTier;
-  return options.serviceTier && options.serviceTier !== 'default' ? options.serviceTier : 'default';
+  return normalizeCodexSpeed(options.serviceTier) ?? 'default';
 }
 
 function displayEffort(state) {
@@ -333,8 +338,7 @@ function writeAgentStatus(state) {
     const effortName = new Map([['off', '关闭'], ['minimal', '最低档'], ['low', '低档'], ['medium', '中档'], ['high', '高档'], ['xhigh', '超高档'], ['max', '最高档']]).get(effort) ?? effort;
     const model = state.options.model;
     const agent = agentName(state);
-    const tier = agent === 'Codex' ? resolveCodexServiceTier(state.options, process.env) : null;
-    const tierName = new Map([['default', '普通'], ['fast', '快速'], ['ultrafast', '超快'], ['priority', '优先'], ['flex', '弹性']]).get(tier) ?? (tier || null);
+    const tierName = agent === 'Codex' ? CODEX_SPEED_LABELS[resolveCodexServiceTier(state.options)] : null;
     const label = `${agent}：${state.task}（${[model && model !== 'best' ? model : '', effort ? `${effortName}推理` : '', tierName].filter(Boolean).join(' · ')}）`;
     const file = path.join(dir, `${id}.json`);
     if (lastAgentStatus?.file === file && lastAgentStatus.status === status &&

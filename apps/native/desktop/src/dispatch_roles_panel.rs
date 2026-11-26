@@ -636,21 +636,8 @@ impl DispatchRolesPanel {
                 .collect(),
             Choice::Speed(_) => speed_options("codex")
                 .iter()
-                .zip([
-                    "Normal (follow environment)",
-                    "Fast",
-                    "Ultra fast",
-                    "Priority",
-                    "Flex",
-                ])
-                .map(|((value, zh), en)| {
-                    let zh = if *value == "default" {
-                        "普通（跟随环境变量）"
-                    } else {
-                        zh
-                    };
-                    ChoiceItem::new(value, self.text(zh, en))
-                })
+                .zip(["Standard", "Fast", "Ultra fast"])
+                .map(|((value, zh), en)| ChoiceItem::new(value, self.text(zh, en)))
                 .collect(),
         }
     }

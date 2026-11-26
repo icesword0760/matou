@@ -200,7 +200,7 @@ fn guide_and_roles_use_the_configured_matou_role_document() {
             "version": 1,
             "allowSubDispatch": false,
             "agents": [
-                { "id": "codex", "enabled": true, "model": "sol", "effort": "high", "mode": "auto", "speed": "fast", "role": "接口和测试" },
+                { "id": "codex", "enabled": true, "model": "sol", "effort": "high", "mode": "auto", "speed": "priority", "role": "接口和测试" },
                 { "id": "dsh", "enabled": true, "model": "deepseek-flash", "effort": "high", "mode": "auto", "role": "补产品文案" },
                 { "id": "agy", "enabled": false, "model": "gemini-pro-orchestrator", "effort": "high", "mode": "explicit", "role": "" }
             ]

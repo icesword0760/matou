@@ -91,7 +91,7 @@ function formatMatouRolesMarkdown(roles, defaultAgent = 'codex') {
   if (!roles) return '';
   const names = { codex: 'Codex', dsh: 'DSH', agy: 'Antigravity（反重力）' };
   const efforts = { off: '关闭', low: '低', medium: '中', high: '高', xhigh: '超高', max: '最高' };
-  const speeds = { fast: '快速', ultrafast: '超快', priority: '优先', flex: '弹性' };
+  const speeds = { fast: '快速', ultrafast: '超快', priority: '快速' };
   const enabled = roles.agents.filter((a) => a.enabled !== false);
   const disabled = roles.agents.filter((a) => a.enabled === false);
   const lines = ['## 用户自定义 Agent 生态位与默认配置（以本节为准）', ''];
@@ -102,11 +102,11 @@ function formatMatouRolesMarkdown(roles, defaultAgent = 'codex') {
     const effortFixed = a.id === 'agy' && /orchestrator/i.test(model);
     const suffix = a.id === 'agy' ? /-(low|medium|high|xhigh)$/i.exec(model)?.[1].toLowerCase() : null;
     const effort = suffix || (typeof a.effort === 'string' ? a.effort : '');
-    const speed = a.id === 'codex' && typeof a.speed === 'string' && a.speed !== 'default' ? a.speed : '';
+    const speed = a.id === 'codex' && typeof a.speed === 'string' && Object.hasOwn(speeds, a.speed) ? speeds[a.speed] : '';
     const specs = [
       model ? `模型: ${model}` : null,
       effortFixed ? '无推理档位' : (effort ? `推理: ${Object.hasOwn(efforts, effort) ? efforts[effort] : effort}` : null),
-      speed ? `速度: ${Object.hasOwn(speeds, speed) ? speeds[speed] : speed}` : null,
+      speed ? `速度: ${speed}` : null,
     ].filter(Boolean).join(' · ');
     const role = typeof a.role === 'object' ? '' : a.role;
     const roleText = String(role || '').replace(/\r\n?/g, '\n').trim().replace(/\n/g, '\n  ');

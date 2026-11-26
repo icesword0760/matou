@@ -269,6 +269,16 @@ test('Claude SessionStart injects the same dispatch roles as Foreman across life
   }
   assert.doesNotMatch(readHook('startup', { ...env, MATOU_FOREMAN_DEPTH: '1' }), /用户自定义 Agent 生态位/)
 
+  for (const [speed, label] of [['priority', '快速'], ['flex', undefined]]) {
+    await writeFile(rolesPath, JSON.stringify({
+      version: 1, agents: [{ ...agents[0], speed }, ...agents.slice(1)]
+    }))
+    const context = readHook('resume')
+    await verifyParity(context)
+    if (label) assert.match(context, /速度: 快速/)
+    else assert.doesNotMatch(context, /速度:/)
+  }
+
   await writeFile(join(temporaryRoot, 'config.json'), JSON.stringify({ version: 1, defaults: { agent: 'agy' } }))
   agents[2].model = 'gpt-oss-120b-medium'
   await writeFile(rolesPath, JSON.stringify({ version: 1, agents }))

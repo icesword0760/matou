@@ -1,6 +1,6 @@
 #![cfg(unix)]
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
@@ -204,6 +204,108 @@ printf '%s\n' 'fixture diagnostic' >&2
     let indicator: Value = serde_json::from_str(&read(indicator)).unwrap();
     assert_eq!(indicator["state"], "completed");
     assert!(indicator["label"].as_str().unwrap().contains("快速"));
+}
+
+#[test]
+fn codex_speed_keeps_precedence_and_normalizes_legacy_inputs() {
+    let fixture = Fixture::new(
+        r#"
+printf '%s\n' "$@" > actual-speed-argv.txt
+printf '%s\n' '{"type":"thread.started","thread_id":"fixture-speed-thread"}'
+printf '%s\n' '{"type":"turn.completed"}'
+"#,
+    );
+    let roles = fixture.base.join("dispatch-roles.json");
+    let write_role_speed = |speed| {
+        let mut config = matou_native_core::dispatch_roles::DispatchRolesConfig::default();
+        config.agents[0].speed = Some(speed);
+        fs::write(&roles, serde_json::to_vec(&config).unwrap()).unwrap();
+    };
+    let assert_speed = |task: &str, tier, label| {
+        assert!(
+            read(fixture.cwd.join("actual-speed-argv.txt"))
+                .lines()
+                .any(|arg| arg == format!("service_tier={}", json!(tier)))
+        );
+        let indicator: Value = serde_json::from_str(&read(
+            fixture
+                .base
+                .join("agent-status")
+                .join(format!("codex-{task}.json")),
+        ))
+        .unwrap();
+        assert!(indicator["label"].as_str().unwrap().contains(label));
+    };
+    for (task, role, env, flags, tier, label) in [
+        (
+            "explicit",
+            "ultrafast",
+            "ultrafast",
+            &["--speed", "priority"][..],
+            "fast",
+            "快速",
+        ),
+        (
+            "explicit-default",
+            "ultrafast",
+            "fast",
+            &["--speed", "default"],
+            "default",
+            "标准",
+        ),
+        ("environment", "ultrafast", "priority", &[], "fast", "快速"),
+        (
+            "configured",
+            "ultrafast",
+            "default",
+            &[],
+            "ultrafast",
+            "超快",
+        ),
+        ("legacy-priority", "priority", "flex", &[], "fast", "快速"),
+        ("legacy-flex", "flex", "", &[], "default", "标准"),
+    ] {
+        write_role_speed(role.to_owned());
+        check(
+            fixture
+                .start(task, flags)
+                .args(["--model", "gpt-6.1-terra"])
+                .env("MATOU_FOREMAN_ROLES_FILE", &roles)
+                .env("CODEX_SERVICE_TIER", env)
+                .output()
+                .unwrap(),
+            0,
+        );
+        assert_speed(task, tier, label);
+    }
+    assert_eq!(
+        fixture.state("explicit")["options"]["speedOverride"],
+        "fast"
+    );
+
+    let rejected = fixture
+        .start("rejected", &["--speed", "flex"])
+        .output()
+        .unwrap();
+    assert_eq!(rejected.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("无效的 --speed"));
+    assert!(!fixture.runs.join("rejected/state.json").exists());
+
+    let task = "legacy-flex";
+    let state_path = fixture.runs.join(task).join("state.json");
+    let mut state = fixture.state(task);
+    state["options"]["speedOverride"] = json!("priority");
+    fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+    check(
+        fixture
+            .command()
+            .args(["send", task, "--message"])
+            .arg(&fixture.brief)
+            .output()
+            .unwrap(),
+        0,
+    );
+    assert_speed(task, "fast", "快速");
 }
 
 #[test]
