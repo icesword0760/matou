@@ -2209,6 +2209,7 @@ mod tests {
         assert_eq!(server.saved_noise_bytes("session"), saved);
         assert_eq!(claude_hook_reply(&server, &run, &payload)?, response);
         assert_eq!(server.saved_noise_bytes("session"), saved);
+        crate::context_guard::store::flush_saved_stats_blocking();
         let stats = serde_json::to_value(get_saved_stats(root.path(), SystemTime::now()))?;
         assert_eq!(
             stats["agents"]["claude-code"],

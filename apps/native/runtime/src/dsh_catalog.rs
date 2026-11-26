@@ -1680,7 +1680,7 @@ mod tests {
                 &linked,
                 &scope,
                 ListOptions {
-                    query: subdirectory.to_str().unwrap(),
+                    query: subdirectory.to_str().unwrap().trim_start_matches(r"\\?\"),
                     scope: SearchScope::Metadata,
                     ..Default::default()
                 },

@@ -4245,6 +4245,20 @@ fn assert_fresh_permission_confirmed(child: &mut RuntimeChild, mode: &str) -> Re
                         result["sessionId"] == child.session && result["permissionMode"] == mode
                     });
                 if let Some(receipt) = receipt {
+                    if receipt["error"].as_str()
+                        == Some("AI Session is already stopping or recovering")
+                        && !restoring
+                        && Instant::now() < deadline
+                    {
+                        // Shell promotion finishes its startup grace window asynchronously after
+                        // the child's first screen output. Retry once promotion clears.
+                        thread::sleep(Duration::from_millis(50));
+                        child.send(Command::SetProviderPermissionMode {
+                            session_id: child.session.clone(),
+                            mode: mode.into(),
+                        })?;
+                        continue;
+                    }
                     assert!(receipt.get("error").is_none(), "{receipt}");
                     assert!(
                         ready,
