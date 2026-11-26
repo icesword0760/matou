@@ -2003,10 +2003,10 @@ mod workspace {
         draw(window.into(), cx);
         assert_eq!(offset(cx), preview_scroll);
         window
-            .update(cx, |view, _, cx| {
+            .update(cx, |view, _, _| {
                 assert!(view.hover_restore_at.is_some());
+                // The explicit draw below keeps this observation to one frame.
                 view.hover_restore_at = Some(0.);
-                cx.notify();
             })
             .unwrap();
         draw(window.into(), cx);
