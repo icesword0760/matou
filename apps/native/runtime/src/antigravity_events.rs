@@ -264,6 +264,9 @@ impl Run {
         );
         let permission_changed =
             reported_permission.filter(|permission| *permission != self.permission);
+        let follows_native_auto = self.launch_permission == PermissionMode::Default
+            && matches!(self.permission, PermissionMode::Default | PermissionMode::Auto)
+            && matches!(self.bound_permission, None | Some(PermissionMode::Default));
         if let Some(permission) = permission_changed {
             self.permission = permission;
         }
@@ -276,9 +279,7 @@ impl Run {
                 model: text(model).or_else(|| text(model.and_then(|model| model.get("id")))),
                 permission: reported_permission.map(|permission| {
                     // Preserve native defaults on restore when Auto was only observed.
-                    if permission == PermissionMode::Auto
-                        && self.launch_permission != PermissionMode::Auto
-                    {
+                    if permission == PermissionMode::Auto && follows_native_auto {
                         PermissionMode::Default
                     } else {
                         permission

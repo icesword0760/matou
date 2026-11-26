@@ -1371,6 +1371,116 @@ fn slow_clients_reclaim_slots_without_blocking_other_connections() -> Result<()>
 
 #[cfg(unix)]
 #[test]
+fn managed_codex_uses_run_identity_when_environment_is_filtered() -> Result<()> {
+    let mut harness = Harness::new(false, true, GENERATION, fixed_now, IDLE_TIMEOUT)?;
+    let runs = harness.server.runs();
+    let session = fixture_id(8);
+    let launch = |command: &str| {
+        let stale = BTreeMap::from([(CONTROL_IDENTITY_FILE_ENV.into(), "/stale".into())]);
+        ShellLaunch {
+            profile: LaunchProfile::Codex,
+            executable: "codex".into(),
+            argv: vec![
+                "--model".into(),
+                "fork".into(),
+                command.into(),
+                "session".into(),
+            ],
+            cwd: harness.root.path().into(),
+            data_root: harness.root.path().into(),
+            inherited_env: stale.clone(),
+            env: stale,
+            cols: 80,
+            rows: 24,
+        }
+    };
+    let configure = |mut launch: ShellLaunch, run_id: &str| -> Result<(ShellLaunch, PathBuf)> {
+        clear_control_environment(&mut launch);
+        assert!(
+            !launch
+                .inherited_env
+                .contains_key(OsStr::new(CONTROL_IDENTITY_FILE_ENV))
+        );
+        assert!(
+            !launch
+                .env
+                .contains_key(OsStr::new(CONTROL_IDENTITY_FILE_ENV))
+        );
+        runs.inject(&mut launch, &session, run_id)?;
+        assert_eq!(launch.argv[0], "-c");
+        let prefix = format!("shell_environment_policy.set.{CONTROL_IDENTITY_FILE_ENV}=");
+        let path: PathBuf = serde_json::from_str(launch.argv[1].strip_prefix(&prefix).unwrap())?;
+        let token = &launch.env[OsStr::new("MATOU_CONTROL_TOKEN")].to_string_lossy();
+        assert!(launch.argv.iter().all(|arg| !arg.contains(token.as_ref())));
+        assert_eq!(path.parent(), harness.server.endpoint.path.parent());
+        assert_eq!(fs::metadata(&path)?.permissions().mode() & 0o7777, 0o600);
+        Ok((launch, path))
+    };
+    let (resume, path) = configure(launch("resume"), RUN)?;
+    assert_eq!(&resume.argv[2..], ["--model", "fork", "resume", "session"]);
+    let (fork, second_path) = configure(launch("fork"), "second-run")?;
+    assert_eq!(&fork.argv[2..], ["--model", "fork", "fork", "session"]);
+    assert_ne!(path, second_path);
+
+    let cli = |harness: &mut Harness,
+               args: &[&str],
+               env: BTreeMap<std::ffi::OsString, std::ffi::OsString>| {
+        harness.drive(move || {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let code = crate::mt_cli::run_with(
+                &args.iter().map(|arg| (*arg).into()).collect::<Vec<_>>(),
+                || crate::mt_cli::control_identity(|key| env.get(OsStr::new(key)).cloned()),
+                &mut stdout,
+                &mut stderr,
+            );
+            Ok((
+                code,
+                serde_json::from_slice::<Value>(if code == 0 { &stdout } else { &stderr })?,
+            ))
+        })
+    };
+    let mut filtered = BTreeMap::from([(CONTROL_IDENTITY_FILE_ENV.into(), path.clone().into())]);
+    let identify = ["identify", "--json"];
+    let (code, identity) = cli(&mut harness, &identify, filtered.clone())?;
+    assert_eq!(code, 0, "{identity}");
+    assert_eq!(
+        identity["caller"],
+        json!({"sessionId": session, "runId": RUN})
+    );
+    for args in [&["list", "--json"][..], &["read", "self", "--json"][..]] {
+        let (code, result) = cli(&mut harness, args, filtered.clone())?;
+        assert_eq!(code, 0, "{result}");
+    }
+    // An incomplete environment identity must fall back to the complete file pair.
+    filtered.insert("MATOU_CONTROL_ENDPOINT".into(), "/missing.sock".into());
+    assert_eq!(cli(&mut harness, &identify, filtered.clone())?.0, 0);
+    let mut complete = resume.env.clone();
+    complete.insert(CONTROL_IDENTITY_FILE_ENV.into(), "/missing-file".into());
+    assert_eq!(cli(&mut harness, &identify, complete.clone())?.0, 0);
+    assert_eq!(
+        cli(&mut harness, &identify, BTreeMap::new())?.1["code"],
+        "CAPABILITY_DENIED"
+    );
+
+    runs.revoke(RUN);
+    assert!(!path.exists());
+    assert!(second_path.is_file());
+    assert_eq!(
+        cli(&mut harness, &identify, filtered)?.1["code"],
+        "CAPABILITY_DENIED"
+    );
+    assert_eq!(
+        cli(&mut harness, &identify, complete)?.1["code"],
+        "CAPABILITY_DENIED"
+    );
+    drop(harness.server);
+    assert!(!second_path.exists());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn runtime_host_connects_managed_shell_and_revokes_exited_run() -> Result<()> {
     let root = temporary_root()?;
     let workspace = root.path().join("project");

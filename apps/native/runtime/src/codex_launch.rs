@@ -14,6 +14,7 @@ use matou_native_core::{
     provider_launch::{EFFORTS, validate_cwd},
     pty::{LaunchProfile, ShellLaunch, get_var},
 };
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::codex_permissions;
@@ -32,32 +33,32 @@ pub(crate) fn first_screen_ready(elapsed: Duration, emitted_output: bool) -> boo
     elapsed >= STARTUP_GRACE && emitted_output
 }
 
+pub(crate) fn shell_environment_path_arg(name: &str, path: &Path) -> Option<String> {
+    let path = std::path::absolute(path).ok()?;
+    let path = path.to_str()?;
+    #[cfg(windows)]
+    let path = path.replace('\\', "/");
+    Some(format!(
+        "shell_environment_policy.set.{name}={}",
+        json!(path)
+    ))
+}
+
 pub(crate) fn finish_argv(
     argv: &mut Vec<String>,
     status_directory: Option<&Path>,
     roles_file: &Path,
     subcommand: Option<Vec<String>>,
 ) {
-    fn path_value(path: &Path) -> Option<String> {
-        let path = std::path::absolute(path).ok()?;
-        let path = path.to_str()?;
-        #[cfg(windows)]
-        let path = path.replace('\\', "/");
-        Some(json!(path).to_string())
-    }
-
-    if let Some(status_directory) = status_directory.and_then(path_value) {
-        argv.extend([
-            "-c".into(),
-            format!("shell_environment_policy.set.MATOU_AGENT_STATUS_DIR={status_directory}"),
-        ]);
+    if let Some(status_arg) =
+        status_directory.and_then(|path| shell_environment_path_arg("MATOU_AGENT_STATUS_DIR", path))
+    {
+        argv.extend(["-c".into(), status_arg]);
         if roles_file.is_file()
-            && let Some(roles_file) = path_value(roles_file)
+            && let Some(roles_arg) =
+                shell_environment_path_arg("MATOU_FOREMAN_ROLES_FILE", roles_file)
         {
-            argv.extend([
-                "-c".into(),
-                format!("shell_environment_policy.set.MATOU_FOREMAN_ROLES_FILE={roles_file}"),
-            ]);
+            argv.extend(["-c".into(), roles_arg]);
         }
     }
     argv.extend(subcommand.into_iter().flatten());
@@ -123,6 +124,9 @@ pub(crate) fn prepare(
     let field = |key: &str| provider[key].as_str().unwrap_or_default().trim();
     let model = field("model");
     let mut argv = vec!["-c".into(), "check_for_update_on_startup=false".into()];
+    if let Some(status_line) = status_line_arg(&cwd, &environment) {
+        argv.extend(["-c".into(), status_line]);
+    }
     let effort = field("reasoningEffort");
     if effort != "follow" && EFFORTS.contains(&effort) {
         argv.extend([
@@ -173,6 +177,88 @@ pub(crate) fn config_root<'a>(get: impl Fn(&str) -> Option<&'a OsStr>) -> Option
     #[cfg(not(windows))]
     let home = get("HOME");
     home.map(|home| Path::new(home).join(".codex"))
+}
+
+#[derive(Default, Deserialize)]
+struct StatusLineConfig {
+    tui: Option<CodexTuiConfig>,
+    project_root_markers: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+struct CodexTuiConfig {
+    status_line: Option<Vec<String>>,
+}
+
+fn read_status_line_config(root: &Path) -> Option<StatusLineConfig> {
+    match fs::read_to_string(root.join("config.toml")) {
+        Ok(contents) => toml::from_str(&contents).ok(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Some(StatusLineConfig::default()),
+        Err(_) => None,
+    }
+}
+
+fn status_line_arg(cwd: &Path, environment: &BTreeMap<OsString, OsString>) -> Option<String> {
+    let root = config_root(|key| get_var(environment, key))
+        .map(|root| cwd.join(root))
+        .or_else(|| std::env::home_dir().map(|home| home.join(".codex")))?;
+    let config = read_status_line_config(&root)?;
+    let cwd = cwd.canonicalize().ok()?;
+    let root = root.canonicalize().unwrap_or(root);
+    let default_markers = [".git".to_owned()];
+    let markers = config
+        .project_root_markers
+        .as_deref()
+        .unwrap_or(&default_markers);
+    let project_root = cwd
+        .ancestors()
+        .find(|dir| {
+            markers.iter().any(|marker| {
+                let path = dir.join(marker);
+                path.exists() && (marker != ".git" || !path.is_dir() || path.join("HEAD").exists())
+            })
+        })
+        .unwrap_or(&cwd);
+    for dir in cwd
+        .ancestors()
+        .take_while(|dir| dir.starts_with(project_root))
+    {
+        let project_config = dir.join(".codex");
+        if project_config != root
+            && project_config.canonicalize().ok().as_ref() != Some(&root)
+            && read_status_line_config(&project_config)?
+                .tui
+                .and_then(|tui| tui.status_line)
+                .is_some()
+        {
+            // Codex decides whether to trust a project layer and apply its settings.
+            return None;
+        }
+    }
+
+    let items = config
+        .tui
+        .and_then(|tui| tui.status_line)
+        .unwrap_or_else(|| vec!["fast-mode".into()]);
+    let has_speed = items.iter().any(|item| item == "fast-mode");
+    let mut added_speed = false;
+    let items: Vec<_> = items
+        .iter()
+        .filter_map(|item| {
+            let item = match item.as_str() {
+                "model" | "model-name" | "current-dir" | "thread-name" | "git-branch"
+                | "context-remaining" | "context-used" | "context-usage" => return None,
+                "model-with-reasoning" if has_speed => return None,
+                "model-with-reasoning" => "fast-mode",
+                item => item,
+            };
+            if item == "fast-mode" && std::mem::replace(&mut added_speed, true) {
+                return None;
+            }
+            Some(item)
+        })
+        .collect();
+    Some(format!("tui.status_line={}", json!(items)))
 }
 
 fn active_provider(data_root: &Path) -> Result<Value> {
@@ -270,6 +356,50 @@ pub(crate) fn run_batch_agent(args: impl IntoIterator<Item = OsString>) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_status_line_preserves_custom_items_and_honors_project_layers() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let project = temp.path().join("project");
+        let cwd = project.join("nested");
+        let config_root = temp.path().join("codex-home");
+        fs::create_dir_all(&cwd)?;
+        fs::create_dir(&config_root)?;
+        let environment = BTreeMap::from([("CODEX_HOME".into(), config_root.clone().into())]);
+        let arg = || status_line_arg(&cwd, &environment);
+        let config = config_root.join("config.toml");
+
+        assert_eq!(arg().as_deref(), Some(r#"tui.status_line=["fast-mode"]"#));
+        for (contents, expected) in [
+            (
+                r#"[tui]
+status_line = ["approval-mode", "model-with-reasoning", "current-dir",
+               "model-name", "thread-name", "git-branch", "context-usage", "codex-version"]"#,
+                Some(r#"tui.status_line=["approval-mode","fast-mode","codex-version"]"#),
+            ),
+            (
+                r#"tui.status_line = ["model-with-reasoning", "approval-mode", "fast-mode", "fast-mode", "model"]"#,
+                Some(r#"tui.status_line=["approval-mode","fast-mode"]"#),
+            ),
+            ("tui.status_line = []", Some("tui.status_line=[]")),
+            ("[tui", None),
+        ] {
+            fs::write(&config, contents)?;
+            assert_eq!(arg().as_deref(), expected, "{contents}");
+            assert_eq!(fs::read_to_string(&config)?, contents);
+        }
+
+        fs::write(&config, "")?;
+        fs::write(project.join(".git"), "gitdir: /fixture/gitdir")?;
+        fs::create_dir(project.join(".codex"))?;
+        let project_config = project.join(".codex/config.toml");
+        fs::write(&project_config, "tui.status_line_use_colors = true")?;
+        assert_eq!(arg().as_deref(), Some(r#"tui.status_line=["fast-mode"]"#));
+        fs::write(&project_config, "tui.status_line = []")?;
+        assert_eq!(arg(), None);
+        assert_eq!(fs::read_to_string(project_config)?, "tui.status_line = []");
+        Ok(())
+    }
 
     #[test]
     fn codex_foreman_argv_keeps_environment_overrides_before_resume_and_fork() -> Result<()> {

@@ -549,6 +549,8 @@ mod workspace_board_ui {
                     .child(board_guide_icon())
                     .child(view.drag_hint),
             );
+        #[cfg(target_os = "windows")]
+        let header = header.pr(px(18. + crate::windows_titlebar::WINDOWS_CAPTION_CONTROLS_WIDTH));
 
         let scroll = div()
             .id("workspace-board-scroll")

@@ -96,6 +96,7 @@ fn graph_for(child: &mut RuntimeChild, profile: &str) -> Result<Value> {
 }
 
 fn assert_hook_argv(actual: &[String], expected: &[&str]) {
+    let actual = after_control_identity(actual);
     assert_eq!(&actual[..actual.len() - 5], expected);
     let [dev_flag, dev_instructions, flag, hooks, trust] = &actual[actual.len() - 5..] else {
         unreachable!()
@@ -117,6 +118,19 @@ fn assert_hook_argv(actual: &[String], expected: &[&str]) {
     ] {
         assert!(hooks.contains(&format!("{event} = [")), "{event}");
     }
+}
+
+pub(super) fn after_control_identity<S: AsRef<str>>(argv: &[S]) -> &[S] {
+    assert_eq!(argv[0].as_ref(), "-c");
+    let identity: PathBuf = serde_json::from_str(
+        argv[1]
+            .as_ref()
+            .strip_prefix("shell_environment_policy.set.MATOU_CONTROL_IDENTITY_FILE=")
+            .expect("Codex control identity override"),
+    )
+    .expect("valid Codex control identity path");
+    assert!(identity.is_absolute());
+    &argv[2..]
 }
 
 fn mount(db: &Connection, session: &str) -> Result<(String, Option<String>)> {
@@ -301,7 +315,12 @@ fn codex_launch_promotes_exact_commands_on_the_same_card() -> Result<()> {
         assert_shell_gone(old_pid)?;
         assert!(!root.path().join("Shell 家目录/shell-codex-argv").exists());
         let actual = argv(&codex_home.join("argv"))?;
-        let mut expected = vec!["-c", "check_for_update_on_startup=false"];
+        let mut expected = vec![
+            "-c",
+            "check_for_update_on_startup=false",
+            "-c",
+            r#"tui.status_line=["fast-mode"]"#,
+        ];
         let endpoint = if mode == "fullAccess" {
             expected.extend([
                 "-c",
@@ -533,6 +552,8 @@ fn codex_launch_rolls_back_missing_and_immediately_exiting_commands() -> Result<
                 &[
                     "-c",
                     "check_for_update_on_startup=false",
+                    "-c",
+                    r#"tui.status_line=["fast-mode"]"#,
                     "--ask-for-approval",
                     "on-request",
                     "--sandbox",

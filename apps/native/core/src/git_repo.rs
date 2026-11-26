@@ -471,14 +471,23 @@ impl ChangeCounts {
     }
 }
 
-/// Read the symbolic HEAD for a working directory without invoking Git or
-/// touching the index. Linked worktrees store their own HEAD behind a gitfile.
+/// Read HEAD without invoking Git or touching the index. Linked worktrees
+/// store their own HEAD behind a gitfile.
+pub fn current_head(cwd: &Path) -> Option<Head> {
+    let head = worktree_head(cwd)?;
+    let head = head.trim_end();
+    if let Some(branch) = head.strip_prefix("ref: refs/heads/") {
+        return (!branch.is_empty()).then(|| Head::Branch(branch.to_owned()));
+    }
+    (matches!(head.len(), 40 | 64) && head.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| Head::Detached(head.to_owned()))
+}
+
 pub fn current_branch(cwd: &Path) -> Option<String> {
-    worktree_head(cwd)?
-        .trim_end()
-        .strip_prefix("ref: refs/heads/")
-        .filter(|branch| !branch.is_empty())
-        .map(str::to_owned)
+    match current_head(cwd)? {
+        Head::Branch(branch) => Some(branch),
+        Head::Detached(_) => None,
+    }
 }
 
 fn worktree_head(cwd: &Path) -> Option<String> {

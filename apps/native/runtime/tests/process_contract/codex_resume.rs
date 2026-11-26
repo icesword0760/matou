@@ -1,5 +1,6 @@
 use super::{
     codex_events::{emit, node, shutdown, transcript},
+    codex_launch::after_control_identity,
     post_claude_hook_url as post_hook, *,
 };
 use matou_native_core::{
@@ -1382,16 +1383,25 @@ const READ_ONLY_ARGS: &[&str] = &[
 fn assert_permission_argv(home: &Path, expected: &[&str]) -> Result<()> {
     let raw = fs::read_to_string(home.join("argv"))?;
     let argv: Vec<_> = raw.split_terminator('\0').collect();
+    let argv = after_control_identity(&argv);
     let hook = argv
         .iter()
         .position(|arg| arg.starts_with("hooks={ "))
         .context("Codex run hooks")?;
-    assert_eq!(&argv[..2], ["-c", "check_for_update_on_startup=false"]);
+    assert_eq!(
+        &argv[..4],
+        [
+            "-c",
+            "check_for_update_on_startup=false",
+            "-c",
+            r#"tui.status_line=["fast-mode"]"#,
+        ]
+    );
     assert_eq!(argv[hook - 3], "-c");
     assert!(argv[hook - 2].starts_with("developer_instructions="));
     assert!(argv[hook - 2].contains("mt identify --json"));
     assert_eq!(argv[hook - 1], "-c");
-    assert_eq!(&argv[2..hook - 3], expected);
+    assert_eq!(&argv[4..hook - 3], expected);
     assert_eq!(
         &argv[hook + 1..hook + 3],
         ["--dangerously-bypass-hook-trust", "-c"]

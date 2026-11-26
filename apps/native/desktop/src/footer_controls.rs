@@ -167,6 +167,21 @@ pub(super) struct FooterPopover {
     _activation: Option<Subscription>,
 }
 
+fn git_target_cwd(node: &Value, live: Option<&Value>) -> Option<PathBuf> {
+    let live = live.unwrap_or(&Value::Null);
+    [
+        &live["gitCwd"],
+        &node["git"]["cwd"],
+        &node["cwd"],
+        &node["environment"]["path"],
+        &node["worktree"]["path"],
+    ]
+    .into_iter()
+    .filter_map(Value::as_str)
+    .map(PathBuf::from)
+    .find(|path| path.is_absolute())
+}
+
 use matou_native_runtime::host::{
     EnvironmentChangeResult, SessionEnvironmentReply, SessionEnvironmentTarget,
 };
@@ -500,7 +515,7 @@ impl Workspace {
         if self
             .footer_popovers
             .get(&handle)
-            .is_some_and(|popup| popup.menu == menu)
+            .is_some_and(|popup| popup.menu == menu && self.footer_popover_current(popup, window))
         {
             self.dismiss_footer_popover(window, cx);
             return;
@@ -508,7 +523,11 @@ impl Workspace {
         let Some(session) = self.footer_session(window).map(str::to_owned) else {
             return;
         };
-        let cwd = self.footer_cwd(&session);
+        let cwd = if menu == FooterMenu::Git {
+            self.footer_git_cwd(&session)
+        } else {
+            self.footer_cwd(&session)
+        };
         self.dismiss_permission_menu(window, cx);
         self.dismiss_hud_wiring_overlay(window, cx);
         let git = (menu == FooterMenu::Git).then(|| {
@@ -604,6 +623,15 @@ impl Workspace {
             })
             .map(PathBuf::from)
             .filter(|path| path.is_absolute())
+    }
+
+    fn footer_git_cwd(&self, id: &str) -> Option<PathBuf> {
+        git_target_cwd(self.hud_node(id)?, self.live_agent_hud(id)).or_else(|| self.footer_cwd(id))
+    }
+
+    pub(super) fn footer_popover_current(&self, popup: &FooterPopover, window: &Window) -> bool {
+        self.footer_session(window) == Some(popup.session.as_str())
+            && (popup.menu != FooterMenu::Git || self.footer_git_cwd(&popup.session) == popup.cwd)
     }
 
     fn request_footer_diagnostics(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1239,7 +1267,7 @@ impl Workspace {
             return;
         };
         if popup.git.as_ref().is_none_or(|git| git.busy.is_some())
-            || self.footer_session(window) != Some(popup.session.as_str())
+            || !self.footer_popover_current(popup, window)
             || (action != GitAction::Status && self.read_only.is_some())
         {
             return;
@@ -1307,11 +1335,13 @@ impl Workspace {
         let Some(mut request) = self.pending_footer_git.remove(&reply.request_id) else {
             return;
         };
-        let visible = self
-            .git_menu_mut(request.handle)
-            .is_some_and(|git| git.busy == Some((reply.request_id, request.action)));
+        let current = self.footer_git_cwd(&request.session).as_ref() == Some(&request.cwd);
+        let visible = current
+            && self
+                .git_menu_mut(request.handle)
+                .is_some_and(|git| git.busy == Some((reply.request_id, request.action)));
         let completed = reply.result.is_ok();
-        if let Ok(status) = &reply.result {
+        if current && let Ok(status) = &reply.result {
             self.remember_footer_git(&request, reply.request_id, status);
         }
         if visible
@@ -1434,7 +1464,8 @@ impl Workspace {
 
     pub(super) fn footer_git_projection(&self, session: &str) -> Option<FooterGit> {
         let projection = self.footer_git_projections.get(session)?;
-        (self.footer_cwd(session).as_ref() == Some(&projection.cwd)).then(|| projection.git.clone())
+        (self.footer_git_cwd(session).as_ref() == Some(&projection.cwd))
+            .then(|| projection.git.clone())
     }
 
     pub(super) fn release_footer_git_projection(
@@ -1450,6 +1481,11 @@ impl Workspace {
                 .is_some_and(|entry| {
                     request_id > entry.request_id
                         && entry.received.elapsed() >= Duration::from_secs(2)
+                        && !self.footer_popovers.values().any(|popup| {
+                            popup.session == session
+                                && popup.cwd.as_ref() == Some(&entry.cwd)
+                                && popup.git.as_ref().is_some_and(|git| git.status.is_some())
+                        })
                 })
         {
             self.footer_git_projections.remove(session);
@@ -1498,7 +1534,7 @@ impl Workspace {
         let Some(popup) = self.footer_popovers.get(&window.window_handle()) else {
             return false;
         };
-        if self.footer_session(window) != Some(popup.session.as_str()) {
+        if !self.footer_popover_current(popup, window) {
             self.dismiss_footer_popover(window, cx);
             return false;
         }
@@ -3755,6 +3791,42 @@ mod tests {
         assert_eq!(clean.root.as_deref(), Some(std::path::Path::new(path)));
         let legacy = FooterGit::projected(&node, None, InterfaceLocale::English).unwrap();
         assert_eq!(legacy.label, "old*");
+    }
+
+    #[::core::prelude::v1::test]
+    fn git_footer_and_menu_follow_the_cards_worktree() {
+        let (main, worktree, live_worktree) = if cfg!(windows) {
+            (r"C:\main", r"C:\main\linked", r"C:\live")
+        } else {
+            ("/main", "/main/linked", "/live ")
+        };
+        let mut node = json!({
+            "cwd": worktree,
+            "environment": {"path": main},
+            "git": {"branch": "main", "dirty": true, "root": main},
+        });
+        assert_eq!(git_target_cwd(&node, None), Some(PathBuf::from(worktree)));
+
+        node["git"] = json!({"cwd": worktree, "branch": "feature", "dirty": false});
+        let locale = InterfaceLocale::English;
+        let git = FooterGit::projected(&node, None, locale).unwrap();
+        assert_eq!(git.label, "feature");
+        assert!(git.available);
+
+        let mut live = json!({"gitCwd": live_worktree, "gitBranch": null, "gitDirty": true,
+            "gitDetachedHead": "0123456789abcdef0123456789abcdef01234567"});
+        assert_eq!(
+            git_target_cwd(&node, Some(&live)),
+            Some(PathBuf::from(live_worktree))
+        );
+        let git = FooterGit::projected(&node, Some(&live), locale).unwrap();
+        assert_eq!(git.label, "HEAD 0123456*");
+        assert!(git.available);
+
+        live["gitDetachedHead"] = Value::Null;
+        let git = FooterGit::projected(&node, Some(&live), locale).unwrap();
+        assert!(!git.available);
+        assert!(git.branch.is_none());
     }
 
     #[::core::prelude::v1::test]

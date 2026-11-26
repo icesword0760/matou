@@ -6164,7 +6164,7 @@ while IFS= read -r line; do :; done
         .find_map(|args| (args[0] == "--settings").then_some(args[1]))
         .context("expected per-session settings")?;
     let settings: Value = serde_json::from_slice(&fs::read(settings_path)?)?;
-    assert_eq!(settings["statusLine"]["stack_with_default"], true);
+    assert_eq!(settings["statusLine"]["stack_with_default"], false);
     assert_eq!(settings["toolPermission"], "always-proceed");
     assert_eq!(settings["enableTerminalSandbox"], false);
     assert_eq!(settings["allowNonWorkspaceAccess"], true);

@@ -327,7 +327,10 @@ pub fn observation_patch(
             && !key.is_empty()
             && key.bytes().all(config_key_byte)
         {
-            dropping = matches!(key, "backend" | "taskNotifications" | "upstreamRetry");
+            dropping = matches!(
+                key,
+                "backend" | "taskNotifications" | "upstreamRetry" | "contextBar"
+            );
         }
         if !dropping {
             patch.push((*line).into());
@@ -337,6 +340,7 @@ pub fn observation_patch(
         "    backend: dsh".into(),
         "    taskNotifications: \"off\"".into(),
         "    upstreamRetry: false".into(),
+        "    contextBar: false".into(),
         String::new(),
     ]);
     Ok(patch.join("\n"))

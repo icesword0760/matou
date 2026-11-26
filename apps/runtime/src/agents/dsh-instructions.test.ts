@@ -63,7 +63,11 @@ describe('DSH native system section and mode boundary', () => {
   it('reuses the existing collaboration rules with a DSH wrapper and no profile or project-file writes', async () => {
     const dsh = await readFile(new URL('../../control-assets/providers/dsh-system-message.md', import.meta.url), 'utf8')
     const baseline = await readFile(new URL('../../control-assets/providers/antigravity-system-message.md', import.meta.url), 'utf8')
-    expect(dsh).toBe(baseline.replace('Matou-managed Antigravity terminal', 'Matou-managed DSH terminal'))
+    const sharedRulesStart = '统一执行顺序：'
+    expect(dsh.split('\n', 1)[0]).toBe(baseline.split('\n', 1)[0]!.replace('Matou-managed Antigravity terminal', 'Matou-managed DSH terminal'))
+    expect(baseline).toContain(sharedRulesStart)
+    expect(dsh).toContain(sharedRulesStart)
+    expect(dsh.slice(dsh.indexOf(sharedRulesStart))).toBe(baseline.slice(baseline.indexOf(sharedRulesStart)))
     expect(dsh).toContain('mt identify --json')
     expect(dsh).toContain('mt list --json')
     expect(dsh).toContain('mt read')

@@ -506,6 +506,8 @@ fn codex_current_fork_uses_the_reserved_source_and_only_confirms_session_start()
         [
             "-c",
             "check_for_update_on_startup=false",
+            "-c",
+            r#"tui.status_line=["fast-mode"]"#,
             "--model",
             "source-model",
             "--ask-for-approval",

@@ -863,6 +863,7 @@ printf '%s\n' "$PWD" > "$CODEX_HOME/$name-cwd"
 printf 'CODEX FIXTURE READY\n'
 while IFS= read -r line; do
   printf '%s\n' "$line" >> "$CODEX_HOME/$name-input"
+  [ "$line" != /exit ] || exit 0
 done
 "#,
         )?;
@@ -1172,6 +1173,32 @@ fn fork_started(host: &RuntimeHost, id: &str) -> Result<()> {
     Ok(())
 }
 
+fn set_codex_source_permission(
+    host: &RuntimeHost,
+    fixture: &CodexFixture,
+    source: &str,
+    rollout: &Path,
+    mode: &str,
+    argument: &str,
+) -> Result<()> {
+    send(
+        host,
+        Command::SetProviderPermissionMode {
+            session_id: source.to_owned(),
+            mode: mode.to_owned(),
+        },
+    )?;
+    marker(&fixture.home.join("source-argv"), |args| {
+        args.lines().any(|arg| arg == argument)
+    })?;
+    post(
+        &fixture.hook("source")?,
+        &codex_hook("SessionStart", PARENT, &fixture.options.workspace, rollout),
+    )?;
+    identity(host, source, PARENT)?;
+    Ok(())
+}
+
 #[test]
 fn codex_fork_leases_roll_back_unbound_checkout_and_retry_bound_checkout_after_restart()
 -> Result<()> {
@@ -1193,6 +1220,7 @@ fn codex_fork_leases_roll_back_unbound_checkout_and_retry_bound_checkout_after_r
         ..Default::default()
     })?;
     let (scene, source, source_hook, parent) = fixture.source(&host)?;
+    let read_only = "default_permissions=\":read-only\"";
     for name in ["UserPromptSubmit", "Stop"] {
         post(
             &source_hook,
@@ -1203,6 +1231,7 @@ fn codex_fork_leases_roll_back_unbound_checkout_and_retry_bound_checkout_after_r
         node(graph, &source).is_some_and(|node| node["canFork"] == true)
     })
     .context("Codex source readiness")?;
+    set_codex_source_permission(&host, &fixture, &source, &parent, "readOnly", read_only)?;
 
     let current = fork(
         &host,
@@ -1212,6 +1241,11 @@ fn codex_fork_leases_roll_back_unbound_checkout_and_retry_bound_checkout_after_r
         "current fork",
     )?;
     let hook = fixture.hook("fork")?;
+    assert!(
+        fs::read_to_string(fixture.home.join("fork-argv"))?
+            .lines()
+            .any(|arg| arg == read_only)
+    );
     let child = fixture.rollout(CHILD, &fixture.options.workspace)?;
     post(
         &hook,
@@ -1283,6 +1317,14 @@ fn codex_fork_leases_roll_back_unbound_checkout_and_retry_bound_checkout_after_r
     let branch = git(&checkout, &["branch", "--show-current"])?
         .trim()
         .to_owned();
+    set_codex_source_permission(
+        &host,
+        &fixture,
+        &source,
+        &parent,
+        "approveForMe",
+        "--approve-for-me",
+    )?;
     host.shutdown()?;
     fs::remove_file(fixture.home.join("fork-argv"))?;
 
@@ -1299,6 +1341,9 @@ fn codex_fork_leases_roll_back_unbound_checkout_and_retry_bound_checkout_after_r
     )?;
     fork_started(&restarted, &managed).context("retry after runtime restart")?;
     let hook = fixture.hook("fork")?;
+    let args = fs::read_to_string(fixture.home.join("fork-argv"))?;
+    assert!(args.lines().any(|arg| arg == read_only));
+    assert!(!args.lines().any(|arg| arg == "--approve-for-me"));
     let third = "01a1ddc1-e832-7cf2-83b7-5adb2f12224e";
     let rollout = fixture.rollout(third, &checkout)?;
     post(
@@ -1322,6 +1367,15 @@ fn codex_fork_leases_roll_back_unbound_checkout_and_retry_bound_checkout_after_r
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
     assert_eq!((fence, lease_token, count), (3, None, 3));
+    let permission = |id| -> Result<Value> {
+        Ok(matou_native_core::sessions::codex_binding(&database, id)?
+            .context("Codex permission binding")?
+            .metadata["permissionMode"]
+            .clone())
+    };
+    assert_eq!(permission(&source)?, "approveForMe");
+    assert_eq!(permission(&current)?, "readOnly");
+    assert_eq!(permission(&managed)?, "readOnly");
     drop(database);
     let repo = result(
         &restarted,
@@ -1333,6 +1387,20 @@ fn codex_fork_leases_roll_back_unbound_checkout_and_retry_bound_checkout_after_r
         "gitRepoResult",
     )?;
     assert_eq!(repo["linkedWorktree"], true);
+    input(&restarted, &managed, b"/exit\r")?;
+    graph(&restarted, |graph| {
+        node(graph, &managed).is_some_and(|child| child["workStatus"] == "exited")
+    })?;
+    send(&restarted, Command::RestartSession { session_id: managed.clone() })?;
+    let args = marker(&fixture.home.join("source-argv"), |args| {
+        args.lines().any(|arg| arg == third)
+    })?;
+    assert!(args.lines().any(|arg| arg == read_only));
+    assert!(!args.lines().any(|arg| arg == "--approve-for-me"));
+    let hook = fixture.hook("source")?;
+    let cwd = fs::read_to_string(fixture.home.join("source-cwd"))?;
+    post(&hook, &codex_hook("SessionStart", third, Path::new(cwd.trim()), &rollout))?;
+    identity(&restarted, &managed, third)?;
     restarted.shutdown()
 }
 

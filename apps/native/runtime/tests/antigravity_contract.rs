@@ -554,6 +554,8 @@ fn antigravity_default_follows_native_modes_without_persisting_explicit_auto() {
     assert_eq!(update.permission_changed, Some(PermissionMode::Plan));
     hud.ingest_provider(&plan, 4.);
     assert_eq!(hud.snapshot(4.).permission_mode, Some("plan"));
+    let update = observed(run.ingest("current", Source::Statusline, &auto, 5));
+    assert_eq!(update.identity.unwrap().permission, Some(PermissionMode::Auto));
 
     let mut explicit = Run::new("current", LaunchMode::Fresh, PermissionMode::Auto);
     let update = observed(explicit.ingest("current", Source::Statusline, &auto, 1));

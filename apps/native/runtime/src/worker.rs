@@ -11,6 +11,8 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use matou_native_terminal::{GridSelection, InputModes, Screen, SelectionAction, Theme};
 
+#[cfg(windows)]
+use crate::powershell_cwd::{PowerShellCwd, read_report};
 use crate::{
     SessionEvent, SessionOptions,
     search::{SearchRequest, SearchResult},
@@ -19,6 +21,8 @@ use crate::{
 };
 
 const MAX_POLL_WAIT: Duration = Duration::from_millis(250);
+#[cfg(windows)]
+const POWERSHELL_CWD_POLL_INTERVAL: Duration = Duration::from_millis(125);
 
 #[derive(Debug)]
 pub struct WorkerEvent {
@@ -182,6 +186,16 @@ impl SessionWorker {
             .name("matou-shell-session".into())
             .spawn(move || {
                 let session_id = options.session_id.clone();
+                #[cfg(windows)]
+                let (options, powershell_cwd) = {
+                    let mut options = options;
+                    let report =
+                        PowerShellCwd::attach(&mut options.launch).unwrap_or_else(|error| {
+                            eprintln!("could not enable PowerShell directory tracking: {error:#}");
+                            None
+                        });
+                    (options, report)
+                };
                 match Session::launch(options) {
                     Ok(mut session) => {
                         if started
@@ -201,6 +215,8 @@ impl SessionWorker {
                             &incoming,
                             &events,
                             &worker_input,
+                            #[cfg(windows)]
+                            powershell_cwd,
                         )
                     }
                     Err(error) => {
@@ -391,8 +407,13 @@ fn run(
     incoming: &Receiver<WorkerCommand>,
     events: &Sender<WorkerEvent>,
     shell_input: &Mutex<ShellInput>,
+    #[cfg(windows)] mut powershell_cwd: Option<PowerShellCwd>,
 ) -> Result<()> {
     let mut next = None;
+    #[cfg(windows)]
+    let mut cwd_poll_at = Instant::now();
+    #[cfg(windows)]
+    let mut last_reported_cwd = None;
     #[cfg(test)]
     let mut fail_promotion_clear = false;
     loop {
@@ -587,8 +608,35 @@ fn run(
         } else {
             MAX_POLL_WAIT
         };
+        #[cfg(windows)]
+        let wait = if powershell_cwd.is_some() {
+            wait.min(cwd_poll_at.saturating_duration_since(Instant::now()))
+        } else {
+            wait
+        };
         match session.poll(wait) {
             Ok(batch) => {
+                #[cfg(windows)]
+                let mut batch = batch;
+                #[cfg(windows)]
+                if let Some(report) = &powershell_cwd
+                    && Instant::now() >= cwd_poll_at
+                {
+                    cwd_poll_at = Instant::now() + POWERSHELL_CWD_POLL_INTERVAL;
+                    if let Some(cwd) = read_report(report.path())
+                        && std::path::Path::new(&cwd).is_absolute()
+                        && last_reported_cwd.as_ref() != Some(&cwd)
+                    {
+                        last_reported_cwd = Some(cwd.clone());
+                        batch.insert(
+                            0,
+                            SessionEvent::CwdCaptured {
+                                run_id: run_id.to_owned(),
+                                cwd,
+                            },
+                        );
+                    }
+                }
                 if let Err(error) = publish(events, id, run_id, batch) {
                     let _ = finish(session, id, run_id, events);
                     return Err(error);
@@ -608,6 +656,8 @@ fn run(
             }
         }
         if session.is_closed() {
+            #[cfg(windows)]
+            drop(powershell_cwd.take());
             // Keep serving the final screen and pending replay after exit.
             // Wake for a held frame or pending search refresh after the last output.
             let command = match session.poll_deadline() {

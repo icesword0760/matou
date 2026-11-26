@@ -37,6 +37,8 @@ pub mod model_router;
 pub mod mt_cli;
 mod native_hooks;
 pub mod owner;
+#[cfg(any(windows, test))]
+mod powershell_cwd;
 pub mod protocol;
 mod provider_catalog;
 pub use provider_catalog::{HistoryText, HistoryTextSource, history_text};

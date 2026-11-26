@@ -270,14 +270,14 @@ mod sigkill {
         })?;
         assert_eq!(
             resumed.applied_versions,
-            (interrupted..=35).collect::<Vec<_>>()
+            (interrupted..=36).collect::<Vec<_>>()
         );
-        assert_eq!(resumed.current_version, 35);
+        assert_eq!(resumed.current_version, 36);
         drop(db);
 
         let db = open_read_only(&path)?;
         let resumed_history = history(&db)?;
-        assert_eq!(resumed_history.len(), 35);
+        assert_eq!(resumed_history.len(), 36);
         assert_eq!(resumed_history[..committed as usize], expected_history);
         assert!(
             resumed_history[committed as usize..]
@@ -391,7 +391,7 @@ fn read_only_snapshot_survives_v35_migration_and_delays_checkpoint() -> Result<(
     // checkpoint until that reader releases its old snapshot.
     writer.busy_timeout(std::time::Duration::ZERO)?;
     let report = migrate(&mut writer, UPGRADE_AT)?;
-    assert_eq!(report.applied_versions, [35]);
+    assert_eq!(report.applied_versions, [35, 36]);
     assert_ne!(schema(&writer)?, old_schema);
     assert_eq!(schema(&snapshot)?, old_schema);
     assert_eq!(history(&snapshot)?, old_history);
@@ -407,7 +407,7 @@ fn read_only_snapshot_survives_v35_migration_and_delays_checkpoint() -> Result<(
     let mut reopened = Connection::open(&path)?;
     configure_connection(&reopened)?;
     let report = migrate(&mut reopened, UPGRADE_AT + 1)?;
-    assert_eq!(report.current_version, 35);
+    assert_eq!(report.current_version, 36);
     assert!(report.applied_versions.is_empty());
     assert_saved_session(&reopened)?;
     assert_intact(&reopened)

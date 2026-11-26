@@ -61,7 +61,17 @@ pub(crate) use windows::connect as connect_pipe;
 #[cfg(windows)]
 use windows::{Endpoint, accept_connections};
 
-const CONTROL_ENV: [&str; 11] = [
+pub(crate) const CONTROL_IDENTITY_FILE_ENV: &str = "MATOU_CONTROL_IDENTITY_FILE";
+
+#[cfg(unix)]
+#[derive(Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ControlIdentityFile {
+    pub(crate) endpoint: PathBuf,
+    pub(crate) token: String,
+}
+
+const CONTROL_ENV: [&str; 12] = [
     "MATOU_CONTROL_ENDPOINT",
     "MATOU_CONTROL_TOKEN",
     "MATOU_CONTROL_PROTOCOL",
@@ -73,6 +83,7 @@ const CONTROL_ENV: [&str; 11] = [
     "MATOU_CONTROL_ASSET_ROOT",
     "DSH_MATOU_CONTROL_TOKEN",
     "MATOU_CONTROL_RUNTIME",
+    CONTROL_IDENTITY_FILE_ENV,
 ];
 
 pub(crate) fn clear_control_environment(launch: &mut ShellLaunch) {
@@ -107,6 +118,23 @@ impl RunControl {
             "MATOU_CONTROL_RUNTIME".into(),
             std::env::current_exe()?.into_os_string(),
         );
+        #[cfg(unix)]
+        let token = if launch.profile == matou_native_core::pty::LaunchProfile::Codex {
+            self.tokens.issue_with(
+                run_id,
+                session_id,
+                MANAGED_SCOPES,
+                i64::MAX,
+                |token, capability| {
+                    capability._identity_file = Some(self.prepare_codex_identity(launch, token)?);
+                    Ok(())
+                },
+            )?
+        } else {
+            self.tokens
+                .issue(run_id, session_id, MANAGED_SCOPES, i64::MAX)?
+        };
+        #[cfg(not(unix))]
         let token = self
             .tokens
             .issue(run_id, session_id, MANAGED_SCOPES, i64::MAX)?;
@@ -123,6 +151,37 @@ impl RunControl {
             launch.env.insert(key.into(), value.into());
         }
         Ok(())
+    }
+
+    #[cfg(unix)]
+    fn prepare_codex_identity(
+        &self,
+        launch: &mut ShellLaunch,
+        token: &str,
+    ) -> Result<tempfile::TempPath> {
+        let endpoint = std::path::absolute(&self.endpoint)?;
+        let parent = endpoint.parent().context("control directory is missing")?;
+        let mut file = tempfile::Builder::new()
+            .prefix("identity-")
+            .tempfile_in(parent)
+            .context("create Codex control identity file")?;
+        file.as_file()
+            .set_permissions(Permissions::from_mode(0o600))
+            .context("set Codex control identity permissions")?;
+        serde_json::to_writer(
+            &mut file,
+            &ControlIdentityFile {
+                endpoint,
+                token: token.into(),
+            },
+        )
+        .context("write Codex control identity file")?;
+        let override_arg =
+            crate::codex_launch::shell_environment_path_arg(CONTROL_IDENTITY_FILE_ENV, file.path())
+                .context("encode Codex control identity path")?;
+        // Inject before any Codex resume or fork subcommand already in the launch.
+        launch.argv.splice(..0, ["-c".into(), override_arg]);
+        Ok(file.into_temp_path())
     }
 
     pub(crate) fn revoke(&self, run_id: &str) {
@@ -180,6 +239,8 @@ struct Capability {
     scopes: &'static [&'static str],
     expires_at: i64,
     runtime_generation: String,
+    #[cfg(unix)]
+    _identity_file: Option<tempfile::TempPath>,
 }
 
 struct Tokens {
@@ -202,17 +263,32 @@ impl Tokens {
         scopes: &'static [&'static str],
         expires_at: i64,
     ) -> Result<String> {
+        self.issue_with(run_id, session_id, scopes, expires_at, |_, _| Ok(()))
+    }
+
+    fn issue_with(
+        &self,
+        run_id: &str,
+        session_id: &str,
+        scopes: &'static [&'static str],
+        expires_at: i64,
+        prepare: impl FnOnce(&str, &mut Capability) -> Result<()>,
+    ) -> Result<String> {
         let mut bytes = [0; 32];
         getrandom::fill(&mut bytes).map_err(|_| anyhow::anyhow!("generate control capability"))?;
         let token = URL_SAFE_NO_PAD.encode(bytes);
-        self.records.lock().unwrap().push(Capability {
+        let mut capability = Capability {
             digest: Sha256::digest(token.as_bytes()).into(),
             run_id: run_id.into(),
             session_id: session_id.into(),
             scopes,
             expires_at,
             runtime_generation: self.generation.clone(),
-        });
+            #[cfg(unix)]
+            _identity_file: None,
+        };
+        prepare(&token, &mut capability)?;
+        self.records.lock().unwrap().push(capability);
         Ok(token)
     }
 

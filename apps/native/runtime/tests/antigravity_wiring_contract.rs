@@ -184,7 +184,7 @@ done
             .collect::<Vec<_>>();
         assert_eq!(args.first().map(String::as_str), Some("--settings"));
         let settings: Value = serde_json::from_slice(&fs::read(&args[1])?)?;
-        assert_eq!(settings["statusLine"]["stack_with_default"], true);
+        assert_eq!(settings["statusLine"]["stack_with_default"], false);
         Ok(Run {
             endpoint,
             statusline: settings["statusLine"]["command"]
@@ -577,6 +577,7 @@ fn promotion_installs_and_repairs_plugin_and_projects_authenticated_activity() -
     );
     let second = fixture.run(2)?;
     assert_eq!(second.resume_arg(), Some(SOURCE));
+    assert!(second.args.windows(2).any(|args| args == ["--mode", "plan"]));
     assert_eq!(
         fs::metadata(plugin.join("plugin.json"))?.modified()?,
         version
@@ -762,6 +763,7 @@ fn catalog_recovers_retries_and_obeys_read_only_storage() -> Result<()> {
 #[test]
 fn fork_waits_for_parent_idle_and_retry_uses_a_new_run() -> Result<()> {
     let fixture = Fixture::new()?;
+    fixture.write_history("Fork source")?;
     let mut host = fixture.start()?;
     let (scene, source) = ready(&host)?;
     fixture.promote(&host, &source)?;
@@ -771,6 +773,32 @@ fn fork_waits_for_parent_idle_and_retry_uses_a_new_run() -> Result<()> {
     parent.hook("PreInvocation", SOURCE)?;
     parent.hook("Stop", SOURCE)?;
     graph(&host, |graph| node(graph, &source)["canFork"] == true)?;
+    send(
+        &host,
+        Command::SetProviderPermissionMode {
+            session_id: source.clone(),
+            mode: "turbo".into(),
+        },
+    )?;
+    let parent = fixture.run(2)?;
+    parent.status(SOURCE, "idle")?;
+    let receipt = graph(&host, |graph| {
+        graph["providerPermissionModeResults"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|result| result["sessionId"] == source && result["permissionMode"] == "turbo")
+    })?;
+    assert!(receipt["providerPermissionModeResults"][0]["error"].is_null());
+    let assert_turbo = |run: &Run| -> Result<()> {
+        let settings: Value = serde_json::from_slice(&fs::read(&run.args[1])?)?;
+        assert_eq!(settings["agentMode"], "accept-edits");
+        assert_eq!(settings["toolPermission"], "always-proceed");
+        assert_eq!(settings["enableTerminalSandbox"], false);
+        assert!(run.args.iter().any(|arg| arg == "--dangerously-skip-permissions"));
+        Ok(())
+    };
+    assert_turbo(&parent)?;
     send(
         &host,
         Command::ForkSession {
@@ -789,8 +817,9 @@ fn fork_waits_for_parent_idle_and_retry_uses_a_new_run() -> Result<()> {
         .as_str()
         .with_context(|| response.to_string())?
         .to_owned();
-    let first = fixture.run(2)?;
+    let first = fixture.run(3)?;
     assert_eq!(first.resume_arg(), Some(SOURCE));
+    assert_turbo(&first)?;
     first.status(SOURCE, "authenticating")?;
     first.status(CHILD, "idle")?;
     // This ordinary input is a PTY barrier while callbacks are processed.
@@ -821,8 +850,9 @@ fn fork_waits_for_parent_idle_and_retry_uses_a_new_run() -> Result<()> {
         graph["forkSessionResult"]["sessionId"] == child
     })?;
     assert!(retry["forkSessionResult"]["error"].is_null(), "{retry}");
-    let second = fixture.run(3)?;
+    let second = fixture.run(4)?;
     assert_eq!(second.resume_arg(), Some(SOURCE));
+    assert_turbo(&second)?;
     assert_ne!(first.endpoint, second.endpoint);
     second.status(SOURCE, "idle")?;
     wait(|| Ok(second.input_log().contains("/fork").then_some(())))?;
@@ -831,6 +861,7 @@ fn fork_waits_for_parent_idle_and_retry_uses_a_new_run() -> Result<()> {
     let bound = identity(&host, &child, "confirmed")?;
     assert_eq!(bound["providerSessionId"], CHILD);
     assert_eq!(bound["metadata"]["canFork"], true);
+    assert_eq!(bound["metadata"]["permissionMode"], "turbo");
     assert_eq!(
         second
             .input_log()
@@ -839,5 +870,17 @@ fn fork_waits_for_parent_idle_and_retry_uses_a_new_run() -> Result<()> {
             .count(),
         1
     );
+    let mut history: Value = serde_json::from_slice(&fs::read(fixture.history_file())?)?;
+    history["conversations"][CHILD] = history["conversations"][SOURCE].clone();
+    fs::write(fixture.history_file(), serde_json::to_vec(&history)?)?;
+    input(&host, &child, b"/exit\r")?;
+    graph(&host, |graph| node(graph, &child)["workStatus"] == "exited")?;
+    send(&host, Command::RestartSession { session_id: child.clone() })?;
+    let restored = fixture.run(5)?;
+    assert_eq!(restored.resume_arg(), Some(CHILD));
+    assert_turbo(&restored)?;
+    restored.status(CHILD, "idle")?;
+    let restored = identity(&host, &child, "confirmed")?;
+    assert_eq!(restored["metadata"]["permissionMode"], "turbo");
     host.shutdown()
 }

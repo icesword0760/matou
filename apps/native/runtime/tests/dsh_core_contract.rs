@@ -247,6 +247,8 @@ fn dsh_patch_preserves_literal_config_and_limits_observer_changes() {
     model: native-model
     preset: !!js process.env.DSH_PRESET ?? undefined
     backend: original
+    contextBar: true
+    statusBar: true
     taskNotifications: all
     upstreamRetry:
       maxRetries: 5
@@ -277,10 +279,12 @@ fn dsh_patch_preserves_literal_config_and_limits_observer_changes() {
   config:
     model: native-model
     preset: !!js process.env.DSH_PRESET ?? undefined
+    statusBar: true
     fullscreen: true
     backend: dsh
     taskNotifications: \"off\"
     upstreamRetry: false
+    contextBar: false
 "
     );
     for invalid in [

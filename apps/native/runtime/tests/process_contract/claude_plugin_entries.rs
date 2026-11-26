@@ -47,7 +47,9 @@ printf '%s' "$PWD" > "$record.cwd"
 [ "$1" = --settings ]
 /bin/cat "$2" > "$record.settings"
 printf 'PLUGIN_CLAUDE_READY:%s\n' "$$"
-exec /bin/sleep 60
+while IFS= read -r line; do
+  [ "$line" != /exit ] || exit 0
+done
 "#,
         )?;
         fs::set_permissions(stub, fs::Permissions::from_mode(0o700))?;
@@ -290,18 +292,19 @@ fn packaged_argv_for_create_restore_permission_restart_and_fork() -> Result<()> 
 
     runtime.send(Command::SetProviderPermissionMode {
         session_id: fresh.session.clone(),
-        mode: "bypassPermissions".into(),
+        mode: "dontAsk".into(),
     })?;
     let restarted = fixture.next_launch(
         &mut runtime,
-        "permission restart to bypass",
+        "permission restart to don't ask",
         &[
-            "--model", MODEL, "--effort", "low", "--resume", PARENT, BYPASS,
+            "--model", MODEL, "--effort", "low", "--resume", PARENT,
+            "--permission-mode", "dontAsk",
         ],
     )?;
     assert_eq!(restarted.session, fresh.session);
-    post_claude_identity(&restarted.settings, PARENT, "bypassPermissions", MODEL)?;
-    let result = permission_mode_result(&mut runtime, "bypassPermissions")?;
+    post_claude_identity(&restarted.settings, PARENT, "dontAsk", MODEL)?;
+    let result = permission_mode_result(&mut runtime, "dontAsk")?;
     assert!(result.get("error").is_none(), "{result}");
 
     for event in ["UserPromptSubmit", "Stop"] {
@@ -342,11 +345,29 @@ fn packaged_argv_for_create_restore_permission_restart_and_fork() -> Result<()> 
             "--resume",
             PARENT,
             "--fork-session",
-            BYPASS,
+            "--permission-mode",
+            "dontAsk",
         ],
     )?;
     assert_ne!(forked.session, fresh.session);
-    confirm(&mut runtime, &forked, CHILD, "bypassPermissions")?;
+    confirm(&mut runtime, &forked, CHILD, "dontAsk")?;
+    runtime.send(Command::Input {
+        session_id: forked.session.clone(),
+        bytes: b"/exit\r".to_vec(),
+        defer_ordering: false,
+    })?;
+    let deadline = Instant::now() + TIMEOUT;
+    while get_session(&db, &forked.session)?.context("forked Claude card")?.status != "exited" {
+        runtime.event(deadline, true)?;
+    }
+    runtime.send(Command::RestartSession { session_id: forked.session.clone() })?;
+    let restored = fixture.next_launch(
+        &mut runtime,
+        "restore the fork",
+        &["--model", MODEL, "--effort", "low", "--resume", CHILD, "--permission-mode", "dontAsk"],
+    )?;
+    assert_eq!(restored.session, forked.session);
+    confirm(&mut runtime, &restored, CHILD, "dontAsk")?;
     shutdown(runtime)
 }
 

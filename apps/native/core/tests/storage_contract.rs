@@ -63,14 +63,14 @@ fn fresh_database_has_all_reference_schema_objects() -> Result<()> {
     assert_eq!(number(&db, "SELECT COUNT(*) FROM _runtime_meta")?, 0);
 
     let migration = migrate(&mut db, 1234)?;
-    assert_eq!(migration.applied_versions, (1..=35).collect::<Vec<_>>());
-    assert_eq!(migration.current_version, 35);
+    assert_eq!(migration.applied_versions, (1..=36).collect::<Vec<_>>());
+    assert_eq!(migration.current_version, 36);
     assert_eq!(
         number(
             &db,
             "SELECT COUNT(*) FROM schema_migrations WHERE applied_at = 1234"
         )?,
-        35
+        36
     );
     assert_eq!(number(&db, "PRAGMA foreign_keys")?, 1);
     assert_eq!(number(&db, "PRAGMA legacy_alter_table")?, 0);
@@ -85,7 +85,18 @@ fn fresh_database_has_all_reference_schema_objects() -> Result<()> {
     assert_eq!(expected.len(), 87);
     assert_eq!(actual.len(), expected.len());
     for (current, frozen) in actual.iter().zip(expected) {
-        assert_eq!(current, frozen, "frozen schema object {}", frozen["name"]);
+        let mut expected = frozen.clone();
+        if frozen["name"] == "session_fork_intents" {
+            expected["sql"] = json!(frozen["sql"].as_str().unwrap().replace(
+                "'default', 'auto', 'acceptEdits', 'plan', 'bypassPermissions'",
+                concat!(
+                    "'default', 'auto', 'acceptEdits', 'plan', 'bypassPermissions',\n",
+                    "            'manual', 'dontAsk', 'ask', 'turbo',\n",
+                    "            'askForApproval', 'approveForMe', 'readOnly', 'fullAccess'"
+                ),
+            ));
+        }
+        assert_eq!(current, &expected, "frozen schema object {}", frozen["name"]);
     }
     Ok(())
 }
@@ -172,7 +183,7 @@ fn domain_transaction_matches_frozen_source_and_replays_after_reopen() -> Result
     let mut db = Connection::open(&path)?;
     configure_connection(&db)?;
     let after_reopen = migrate(&mut db, 1250)?;
-    assert_eq!(after_reopen.current_version, 35);
+    assert_eq!(after_reopen.current_version, 36);
     assert!(after_reopen.applied_versions.is_empty());
     let replay = execute(&mut db, &command, 1300, |_, _| {
         panic!("durable replay ran the mutation")
@@ -414,19 +425,19 @@ fn upgrades_legacy_history_but_rejects_corrupt_or_future_history_without_writes(
         [m[16]["checksum"].as_str().unwrap()],
     )?;
     db.execute(
-        "INSERT INTO schema_migrations VALUES (36, 'future', 'v2:unknown', 1500)",
+        "INSERT INTO schema_migrations VALUES (37, 'future', 'v2:unknown', 1500)",
         [],
     )?;
     let future = query_json(&db, history)?;
     assert_eq!(
         migrate(&mut db, 2000).unwrap_err().to_string(),
-        "database schema version 36 is newer than supported version 35"
+        "database schema version 37 is newer than supported version 36"
     );
     assert_eq!(query_json(&db, history)?, future);
 
-    db.execute("DELETE FROM schema_migrations WHERE version = 36", [])?;
+    db.execute("DELETE FROM schema_migrations WHERE version = 37", [])?;
     let upgraded = migrate(&mut db, 2000)?;
-    assert_eq!(upgraded.current_version, 35);
+    assert_eq!(upgraded.current_version, 36);
     assert!(upgraded.applied_versions.is_empty());
     let actual = query_json(&db, history)?;
     for (applied, migration) in actual.as_array().unwrap().iter().zip(m) {
@@ -494,8 +505,8 @@ fn migration_35_rolls_back_on_foreign_key_violation_and_can_be_retried() -> Resu
 
     db.execute("DELETE FROM session_runs WHERE id = 'orphan-run'", [])?;
     let migrated = migrate(&mut db, 2100)?;
-    assert_eq!(migrated.applied_versions, vec![35]);
-    assert_eq!(migrated.current_version, 35);
+    assert_eq!(migrated.applied_versions, vec![35, 36]);
+    assert_eq!(migrated.current_version, 36);
     let cwd = db
         .query_row("SELECT cwd FROM sessions WHERE id = 'shell-1'", [], |row| {
             row.get::<_, String>(0)

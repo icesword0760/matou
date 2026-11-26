@@ -696,7 +696,7 @@ impl ProviderHookServer {
             )?;
             let settings = json!({"statusLine": {
                 "type": "command", "command": command,
-                "stack_with_default": true,
+                "stack_with_default": false,
             }});
             write_private(
                 &files.temporary,

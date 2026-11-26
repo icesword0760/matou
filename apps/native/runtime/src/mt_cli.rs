@@ -113,18 +113,83 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> i32 {
         .collect();
     run_with(
         &args,
-        || {
-            (
-                std::env::var_os("MATOU_CONTROL_ENDPOINT"),
-                std::env::var("MATOU_CONTROL_TOKEN")
-                    .ok()
-                    .filter(|token| !token.is_empty())
-                    .or_else(|| std::env::var("DSH_MATOU_CONTROL_TOKEN").ok()),
-            )
-        },
+        || control_identity(|name| std::env::var_os(name)),
         &mut io::stdout().lock(),
         &mut io::stderr().lock(),
     )
+}
+
+pub(crate) fn control_identity(
+    get: impl Fn(&str) -> Option<OsString>,
+) -> (Option<OsString>, Option<String>) {
+    let endpoint = get("MATOU_CONTROL_ENDPOINT").filter(|value| !value.is_empty());
+    let token = |name| {
+        get(name)
+            .and_then(|value| value.into_string().ok())
+            .filter(|value| !value.is_empty())
+    };
+    let token = token("MATOU_CONTROL_TOKEN").or_else(|| token("DSH_MATOU_CONTROL_TOKEN"));
+    #[cfg(unix)]
+    if (endpoint.is_none() || token.is_none())
+        && let Some(file) = get(crate::host_control::CONTROL_IDENTITY_FILE_ENV)
+        && let Some(identity) = read_identity_file(Path::new(&file))
+    {
+        return (
+            Some(identity.endpoint.into_os_string()),
+            Some(identity.token),
+        );
+    }
+    (endpoint, token)
+}
+
+#[cfg(unix)]
+fn read_identity_file(path: &Path) -> Option<crate::host_control::ControlIdentityFile> {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    use std::{
+        fs::OpenOptions,
+        os::unix::{
+            fs::{MetadataExt, OpenOptionsExt},
+            net::SocketAddr,
+        },
+    };
+
+    const MAX_IDENTITY_BYTES: u64 = 4096;
+    if !path.is_absolute() {
+        return None;
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .ok()?;
+    let metadata = file.metadata().ok()?;
+    // SAFETY: geteuid only reads the current process credential.
+    if !metadata.is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o7777 != 0o600
+    {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_IDENTITY_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > MAX_IDENTITY_BYTES {
+        return None;
+    }
+    let identity: crate::host_control::ControlIdentityFile = serde_json::from_slice(&bytes).ok()?;
+    if !identity.endpoint.is_absolute()
+        || identity
+            .endpoint
+            .as_os_str()
+            .as_encoded_bytes()
+            .contains(&0)
+        || SocketAddr::from_pathname(&identity.endpoint).is_err()
+        || URL_SAFE_NO_PAD.decode(&identity.token).ok()?.len() != 32
+    {
+        return None;
+    }
+    Some(identity)
 }
 
 pub(crate) fn run_with(

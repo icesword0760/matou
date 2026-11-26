@@ -1259,8 +1259,11 @@ pub fn load_provider_catalog_binding_with_rollback(
         } else {
             metadata.remove("model");
         }
+        // A catalog summary may report the provider default for an existing binding.
+        metadata
+            .entry("permissionMode")
+            .or_insert_with(|| json!(input.permission_mode));
         metadata.extend([
-            ("permissionMode".into(), json!(input.permission_mode)),
             ("loadedFromCatalog".into(), json!(true)),
             ("spawnRevision".into(), json!(now)),
             (

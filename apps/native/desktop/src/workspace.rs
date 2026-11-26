@@ -9114,6 +9114,12 @@ impl Workspace {
         let palette = self.theme_palette();
         let sidebar_palette = palette.sidebar;
         let background = rgba(sidebar_palette.background);
+        let board_open = self.wiring.board_open;
+        let board_color = rgba(if board_open {
+            sidebar_palette.accent_icon
+        } else {
+            sidebar_palette.toolbar_text
+        });
         #[cfg(debug_assertions)]
         crate::settings_shell::probe_workspace_surfaces(|probe| probe.sidebar = Some(background));
         // At 720 the English title must stay whole. Reclaim only the button's
@@ -9256,15 +9262,14 @@ impl Workspace {
                                 .cursor_pointer()
                                 .h(px(30.))
                                 .px(px(10.))
+                                .rounded(px(7.))
                                 .flex()
                                 .items_center()
                                 .gap(px(7.))
-                                .child(icon("columns-3", 16., rgba(sidebar_palette.toolbar_text)))
-                                .child(if self.wiring.board_open {
-                                    self.locale.text("画布", "Canvas")
-                                } else {
-                                    self.locale.text("看板", "Board")
-                                }),
+                                .text_color(board_color)
+                                .when(board_open, |button| button.bg(rgba(sidebar_palette.task_active)))
+                                .child(icon("columns-3", 16., board_color))
+                                .child(self.locale.text("看板", "Board")),
                             &self.control_focus["sidebar-board"],
                             Self::toggle_board,
                             cx,
@@ -17753,7 +17758,7 @@ impl Workspace {
         if self
             .footer_popovers
             .get(&window.window_handle())
-            .is_some_and(|popup| self.level_focus() != Some(popup.session.as_str()))
+            .is_some_and(|popup| !self.footer_popover_current(popup, window))
         {
             self.dismiss_footer_popover(window, cx);
         }
@@ -17789,7 +17794,7 @@ impl Workspace {
         let mut footer_menu = self
             .footer_popovers
             .get(&window.window_handle())
-            .filter(|popup| Some(popup.session.as_str()) == session);
+            .filter(|popup| self.footer_popover_current(popup, window));
         let live = fields.as_ref().map_or(&Value::Null, |fields| {
             fields.live.unwrap_or(&fields.node["codexHud"])
         });
@@ -17807,7 +17812,11 @@ impl Workspace {
         footer_menu = footer_menu.filter(|popup| match popup.menu {
             FooterMenu::Quota => quota.is_some(),
             FooterMenu::Stats => more.is_some(),
-            _ => true,
+            FooterMenu::Git => fields
+                .as_ref()
+                .and_then(|fields| fields.git.as_ref())
+                .is_some_and(|git| git.available),
+            FooterMenu::Environment => true,
         });
         let sizing = footer_widths(
             f32::from(viewport_width),
@@ -19873,12 +19882,13 @@ impl Render for Workspace {
             (None, overlay)
         };
         let board = self.render_board(cx);
+        let showing_board = board.is_some();
         let carousel = div()
             .flex_1()
             .min_h_0()
             .relative()
             .flex()
-            .when(board.is_none(), |stage| {
+            .when(!showing_board, |stage| {
                 if let Some(tree) = &split_tree {
                     stage.child(self.render_split_canvas(tree, split_cards, cx))
                 } else {
@@ -19997,23 +20007,27 @@ impl Render for Workspace {
                                 stage
                             },
                         );
-                        let dag_error_banner = self.dag_open_error_banner(cx);
-                        // Windows keeps the fused 48px topbar flush with the
-                        // window edge; the DAG failure banner sits below it.
-                        // Other platforms keep the frozen banner-first order.
-                        #[cfg(target_os = "windows")]
-                        let stage = stage
-                            .child(self.topbar(window, cx))
-                            .children(dag_error_banner);
-                        #[cfg(not(target_os = "windows"))]
-                        let stage = stage
-                            .children(dag_error_banner)
-                            .child(self.topbar(window, cx));
                         stage
+                            .when(!showing_board, |stage| {
+                                let dag_error_banner = self.dag_open_error_banner(cx);
+                                // Keep the fused Windows topbar flush with the window edge.
+                                #[cfg(target_os = "windows")]
+                                let stage = stage
+                                    .child(self.topbar(window, cx))
+                                    .children(dag_error_banner);
+                                #[cfg(not(target_os = "windows"))]
+                                let stage = stage
+                                    .children(dag_error_banner)
+                                    .child(self.topbar(window, cx));
+                                stage
+                            })
                             .children(self.read_only_banner(cx))
                             .child(carousel)
-                            .children(self.search_bar(cx))
-                            .child(self.footer(window, cx))
+                            .when(!showing_board, |stage| {
+                                stage
+                                    .children(self.search_bar(cx))
+                                    .child(self.footer(window, cx))
+                            })
                             .children(connection_status.map(|status| {
                                 div()
                                     .id("runtime-connection-status")
@@ -21574,16 +21588,31 @@ impl FooterGit {
     fn projected(node: &Value, hud: Option<&Value>, locale: InterfaceLocale) -> Option<Self> {
         let live = hud.unwrap_or(&Value::Null);
         let git = &node["git"];
-        let branch = trimmed_graph_text(&live["gitBranch"])
-            .or_else(|| trimmed_graph_text(&git["branch"]))
-            .or_else(|| trimmed_graph_text(&node["gitBranch"]));
-        let dirty = live["gitDirty"]
-            .as_bool()
-            .or_else(|| git["dirty"].as_bool())
-            .or_else(|| node["gitDirty"].as_bool())
-            .unwrap_or(false);
+        let live_git = live["gitCwd"]
+            .as_str()
+            .filter(|cwd| std::path::Path::new(cwd).is_absolute());
+        let (branch, revision, dirty) = if live_git.is_some() {
+            (
+                trimmed_graph_text(&live["gitBranch"]),
+                trimmed_graph_text(&live["gitDetachedHead"]),
+                live["gitDirty"].as_bool().unwrap_or(false),
+            )
+        } else {
+            (
+                trimmed_graph_text(&live["gitBranch"])
+                    .or_else(|| trimmed_graph_text(&git["branch"]))
+                    .or_else(|| trimmed_graph_text(&node["gitBranch"])),
+                trimmed_graph_text(&git["detachedHead"]),
+                live["gitDirty"]
+                    .as_bool()
+                    .or_else(|| git["dirty"].as_bool())
+                    .or_else(|| node["gitDirty"].as_bool())
+                    .unwrap_or(false),
+            )
+        };
         let root = trimmed_graph_text(&git["root"])
             .or_else(|| trimmed_graph_text(&git["repositoryRoot"]))
+            .filter(|_| live_git.is_none() || live_git == git["cwd"].as_str())
             .map(PathBuf::from)
             .filter(|path| path.is_absolute());
         let (mut label, title, available) = if let Some(branch) = branch {
@@ -21592,7 +21621,7 @@ impl FooterGit {
                 format!("{}{branch}", locale.text("Git 分支：", "Git branch: ")),
                 true,
             )
-        } else if let Some(revision) = trimmed_graph_text(&git["detachedHead"]) {
+        } else if let Some(revision) = revision {
             (
                 format!("HEAD {}", revision.get(..7).unwrap_or(revision)),
                 format!(
@@ -21601,7 +21630,7 @@ impl FooterGit {
                 ),
                 true,
             )
-        } else if git["state"] == "unavailable" {
+        } else if git["state"] == "unavailable" || (live_git.is_some() && git.is_object()) {
             (
                 locale.text("Git 不可用", "Git unavailable").into(),
                 locale

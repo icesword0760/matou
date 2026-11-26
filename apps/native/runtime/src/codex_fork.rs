@@ -49,6 +49,7 @@ pub struct CodexForkAuthority {
 pub struct CodexForkLaunch {
     pub authority: CodexForkAuthority,
     pub launch: ShellLaunch,
+    pub permission_mode: &'static str,
     pub permission_warning: Option<&'static str>,
 }
 
@@ -326,6 +327,7 @@ impl CodexForkIntent {
             Ok(CodexForkLaunch {
                 authority,
                 launch: plan.launch,
+                permission_mode: plan.permission_mode,
                 permission_warning: plan.permission_warning,
             })
         })();

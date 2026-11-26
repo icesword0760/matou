@@ -14,6 +14,7 @@ use matou_native_core::{
     backup::{BackupService, CLEAN_EXIT_BACKUP_TIMEOUT},
     context_optimizer_config::{ContextOptimizerConfig, ContextOptimizerSnapshot},
     dispatch_roles::{DispatchRolesStore, format_roles_markdown},
+    git_repo::{self, Head},
     hierarchy::{
         self, HierarchyIds, HierarchyResult, Scene, Session as StoredSession, Task, Workspace,
         canvas, cards, tabs, tasks, workspaces,
@@ -168,6 +169,15 @@ impl RunningShell {
 
     fn promotion_verified(&self) -> bool {
         !self.retiring && self.promotion_process_result().is_some_and(Result::is_ok)
+    }
+
+    fn live_git_cwd(&self) -> Option<&Path> {
+        let hook = self.hook.as_ref()?;
+        hook.hud
+            .cwd()
+            .map(Path::new)
+            .filter(|path| path.is_absolute())
+            .or_else(|| Some(Path::new(&self.cwd)).filter(|path| path.is_absolute()))
     }
 }
 
@@ -754,6 +764,10 @@ impl ShellOwner {
                 .codex_binding(&source.id)?
                 .filter(|binding| binding.provider_session_id == record.source_provider_session_id)
                 .context("Codex Fork source identity changed")?;
+            // Permission belongs to the accepted Fork, including after an owner restart.
+            if let Some(metadata) = binding.metadata.as_object_mut() {
+                metadata.insert("permissionMode".into(), json!(record.permission_mode));
+            }
             // A restored lease already accepted this exact saved source. Its
             // separate foreground PTY can be restoring the same identity.
             if record.lease_fence > 0 && binding.resumable && binding.restore_state == "restoring" {
@@ -860,7 +874,9 @@ impl ShellOwner {
             "Codex Fork checkout differs from the persisted environment"
         );
         launch.cwd = PathBuf::from(&stored.cwd);
-        let metadata = json!({"provider": "codex", "cwd": launch.cwd});
+        let metadata = json!({
+            "provider": "codex", "cwd": launch.cwd, "permissionMode": prepared.permission_mode,
+        });
         let secrets = launch
             .env
             .get(std::ffi::OsStr::new("OPENAI_API_KEY"))
@@ -1095,6 +1111,7 @@ impl ShellOwner {
         else {
             return Ok(Value::Null);
         };
+        let git_cwd = shell.live_git_cwd().map(Path::to_path_buf);
         let Some(hook) = shell.hook.as_mut() else {
             return Ok(Value::Null);
         };
@@ -1114,22 +1131,22 @@ impl ShellOwner {
                 .filter(|cwd| Path::new(cwd).is_absolute())
                 .unwrap_or(&shell.cwd),
         );
-        let branch = matou_native_core::git_repo::current_branch(&cwd);
-        let refresh_git = hook
-            .git_status
-            .as_ref()
-            .is_none_or(|(path, at, _)| path != &cwd || at.elapsed() >= Duration::from_secs(2));
-        if refresh_git {
-            let previous = hook
-                .git_status
-                .as_ref()
-                .filter(|(path, _, _)| path == &cwd)
-                .map(|(_, _, dirty)| *dirty)
-                .unwrap_or(false);
-            let dirty = matou_native_core::git_repo::is_dirty(&cwd).unwrap_or(previous);
-            hook.git_status = Some((cwd.clone(), Instant::now(), dirty));
+        let head = git_cwd.as_deref().and_then(git_repo::current_head);
+        let mut dirty = false;
+        if let Some(cwd) = git_cwd.as_ref().filter(|_| head.is_some()) {
+            let previous = hook.git_status.as_ref().filter(|(path, _, _)| path == cwd);
+            if let Some((_, _, cached)) =
+                previous.filter(|(_, at, _)| at.elapsed() < Duration::from_secs(2))
+            {
+                dirty = *cached;
+            } else {
+                dirty =
+                    git_repo::is_dirty(cwd).unwrap_or(previous.is_some_and(|(_, _, dirty)| *dirty));
+                hook.git_status = Some((cwd.clone(), Instant::now(), dirty));
+            }
+        } else {
+            hook.git_status = None;
         }
-        let dirty = hook.git_status.as_ref().is_some_and(|(_, _, dirty)| *dirty);
         if hook
             .hud_config
             .as_ref()
@@ -1230,7 +1247,14 @@ impl ShellOwner {
                         .as_ref()
                         .is_some_and(|resume| resume.binding_id.is_some()))
         );
+        let (branch, detached_head) = match head {
+            Some(Head::Branch(branch)) => (Some(branch), None),
+            Some(Head::Detached(revision)) => (None, Some(revision)),
+            None => (None, None),
+        };
+        hud["gitCwd"] = json!(git_cwd);
         hud["gitBranch"] = json!(branch);
+        hud["gitDetachedHead"] = json!(detached_head);
         hud["gitDirty"] = json!(dirty);
         if let Some((_, _, config)) = &hook.hud_config
             && let Some(config) = config.as_object()
@@ -1344,28 +1368,64 @@ impl ShellOwner {
                     node["environment"]["state"] = json!("missing");
                     node["environment"]["error"] = json!("path-missing");
                 }
-                if node["sessionId"].as_str() == focused.as_deref() {
-                    let cwd = focused
-                        .as_ref()
-                        .and_then(|id| self.shells.get(id))
-                        .and_then(|shell| shell.hook.as_ref())
-                        .and_then(|hook| hook.hud.cwd())
-                        .filter(|cwd| Path::new(cwd).is_absolute())
-                        .or_else(|| node["cwd"].as_str());
-                    let branch = cwd.and_then(|cwd| {
-                        matou_native_core::git_repo::current_branch(Path::new(cwd))
-                    });
-                    if let Some(branch) = branch {
-                        if node["git"].is_object() {
-                            node["git"]["branch"] = json!(branch);
-                            node["git"]["state"] = json!("ready");
-                            node["git"].as_object_mut().unwrap().remove("detachedHead");
+                if let Some(id) = focused.as_deref()
+                    && node["sessionId"].as_str() == Some(id)
+                {
+                    let shell = self
+                        .shells
+                        .get(id)
+                        .filter(|shell| !shell.ended && !shell.retiring);
+                    let bound = [&node["environment"]["path"], &node["worktree"]["path"]]
+                        .into_iter()
+                        .filter_map(Value::as_str)
+                        .map(Path::new)
+                        .find(|path| path.is_absolute());
+                    let cwd = shell
+                        .and_then(RunningShell::live_git_cwd)
+                        .or_else(|| {
+                            node["cwd"]
+                                .as_str()
+                                .map(Path::new)
+                                .filter(|path| path.is_absolute())
+                        })
+                        .or(bound);
+                    if let Some(cwd) = cwd {
+                        let git = if let Some(head) = git_repo::current_head(cwd) {
+                            let same_directory = bound.is_some_and(|bound| {
+                                bound == cwd
+                                    || cwd.canonicalize().ok().is_some_and(|canonical| {
+                                        bound.canonicalize().is_ok_and(|path| path == canonical)
+                                    })
+                            });
+                            let dirty = if same_directory {
+                                node["git"]["dirty"].as_bool().unwrap_or(false)
+                            } else {
+                                shell
+                                    .and_then(|shell| shell.hook.as_ref())
+                                    .and_then(|hook| hook.git_status.as_ref())
+                                    .filter(|(path, at, _)| {
+                                        path == cwd && at.elapsed() < Duration::from_secs(2)
+                                    })
+                                    .map(|(_, _, dirty)| *dirty)
+                                    .or_else(|| git_repo::is_dirty(cwd))
+                                    .unwrap_or(false)
+                            };
+                            Some(match head {
+                                Head::Branch(branch) => json!({
+                                    "cwd": cwd, "state": "ready", "branch": branch, "dirty": dirty,
+                                }),
+                                Head::Detached(revision) => json!({
+                                    "cwd": cwd, "state": "ready", "detachedHead": revision, "dirty": dirty,
+                                }),
+                            })
                         } else {
-                            node["git"] =
-                                json!({"state": "ready", "branch": branch, "dirty": false});
+                            node["git"].is_object().then(|| {
+                                json!({"cwd": cwd, "state": "unavailable", "dirty": false})
+                            })
+                        };
+                        if let Some(git) = git {
+                            node["git"] = git;
                         }
-                    } else if let Some(git) = node["git"].as_object_mut() {
-                        git.remove("branch");
                     }
                 }
                 if node["currentMode"] == "codex"
@@ -6539,6 +6599,7 @@ impl ShellOwner {
                     .shells
                     .get_mut(&event.session_id)
                     .expect("live session");
+                #[cfg(any(target_os = "macos", target_os = "linux"))]
                 if shell.is_shell {
                     shell.cwd_capture = Some((Instant::now() + Duration::from_millis(180), true));
                 }
@@ -8523,15 +8584,36 @@ mod provider_tests {
         let root = tempfile::tempdir()?;
         let cwd = root.path().join("workspace");
         fs::create_dir(&cwd)?;
-        ensure!(
-            std::process::Command::new("git")
-                .current_dir(&cwd)
+        let git = |path: &Path, args: &[&str]| -> Result<()> {
+            let output = std::process::Command::new("git")
+                .current_dir(path)
                 .env("GIT_CONFIG_NOSYSTEM", "1")
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .args(["init", "--quiet", "--initial-branch=main"])
-                .status()?
-                .success()
-        );
+                .args(args)
+                .output()?;
+            ensure!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            Ok(())
+        };
+        git(&cwd, &["init", "--quiet", "--initial-branch=main"])?;
+        git(
+            &cwd,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.com",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "Initial commit",
+            ],
+        )?;
+        git(&cwd, &["worktree", "add", "-b", "linked", "../linked"])?;
+        let linked_cwd = root.path().join("linked");
         let config_root = root.path().join("claude");
         let projects = config_root.join("projects/project-bucket");
         fs::create_dir_all(&projects)?;
@@ -8580,6 +8662,43 @@ mod provider_tests {
         )?;
         let mut owner =
             ShellOwner::new(connection, ownership, || uuid::Uuid::new_v4().to_string())?;
+        owner.connection.execute(
+            "INSERT INTO execution_context_git_states
+                (execution_context_id, repository_root, state, branch, dirty, updated_at)
+             VALUES ('context', ?, 'ready', 'main', 1, 1)",
+            [cwd.to_str().unwrap()],
+        )?;
+        owner.connection.execute(
+            "UPDATE sessions SET cwd=? WHERE id=?",
+            params![linked_cwd.to_str().unwrap(), session],
+        )?;
+        let graph = owner.graph("scene", Some("window"))?;
+        assert_eq!(graph["nodes"][0]["environment"]["path"], json!(cwd));
+        assert_eq!(
+            graph["nodes"][0]["git"],
+            json!({"cwd": linked_cwd, "state": "ready", "branch": "linked", "dirty": false}),
+        );
+        git(&linked_cwd, &["checkout", "--detach", "HEAD"])?;
+        let graph = owner.graph("scene", Some("window"))?;
+        let git_state = &graph["nodes"][0]["git"];
+        assert!(git_state.get("branch").is_none());
+        assert!(matches!(
+            git_state["detachedHead"].as_str().map(str::len),
+            Some(40 | 64)
+        ));
+        owner.connection.execute(
+            "UPDATE sessions SET cwd=? WHERE id=?",
+            params![root.path().to_str().unwrap(), session],
+        )?;
+        let graph = owner.graph("scene", Some("window"))?;
+        assert_eq!(
+            graph["nodes"][0]["git"],
+            json!({"cwd": root.path(), "state": "unavailable", "dirty": false}),
+        );
+        owner.connection.execute(
+            "UPDATE sessions SET cwd=? WHERE id=?",
+            params![cwd.to_str().unwrap(), session],
+        )?;
         let executable = root.path().join("test-provider");
         assert_eq!(
             owner.notification_scene_id("window", session)?.as_deref(),
@@ -8802,7 +8921,9 @@ mod provider_tests {
         assert_eq!(owner.session(session)?.unwrap().title, "Native migration");
         let hud = owner.agent_hud(session, root.path())?;
         assert_eq!(hud["hud"]["defaultAccountUsage"], false);
+        assert_eq!(hud["hud"]["gitCwd"], json!(cwd));
         assert_eq!(hud["hud"]["gitBranch"], "main");
+        assert!(hud["hud"]["gitDetachedHead"].is_null());
         assert_eq!(hud["hud"]["toolCounts"], json!([{"name":"Read","count":1}]));
         assert_eq!(hud["hud"]["subagentCount"], 2);
         assert_eq!(hud["hud"]["configCounts"]["mcps"], 3);

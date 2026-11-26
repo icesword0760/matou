@@ -652,8 +652,10 @@ pub fn create_fork_in_environment(
         )?.exists(params![scene_id, name, selected_level_parent, structural_parent_id])? {
             return Err(fork_error("DUPLICATE_NAME", format!("同一层已存在“{name}”")));
         }
+        // Capture the source card's native setting when the fork is accepted.
         let permission = match binding["permissionMode"].as_str() {
-            Some(mode @ ("auto" | "acceptEdits" | "plan" | "bypassPermissions")) => mode,
+            Some(mode @ ("auto" | "acceptEdits" | "plan" | "bypassPermissions" | "manual" | "dontAsk"
+                | "ask" | "turbo" | "askForApproval" | "approveForMe" | "readOnly" | "fullAccess")) => mode,
             _ => "default",
         };
         register_window(tx, window_id, now)?;
@@ -755,6 +757,7 @@ pub struct NativeFork {
     pub submission_key: String,
     pub source_session_id: String,
     pub source_provider_session_id: String,
+    pub permission_mode: String,
     pub worktree_mode: String,
     pub display_name: String,
     pub branch_name: Option<String>,
@@ -783,7 +786,8 @@ pub fn native_codex_fork(connection: &Connection, session_id: &str) -> Result<Op
         "SELECT fork.operation_id, fork.submission_key, fork.source_session_id,
                 fork.source_provider_session_id, fork.worktree_mode, fork.display_name, fork.lease_fence,
                 worktree.id, worktree.execution_context_id, worktree.repository_root,
-                worktree.worktree_path, worktree.branch_name, COALESCE(worktree.base_revision, worktree.base_ref, ''), fork.branch_name
+                worktree.worktree_path, worktree.branch_name, COALESCE(worktree.base_revision, worktree.base_ref, ''), fork.branch_name,
+                fork.permission_mode
          FROM session_fork_intents AS fork
          LEFT JOIN worktrees AS worktree ON worktree.id = fork.worktree_id
             OR (fork.worktree_mode = 'current' AND fork.worktree_id IS NULL
@@ -794,6 +798,7 @@ pub fn native_codex_fork(connection: &Connection, session_id: &str) -> Result<Op
         |row| Ok(NativeFork {
             operation_id: row.get(0)?, submission_key: row.get(1)?, source_session_id: row.get(2)?,
             source_provider_session_id: row.get(3)?, worktree_mode: row.get(4)?,
+            permission_mode: row.get(14)?,
             display_name: row.get(5)?, lease_fence: row.get(6)?, branch_name: row.get(13)?,
             worktree: match row.get::<_, Option<String>>(7)? {
                 Some(id) => Some(NativeForkWorktree {
