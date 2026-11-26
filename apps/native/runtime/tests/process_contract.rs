@@ -2790,7 +2790,7 @@ fn claude_role_budget_projects_the_actual_fresh_process_environment() -> Result<
             Some("opus"),
             "maximum",
             Some(180_000),
-            Ok(["260000", "90", "1", "unset", "unset"]),
+            Ok(["260000", "90", "0", "unset", "unset"]),
         ),
         (
             "1M cap",

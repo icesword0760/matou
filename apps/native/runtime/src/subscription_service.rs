@@ -14,7 +14,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, ensure};
 use matou_native_core::{
-    claude_role_budget::CLAUDE_ROLES,
+    claude_role_budget::{CLAUDE_ROLES, disables_1m_context},
     provider_config::{ProviderConfigStore, StoredSubscription, SubscriptionAccountIdentity},
     provider_launch::{
         ClaudeLaunch, PreparedSubscriptionLaunch, PreparedSubscriptionTarget, role_model_env_key,
@@ -535,7 +535,7 @@ impl SubscriptionService {
                 .insert("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE".into(), "90".into());
             plan.env.insert(
                 "CLAUDE_CODE_DISABLE_1M_CONTEXT".into(),
-                u8::from(window < 1_000_000).to_string(),
+                u8::from(disables_1m_context(window)).to_string(),
             );
         }
         let client = ManagementClient::new(&account.connection);

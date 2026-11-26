@@ -18,7 +18,8 @@ describe('Claude subscription launch projection', () => {
       ANTHROPIC_DEFAULT_OPUS_MODEL: 'matou-chatgpt/matou-opus', ANTHROPIC_DEFAULT_SONNET_MODEL_NAME: 'GPT Balanced',
       ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION: 'ChatGPT 账号 · gpt-large · 512K',
       ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION: 'ChatGPT 账号 · gpt-balanced · 512K', CLAUDE_CODE_AUTO_MODE_SERVER: '0' });
-    expect(result.settings).toMatchObject({ env: { ANTHROPIC_API_KEY: '', CLAUDE_CODE_OAUTH_TOKEN: '', CLAUDE_CODE_DISABLE_1M_CONTEXT: '1' }, autoCompactWindow: 512000 });
+    expect(result.settings).toMatchObject({ env: { ANTHROPIC_API_KEY: '', CLAUDE_CODE_OAUTH_TOKEN: '' }, autoCompactWindow: 512000 });
+    expect(result.settings.env.CLAUDE_CODE_DISABLE_1M_CONTEXT).toBeUndefined();
     expect(result.settings.modelPicker).toEqual({ replaceBuiltInOptions: true, options: [
       { model: 'opus', label: 'Opus · GPT Large', description: 'ChatGPT 账号 · gpt-large · 512K' },
       { model: 'sonnet', label: 'Sonnet · GPT Balanced', description: 'ChatGPT 账号 · gpt-balanced · 512K' },
@@ -41,7 +42,9 @@ describe('Claude subscription launch projection', () => {
       DISABLE_TELEMETRY: '1',
       DISABLE_ERROR_REPORTING: '1',
     });
-    expect(result.settings.env).toEqual({ ANTHROPIC_API_KEY: '', CLAUDE_CODE_OAUTH_TOKEN: '', CLAUDE_CODE_DISABLE_1M_CONTEXT: '1' });
+    expect(result.settings.env).toEqual({ ANTHROPIC_API_KEY: '', CLAUDE_CODE_OAUTH_TOKEN: '' });
+    const small = value(buildClaudeLaunch({ ...input(), subscription, accountPrefix: `matou-${subscription}`, contextWindow: 200_000 }));
+    expect(small.settings.env).toEqual({ ANTHROPIC_API_KEY: '', CLAUDE_CODE_OAUTH_TOKEN: '', CLAUDE_CODE_DISABLE_1M_CONTEXT: '1' });
   });
   it('uses role-specific fallback order and reports missing models', () => {
     const fallback = { id: 'default' }, small = { id: 'small' }, own = { id: 'own' };

@@ -8,7 +8,7 @@ use std::{
 };
 
 use matou_native_core::{
-    claude_role_budget::{CLAUDE_ROLE_LABELS, CLAUDE_ROLES},
+    claude_role_budget::{CLAUDE_ROLE_LABELS, CLAUDE_ROLES, disables_1m_context},
     journal::MAX_SAFE_INTEGER,
     provider_launch::{EFFORTS, is_claude_model_environment, role_model_env_key},
 };
@@ -259,7 +259,7 @@ pub fn build_launch(input: LaunchInput<'_>) -> Result<LaunchPlan, LaunchError> {
         let window = opus.min(fable).min(sonnet).min(haiku).min(1_000_000);
         settings["autoCompactWindow"] = json!(window);
         env.insert("CLAUDE_CODE_MAX_CONTEXT_TOKENS".into(), window.to_string());
-        if window < 1_000_000 {
+        if disables_1m_context(window) {
             env.insert("CLAUDE_CODE_DISABLE_1M_CONTEXT".into(), "1".into());
             settings["env"]["CLAUDE_CODE_DISABLE_1M_CONTEXT"] = json!("1");
         }
@@ -960,10 +960,16 @@ mod tests {
         ));
         let mut launch = input(&small);
         launch.context_window = Some(512_000);
-        assert_eq!(
-            build_launch(launch).unwrap().settings["autoCompactWindow"],
-            512_000
-        );
+        let plan_512k = build_launch(launch).unwrap();
+        assert_eq!(plan_512k.settings["autoCompactWindow"], 512_000);
+        assert!(!plan_512k.env.contains_key("CLAUDE_CODE_DISABLE_1M_CONTEXT"));
+        assert!(plan_512k.settings["env"].get("CLAUDE_CODE_DISABLE_1M_CONTEXT").is_none());
+        let mut launch_872k = input(&small);
+        launch_872k.context_window = Some(872_000);
+        let plan_872k = build_launch(launch_872k).unwrap();
+        assert_eq!(plan_872k.settings["autoCompactWindow"], 872_000);
+        assert!(!plan_872k.env.contains_key("CLAUDE_CODE_DISABLE_1M_CONTEXT"));
+        assert!(plan_872k.settings["env"].get("CLAUDE_CODE_DISABLE_1M_CONTEXT").is_none());
         let unknown = CatalogModel {
             id: "fixture-unknown".into(),
             ..CatalogModel::default()

@@ -237,7 +237,7 @@ export class PtySession {
       const contextWindow = options.contextWindow === undefined ? 512_000 : options.contextWindow
       const contextEnv: Record<string, string> = contextWindow ? {
         CLAUDE_CODE_MAX_CONTEXT_TOKENS: String(contextWindow), CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: '90',
-        CLAUDE_CODE_DISABLE_1M_CONTEXT: contextWindow < 1_000_000 ? '1' : '0'
+        CLAUDE_CODE_DISABLE_1M_CONTEXT: contextWindow <= 200_000 ? '1' : '0'
       } : {}
       if (profile === 'claude-code' && contextWindow) {
         const settings = settingsPath ? JSON.parse(await readFile(settingsPath, 'utf8')) as Record<string, unknown> : {}

@@ -158,10 +158,10 @@ export function buildClaudeLaunch(input: ClaudeLaunchInput): ClaudeLaunchResult 
     const window = Math.min(...windows, 1_000_000);
     settings.autoCompactWindow = window;
     env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = String(window);
-    // 2.1.323 infers Opus's opt-in [1m] suffix even for custom role aliases.
-    // Disable that inference for smaller cards. The native autoCompactWindow
-    // remains authoritative (e.g. 272K), rather than falling back to 200K.
-    if (window < 1_000_000) {
+    // Disable 1M context only when the effective budget fits within the 200K
+    // standard window; setting DISABLE_1M_CONTEXT=1 for larger budgets (such as
+    // 512K or 872K) clamps 1M-capable models back to 200K.
+    if (window <= 200_000) {
       env.CLAUDE_CODE_DISABLE_1M_CONTEXT = '1';
       settings.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = '1';
     }

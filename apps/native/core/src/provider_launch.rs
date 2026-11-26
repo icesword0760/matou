@@ -16,7 +16,7 @@ use serde_json::{Map, Value, json};
 use crate::{
     claude_role_budget::{
         CLAUDE_ROLE_LABELS, CLAUDE_ROLES as ROLES, ClaudeBudgetCompaction, ClaudeBudgetTarget,
-        ClaudeRoleBudget, MAXIMUM_CONTEXT, claude_role_budget,
+        ClaudeRoleBudget, claude_role_budget, disables_1m_context,
     },
     provider_config::custom_context_window,
     pty::{CALLER_SESSION_MARKERS, LaunchProfile, ShellLaunch, get_var, remove_var, set_var},
@@ -2717,7 +2717,7 @@ fn project_context_window(environment: &mut BTreeMap<OsString, OsString>, window
             ("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "90".to_owned()),
             (
                 "CLAUDE_CODE_DISABLE_1M_CONTEXT",
-                u8::from(window < MAXIMUM_CONTEXT).to_string(),
+                u8::from(disables_1m_context(window)).to_string(),
             ),
         ] {
             set_var(environment, key.into(), value.into());

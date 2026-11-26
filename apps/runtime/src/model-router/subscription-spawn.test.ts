@@ -38,7 +38,7 @@ describe('subscription projection at the actual final PTY spawn boundary', () =>
     if (mode !== 'new') expect(capture.argv).toContain('--resume')
     if (mode === 'fork') expect(capture.argv).toContain('--fork-session')
     const settings = JSON.parse(await readFile(f.settingsPath, 'utf8'))
-    expect(settings.env).toEqual({ ANTHROPIC_API_KEY: '', CLAUDE_CODE_OAUTH_TOKEN: '', CLAUDE_CODE_DISABLE_1M_CONTEXT: '1', CLAUDE_CODE_MAX_CONTEXT_TOKENS: '512000', CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: '90', KEEP_ME: 'keep' })
+    expect(settings.env).toEqual({ ANTHROPIC_API_KEY: '', CLAUDE_CODE_OAUTH_TOKEN: '', CLAUDE_CODE_DISABLE_1M_CONTEXT: '0', CLAUDE_CODE_MAX_CONTEXT_TOKENS: '512000', CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: '90', KEEP_ME: 'keep' })
     expect(settings.autoCompactWindow).toBe(512000)
     expect(settings.customSetting).toBe(true)
     expect(settings.hooks.Stop[0].hooks[0].type).toBe('http')

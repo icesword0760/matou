@@ -17,7 +17,10 @@ use std::{cell::RefCell, rc::Rc};
 
 use gpui::{prelude::*, *};
 use matou_native_core::{
-    claude_role_budget::{CLAUDE_ROLE_LABELS, CLAUDE_ROLES as ROLES},
+    claude_role_budget::{
+        CLAUDE_ROLE_LABELS, CLAUDE_ROLES as ROLES, ClaudeBudgetTarget, MAXIMUM_CONTEXT,
+        resolve_target_window,
+    },
     sessions::InterfaceLocale,
 };
 
@@ -26,6 +29,7 @@ use super::{
     TEXT, focus_ring_with, icon, shadow,
 };
 use crate::rename_input::{RenameInput, RenameInputEvent};
+use matou_native_desktop::provider_context_editor::{compact_tokens, provider_context_mode};
 use matou_native_desktop::theme_tokens::{LIGHT, ThemePalette};
 
 /// Model select value that switches the row to the manual model-id field.
@@ -167,6 +171,14 @@ impl AssignmentColors {
     }
 }
 
+/// Read-only summary of the effective session context window computed from the
+/// active tier assignments and optional independent compaction model.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SessionWindowNote {
+    pub(crate) text: String,
+    pub(crate) is_error: bool,
+}
+
 /// One frame of the frozen assignment block, supplied by the settings logic.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AssignmentPanel {
@@ -178,6 +190,7 @@ pub(crate) struct AssignmentPanel {
     pub(crate) saving: bool,
     pub(crate) saved: bool,
     pub(crate) save_error: bool,
+    pub(crate) session_window_note: Option<SessionWindowNote>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -418,6 +431,7 @@ impl AssignmentView {
             saving,
             saved,
             save_error,
+            session_window_note,
         } = panel;
         self.locale = locale;
 
@@ -610,8 +624,22 @@ impl AssignmentView {
                         VIEW_SCOPE,
                         "New sessions use these assignments. Running sessions are unaffected.",
                     )),
-            )
-            .child(actions);
+            );
+        if let Some(note) = session_window_note {
+            footer = footer.child(
+                div()
+                    .text_size(px(11.))
+                    .line_height(relative(1.65))
+                    .text_color(rgba(if note.is_error {
+                        colors.view_error
+                    } else {
+                        colors.muted
+                    }))
+                    .whitespace_normal()
+                    .child(note.text),
+            );
+        }
+        footer = footer.child(actions);
         if save_error {
             footer = footer.child(
                 div()
@@ -2376,6 +2404,18 @@ impl ClaudeAssignments {
         let enabled = matches!(status, AssignmentStatus::Ready) && !saving;
         let rows = std::array::from_fn(|index| self.row(index, providers, enabled, locale));
         let can_save = enabled && self.dirty() && rows.iter().all(|row| row.problem.is_none());
+        let session_window_note = matches!(status, AssignmentStatus::Ready)
+            .then(|| {
+                effective_session_window_note(
+                    &self.draft,
+                    providers.providers(),
+                    providers.active_id(),
+                    providers.compaction(),
+                    self.native_catalog.models(),
+                    locale,
+                )
+            })
+            .flatten();
         AssignmentPanel {
             locale,
             rows,
@@ -2385,6 +2425,7 @@ impl ClaudeAssignments {
             saving,
             saved: self.saved,
             save_error: self.save_error,
+            session_window_note,
         }
     }
 
@@ -2933,15 +2974,252 @@ impl ClaudeAssignments {
     }
 }
 
+struct ResolvedWindowTarget {
+    tier_label: &'static str,
+    model_label: String,
+    window: u64,
+    dedup_with_opus: bool,
+}
+
+fn strip_context_suffix(model: &str) -> &str {
+    model
+        .split_at_checked(model.len().saturating_sub(4))
+        .filter(|(_, suffix)| suffix.eq_ignore_ascii_case("[1m]"))
+        .map_or(model, |(base, _)| base)
+}
+
+fn metadata_tokens(row: Option<&Value>, field: &str) -> Option<u64> {
+    row.and_then(|row| row[field].as_u64())
+        .filter(|tokens| *tokens > 0)
+}
+
+fn effective_session_window_note(
+    draft: &ClaudeRoleAssignments,
+    providers: &[Value],
+    active_id: Option<&str>,
+    compaction: Option<&Value>,
+    native: &[Value],
+    locale: InterfaceLocale,
+) -> Option<SessionWindowNote> {
+    if draft.is_empty() {
+        return None;
+    }
+
+    let mut context_windows = serde_json::Map::new();
+    for provider in providers {
+        let Some(id) = provider["id"].as_str() else {
+            continue;
+        };
+        if let Some(tokens) = provider["contextWindow"].as_u64().filter(|tokens| *tokens > 0) {
+            context_windows.insert(id.to_owned(), serde_json::json!(tokens));
+        } else {
+            context_windows.insert(
+                id.to_owned(),
+                serde_json::json!(provider_context_mode(provider)),
+            );
+        }
+    }
+
+    let find_provider = |id: Option<&str>| {
+        let id = id?;
+        providers
+            .iter()
+            .find(|provider| provider["id"].as_str() == Some(id))
+    };
+    let active_provider = find_provider(active_id);
+    let fable_follows_opus = !draft.contains_key("fable")
+        && active_provider
+            .and_then(|provider| provider["modelMapping"]["fable"].as_str())
+            .is_none_or(|model| model.trim().is_empty());
+
+    let mut resolved = Vec::new();
+    for (index, role) in ROLES.into_iter().enumerate() {
+        let follows_opus = role == "fable" && fable_follows_opus;
+        let effective_role = if follows_opus { "opus" } else { role };
+        let assigned = draft.get(effective_role);
+        let provider = find_provider(assigned.map(|row| row.provider_id.as_str()).or(active_id));
+        let Some(provider) = provider else {
+            continue;
+        };
+        let Some(provider_id) = provider["id"].as_str() else {
+            continue;
+        };
+        let provider_name = provider["name"].as_str().unwrap_or(provider_id);
+        let models = catalog(provider, native).unwrap_or_default();
+        let effective_model = assigned
+            .map(|row| row.model.as_str())
+            .or_else(|| default_model(provider, effective_role, native))
+            .unwrap_or_default();
+        let lookup_id = strip_context_suffix(effective_model.trim());
+        let metadata = (!lookup_id.is_empty())
+            .then(|| {
+                models
+                    .iter()
+                    .find(|item| item["id"].as_str() == Some(lookup_id))
+            })
+            .flatten();
+        let target = ClaudeBudgetTarget {
+            provider_id,
+            provider_name,
+            context_window: metadata_tokens(metadata, "contextWindow"),
+            max_context_window: metadata_tokens(metadata, "maxContextWindow"),
+        };
+        let label = CLAUDE_ROLE_LABELS[index];
+        let display_model = if effective_model.trim().is_empty() {
+            provider_name.to_owned()
+        } else {
+            model_name(models, effective_model).to_owned()
+        };
+        match resolve_target_window(role, target, &context_windows) {
+            Ok(Some(window)) => resolved.push(ResolvedWindowTarget {
+                tier_label: label,
+                model_label: display_model,
+                window,
+                dedup_with_opus: follows_opus,
+            }),
+            Ok(None) => {}
+            Err(_) => {
+                let text = match locale {
+                    InterfaceLocale::Chinese => {
+                        format!(
+                            "当前会话生效窗口不可用：{label} · {display_model} 低于 100K，新会话无法启动"
+                        )
+                    }
+                    InterfaceLocale::English => format!(
+                        "Effective session window unavailable: {label} · {display_model} is under 100K; new sessions cannot start."
+                    ),
+                };
+                return Some(SessionWindowNote {
+                    text,
+                    is_error: true,
+                });
+            }
+        }
+    }
+
+    if let Some(compaction) = compaction.filter(|value| value["mode"] == "custom")
+        && let Some(provider_id) = compaction["providerId"].as_str()
+        && let Some(provider) = find_provider(Some(provider_id))
+    {
+        let provider_name = provider["name"].as_str().unwrap_or(provider_id);
+        let models = catalog(provider, native).unwrap_or_default();
+        let model = compaction["model"].as_str().unwrap_or_default();
+        let lookup_id = strip_context_suffix(model.trim());
+        let metadata = (!lookup_id.is_empty())
+            .then(|| {
+                models
+                    .iter()
+                    .find(|item| item["id"].as_str() == Some(lookup_id))
+            })
+            .flatten();
+        let target = ClaudeBudgetTarget {
+            provider_id,
+            provider_name,
+            context_window: metadata_tokens(metadata, "contextWindow"),
+            max_context_window: metadata_tokens(metadata, "maxContextWindow"),
+        };
+        let label = locale.text("独立压缩", "Compaction");
+        let display_model = if model.trim().is_empty() {
+            provider_name.to_owned()
+        } else {
+            model_name(models, model).to_owned()
+        };
+        match resolve_target_window("compaction", target, &context_windows) {
+            Ok(Some(window)) => resolved.push(ResolvedWindowTarget {
+                tier_label: label,
+                model_label: display_model,
+                window,
+                dedup_with_opus: false,
+            }),
+            Ok(None) => {}
+            Err(_) => {
+                let text = match locale {
+                    InterfaceLocale::Chinese => {
+                        format!(
+                            "当前会话生效窗口不可用：{label} · {display_model} 低于 100K，新会话无法启动"
+                        )
+                    }
+                    InterfaceLocale::English => format!(
+                        "Effective session window unavailable: {label} · {display_model} is under 100K; new sessions cannot start."
+                    ),
+                };
+                return Some(SessionWindowNote {
+                    text,
+                    is_error: true,
+                });
+            }
+        }
+    }
+
+    let min_window = resolved.iter().map(|item| item.window).min()?;
+    let effective = min_window.min(MAXIMUM_CONTEXT);
+    let formatted = compact_tokens(effective);
+
+    if effective >= MAXIMUM_CONTEXT {
+        let text = match locale {
+            InterfaceLocale::Chinese => format!("当前会话生效窗口：{formatted}"),
+            InterfaceLocale::English => format!("Effective session window: {formatted}"),
+        };
+        return Some(SessionWindowNote {
+            text,
+            is_error: false,
+        });
+    }
+
+    let opus_is_limiter = resolved
+        .iter()
+        .any(|item| item.tier_label == "Opus" && item.window == effective);
+    let limiters: Vec<_> = resolved
+        .iter()
+        .filter(|item| item.window == effective && !(item.dedup_with_opus && opus_is_limiter))
+        .collect();
+    let text = if let [single] = limiters.as_slice() {
+        match locale {
+            InterfaceLocale::Chinese => format!(
+                "当前会话生效窗口：{formatted}（由 {} · {} 决定）",
+                single.tier_label, single.model_label
+            ),
+            InterfaceLocale::English => format!(
+                "Effective session window: {formatted} (set by {} · {})",
+                single.tier_label, single.model_label
+            ),
+        }
+    } else {
+        let sep = match locale {
+            InterfaceLocale::Chinese => "、",
+            InterfaceLocale::English => ", ",
+        };
+        let names = limiters
+            .iter()
+            .map(|item| item.tier_label)
+            .collect::<Vec<_>>()
+            .join(sep);
+        match locale {
+            InterfaceLocale::Chinese => format!("当前会话生效窗口：{formatted}（由 {names} 决定）"),
+            InterfaceLocale::English => {
+                format!("Effective session window: {formatted} (set by {names})")
+            }
+        }
+    };
+    Some(SessionWindowNote {
+        text,
+        is_error: false,
+    })
+}
+
 #[cfg(test)]
 mod assignment_validation_tests {
     use super::{
-        Problem, VIEW_PRIVACY, VIEW_SAVE_ERROR, VIEW_SEARCH_FOLLOW_TIER, VIEW_SEARCH_NOTE,
-        VIEW_SEARCH_TIER, VIEW_SEARCH_UNASSIGNED, allows_manual, allows_manual_search,
-        available_models, effort_choices, global_effort, row_problem, search_models, search_patch,
-        search_problem, store_search_effort,
+        Problem, SessionWindowNote, VIEW_PRIVACY, VIEW_SAVE_ERROR, VIEW_SEARCH_FOLLOW_TIER,
+        VIEW_SEARCH_NOTE, VIEW_SEARCH_TIER, VIEW_SEARCH_UNASSIGNED, allows_manual,
+        allows_manual_search, available_models, effective_session_window_note, effort_choices,
+        global_effort, row_problem, search_models, search_patch, search_problem,
+        store_search_effort,
     };
-    use matou_native_core::provider_launch::ClaudeRoleAssignment;
+    use matou_native_core::{
+        provider_launch::{ClaudeRoleAssignment, ClaudeRoleAssignments},
+        sessions::InterfaceLocale,
+    };
     use serde_json::{Value, json};
 
     #[test]
@@ -3300,5 +3578,159 @@ mod assignment_validation_tests {
         );
         assert_eq!(Problem::Empty.text(), "请选择或输入模型。");
         assert_eq!(Problem::Invalid.text(), "模型 ID 无效，请检查输入。");
+    }
+
+    #[test]
+    fn effective_session_window_note_identifies_limiting_tier_or_compaction() {
+        let providers = vec![
+            json!({
+                "id": "main",
+                "name": "Main Provider",
+                "contextWindowMode": "maximum",
+                "modelMapping": {
+                    "opus": "claude-opus-5-5",
+                    "fable": "claude-fable-5",
+                    "sonnet": "claude-sonnet-5-5",
+                    "haiku": "claude-haiku-5-5"
+                },
+                "modelMetadata": [
+                    {"id": "claude-opus-5-5", "contextWindow": 1_000_000},
+                    {"id": "claude-fable-5", "contextWindow": 1_000_000},
+                    {"id": "claude-sonnet-5-5", "contextWindow": 1_000_000},
+                    {"id": "claude-haiku-5-5", "contextWindow": 1_000_000}
+                ]
+            }),
+            json!({
+                "id": "codex",
+                "name": "ChatGPT",
+                "kind": "subscription",
+                "contextWindowMode": "maximum",
+                "subscription": {
+                    "provider": "codex",
+                    "modelMetadata": [
+                        {"id": "gpt-6.2-sol", "contextWindow": 272_000, "maxContextWindow": 872_000}
+                    ]
+                }
+            }),
+            json!({
+                "id": "small-compact",
+                "name": "Small Compact",
+                "modelMetadata": [
+                    {"id": "summary-256k", "contextWindow": 256_000},
+                    {"id": "tiny-80k", "contextWindow": 80_000}
+                ]
+            }),
+        ];
+
+        assert_eq!(
+            effective_session_window_note(
+                &ClaudeRoleAssignments::new(),
+                &providers,
+                Some("main"),
+                None,
+                &[],
+                InterfaceLocale::Chinese,
+            ),
+            None
+        );
+
+        let mut draft = ClaudeRoleAssignments::new();
+        draft.insert(
+            "sonnet".into(),
+            ClaudeRoleAssignment {
+                provider_id: "codex".into(),
+                model: "gpt-6.2-sol".into(),
+                effort: None,
+            },
+        );
+        assert_eq!(
+            effective_session_window_note(
+                &draft,
+                &providers,
+                Some("main"),
+                None,
+                &[],
+                InterfaceLocale::Chinese,
+            ),
+            Some(SessionWindowNote {
+                text: "当前会话生效窗口：872K（由 Sonnet · gpt-6.2-sol 决定）".into(),
+                is_error: false,
+            })
+        );
+        assert_eq!(
+            effective_session_window_note(
+                &draft,
+                &providers,
+                Some("main"),
+                None,
+                &[],
+                InterfaceLocale::English,
+            ),
+            Some(SessionWindowNote {
+                text: "Effective session window: 872K (set by Sonnet · gpt-6.2-sol)".into(),
+                is_error: false,
+            })
+        );
+
+        let custom_compaction = json!({
+            "mode": "custom",
+            "providerId": "small-compact",
+            "model": "summary-256k"
+        });
+        assert_eq!(
+            effective_session_window_note(
+                &draft,
+                &providers,
+                Some("main"),
+                Some(&custom_compaction),
+                &[],
+                InterfaceLocale::Chinese,
+            ),
+            Some(SessionWindowNote {
+                text: "当前会话生效窗口：256K（由 独立压缩 · summary-256k 决定）".into(),
+                is_error: false,
+            })
+        );
+
+        let tiny_compaction = json!({
+            "mode": "custom",
+            "providerId": "small-compact",
+            "model": "tiny-80k"
+        });
+        let error_note = effective_session_window_note(
+            &draft,
+            &providers,
+            Some("main"),
+            Some(&tiny_compaction),
+            &[],
+            InterfaceLocale::Chinese,
+        )
+        .unwrap();
+        assert!(error_note.is_error);
+        assert!(error_note.text.contains("独立压缩 · tiny-80k"));
+
+        let mut all_1m = ClaudeRoleAssignments::new();
+        all_1m.insert(
+            "opus".into(),
+            ClaudeRoleAssignment {
+                provider_id: "main".into(),
+                model: "claude-opus-5-5".into(),
+                effort: None,
+            },
+        );
+        assert_eq!(
+            effective_session_window_note(
+                &all_1m,
+                &providers,
+                Some("main"),
+                None,
+                &[],
+                InterfaceLocale::Chinese,
+            ),
+            Some(SessionWindowNote {
+                text: "当前会话生效窗口：1M".into(),
+                is_error: false,
+            })
+        );
     }
 }

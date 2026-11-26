@@ -1748,7 +1748,7 @@ fn assert_single_provider_window(launch: &ShellLaunch, window: u64) {
     assert_env(
         launch,
         "CLAUDE_CODE_DISABLE_1M_CONTEXT",
-        if window < 1_000_000 { "1" } else { "0" },
+        if window <= 200_000 { "1" } else { "0" },
     );
 }
 
@@ -1853,6 +1853,8 @@ fn single_api_window_preferences_apply_to_fresh_and_restored_launches() -> Resul
         ("512k", "role-model", 512_000),
         ("maximum", "role-model", 1_100_000),
         ("maximum", "unknown-model", 2_000_000),
+        ("maximum", "codex-model", 872_000),
+        ("maximum", "small-model", 200_000),
     ] {
         fs::write(&path, config(json!([{
             "id": "source", "model": "custom-model", "endpoint": "http://127.0.0.1:1",
@@ -1860,7 +1862,9 @@ fn single_api_window_preferences_apply_to_fresh_and_restored_launches() -> Resul
             "modelMapping": {"sonnet": mapping},
             "modelMetadata": [
                 {"id": "custom-model", "contextWindow": 1_048_576, "maxContextWindow": 2_000_000},
-                {"id": "role-model", "contextWindow": 1_100_000}
+                {"id": "role-model", "contextWindow": 1_100_000},
+                {"id": "codex-model", "contextWindow": 272_000, "maxContextWindow": 872_000},
+                {"id": "small-model", "contextWindow": 200_000}
             ]
         }]), "source").to_string())?;
         let preferences = single_provider_preferences("source", json!(mode))?;

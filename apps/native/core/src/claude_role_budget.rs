@@ -4,10 +4,18 @@ use anyhow::{Result, ensure};
 use serde_json::{Map, Value};
 
 const MINIMUM_CONTEXT: u64 = 100_000;
+pub const STANDARD_CONTEXT: u64 = 200_000;
 const FIXED_CONTEXT: u64 = 512_000;
 pub const MAXIMUM_CONTEXT: u64 = 1_000_000;
 pub const CLAUDE_ROLES: [&str; 4] = ["opus", "fable", "sonnet", "haiku"];
 pub const CLAUDE_ROLE_LABELS: [&str; CLAUDE_ROLES.len()] = ["Opus", "Fable", "Sonnet", "Haiku"];
+
+/// Disable 1M context only when the effective budget fits within the 200K standard window.
+/// Setting `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` for larger budgets (such as 512K or 872K)
+/// clamps 1M-capable models down to 200K instead of honoring `autoCompactWindow`.
+pub const fn disables_1m_context(window: u64) -> bool {
+    window <= STANDARD_CONTEXT
+}
 
 #[derive(Clone, Copy)]
 pub struct ClaudeBudgetTarget<'a> {
@@ -51,6 +59,14 @@ pub fn claude_role_budget(
         }
     }
     Ok(budget)
+}
+
+pub fn resolve_target_window(
+    role: &str,
+    target: ClaudeBudgetTarget<'_>,
+    context_windows: &Map<String, Value>,
+) -> Result<Option<u64>> {
+    target_window(role, target, context_windows)
 }
 
 fn target_window(
