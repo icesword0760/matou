@@ -2,7 +2,7 @@ import { copyFile, lstat, mkdir, readdir, writeFile } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { checkPe } from '../native-parity/package-native-win.mjs'
+import { checkPe, isMsvcReleaseRuntime } from '../native-parity/package-native-win.mjs'
 import { fileDigests, runTool } from '../native-release-helpers.mjs'
 import { windowsPeImports } from './pe-imports.mjs'
 
@@ -11,7 +11,6 @@ const applicationIcon = fileURLToPath(new URL('../../apps/desktop/build/icon.ico
 const signatureScript = fileURLToPath(new URL('./file-signatures.ps1', import.meta.url))
 const signingScript = fileURLToPath(new URL('./sign-file.ps1', import.meta.url))
 const msvcRuntime = /^(?:msvc[pr]|vcruntime|concrt|vcomp|vcamp|vccorlib)(?:\d{2,3})(?:_\w+)?d?\.dll$/i
-const releaseRuntime = /^(?:(?:msvcp|vcruntime)140(?:_\w+)?|(?:concrt|vcomp|vcamp|vccorlib)140)\.dll$/i
 const nativeImage = /\.(exe|dll|pyd)$/i
 const invalidWindowsName = /[<>:"|?*\\\p{Cc}]|[. ]$|^(?:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?:\.|$)/iu
 const accountsRoot = ['resources', 'claude-accounts', 'matou-claude-accounts'].join('/')
@@ -51,10 +50,11 @@ async function payloadDigests(directory) {
 }
 
 function needsRuntime(dll) {
-  if (dll === 'ucrtbased.dll' || msvcRuntime.test(dll) && !releaseRuntime.test(dll)) {
+  const releaseRuntime = isMsvcReleaseRuntime(dll)
+  if (dll === 'ucrtbased.dll' || msvcRuntime.test(dll) && !releaseRuntime) {
     throw new Error(`Unsupported Visual C++ runtime import in the release payload: ${dll}`)
   }
-  return releaseRuntime.test(dll)
+  return releaseRuntime
 }
 
 function windowsPowerShell(env) {
@@ -79,7 +79,12 @@ async function inspectSignatures(paths, workDir, env, command, embeddedCatalog =
   return signatures
 }
 
-async function stageMsvcRuntime(payload, source, workDir, arch, env, command) {
+export async function stageMsvcRuntime({ payload, workDir, arch, vcRuntimeDir, env = process.env }, command = runTool) {
+  const configuredSource = vcRuntimeDir ?? (env.VCToolsRedistDir && join(env.VCToolsRedistDir, arch, 'Microsoft.VC143.CRT'))
+  if (!configuredSource) {
+    throw new Error(`Use a VS 2022 ${arch} Developer Command Prompt or set --vc-runtime-dir to its Microsoft.VC143.CRT directory`)
+  }
+  const source = resolve(configuredSource)
   const copies = new Map([
     ['vcruntime140.dll', 'vcruntime140.dll']
   ])
@@ -169,8 +174,6 @@ function signingConfiguration(env, uninstallerDir) {
 export async function buildWindowsInstaller({ payload, destination, workDir, version, internalInstaller,
   arch = 'x64', vcRuntimeDir, env = process.env }, command = runTool) {
   if (!['x64', 'arm64'].includes(arch)) throw new Error('Windows installer architecture must be x64 or arm64')
-  const source = vcRuntimeDir ?? (env.VCToolsRedistDir && join(env.VCToolsRedistDir, arch, 'Microsoft.VC143.CRT'))
-  if (!source) throw new Error(`Use a VS 2022 ${arch} Developer Command Prompt or set --vc-runtime-dir to its Microsoft.VC143.CRT directory`)
   const uninstallerDir = join(workDir, 'signed-uninstallers')
   const signing = internalInstaller ? null : signingConfiguration(env, uninstallerDir)
   const compiler = env.MATOU_WIN_ISCC || 'ISCC.exe'
@@ -183,7 +186,7 @@ export async function buildWindowsInstaller({ payload, destination, workDir, ver
     signingArgs.push('-DMatouSigned', `-DMatouUninstallerDir=${uninstallerDir}`, signing.option)
   }
 
-  await stageMsvcRuntime(payload, resolve(source), workDir, arch, env, command)
+  await stageMsvcRuntime({ payload, workDir, arch, vcRuntimeDir, env }, command)
   await copyFile(applicationIcon, join(payload, 'resources', 'matou.ico'))
   const before = JSON.stringify(await payloadDigests(payload))
   await writeInnoFiles(payload, fileList)

@@ -11,7 +11,7 @@ import {
   defaultUpdateBaseUrl, desktopConfig, generateChecksums, generateManifest, nativeBinaries,
   repo, requireAbsent, runTool, stageRelease
 } from './native-release-helpers.mjs'
-import { buildWindowsInstaller, windowsFileVersion } from './windows-installer/build.mjs'
+import { buildWindowsInstaller, stageMsvcRuntime, windowsFileVersion } from './windows-installer/build.mjs'
 
 const windowsHost = process.platform === 'win32'
 const architectures = { x64: 'x86_64', arm64: 'aarch64' }
@@ -29,7 +29,7 @@ MATOU_WIN_TIMESTAMP_URL overrides the default RFC 3161 timestamp server.
 Prepare the model router, Python account engine and CRT for the selected architecture.
 ARM64 uses MATOU_WIN_ARM64_UPDATE_BASE_URL and defaults to the /stable/win-arm64 feed.
 --internal-installer builds an unsigned EXE without a stable update feed.
---portable-only builds a manual ZIP for x64 or arm64, without an update feed.
+--portable-only builds a manual ZIP for x64 or arm64 with the verified CRT and no update feed.
 The output directory defaults to apps/native/release for x64 or its win-arm64 subdirectory.`
 
 export function windowsReleaseOptions(args, env, config) {
@@ -132,7 +132,9 @@ export async function releaseWindows(options, command = runTool) {
       const { path: payload } = await assembleWindowsDirPackage({
         ...options, ...bins, outDir: unpacked, requireReleaseComponents: !portableOnly
       })
-      if (!portableOnly) {
+      if (portableOnly) {
+        await stageMsvcRuntime({ ...options, payload, workDir: unpacked }, command)
+      } else {
         await buildWindowsInstaller({ ...options, payload, destination: join(staging, `${stem}.exe`), workDir: unpacked }, command)
       }
       if (portableOnly || withZip) await archiveWindowsPayload(join(staging, `${stem}.zip`), payload, command)
@@ -158,10 +160,7 @@ if (invokedPath === fileURLToPath(import.meta.url)) {
     if (options.help) console.log(usage)
     else {
       validateReleaseOptions(options)
-      if (!windowsHost && !options.portableOnly) throw new Error('Build the Windows installer on Windows with Inno Setup 7')
-      if (!windowsHost && (!options.desktopBin || !options.runtimeBin)) {
-        throw new Error('Supply --desktop-bin and --runtime-bin for cross-host Windows packaging')
-      }
+      if (!windowsHost) throw new Error('Package on Windows to verify the Microsoft signature of the bundled Visual C++ runtime')
       console.log((await releaseWindows(options)).join('\n'))
     }
   } catch (error) {

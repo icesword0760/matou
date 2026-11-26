@@ -1,17 +1,14 @@
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join, sep } from 'node:path'
 import { test } from 'node:test'
-import { fileURLToPath } from 'node:url'
 
 import { verifyWindowsDirPackage } from './native-parity/package-native-win.mjs'
 import { runTool } from './native-release-helpers.mjs'
 import { releaseWindows, windowsReleaseOptions } from './release-native-win.mjs'
 
-const script = fileURLToPath(new URL('./release-native-win.mjs', import.meta.url))
 const version = '1.2.3'
 const releaseDate = '2026-11-24T11:00:00.000Z'
 const feed = 'https://updates.example.invalid/stable'
@@ -249,22 +246,22 @@ test('rejects untrusted CRT and any installer without matching signed build evid
 })
 
 for (const arch of ['x64', 'arm64']) {
-  test(`CLI can build an explicit ${arch} portable ZIP without publishing an update manifest`, async t => {
+  test(`${arch} portable ZIP includes the verified Visual C++ runtime without publishing an update manifest`, async t => {
     const { root, options } = await fixtures(t, arch)
-    const { desktopBin, runtimeBin, ghosttyDll, outDir } = options
+    const { outDir, vcRuntimeDir } = options
     const zip = `Matou-${version}-win-${arch}.zip`
     const checksums = `SHA256SUMS-${version}-win-${arch}.txt`
-    const result = spawnSync(process.execPath, [script, '--portable-only', '--arch', arch, '--version', version,
-      '--desktop-bin', desktopBin, '--runtime-bin', runtimeBin, '--ghostty-dll', ghosttyDll, '--out-dir', outDir,
-      '--update-base-url', feed], { encoding: 'utf8' })
-    assert.ifError(result.error)
-    assert.equal(result.status, 0, result.stderr)
+    options.portableOnly = true
+    await releaseWindows(options, windowsTools(options))
     assert.deepEqual((await readdir(outDir)).sort(), [zip, checksums])
     const zipPath = join(outDir, zip)
     const extracted = join(root, arch === 'x64' ? 'win-unpacked' : 'win-arm64-unpacked')
     await mkdir(extracted)
     if (process.platform === 'win32') await runTool('tar.exe', ['-xf', zipPath, '-C', extracted])
     else await runTool('unzip', ['-q', zipPath, '-d', extracted])
-    await verifyWindowsDirPackage(extracted, { arch, version, updateBaseUrl: feed, portableOnly: true })
+    for (const name of ['vcruntime140.dll', 'msvcp140.dll', 'vcruntime140_1.dll']) {
+      assert.deepEqual(await readFile(join(extracted, name)), await readFile(join(vcRuntimeDir, name)))
+    }
+    await verifyWindowsDirPackage(extracted, { ...options })
   })
 }

@@ -414,16 +414,24 @@ async function verifyAccountsDirectory(directory, arch, required = false) {
   }
 }
 
-async function requireEntries(directory, expected, label) {
+export function isMsvcReleaseRuntime(name) {
+  return /^(?:(?:msvcp|vcruntime)140(?:_\w+)?|(?:concrt|vcomp|vcamp|vccorlib)140)\.dll$/i.test(name)
+}
+
+async function requireEntries(directory, expected, label, crtArch) {
   await requirePath(directory, label, true)
   const entries = (await readdir(directory)).sort()
-  if (!isDeepStrictEqual(entries, [...expected].sort())) {
+  const runtimes = crtArch ? entries.filter(isMsvcReleaseRuntime) : []
+  if (!isDeepStrictEqual(entries, [...expected, ...runtimes].sort())) {
     throw new Error(`Invalid ${label} entries at ${directory}: expected ${expected.join(', ')}; found ${entries.join(', ')}`)
+  }
+  for (const name of runtimes) {
+    await checkPe(join(directory, name), `Visual C++ runtime ${name}`, crtArch, true)
   }
 }
 
 async function verifyModelRouter(directory, arch) {
-  await requireEntries(directory, modelRouterFiles, 'model-router directory')
+  await requireEntries(directory, modelRouterFiles, 'model-router directory', arch)
   const binary = join(directory, modelRouterExecutable)
   await checkPe(binary, 'model-router binary', arch)
   await requirePath(join(directory, 'LICENSE'), 'model-router LICENSE')
@@ -470,7 +478,7 @@ export async function verifyWindowsDirPackage(path, options) {
     throw new Error(`Expected directory named ${plan.unpackedDirectoryName}: ${path}`)
   }
   const resources = join(path, plan.resourcesDirectory)
-  await requireEntries(path, [plan.applicationExecutable, plan.runtimeExecutable, ghosttyFilename, plan.resourcesDirectory], 'unpacked package')
+  await requireEntries(path, [plan.applicationExecutable, plan.runtimeExecutable, ghosttyFilename, plan.resourcesDirectory], 'unpacked package', plan.arch)
   const expectedResources = [plan.manifestFilename, plan.versionFilename, 'control-assets']
   const accounts = join(resources, accountsResource)
   if (options.requireReleaseComponents || options.accountsDir !== undefined || await optionalDirectory(accounts)) {
