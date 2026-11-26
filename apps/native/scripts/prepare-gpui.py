@@ -176,9 +176,11 @@ def main():
         # Apply from the extracted archive even when TMPDIR is inside a worktree.
         # Otherwise git apply can discover that worktree and skip patch paths.
         patch_env = {**os.environ, "GIT_CEILING_DIRECTORIES": str(temporary.resolve())}
+        # Preserve the archive's line endings for the pinned patched hashes.
+        git_apply = ["git", "-c", "core.autocrlf=false", "apply"]
         for patch in PATCHES:
-            subprocess.run(["git", "apply", "--check", str(ROOT / patch)], cwd=prepared, env=patch_env, check=True)
-            subprocess.run(["git", "apply", str(ROOT / patch)], cwd=prepared, env=patch_env, check=True)
+            subprocess.run([*git_apply, "--check", str(ROOT / patch)], cwd=prepared, env=patch_env, check=True)
+            subprocess.run([*git_apply, str(ROOT / patch)], cwd=prepared, env=patch_env, check=True)
         actual = {source.as_posix(): digest(prepared / source) for source in SOURCES}
         if actual != PATCHED_SHA256:
             raise SystemExit("GPUI patch results differ from the known adaptations")

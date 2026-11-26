@@ -41,7 +41,7 @@ def patch_source(original, source, path, replacements):
         if text.count(before) != 1:
             raise ValueError(f'Pinned source {path} changed near {before.strip().splitlines()[0]!r}')
         text = text.replace(before, after)
-    (source / path).write_text(text)
+    (source / path).write_text(text, newline='\n')
 
 
 def patch_history_trim(original, source):
@@ -126,7 +126,7 @@ def patch_terminal_paint(original, source):
     for path in ('src/terminal/stream.zig', 'src/terminal/style.zig'):
         shutil.copy2(original / path, source / path)
     workspace = ROOT.parents[2]
-    subprocess.run(['git', 'apply', '--whitespace=error',
+    subprocess.run(['git', '-c', 'core.autocrlf=false', 'apply', '--whitespace=error',
                     f'--directory={source.relative_to(workspace).as_posix()}', str(patch)],
                    cwd=workspace, check=True)
     return {'sha256': digest(patch)}

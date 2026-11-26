@@ -1,0 +1,3 @@
+# Native dependency and router patches must keep LF on every checkout.
+apps/native/patches/*.patch text eol=lf
+tooling/model-router/patches/*.patch text eol=lf

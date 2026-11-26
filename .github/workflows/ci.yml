@@ -9,25 +9,87 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  ZIG_VERSION: '0.17.0'
+
 jobs:
-  check:
-    name: typecheck + unit tests
+  tooling-and-accounts:
+    name: Tooling and account sidecar
     runs-on: macos-latest
-    timeout-minutes: 30
-    env:
-      # Unit tests never launch Electron; skip the ~100 MB binary download.
-      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: pnpm
       - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
         with:
           python-version: '3.13'
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm typecheck
-      - run: pnpm test
-      - run: pnpm test:accounts
+      - run: node tooling/project-identifier-policy.mjs
+      - run: >-
+          node --test
+          tooling/project-identifier-policy.test.mjs
+          tooling/install-macos-app.test.mjs
+          tooling/packaging/package-native-mac.test.mjs
+          tooling/packaging/package-native-win.test.mjs
+          tooling/release-native-mac.test.mjs
+          tooling/release-native-win.test.mjs
+          tooling/model-router/prepare.test.mjs
+      - run: uv sync --project tooling/claude-accounts --frozen
+      - run: uv run --frozen --project tooling/claude-accounts python -m unittest discover -s tooling/claude-accounts -p 'test_*.py'
+
+  native-macos:
+    name: Native tests (macOS arm64)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup default stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          use-cache: false
+      - uses: actions/cache@v4
+        with:
+          path: |
+            apps/native/vendor/gpui
+            apps/native/terminal/vendor/build-cache/*.tar.gz
+            apps/native/terminal/vendor/build-cache/zig-global
+          key: ${{ runner.os }}-${{ runner.arch }}-native-deps-${{ env.ZIG_VERSION }}-${{ hashFiles('apps/native/scripts/prepare-gpui.py', 'apps/native/patches/*.patch', 'apps/native/terminal/scripts/build-libs.py', 'apps/native/terminal/native/reference_width.zig') }}
+      - run: python3 apps/native/scripts/prepare-gpui.py
+      - run: python3 apps/native/terminal/scripts/build-libs.py --target aarch64-apple-darwin
+      - run: cargo fetch --manifest-path apps/native/Cargo.toml --locked
+      - run: cargo build --manifest-path apps/native/Cargo.toml --offline --locked -p matou-native-runtime
+      - run: cargo test --manifest-path apps/native/Cargo.toml --offline --locked
+
+  native-windows:
+    name: Native tests (Windows x64)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup default stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          use-cache: false
+      - uses: actions/cache@v4
+        with:
+          path: |
+            apps/native/vendor/gpui
+            apps/native/terminal/vendor/build-cache/*.tar.gz
+            apps/native/terminal/vendor/build-cache/zig-global
+          key: ${{ runner.os }}-${{ runner.arch }}-native-deps-${{ env.ZIG_VERSION }}-${{ hashFiles('apps/native/scripts/prepare-gpui.py', 'apps/native/patches/*.patch', 'apps/native/terminal/scripts/build-libs.py', 'apps/native/terminal/native/reference_width.zig') }}
+      - run: python apps/native/scripts/prepare-gpui.py
+      - run: python apps/native/terminal/scripts/build-libs.py --target x86_64-pc-windows-msvc
+      - name: Add the Ghostty DLL to PATH
+        run: Join-Path $env:GITHUB_WORKSPACE 'apps/native/terminal/vendor/ghostty-vt/windows-x86_64/bin' >> $env:GITHUB_PATH
+      - run: cargo fetch --manifest-path apps/native/Cargo.toml --locked
+      - run: cargo build --manifest-path apps/native/Cargo.toml --offline --locked -p matou-native-runtime
+      - run: cargo test --manifest-path apps/native/Cargo.toml --offline --locked
