@@ -7768,6 +7768,9 @@ fn run_writable(
                             views.remove(id);
                             scroll_requests.remove(id);
                             frame_delivery.remove(id);
+                            operations.retain(|(session, _, _)| session != id);
+                            searches.retain(|(session, _, _)| session != id);
+                            copies.retain(|(_, session, _, _)| session != id);
                             if !environment_changes.contains_key(id) {
                                 send.send_blocking(Event::Recovery {
                                     session_id: id.to_owned(),
