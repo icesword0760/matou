@@ -36,7 +36,7 @@ The output directory defaults to apps/native/release for x64 or its win-arm64 su
 export function windowsReleaseOptions(args, env, config) {
   const strings = ['arch', 'version', 'out-dir', 'desktop-bin', 'runtime-bin', 'ghostty-dll', 'accounts-dir',
     'model-router', 'vc-runtime-dir', 'update-base-url', 'installer']
-  const booleans = ['with-zip', 'internal-installer', 'portable-only']
+  const booleans = ['with-zip', 'internal-installer', 'portable-only', 'unsigned']
   const { values } = parseArgs({ args, options: {
     ...Object.fromEntries(strings.map(name => [name, { type: 'string' }])),
     ...Object.fromEntries(booleans.map(name => [name, { type: 'boolean' }])),
@@ -44,8 +44,8 @@ export function windowsReleaseOptions(args, env, config) {
   } })
   if (values.help) return { help: true }
   if (values.installer !== undefined) throw new Error('--installer is unsupported. The release builds its installer from the verified payload.')
-  if (values['portable-only'] && (values['with-zip'] || values['internal-installer'])) {
-    throw new Error('--portable-only cannot be combined with --with-zip or --internal-installer')
+  if (values['portable-only'] && (values['with-zip'] || values['internal-installer'] || values.unsigned)) {
+    throw new Error('--portable-only cannot be combined with --with-zip, --internal-installer or --unsigned')
   }
   const arch = values.arch ?? (env.MATOU_WIN_ARCH || 'x64')
   const arm64UpdateBaseUrl = arch === 'arm64' ? env.MATOU_WIN_ARM64_UPDATE_BASE_URL : undefined
@@ -59,6 +59,7 @@ export function windowsReleaseOptions(args, env, config) {
     portableOnly: values['portable-only'] === true,
     withZip: values['with-zip'] === true,
     internalInstaller: values['internal-installer'] === true,
+    unsigned: values.unsigned === true,
     outDir: values['out-dir'] ?? join(repo, 'apps/native/release', arch === 'arm64' ? 'win-arm64' : ''),
     desktopBin: values['desktop-bin'],
     runtimeBin: values['runtime-bin'],

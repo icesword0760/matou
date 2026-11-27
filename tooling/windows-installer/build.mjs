@@ -172,10 +172,10 @@ function signingConfiguration(env, uninstallerDir) {
 }
 
 export async function buildWindowsInstaller({ payload, destination, workDir, version, internalInstaller,
-  arch = 'x64', vcRuntimeDir, env = process.env }, command = runTool) {
+  unsigned = false, arch = 'x64', vcRuntimeDir, env = process.env }, command = runTool) {
   if (!['x64', 'arm64'].includes(arch)) throw new Error('Windows installer architecture must be x64 or arm64')
   const uninstallerDir = join(workDir, 'signed-uninstallers')
-  const signing = internalInstaller ? null : signingConfiguration(env, uninstallerDir)
+  const signing = (internalInstaller || unsigned) ? null : signingConfiguration(env, uninstallerDir)
   const compiler = env.MATOU_WIN_ISCC || 'ISCC.exe'
   const fileVersion = windowsFileVersion(version)
   const fileList = join(workDir, 'payload.iss')

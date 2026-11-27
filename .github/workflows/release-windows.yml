@@ -1,11 +1,16 @@
-name: Release Windows x64 Portable
+name: Release Windows x64 Installer
 
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing GitHub Release tag to attach Windows x64 portable artifacts to (e.g. v0.3.1)
+        description: Existing GitHub Release tag to attach Windows x64 installer assets to (e.g. v0.3.1)
         required: true
+        type: string
+      ref:
+        description: Git ref to build from (defaults to main)
+        required: false
+        default: main
         type: string
 
 permissions:
@@ -17,13 +22,13 @@ env:
 
 jobs:
   package-windows-x64:
-    name: Build Windows x64 portable ZIP
+    name: Build Windows x64 installer EXE
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ inputs.ref || 'main' }}
 
       - run: rustup default stable
 
@@ -43,6 +48,34 @@ jobs:
         with:
           version: ${{ env.ZIG_VERSION }}
           use-cache: false
+
+      - name: Install Inno Setup 7
+        id: iscc
+        shell: pwsh
+        run: |
+          $found = @('C:\Program Files (x86)\Inno Setup 7\ISCC.exe', 'C:\Program Files\Inno Setup 7\ISCC.exe') | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $found) {
+            choco install innosetup --no-progress -y --force || true
+            $found = @(
+              'C:\Program Files (x86)\Inno Setup 7\ISCC.exe',
+              'C:\Program Files\Inno Setup 7\ISCC.exe',
+              'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+            ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          }
+          if (-not $found -or ($found -notmatch 'Inno Setup 7')) {
+            $setup = Join-Path $env:RUNNER_TEMP 'innosetup-7.exe'
+            Invoke-WebRequest -Uri 'https://files.jrsoftware.org/is/7/innosetup-7.0.0.exe' -OutFile $setup
+            Start-Process -FilePath $setup -ArgumentList '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-' -Wait
+            $found = @('C:\Program Files (x86)\Inno Setup 7\ISCC.exe', 'C:\Program Files\Inno Setup 7\ISCC.exe') | Where-Object { Test-Path $_ } | Select-Object -First 1
+          }
+          if (-not $found) { throw 'Could not locate Inno Setup 7 ISCC.exe' }
+          $isccDir = Split-Path $found -Parent
+          $lang = Join-Path $isccDir 'Languages\ChineseSimplified.isl'
+          if (-not (Test-Path $lang)) {
+            Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/Unofficial/ChineseSimplified.isl' -OutFile $lang
+          }
+          Write-Host "Using ISCC: $found"
+          "path=$found" >> $env:GITHUB_OUTPUT
 
       - uses: actions/cache@v4
         with:
@@ -84,27 +117,33 @@ jobs:
           }
           "dir=$dir" >> $env:GITHUB_OUTPUT
 
-      - name: Package Windows x64 portable ZIP
+      - name: Package Windows x64 installer EXE
         shell: pwsh
+        env:
+          MATOU_WIN_ISCC: ${{ steps.iscc.outputs.path }}
         run: |
-          $crt = Get-ChildItem 'C:\Program Files\Microsoft Visual Studio\2022' -Recurse -Directory -Filter 'Microsoft.VC143.CRT' -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -match '\\x64\\' } |
-            Sort-Object FullName -Descending |
-            Select-Object -First 1 -ExpandProperty FullName
+          $roots = @('C:\Program Files\Microsoft Visual Studio', 'C:\Program Files (x86)\Microsoft Visual Studio') | Where-Object { Test-Path $_ }
+          $crt = $roots | ForEach-Object {
+            Get-ChildItem $_ -Recurse -Directory -Filter 'Microsoft.VC*.CRT' -ErrorAction SilentlyContinue
+          } | Where-Object {
+            ($_.FullName -match '\\x64\\') -and (Test-Path (Join-Path $_.FullName 'vcruntime140.dll'))
+          } | Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
           if (-not $crt) {
-            throw 'Could not locate Microsoft.VC143.CRT for x64'
+            throw 'Could not locate Visual C++ x64 CRT directory'
           }
           Write-Host "Using CRT: $crt"
           New-Item -ItemType Directory -Force -Path apps/native/release | Out-Null
+          $ver = "${{ inputs.tag }}".TrimStart('v')
           node tooling/release-native-win.mjs `
             --arch x64 `
-            --portable-only `
+            --version "$ver" `
+            --unsigned `
             --accounts-dir tooling/claude-accounts/dist/matou-claude-accounts `
             --model-router "${{ steps.router.outputs.dir }}" `
             --vc-runtime-dir "$crt" `
             --out-dir apps/native/release
 
-      - name: Upload Windows x64 portable assets to GitHub Release
+      - name: Upload Windows x64 installer assets to GitHub Release
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
