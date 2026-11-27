@@ -3181,7 +3181,7 @@ dependencies = [
 
 [[package]]
 name = "matou-native-core"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "base64",
@@ -3203,7 +3203,7 @@ dependencies = [
 
 [[package]]
 name = "matou-native-desktop"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",
@@ -3228,7 +3228,7 @@ dependencies = [
 
 [[package]]
 name = "matou-native-runtime"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",
@@ -3262,7 +3262,7 @@ dependencies = [
 
 [[package]]
 name = "matou-native-terminal"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "base64",
