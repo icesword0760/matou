@@ -160,6 +160,24 @@ pub struct RuntimeCommands {
     shared: Arc<Shared>,
 }
 impl RuntimeCommands {
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        Self {
+            shared: Arc::new(Shared {
+                hooks: TestHooks::default(),
+                state: Mutex::new(State {
+                    generation: 0,
+                    phase: ConnectionPhase::Ready,
+                    sender: None,
+                    stopping: false,
+                    retry: false,
+                    pid: 0,
+                }),
+                changed: Condvar::new(),
+            }),
+        }
+    }
+
     /// The producer supplies its original connection, never the connection at completion time.
     pub fn send_at(
         &self,

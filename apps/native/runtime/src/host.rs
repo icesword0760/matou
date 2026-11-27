@@ -139,7 +139,10 @@ impl LaunchOptions {
                 args.next();
                 std::process::exit(crate::mt_cli::run(args));
             }
-            if args.peek().is_some_and(|flag| flag == crate::mt_cli::FOREMAN_MODE) {
+            if args
+                .peek()
+                .is_some_and(|flag| flag == crate::mt_cli::FOREMAN_MODE)
+            {
                 args.next();
                 std::process::exit(crate::foreman::run(args));
             }
@@ -148,7 +151,10 @@ impl LaunchOptions {
                 args.next();
                 std::process::exit(crate::codex_launch::run_batch_agent(args));
             }
-            if args.peek().is_some_and(|flag| flag == crate::native_hooks::MODE) {
+            if args
+                .peek()
+                .is_some_and(|flag| flag == crate::native_hooks::MODE)
+            {
                 args.next();
                 std::process::exit(crate::native_hooks::run(args));
             }
@@ -1684,15 +1690,22 @@ impl LiveUpdate {
                         } else {
                             match &fetcher {
                                 Ok(fetcher) => {
+                                    let publish = |state| {
+                                        let _ = events.send_blocking(wiring_result(
+                                            "updateStatusChanged",
+                                            0,
+                                            Ok(json!(state)),
+                                        ));
+                                    };
                                     if kind == "updateCheckResult" {
                                         update.check(
                                             fetcher,
                                             || now() as u64,
                                             |ms| thread::sleep(Duration::from_millis(ms)),
-                                            |_| {},
+                                            publish,
                                         );
                                     } else {
-                                        update.download(fetcher, &files, || now() as u64, |_| {});
+                                        update.download(fetcher, &files, || now() as u64, publish);
                                     }
                                     Ok(json!(update.state()))
                                 }

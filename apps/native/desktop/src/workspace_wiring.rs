@@ -3,9 +3,7 @@ use super::*;
 #[path = "footer_claude_accounts.rs"]
 mod footer_claude_accounts;
 use footer_claude_accounts::AccountUi;
-use matou_native_core::link_routing::{
-    ControlledBrowserFailure, LinkSource, route_link,
-};
+use matou_native_core::link_routing::{ControlledBrowserFailure, LinkSource, route_link};
 use matou_native_desktop::{
     card_context_menu::{
         CardMenu, CardMenuAction, CardMenuContext, CardMenuEvent, CardMenuItem, CardPresentation,
@@ -92,7 +90,9 @@ fn launch_link(
             LinkOpenTarget::Controlled => browser_integration::open_controlled_url(&url),
             LinkOpenTarget::System => browser_integration::open_system_url(&url),
         };
-        opened.then_some(()).ok_or(ControlledBrowserFailure::LaunchFailed)
+        opened
+            .then_some(())
+            .ok_or(ControlledBrowserFailure::LaunchFailed)
     })
 }
 
@@ -343,9 +343,10 @@ impl Workspace {
         }
         self.wiring.link_in_progress = true;
         let url = link.url().to_owned();
-        let prefer_controlled = self.data_root.as_deref().is_some_and(
-            matou_native_runtime::browser_integration::prefers_controlled_browser,
-        );
+        let prefer_controlled = self
+            .data_root
+            .as_deref()
+            .is_some_and(matou_native_runtime::browser_integration::prefers_controlled_browser);
         let initial_target = if prefer_controlled {
             LinkOpenTarget::Controlled
         } else {
@@ -358,16 +359,22 @@ impl Workspace {
             };
             let mut result = initial_open.await;
             if result.is_err() && prefer_controlled {
-                let Ok(open) = owner.update(cx, open_system) else { return };
+                let Ok(open) = owner.update(cx, open_system) else {
+                    return;
+                };
                 result = open.await;
             }
             while result.is_err() {
-                let Ok(prompt) = owner.update_in(cx, |this, window, cx| {
-                    this.link_failure_prompt(window, cx)
-                }) else { break };
+                let Ok(prompt) =
+                    owner.update_in(cx, |this, window, cx| this.link_failure_prompt(window, cx))
+                else {
+                    break;
+                };
                 match prompt.await {
                     LinkFallbackAction::Retry => {
-                        let Ok(open) = owner.update(cx, open_system) else { break };
+                        let Ok(open) = owner.update(cx, open_system) else {
+                            break;
+                        };
                         result = open.await;
                     }
                     LinkFallbackAction::Copy => {
@@ -2787,8 +2794,10 @@ impl Workspace {
             .is_err()
         {
             self.show_error_toast(
-                self.locale
-                    .text("无法生成交接摘要：运行时未就绪", "Runtime unavailable for handoff brief"),
+                self.locale.text(
+                    "无法生成交接摘要：运行时未就绪",
+                    "Runtime unavailable for handoff brief",
+                ),
                 cx,
             );
         }
@@ -2857,7 +2866,13 @@ impl Workspace {
             self.set_egress_status(status, window, cx);
             self.refresh_frozen_egress(cx);
         }
-        if let Some((pending, expected, stage)) = self.wiring.update_request
+        if kind == "updateStatusChanged" && request_id == 0 {
+            if let Ok(status) =
+                serde_json::from_value::<update_download::UpdateState>(reply["result"].clone())
+            {
+                self.accept_update_state(project_update(status), cx);
+            }
+        } else if let Some((pending, expected, stage)) = self.wiring.update_request
             && pending == request_id
             && expected == kind
         {
@@ -3455,6 +3470,173 @@ fn project_update(value: update_download::UpdateState) -> UpdateState {
     UpdateState {
         current_version: value.current_version,
         status,
+    }
+}
+
+#[cfg(test)]
+mod update_push_tests {
+    use super::{Overlay, UpdateAction, UpdateErrorStage, UpdatePhase, Workspace, update_download};
+    use crate::runtime_bridge::{BridgeEvent, Event, RuntimeCommands};
+    use gpui::{AppContext, Context, Entity, IntoElement, Render, TestAppContext, Window, div};
+    use matou_native_core::{sessions::InterfaceLocale, update_policy::InstallMode};
+    use serde_json::json;
+
+    const DOWNLOAD_SIZE: u64 = 10_000_000;
+
+    fn with_workspace(test: impl FnOnce(&mut Workspace, &mut Window, &mut Context<Workspace>)) {
+        struct TestWindow(Entity<Workspace>);
+        impl Render for TestWindow {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+            }
+        }
+
+        let mut cx = TestAppContext::single();
+        let handle = cx.add_window(|window, cx| {
+            let (_, events) = async_channel::unbounded();
+            let commands = RuntimeCommands::for_test();
+            TestWindow(cx.new(|cx| {
+                let mut workspace =
+                    Workspace::with_launch_options(commands, events, window, cx, None);
+                workspace.locale = InterfaceLocale::English;
+                workspace
+            }))
+        });
+        handle
+            .update(&mut cx, |test_window, window, cx| {
+                test_window.0.update(cx, |view, cx| test(view, window, cx));
+            })
+            .unwrap();
+    }
+
+    fn release() -> update_download::Release {
+        update_download::Release {
+            version: "99.0.0".into(),
+            release_notes: Vec::new(),
+            install_mode: InstallMode::Manual,
+            release_date: None,
+            size_bytes: Some(DOWNLOAD_SIZE),
+            manual_download_url: None,
+        }
+    }
+
+    fn push_status(
+        view: &mut Workspace,
+        phase: UpdatePhase,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) {
+        let state = update_download::UpdateState {
+            current_version: env!("CARGO_PKG_VERSION").into(),
+            phase,
+        };
+        view.apply(
+            BridgeEvent::Runtime {
+                generation: view.runtime_generation,
+                event: Event::Graph(json!({
+                    "type": "updateStatusChanged", "requestId": 0, "result": state,
+                })),
+            },
+            window,
+            cx,
+        );
+    }
+
+    #[test]
+    fn update_push_refreshes_open_popover_independently_of_pending_request() {
+        with_workspace(|view, window, cx| {
+            view.open_wiring_overlay(Overlay::Update, window, cx);
+            view.wiring.update.dispatch(UpdateAction::TogglePopover);
+            let pending_status = Some((42, "updateStatusResult", UpdateErrorStage::Check));
+            view.wiring.update_request = pending_status;
+
+            for (percent, transferred, rate, sizes, speed) in [
+                (25, 2_500_000, 500_000, "2.5 MB / 10.0 MB", "0.5 MB/s"),
+                (70, 7_000_000, 1_000_000, "7.0 MB / 10.0 MB", "1.0 MB/s"),
+            ] {
+                push_status(
+                    view,
+                    UpdatePhase::Downloading {
+                        release: release(),
+                        progress: update_download::Progress::new(
+                            percent as f64,
+                            transferred,
+                            DOWNLOAD_SIZE,
+                            rate,
+                        ),
+                    },
+                    window,
+                    cx,
+                );
+                assert!(view.wiring.update_request == pending_status);
+                assert!(view.wiring.overlay == Some(Overlay::Update));
+                let update = view.runtime_update_view();
+                assert!(update.open);
+                assert_eq!(update.label, format!("App update: downloading {percent}%"));
+                let progress = update.progress.unwrap();
+                assert_eq!(progress.rounded_percent, percent);
+                assert_eq!(progress.sizes, sizes);
+                assert!(progress.rate.starts_with(speed), "{}", progress.rate);
+            }
+
+            view.wiring.update_request = None;
+            push_status(
+                view,
+                UpdatePhase::Downloaded { release: release() },
+                window,
+                cx,
+            );
+            assert!(view.wiring.overlay == Some(Overlay::Update));
+            let update = view.runtime_update_view();
+            assert!(update.open);
+            assert_eq!(update.label, "App update: waiting to open installer");
+            assert!(update.progress.is_none());
+            assert!(
+                update
+                    .buttons
+                    .iter()
+                    .any(|button| button.action == UpdateAction::Install && button.enabled)
+            );
+        });
+    }
+
+    #[test]
+    fn update_push_refreshes_trigger_without_opening_dismissed_popover() {
+        with_workspace(|view, window, cx| {
+            view.open_wiring_overlay(Overlay::Update, window, cx);
+            view.wiring.update.dispatch(UpdateAction::TogglePopover);
+            view.dismiss_wiring_overlay(window, cx);
+
+            push_status(
+                view,
+                UpdatePhase::Downloading {
+                    release: release(),
+                    progress: update_download::Progress::new(
+                        50.0,
+                        5_000_000,
+                        DOWNLOAD_SIZE,
+                        1_000_000,
+                    ),
+                },
+                window,
+                cx,
+            );
+            assert!(view.wiring.overlay.is_none());
+            let update = view.runtime_update_view();
+            assert!(!update.open);
+            assert_eq!(update.label, "App update: downloading 50%");
+
+            push_status(
+                view,
+                UpdatePhase::Downloaded { release: release() },
+                window,
+                cx,
+            );
+            assert!(view.wiring.overlay.is_none());
+            let update = view.runtime_update_view();
+            assert!(!update.open);
+            assert_eq!(update.label, "App update: waiting to open installer");
+        });
     }
 }
 

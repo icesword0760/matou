@@ -42,6 +42,7 @@ const WAIT: Duration = Duration::from_secs(10);
 struct TestBody {
     chunks: VecDeque<Bytes>,
     stall: bool,
+    remaining: Option<tokio::sync::mpsc::Receiver<Bytes>>,
 }
 
 impl Body for TestBody {
@@ -50,10 +51,14 @@ impl Body for TestBody {
 
     fn poll_frame(
         mut self: Pin<&mut Self>,
-        _: &mut Context<'_>,
+        cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, Infallible>>> {
         if let Some(bytes) = self.chunks.pop_front() {
             Poll::Ready(Some(Ok(Frame::data(bytes))))
+        } else if let Some(remaining) = &mut self.remaining {
+            remaining
+                .poll_recv(cx)
+                .map(|bytes| bytes.map(Frame::data).map(Ok))
         } else if self.stall {
             Poll::Pending
         } else {
@@ -68,6 +73,7 @@ enum Reply {
     Found(String),
     Artifact { tampered: bool, stall: bool },
     Bytes(Vec<u8>),
+    StreamedArtifact(Vec<u8>, Arc<Notify>),
     NoHeaders,
     Gated(Arc<Notify>, String),
 }
@@ -75,6 +81,7 @@ enum Reply {
 impl Reply {
     async fn response(self) -> Response<TestBody> {
         let mut headers = Response::builder();
+        let mut remaining = None;
         let (chunks, stall) = match self {
             Self::Text(status, text) => {
                 headers = headers.status(status);
@@ -101,13 +108,35 @@ impl Reply {
                 (chunks, stall)
             }
             Self::Bytes(bytes) => (VecDeque::from([Bytes::from(bytes)]), false),
+            Self::StreamedArtifact(bytes, finish) => {
+                let bytes = Bytes::from(bytes);
+                let first = bytes.slice(..65_536);
+                let (send, receive) = tokio::sync::mpsc::channel(1);
+                remaining = Some(receive);
+                tokio::spawn(async move {
+                    // Give the updater's progress interval time to elapse while streaming.
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    if send.send(bytes.slice(65_536..131_072)).await.is_ok() {
+                        // Keep the download in flight until the test receives partial progress.
+                        finish.notified().await;
+                        let _ = send.send(bytes.slice(131_072..)).await;
+                    }
+                });
+                (VecDeque::from([first]), false)
+            }
             Self::NoHeaders => pending().await,
             Self::Gated(gate, text) => {
                 gate.notified().await;
                 (VecDeque::from([Bytes::from(text)]), false)
             }
         };
-        headers.body(TestBody { chunks, stall }).unwrap()
+        headers
+            .body(TestBody {
+                chunks,
+                stall,
+                remaining,
+            })
+            .unwrap()
     }
 }
 
@@ -936,9 +965,11 @@ fn host_reply(host: &RuntimeHost, id: u64, kind: &str) -> Result<Value> {
 }
 
 #[test]
-fn runtime_host_uses_live_http_and_remains_responsive_during_check() -> Result<()> {
+fn runtime_host_streams_live_update_states_and_remains_responsive_during_check() -> Result<()> {
     let gate = Arc::new(Notify::new());
     let server_gate = Arc::clone(&gate);
+    let finish_download = Arc::new(Notify::new());
+    let server_finish = Arc::clone(&finish_download);
     let (checking, requested) = mpsc::channel();
     let windows_arm64 = cfg!(all(windows, target_arch = "aarch64"));
     let installer = if windows_arm64 {
@@ -973,13 +1004,8 @@ fn runtime_host_uses_live_http_and_remains_responsive_during_check() -> Result<(
                 Arc::clone(&server_gate),
                 yaml("99.0.0", installer, &checksum),
             )
-        } else if path.ends_with(installer) && cfg!(windows) {
-            Reply::Bytes(server_artifact.clone())
         } else if path.ends_with(installer) {
-            Reply::Artifact {
-                tampered: false,
-                stall: false,
-            }
+            Reply::StreamedArtifact(server_artifact.clone(), Arc::clone(&server_finish))
         } else {
             not_found()
         }
@@ -1011,6 +1037,10 @@ fn runtime_host_uses_live_http_and_remains_responsive_during_check() -> Result<(
     host.commands
         .send(Command::CheckForUpdate { request_id: 1 })?;
     requested.recv_timeout(WAIT)?;
+    assert_eq!(
+        host_reply(&host, 0, "updateStatusChanged")?["status"],
+        "checking"
+    );
     host.commands
         .send(Command::GetUpdateStatus { request_id: 2 })?;
     assert_eq!(
@@ -1034,7 +1064,35 @@ fn runtime_host_uses_live_http_and_remains_responsive_during_check() -> Result<(
 
     host.commands
         .send(Command::DownloadUpdate { request_id: 3 })?;
+    let started = host_reply(&host, 0, "updateStatusChanged")?;
+    assert_eq!(started["status"], "downloading");
+    assert_eq!(started["progress"]["transferredBytes"], 0);
+    let partial = host_reply(&host, 0, "updateStatusChanged")?;
+    assert_eq!(partial["status"], "downloading");
+    assert_eq!(partial["progress"]["totalBytes"], ARTIFACT_SIZE);
+    let percent = partial["progress"]["percent"].as_f64().unwrap();
+    assert!(percent > 0.0 && percent < 100.0, "{partial}");
+    let transferred = partial["progress"]["transferredBytes"].as_u64().unwrap();
+    assert!(
+        transferred > 0 && transferred < ARTIFACT_SIZE as u64,
+        "{partial}"
+    );
+    assert!(partial["progress"]["bytesPerSecond"].as_u64().unwrap() > 0);
+    finish_download.notify_one();
+    let terminal = next_event(&host, |event| match event {
+        Event::Graph(graph)
+            if (graph["type"] == "updateStatusChanged"
+                && graph["requestId"] == 0
+                && graph["result"]["status"] != "downloading")
+                || (graph["type"] == "updateDownloadResult" && graph["requestId"] == 3) =>
+        {
+            Some(graph)
+        }
+        _ => None,
+    })?;
+    assert_eq!(terminal["type"], "updateStatusChanged", "{terminal}");
     let downloaded = host_reply(&host, 3, "updateDownloadResult")?;
+    assert_eq!(terminal["result"], downloaded);
     if windows_arm64 {
         assert_eq!(downloaded["status"], "error");
         assert!(!options.data_root.join("updates").join(installer).exists());
