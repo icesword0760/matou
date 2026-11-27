@@ -363,7 +363,7 @@ fn account_summary_projects_frozen_subscription_files_without_leaking_secrets() 
     assert_eq!(accounts[1]["plan"], "[redacted]");
     assert_eq!(accounts[1]["email"], "•••");
     assert_eq!(accounts[2]["provider"], "codex");
-    assert_eq!(accounts[2]["status"], "needs-activation");
+    assert_eq!(accounts[2]["status"], "active");
     assert_eq!(accounts[2]["plan"], "Free");
     assert!(!legacy_path.exists());
     for (path, contents) in files {

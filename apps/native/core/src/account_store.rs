@@ -271,7 +271,6 @@ impl AccountStore {
                 provider,
                 account,
                 credential,
-                current,
                 now_ms,
             );
             safe_subscription_view(&mut view, &safe);
@@ -300,7 +299,6 @@ impl AccountStore {
                 provider,
                 &Value::Null,
                 Some(credential),
-                false,
                 now_ms,
             );
             safe_subscription_view(&mut view, &safe);
@@ -437,7 +435,6 @@ fn subscription_view(
     provider: &'static str,
     account: &Value,
     credential: Option<&Value>,
-    current: bool,
     now_ms: u64,
 ) -> AccountView {
     use AccountStatus::*;
@@ -513,7 +510,6 @@ fn subscription_view(
     } else if credential["disabled"] == true
         || matches!(saved_status, "needs-activation" | "router-not-running")
         || matches!(credential_status, "disabled" | "needs-activation")
-        || !current
     {
         NeedsActivation
     } else {
@@ -866,7 +862,7 @@ mod tests {
         assert_eq!(state, LoadState::Loaded);
         assert_eq!(summary.current_id, None);
         assert_eq!(summary.accounts.len(), 1);
-        assert_eq!(summary.accounts[0].status, AccountStatus::NeedsActivation);
+        assert_eq!(summary.accounts[0].status, AccountStatus::Active);
         assert_eq!(summary.accounts[0].provider, Some("antigravity"));
         assert_eq!(summary.accounts[0].plan, "Paid");
         assert!(!serde_json::to_string(&summary)?.contains("standalone"));

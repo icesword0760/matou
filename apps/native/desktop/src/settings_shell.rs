@@ -5897,7 +5897,7 @@ impl SettingsShell {
                     PathUnavailable => (locale.text("PATH 不可用", "Missing from PATH"), palette.workspace.text),
                     NotLoggedIn => (locale.text("尚未登录", "Sign-in needed"), palette.workspace.text),
                     StartFailed => (locale.text("启动失败", "Could not start"), palette.workspace.text),
-                    Installed => (locale.text("登录待确认", "Sign-in unverified"), palette.workspace.muted),
+                    Installed => (locale.text("已安装", "Installed"), palette.workspace.muted),
                 };
                 div().min_h(px(32.)).flex().items_center().justify_between().gap(px(12.))
                     .when(index > 0, |row| row.border_t_1().border_color(rgba(palette.workspace.line)))
@@ -6190,20 +6190,11 @@ impl SettingsShell {
                         Some("rate-limited") => locale.text("已达限额", "Rate limited"),
                         _ => locale.text("未知", "Unknown"),
                     };
-                    let current =
-                        account["id"].is_string() && account["id"] == account_summary["currentId"];
                     let plan = account["plan"]
                         .as_str()
                         .filter(|plan| !plan.is_empty())
                         .unwrap_or_else(|| locale.text("未知套餐", "Unknown plan"));
-                    lines.push(if current {
-                        format!(
-                            "{plan} · {status} · {}",
-                            locale.text("当前账号", "Current account")
-                        )
-                    } else {
-                        format!("{plan} · {status}")
-                    });
+                    lines.push(format!("{plan} · {status}"));
                 }
                 if lines.is_empty() {
                     lines.push(if result["loadState"] == "corrupt" {
