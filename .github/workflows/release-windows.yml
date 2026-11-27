@@ -53,26 +53,19 @@ jobs:
         id: iscc
         shell: pwsh
         run: |
-          $found = @('C:\Program Files (x86)\Inno Setup 7\ISCC.exe', 'C:\Program Files\Inno Setup 7\ISCC.exe') | Where-Object { Test-Path $_ } | Select-Object -First 1
-          if (-not $found) {
-            choco install innosetup --no-progress -y --force || true
-            $found = @(
-              'C:\Program Files (x86)\Inno Setup 7\ISCC.exe',
-              'C:\Program Files\Inno Setup 7\ISCC.exe',
-              'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
-            ) | Where-Object { Test-Path $_ } | Select-Object -First 1
-          }
-          if (-not $found -or ($found -notmatch 'Inno Setup 7')) {
-            $setup = Join-Path $env:RUNNER_TEMP 'innosetup-7.exe'
-            Invoke-WebRequest -Uri 'https://files.jrsoftware.org/is/7/innosetup-7.0.0.exe' -OutFile $setup
-            Start-Process -FilePath $setup -ArgumentList '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-' -Wait
-            $found = @('C:\Program Files (x86)\Inno Setup 7\ISCC.exe', 'C:\Program Files\Inno Setup 7\ISCC.exe') | Where-Object { Test-Path $_ } | Select-Object -First 1
+          $dir = Join-Path $env:RUNNER_TEMP 'inno7'
+          $setup = Join-Path $env:RUNNER_TEMP 'innosetup-7.1.1-x64.exe'
+          Invoke-WebRequest -Uri 'https://github.com/jrsoftware/issrc/releases/download/is-7_1_1/innosetup-7.1.1-x64.exe' -OutFile $setup
+          Start-Process -FilePath $setup -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /CURRENTUSER /DIR=`"$dir`"" -Wait
+          $found = Join-Path $dir 'ISCC.exe'
+          if (-not (Test-Path $found)) {
+            $found = @('C:\Program Files\Inno Setup 7\ISCC.exe', 'C:\Program Files (x86)\Inno Setup 7\ISCC.exe') | Where-Object { Test-Path $_ } | Select-Object -First 1
           }
           if (-not $found) { throw 'Could not locate Inno Setup 7 ISCC.exe' }
           $isccDir = Split-Path $found -Parent
           $lang = Join-Path $isccDir 'Languages\ChineseSimplified.isl'
           if (-not (Test-Path $lang)) {
-            Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/Unofficial/ChineseSimplified.isl' -OutFile $lang
+            Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/jrsoftware/issrc/is-7_1_1/Files/Languages/ChineseSimplified.isl' -OutFile $lang
           }
           Write-Host "Using ISCC: $found"
           "path=$found" >> $env:GITHUB_OUTPUT
