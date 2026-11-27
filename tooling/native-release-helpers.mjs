@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 
 export const repo = fileURLToPath(new URL('../', import.meta.url))
-export const defaultUpdateBaseUrl = 'https://updates.baize-ailabs.com/stable'
+export const defaultUpdateBaseUrl = 'https://github.com/icesword0760/matou/releases/latest/download'
 export async function nativeReleaseConfig() {
   const [config, manifest] = await Promise.all([
     readFile(join(repo, 'apps/native/release-config.json'), 'utf8').then(JSON.parse),

@@ -2,14 +2,15 @@
 
 ## 客户端读取哪些产物
 
-Matou 从打包时写入的 HTTPS 地址读取更新清单。原生 macOS 根据 `stable-mac.yml` 下载 DMG。同一份清单也包含供 macOS 0.2.x 从旧版升级的完整 ZIP，旧版安装前校验应用签名。Windows 根据各自架构的 `stable.yml` 下载已签名的 EXE 安装器。
+原生客户端和正式打包脚本默认使用 `https://github.com/icesword0760/matou/releases/latest/download`。三个平台的清单和安装产物可以作为附件放在同一个 GitHub Release 中。原生 macOS 下载 DMG，同一份清单也提供 macOS 0.2.x 升级用的完整 ZIP，旧版安装前会校验应用签名。Windows 按架构下载已签名的 EXE 安装器。
 
 | 平台 | 打包产物 | 更新清单 |
 | --- | --- | --- |
 | macOS arm64 / x64 | `Matou-<version>-mac-<arch>.zip`、`Matou-<version>-mac-<arch>.dmg`、`SHA256SUMS-<version>-mac-<arch>.txt` | `stable-mac.yml` |
-| Windows x64 / ARM64 | `Matou-<version>-win-<arch>.exe`、可选的同名便携 ZIP、`SHA256SUMS-<version>-win-<arch>.txt`（ARM64 文件名用 `arm64`） | `stable.yml`，指向 EXE |
+| Windows x64 | `Matou-<version>-win-x64.exe`、可选的同名便携 ZIP、`SHA256SUMS-<version>-win-x64.txt` | `stable.yml` |
+| Windows ARM64 | `Matou-<version>-win-arm64.exe`、可选的同名便携 ZIP、`SHA256SUMS-<version>-win-arm64.txt` | `stable-win-arm64.yml` |
 
-各架构使用独立的发布目录和对应的更新地址。Windows ARM64 默认使用 `/stable/win-arm64`，可用 `MATOU_WIN_ARM64_UPDATE_BASE_URL` 或 `--update-base-url` 指定。
+Windows ARM64 找不到自己的清单时不会改读 x64 的 `stable.yml`。macOS 每次按单一架构构建，生成的 `stable-mac.yml` 指向该次打包的 DMG 和 ZIP。
 
 ## 准备发布机
 
@@ -43,19 +44,22 @@ pnpm package:win --arch x64 --model-router $routerDirectory --with-zip
 
 Windows 正式打包默认生成 EXE；`--with-zip` 额外生成便携 ZIP。只做便携分发时用 `--portable-only`，该模式不生成更新清单。两端均可用 `--out-dir` 选择新的输出目录，或同时提供 `--desktop-bin` 和 `--runtime-bin` 使用预编译产物。
 
-## 上传顺序
+## 发布到 GitHub Releases
 
-更新服务器需要公开可读的 HTTPS、准确的 `Content-Length`、正确的文件类型和 Range 支持。用 `GET`、`HEAD` 和返回 `206 Partial Content` 的 Range 请求检查。
+1. 创建 Release 草稿，将三个平台的清单、安装产物和 SHA256 校验文件作为同一层级的附件上传。
+2. 对照每份清单确认安装包文件名、大小和 SHA-512，再用 SHA256 校验文件核对附件。便携 ZIP 也用 SHA256 校验。
+3. 确认附件齐全后发布，并将该版本设为 Latest。[GitHub Release 管理文档](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository)
+4. 从外网读取默认地址下的三份清单并跟随重定向，验证清单引用的每个附件可以下载且哈希一致。
 
-1. 上传 ZIP、DMG 或 EXE 及 SHA256 校验文件到临时位置。
-2. 对照各自的清单与校验文件验证 SHA-512、SHA256 和大小。便携 ZIP 用 SHA256 校验。
-3. 把产物移入对应架构的正式目录。
-4. 最后原子替换 `stable-mac.yml` 或 `stable.yml`。
-5. 从外网读取清单及其引用的每个 URL，检查大小、哈希及 Range 响应。
+## 自定义镜像与旧版本过渡
 
-安装产物可长期缓存。更新清单使用 `Cache-Control: no-cache` 或较短 TTL。发布凭据留在发布环境。
+`pnpm package:mac` 和 `pnpm package:win` 可用 `--update-base-url <URL>` 指定镜像或旧服务器，也可用 `MATOU_UPDATE_BASE_URL` 设置。Windows ARM64 打包时的覆盖优先级从高到低为 `--update-base-url`、`MATOU_WIN_ARM64_UPDATE_BASE_URL`、`MATOU_UPDATE_BASE_URL`，然后才使用 GitHub 默认地址。原生客户端启动时也可用相应环境变量覆盖随包配置。
 
-## Nginx 最小配置
+旧版安装在升级前仍会请求原有地址与清单文件名。若通过 `https://updates.baize-ailabs.com/stable` 提供过渡版本，就在旧版请求的地址保留对应清单和安装包。旧 Windows ARM64 请求的是 `/stable/win-arm64/stable.yml`，新版 Windows ARM64 即使显式配置同一个旧目录，也会请求其中的 `stable-win-arm64.yml`。同一台服务器继续服务两代时，可同时提供这两个文件名。
+
+自建镜像先放好安装产物和校验文件，再原子替换清单。用公开 HTTPS 提供下载，验证 `Content-Length` 和 Range 响应。安装产物可长期缓存，清单使用 `Cache-Control: no-cache` 或较短 TTL。
+
+### 自建镜像的 Nginx 示例
 
 ```nginx
 location /matou/stable/ {
@@ -86,4 +90,4 @@ Windows 在 x64 和 ARM64 上分别验证更新清单选择对应架构的签名
 
 ## 回退
 
-发现异常时，将更新清单原子恢复到上一稳定版本，阻止更多客户端发现异常版本。已升级用户通过更高 SemVer 的修复版本恢复。
+发现异常时，可将附件齐全的上一稳定 GitHub Release 设回 Latest，并读回三份清单确认默认地址已切换。自建镜像可原子恢复上一稳定版本的清单。已升级用户通过更高版本号的修复版本恢复。

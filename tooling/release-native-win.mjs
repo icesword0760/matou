@@ -4,9 +4,7 @@ import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
 
-import {
-  assembleWindowsDirPackage, planWindowsPackage, windowsArm64UpdateBaseUrl
-} from './packaging/package-native-win.mjs'
+import { assembleWindowsDirPackage, planWindowsPackage } from './packaging/package-native-win.mjs'
 import {
   defaultUpdateBaseUrl, nativeReleaseConfig, generateChecksums, generateManifest, nativeBinaries,
   repo, requireAbsent, runTool, stageRelease
@@ -27,7 +25,10 @@ can be set with MATOU_WIN_ISCC, MATOU_WIN_SIGNTOOL, MATOU_WIN_PYTHON and MATOU_W
 The signing certificate is selected by MATOU_WIN_SIGN_CERT_SHA1. An optional
 MATOU_WIN_TIMESTAMP_URL overrides the default RFC 3161 timestamp server.
 Prepare the model router, Python account engine and CRT for the selected architecture.
-ARM64 uses MATOU_WIN_ARM64_UPDATE_BASE_URL and defaults to the /stable/win-arm64 feed.
+Both architectures default to ${defaultUpdateBaseUrl}.
+The stable manifests are stable.yml for x64 and stable-win-arm64.yml for ARM64.
+Override the feed with --update-base-url, then MATOU_WIN_ARM64_UPDATE_BASE_URL (ARM64 only),
+then MATOU_UPDATE_BASE_URL, in descending priority.
 --internal-installer builds an unsigned EXE without a stable update feed.
 --portable-only builds a manual ZIP for x64 or arm64 with the verified CRT and no update feed.
 The output directory defaults to apps/native/release for x64 or its win-arm64 subdirectory.`
@@ -47,12 +48,11 @@ export function windowsReleaseOptions(args, env, config) {
     throw new Error('--portable-only cannot be combined with --with-zip or --internal-installer')
   }
   const arch = values.arch ?? (env.MATOU_WIN_ARCH || 'x64')
+  const arm64UpdateBaseUrl = arch === 'arm64' ? env.MATOU_WIN_ARM64_UPDATE_BASE_URL : undefined
   const plan = planWindowsPackage({
     arch,
     version: values.version ?? config.version,
-    updateBaseUrl: values['update-base-url'] ?? (arch === 'arm64'
-      ? env.MATOU_WIN_ARM64_UPDATE_BASE_URL || windowsArm64UpdateBaseUrl
-      : env.MATOU_UPDATE_BASE_URL || defaultUpdateBaseUrl)
+    updateBaseUrl: values['update-base-url'] ?? (arm64UpdateBaseUrl || env.MATOU_UPDATE_BASE_URL || defaultUpdateBaseUrl)
   })
   const result = {
     ...plan, env,
@@ -96,18 +96,10 @@ async function archiveWindowsPayload(zip, payload, command) {
   }
 }
 
-function validateReleaseOptions({ arch, version, portableOnly, internalInstaller, updateBaseUrl }) {
+function validateReleaseOptions({ version, portableOnly, internalInstaller }) {
   if (portableOnly) return
   if (!internalInstaller && !/^(0|[1-9]\d*)(\.(0|[1-9]\d*)){2}$/.test(version)) {
     throw new Error('The Windows stable feed requires an X.Y.Z version')
-  }
-  if (!internalInstaller) {
-    const feed = new URL(updateBaseUrl)
-    const configuredBase = feed.origin + feed.pathname.replace(/\/+$/, '')
-    if ((arch === 'arm64' && configuredBase === defaultUpdateBaseUrl) ||
-        (arch === 'x64' && configuredBase === windowsArm64UpdateBaseUrl)) {
-      throw new Error('The Windows release requires a stable feed for the selected architecture')
-    }
   }
   windowsFileVersion(version)
 }
@@ -120,7 +112,9 @@ export async function releaseWindows(options, command = runTool) {
     ...(!portableOnly ? [`${stem}.exe`] : []),
     ...(portableOnly || withZip ? [`${stem}.zip`] : [])
   ]
-  const manifestName = !portableOnly && !internalInstaller ? 'stable.yml' : null
+  const manifestName = portableOnly || internalInstaller
+    ? null
+    : arch === 'arm64' ? 'stable-win-arm64.yml' : 'stable.yml'
   const checksumName = `SHA256SUMS-${stem.slice('Matou-'.length)}.txt`
   return stageRelease(outDir, 'win', async (staging, output) => {
     const names = [...artifactNames, checksumName, ...(manifestName ? [manifestName] : [])]

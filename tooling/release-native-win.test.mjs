@@ -12,6 +12,7 @@ import { releaseWindows, windowsReleaseOptions } from './release-native-win.mjs'
 const version = '1.2.3'
 const releaseDate = '2026-11-24T11:00:00.000Z'
 const feed = 'https://updates.example.invalid/stable'
+const githubFeed = 'https://github.com/icesword0760/matou/releases/latest/download'
 const thumbprint = 'A'.repeat(40)
 const digest = (bytes, algorithm = 'sha512', encoding = 'base64') => createHash(algorithm).update(bytes).digest(encoding)
 
@@ -130,6 +131,7 @@ function windowsTools(options, variation = {}) {
     const metadata = JSON.parse(await readFile(versionMetadata, 'utf8'))
     assert.equal(metadata.version, version)
     assert.equal(metadata.update.channel, options.internalInstaller ? 'internal' : 'stable')
+    assert.equal(metadata.update.baseUrl, options.updateBaseUrl)
     if (variation.changePayload) await writeFile(versionMetadata, '{}')
     if (!variation.noInstaller) {
       await writeFile(join(parameter('-o'), `${parameter('-f')}.exe`), peFixture({ arch: variation.installerArch }))
@@ -177,29 +179,40 @@ test('uses the native product metadata by default', async () => {
     const plan = windowsReleaseOptions(['--arch', arch], {}, config)
     assert.equal(plan.version, config.version)
     assert.equal(plan.applicationExecutable, config.productName + '.exe')
+    assert.equal(plan.updateBaseUrl, githubFeed)
   }
 })
 
-test('publishes an ARM64 payload on its own stable feed with the Inno x64 loader', async t => {
-  const { options } = await fixtures(t, 'arm64')
-  const setup = windowsReleaseOptions(['--arch', 'arm64'], {
-    MATOU_UPDATE_BASE_URL: 'https://updates.example.invalid/win-x64'
-  }, { version })
-  assert.equal(setup.updateBaseUrl, 'https://updates.baize-ailabs.com/stable/win-arm64')
-  assert.equal(basename(setup.outDir), 'win-arm64')
-  assert.equal(windowsReleaseOptions(['--arch', 'arm64'], {
-    MATOU_WIN_ARM64_UPDATE_BASE_URL: 'https://updates.example.invalid/arm64'
-  }, { version }).updateBaseUrl, 'https://updates.example.invalid/arm64')
-  assert.throws(() => windowsReleaseOptions(['--arch', 'arm64', '--update-base-url',
-    'https://updates.baize-ailabs.com/stable/'], {}, { version }), /feed for the selected architecture/)
-  assert.throws(() => windowsReleaseOptions(['--arch', 'x64', '--update-base-url',
-    setup.updateBaseUrl], {}, { version }), /feed for the selected architecture/)
-  await releaseWindows({ ...options, updateBaseUrl: setup.updateBaseUrl }, windowsTools(options))
-  const exe = 'Matou-1.2.3-win-arm64.exe'
-  const manifest = await readFile(join(options.outDir, 'stable.yml'), 'utf8')
-  assert.match(manifest, /url: Matou-1\.2\.3-win-arm64\.exe/)
-  assert.ok(manifest.includes(digest(await readFile(join(options.outDir, exe)))))
-  assert.deepEqual((await readdir(options.outDir)).sort(), [exe, 'SHA256SUMS-1.2.3-win-arm64.txt', 'stable.yml'])
+test('resolves Windows feed overrides in order and applies the ARM64 variable only to ARM64', () => {
+  const arm64 = ['--arch', 'arm64']
+  const legacy = 'https://updates.baize-ailabs.com/stable/win-arm64'
+  const env = { MATOU_UPDATE_BASE_URL: feed, MATOU_WIN_ARM64_UPDATE_BASE_URL: `${feed}/arm64` }
+  assert.equal(basename(windowsReleaseOptions(arm64, {}, { version }).outDir), 'win-arm64')
+  assert.equal(windowsReleaseOptions(arm64, { MATOU_UPDATE_BASE_URL: feed }, { version }).updateBaseUrl, feed)
+  assert.equal(windowsReleaseOptions(arm64, env, { version }).updateBaseUrl, env.MATOU_WIN_ARM64_UPDATE_BASE_URL)
+  assert.equal(windowsReleaseOptions([...arm64, '--update-base-url', legacy], env, { version }).updateBaseUrl, legacy)
+  assert.equal(windowsReleaseOptions(['--arch', 'x64'], env, { version }).updateBaseUrl, feed)
+})
+
+test('publishes ARM64 and x64 installers with distinct manifests in the same release directory', async t => {
+  const { options: arm64 } = await fixtures(t, 'arm64')
+  const { options: x64 } = await fixtures(t)
+  const { outDir } = arm64
+  const names = []
+  for (const [fixture, manifestName] of [[arm64, 'stable-win-arm64.yml'], [x64, 'stable.yml']]) {
+    const { arch } = fixture
+    const { updateBaseUrl } = windowsReleaseOptions(['--arch', arch], {}, { version })
+    const options = { ...fixture, outDir, updateBaseUrl }
+    await releaseWindows(options, windowsTools(options))
+    const installerName = `Matou-${version}-win-${arch}.exe`
+    const installer = await readFile(join(outDir, installerName))
+    const manifest = await readFile(join(outDir, manifestName), 'utf8')
+    const lines = manifest.split('\n')
+    assert.ok(lines.includes(`  - url: ${installerName}`))
+    assert.ok(lines.includes(`    sha512: ${digest(installer)}`))
+    names.push(installerName, manifestName, `SHA256SUMS-${version}-win-${arch}.txt`)
+  }
+  assert.deepEqual((await readdir(outDir)).sort(), names.sort())
 })
 
 test('refuses a mislabeled ARM64 installer and x64 CRT in the ARM64 payload', async t => {

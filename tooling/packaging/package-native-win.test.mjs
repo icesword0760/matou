@@ -279,10 +279,10 @@ test('plans a safe HTTP(S) URL without creating packaged or published updater ma
   assert.equal(plan.releaseChannelManifest, null)
   assert.deepEqual(plan.artifactTargets, [])
   // Current native package metadata follows the GitHub feed. The fixture captures the old feed.
-  assert.equal(planWindowsPackage({ arch: 'x64', version }).updateBaseUrl,
-    'https://github.com/icesword0760/matou/releases/latest/download')
-  assert.equal(planWindowsPackage({ arch: 'arm64', version }).updateBaseUrl,
-    'https://updates.baize-ailabs.com/stable/win-arm64')
+  for (const arch of ['x64', 'arm64']) {
+    assert.equal(planWindowsPackage({ arch, version }).updateBaseUrl,
+      'https://github.com/icesword0760/matou/releases/latest/download')
+  }
   for (const url of ['', ' ', 'relative/path', 'https://', 'file:///releases', 'https://example.invalid/\nnext']) {
     assert.throws(() => planWindowsPackage({ arch: 'x64', version, updateBaseUrl: url }), /absolute HTTP\(S\) URL/)
   }

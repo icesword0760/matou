@@ -6,7 +6,7 @@ import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep, win
 import { fileURLToPath } from 'node:url'
 import { isDeepStrictEqual, parseArgs } from 'node:util'
 
-import { nativeReleaseConfig } from '../native-release-helpers.mjs'
+import { defaultUpdateBaseUrl, nativeReleaseConfig } from '../native-release-helpers.mjs'
 import { claudePluginPath, claudePluginSource, verifyClaudePlugin } from './claude-plugin.mjs'
 
 const { appId, productName } = await nativeReleaseConfig()
@@ -16,9 +16,7 @@ const ghosttyVendor = fileURLToPath(new URL('../../apps/native/terminal/vendor/g
 const applicationExecutable = productName + '.exe'
 const frozenVersion = '0.2.24'
 const artifactNamePattern = 'Matou-${version}-${os}-${arch}.${ext}'
-const defaultUpdateBaseUrl = 'https://github.com/icesword0760/matou/releases/latest/download'
 const frozenUpdateBaseUrl = 'https://updates.baize-ailabs.com/stable'
-export const windowsArm64UpdateBaseUrl = `${frozenUpdateBaseUrl}/win-arm64`
 const stableChannel = 'stable'
 const updateConfigFilename = 'app-update.yml'
 const resourcesDirectory = 'resources'
@@ -58,8 +56,7 @@ function dirProjection(arch, version) {
 }
 
 // The URL is offline metadata. The reference dir target skips both updater files.
-export function planWindowsPackage({ target = 'dir', arch, version,
-  updateBaseUrl = arch === 'arm64' ? windowsArm64UpdateBaseUrl : defaultUpdateBaseUrl }) {
+export function planWindowsPackage({ target = 'dir', arch, version, updateBaseUrl = defaultUpdateBaseUrl }) {
   if (target !== 'dir') throw new Error('Target must be dir')
   checkArch(arch)
   checkVersion(version)

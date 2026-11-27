@@ -623,15 +623,63 @@ fn windows_falls_back_to_json_on_404_and_keeps_the_exe_extension() -> Result<()>
 }
 
 #[test]
+fn windows_arm64_does_not_fall_back_to_the_x64_manifest_in_a_shared_release() -> Result<()> {
+    let digest = STANDARD.encode(Sha512::digest(windows_installer_bytes(0x8664)));
+    let server = Server::start(move |path| match path {
+        "/releases/latest/download/stable.yml" => Reply::Text(
+            StatusCode::OK,
+            yaml("2.0.0", "Matou-2.0.0-win-x64.exe", &digest),
+        ),
+        _ => not_found(),
+    })?;
+    let base = server.url("/releases/latest/download");
+    let fetcher = HttpUpdateFetcher::new(Platform::Win32)?;
+    let arm64 = manager_on(
+        &base,
+        "stable",
+        Platform::Win32,
+        Architecture::Arm64,
+        "1.0.0",
+    );
+    assert!(
+        arm64
+            .check(&fetcher, || 1, |_| {}, |_| {})
+            .unwrap()
+            .is_err()
+    );
+    let arm64_requests = server.paths();
+    assert_eq!(
+        arm64_requests.first().map(String::as_str),
+        Some("/releases/latest/download/stable-win-arm64.yml")
+    );
+    assert!(
+        arm64_requests.iter().all(|path| matches!(
+            path.as_str(),
+            "/releases/latest/download/stable-win-arm64.yml"
+                | "/releases/latest/download/release-channel.json"
+        )),
+        "{arm64_requests:?}"
+    );
+    let x64 = manager(&base, "stable", Platform::Win32, "1.0.0");
+    let result = x64.check(&fetcher, || 1, |_| {}, |_| {}).unwrap().unwrap();
+    assert!(result.is_update_available);
+    assert_eq!(
+        server.paths().last().map(String::as_str),
+        Some("/releases/latest/download/stable.yml")
+    );
+    Ok(())
+}
+
+#[test]
 fn windows_arm64_rejects_a_mismatched_feed_and_wrong_pe_even_at_the_correct_hash() -> Result<()> {
     let wrong_arch = windows_installer_bytes(0xaa64);
     let digest = STANDARD.encode(Sha512::digest(&wrong_arch));
     let server = Server::start(move |path| match path {
-        "/wrong-feed/stable.yml" => Reply::Text(
+        "/wrong-feed/stable-win-arm64.yml" => Reply::Text(
             StatusCode::OK,
             yaml("2.0.0", "Matou-2.0.0-win-x64.exe", &digest),
         ),
-        "/arm64/stable.yml" => Reply::Text(
+        "/arm64/stable-win-arm64.yml" => Reply::Text(
             StatusCode::OK,
             yaml("2.0.0", "Matou-2.0.0-win-arm64.exe", &digest),
         ),
@@ -907,8 +955,19 @@ fn runtime_host_uses_live_http_and_remains_responsive_during_check() -> Result<(
     };
     let server_artifact = installer_contents.clone();
     let checksum = STANDARD.encode(Sha512::digest(&installer_contents));
+    let manifest_path = if cfg!(target_os = "macos") {
+        "/stable/preview-mac.yml"
+    } else if windows_arm64 {
+        "/stable/preview-win-arm64.yml"
+    } else if cfg!(windows) {
+        "/stable/preview.yml"
+    } else if cfg!(target_arch = "aarch64") {
+        "/stable/preview-linux-arm64.yml"
+    } else {
+        "/stable/preview-linux.yml"
+    };
     let server = Server::start(move |path| {
-        if path.ends_with(".yml") {
+        if path == manifest_path {
             let _ = checking.send(());
             Reply::Gated(
                 Arc::clone(&server_gate),
@@ -1012,15 +1071,6 @@ fn runtime_host_uses_live_http_and_remains_responsive_during_check() -> Result<(
             "Downloaded installer is not a regular file"
         );
     }
-    let manifest_path = if cfg!(target_os = "macos") {
-        "/stable/preview-mac.yml"
-    } else if cfg!(windows) {
-        "/stable/preview.yml"
-    } else if cfg!(target_arch = "aarch64") {
-        "/stable/preview-linux-arm64.yml"
-    } else {
-        "/stable/preview-linux.yml"
-    };
     assert_eq!(
         server.paths(),
         [manifest_path, &format!("/stable/{installer}")]

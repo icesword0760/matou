@@ -18,7 +18,7 @@ test('uses the native release version, production feed and secure timestamp by d
   const options = macReleaseOptions([], {}, config)
   assert.equal(options.version, config.version)
   assert.equal(options.arch, 'arm64')
-  assert.equal(options.updateBaseUrl, 'https://updates.baize-ailabs.com/stable')
+  assert.equal(options.updateBaseUrl, 'https://github.com/icesword0760/matou/releases/latest/download')
   assert.equal(options.channel, 'stable')
   assert.equal(options.identity, config.mac.identity)
   assert.equal(options.timestamp, true)

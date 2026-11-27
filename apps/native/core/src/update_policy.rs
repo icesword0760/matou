@@ -9,8 +9,6 @@ use url::Url;
 
 pub const DEFAULT_UPDATE_BASE_URL: &str =
     "https://github.com/icesword0760/matou/releases/latest/download";
-pub const WINDOWS_ARM64_UPDATE_BASE_URL: &str = "https://updates.baize-ailabs.com/stable/win-arm64";
-const WINDOWS_X64_RELEASE_BASE_URL: &str = "https://updates.baize-ailabs.com/stable";
 
 #[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -104,7 +102,8 @@ impl FeedConfiguration {
     pub fn channel_filename(&self, platform: Platform, arch: Architecture) -> String {
         let suffix = match (platform, arch) {
             (Platform::Darwin, _) => "-mac",
-            (Platform::Win32, _) => "",
+            (Platform::Win32, Architecture::X64) => "",
+            (Platform::Win32, Architecture::Arm64) => "-win-arm64",
             (Platform::Linux, Architecture::X64) => "-linux",
             (Platform::Linux, Architecture::Arm64) => "-linux-arm64",
         };
@@ -118,20 +117,6 @@ impl FeedConfiguration {
         unix_ms: u64,
     ) -> Result<Url, PolicyError> {
         let mut base = self.base_url()?;
-        if matches!((platform, arch), (Platform::Win32, Architecture::Arm64)) {
-            let mut address = base.clone();
-            address.set_query(None);
-            address.set_fragment(None);
-            if matches!(
-                address.as_str().trim_end_matches('/'),
-                DEFAULT_UPDATE_BASE_URL | WINDOWS_X64_RELEASE_BASE_URL
-            ) {
-                let mut replacement =
-                    Url::parse(WINDOWS_ARM64_UPDATE_BASE_URL).map_err(|_| invalid_url())?;
-                replacement.set_query(base.query());
-                base = replacement;
-            }
-        }
         if !base.path().ends_with('/') {
             base.path_segments_mut()
                 .map_err(|_| invalid_url())?
@@ -606,6 +591,7 @@ mod tests {
         for (platform, arch, asset) in [
             (Platform::Darwin, Architecture::Arm64, "stable-mac.yml"),
             (Platform::Win32, Architecture::X64, "stable.yml"),
+            (Platform::Win32, Architecture::Arm64, "stable-win-arm64.yml"),
         ] {
             assert_eq!(
                 feed.manifest_url(platform, arch, 42).unwrap().as_str(),
@@ -617,11 +603,10 @@ mod tests {
     }
 
     #[test]
-    fn windows_arm64_uses_an_independent_stable_path_with_no_x64_fallback() {
+    fn update_policy_windows_arm64_preserves_explicit_legacy_base_urls() {
         for base in [
-            DEFAULT_UPDATE_BASE_URL,
-            WINDOWS_X64_RELEASE_BASE_URL,
-            WINDOWS_ARM64_UPDATE_BASE_URL,
+            "https://updates.baize-ailabs.com/stable",
+            "https://updates.baize-ailabs.com/stable/win-arm64",
         ] {
             let configured = format!("{base}/?probe=1");
             let feed = FeedConfiguration::resolve(Some(&configured), None, None);
@@ -629,13 +614,7 @@ mod tests {
                 feed.manifest_url(Platform::Win32, Architecture::Arm64, 42)
                     .unwrap()
                     .as_str(),
-                format!("{WINDOWS_ARM64_UPDATE_BASE_URL}/stable.yml?probe=1")
-            );
-            assert_eq!(
-                feed.manifest_url(Platform::Win32, Architecture::X64, 42)
-                    .unwrap()
-                    .as_str(),
-                format!("{base}/stable.yml?probe=1")
+                format!("{base}/stable-win-arm64.yml?probe=1")
             );
         }
     }
@@ -673,7 +652,7 @@ mod tests {
             (Platform::Darwin, Architecture::X64, "stable-mac.yml"),
             (Platform::Darwin, Architecture::Arm64, "stable-mac.yml"),
             (Platform::Win32, Architecture::X64, "stable.yml"),
-            (Platform::Win32, Architecture::Arm64, "stable.yml"),
+            (Platform::Win32, Architecture::Arm64, "stable-win-arm64.yml"),
             (Platform::Linux, Architecture::X64, "stable-linux.yml"),
             (
                 Platform::Linux,
