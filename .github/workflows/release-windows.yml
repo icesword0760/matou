@@ -124,6 +124,14 @@ jobs:
           if (-not $crt) {
             throw 'Could not locate Visual C++ x64 CRT directory'
           }
+          $signtool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Recurse -Filter 'signtool.exe' -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '\\x64\\' } |
+            Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
+          if ($signtool) {
+            Write-Host "Using SignTool: $signtool"
+            $env:MATOU_WIN_SIGNTOOL = $signtool
+          }
+          Remove-Item Env:PSModulePath -ErrorAction SilentlyContinue
           Write-Host "Using CRT: $crt"
           New-Item -ItemType Directory -Force -Path apps/native/release | Out-Null
           $ver = "${{ inputs.tag }}".TrimStart('v')

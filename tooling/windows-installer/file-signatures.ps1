@@ -4,6 +4,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+if ($PSVersionTable.PSVersion.Major -le 5 -and $env:SystemRoot) {
+    $env:PSModulePath = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\Modules"
+}
 $paths = Get-Content -LiteralPath $ListFile -Raw -Encoding UTF8 | ConvertFrom-Json
 $results = @(foreach ($path in $paths) {
     $signature = Get-AuthenticodeSignature -LiteralPath $path
