@@ -524,6 +524,9 @@ async function safeOutput(outDir) {
   if (parts.some(part => protectedComponents.test(part) || /[<>:"|?*\\/]/.test(part)
       || /[. ]$/.test(part) || windowsDevice.test(part))) throw unsafe()
 
+  const localTemp = windowsHost && process.env.LOCALAPPDATA
+    ? await realpath(join(process.env.LOCALAPPDATA, 'Temp')).catch(() => resolve(join(process.env.LOCALAPPDATA, 'Temp')))
+    : null
   const roots = windowsHost ? [tmpdir()] : [tmpdir(), '/tmp']
   for (const path of new Set(roots)) {
     const temp = resolve(path)
@@ -531,7 +534,8 @@ async function safeOutput(outDir) {
       if (error.code === 'ENOENT') return null
       throw error
     })
-    if (!canonical || protectedTempRoot(temp) || protectedTempRoot(canonical)) continue
+    const isWindowsUserTemp = localTemp && canonical && canonical.toLowerCase() === localTemp.toLowerCase()
+    if (!canonical || (!isWindowsUserTemp && (protectedTempRoot(temp) || protectedTempRoot(canonical)))) continue
     const root = within(temp, output) ? temp : within(canonical, output) ? canonical : null
     if (!root) continue
     const suffix = relative(root, output)
