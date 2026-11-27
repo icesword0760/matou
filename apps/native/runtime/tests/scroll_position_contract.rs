@@ -427,7 +427,7 @@ fn capture_scenario(grid: &Grid, scenario: Scenario) -> Result<Value> {
 
 fn wait_host_frame(
     host: &RuntimeHost,
-    predicate: impl Fn(&str, &Screen, u64) -> bool,
+    predicate: impl Fn(&str, &Screen, u64, u64) -> bool,
 ) -> Result<(String, Screen, u64, u64)> {
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
@@ -439,7 +439,7 @@ fn wait_host_frame(
                 scroll_request_id,
                 ..
             }) => {
-                if predicate(&session_id, &screen, scroll_request_id) {
+                if predicate(&session_id, &screen, sequence, scroll_request_id) {
                     return Ok((session_id, screen, sequence, scroll_request_id));
                 }
                 host.commands.send(HostCommand::Applied {
@@ -478,7 +478,7 @@ fn capture_host_frames(grid: &Grid, case: FrameCase) -> Result<Value> {
         },
         OfflineFixtures::default(),
     )?;
-    let (id, _, ready_sequence, _) = wait_host_frame(&host, |_, screen, _| {
+    let (id, _, ready_sequence, _) = wait_host_frame(&host, |_, screen, _, _| {
         screen_rows(screen).any(|row| row.starts_with("SCROLL_FRAME_READY"))
     })?;
     let resize = |rows| HostCommand::Resize {
@@ -494,7 +494,7 @@ fn capture_host_frames(grid: &Grid, case: FrameCase) -> Result<Value> {
     };
     host.commands.send(resize(case.rows))?;
     host.commands.send(ack(ready_sequence))?;
-    let (_, _, resized_sequence, _) = wait_host_frame(&host, |session, screen, _| {
+    let (_, _, resized_sequence, _) = wait_host_frame(&host, |session, screen, _, _| {
         session == id && screen.rows == usize::from(case.rows)
     })?;
     host.commands.send(HostCommand::Input {
@@ -504,9 +504,12 @@ fn capture_host_frames(grid: &Grid, case: FrameCase) -> Result<Value> {
     })?;
     host.commands.send(ack(resized_sequence))?;
     let seed_end = format!("ROW_{:05}", case.seed - 1);
-    let (_, initial, initial_sequence, _) = wait_host_frame(&host, |session, screen, _| {
-        session == id && screen_rows(screen).any(|row| row.starts_with(&seed_end))
-    })?;
+    let (_, initial, initial_sequence, _) =
+        wait_host_frame(&host, |session, screen, sequence, _| {
+            session == id
+                && sequence > resized_sequence
+                && screen_rows(screen).any(|row| row.starts_with(&seed_end))
+        })?;
     let mut request = 0;
     let mut previous_sequence = initial_sequence;
     let mut frames = Vec::new();
@@ -537,7 +540,7 @@ fn capture_host_frames(grid: &Grid, case: FrameCase) -> Result<Value> {
         // Keep the last frame unacknowledged while the whole batch is sent.
         host.commands.send(ack(previous_sequence))?;
         let (_, screen, sequence, applied_request) = loop {
-            let frame = wait_host_frame(&host, |session, _, _| session == id)?;
+            let frame = wait_host_frame(&host, |session, _, _, _| session == id)?;
             // A trailing pre-batch shell frame (request 0, initial rows) may already be queued
             // right after `seed_end` before batch 0 is applied; acknowledge and consume it.
             if index == 0
@@ -583,7 +586,8 @@ fn capture_host_frames(grid: &Grid, case: FrameCase) -> Result<Value> {
     })?;
     anyhow::ensure!(
         resize_records.len() == resizes_applied,
-        "resize records do not match returned grids"
+        "resize records ({}) do not match returned grids ({resizes_applied}): {resize_records:?}",
+        resize_records.len()
     );
     Ok(
         json!({ "id": case.id, "initial": snapshot(&initial), "frames": frames, "resizeRecords": resize_records }),
