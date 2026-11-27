@@ -33,7 +33,7 @@ Matou is a native desktop workbench for AI coding on macOS and Windows with zero
 
 > **Status**: Native release in active development. Published downloads are on [Releases](https://github.com/icesword0760/matou/releases/latest).
 >
-> **Video walkthrough**: [YouTube (English)](https://youtu.be/1OYvkryUNFo) · [Bilibili (Chinese, 5 min)](https://www.bilibili.com/video/BV1uBbL6eEGa)
+> **Video walkthrough**: [YouTube (Chinese, 5 min)](https://youtu.be/B95aYXkY6iU) · [Bilibili (Chinese, 5 min)](https://www.bilibili.com/video/BV1ZC1WzFEZC)
 
 ![Matou native multi-agent desktop workbench walkthrough](assets/shots/en/workspace-demo.gif)
 

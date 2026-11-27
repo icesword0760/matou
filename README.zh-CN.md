@@ -33,7 +33,7 @@
 
 > **项目状态**：原生版持续迭代中，公开安装包见 [Releases](https://github.com/icesword0760/matou/releases/latest)。
 >
-> **演示视频**：[B 站 5 分钟演示](https://www.bilibili.com/video/BV1uBbL6eEGa) · [YouTube 英文版](https://youtu.be/1OYvkryUNFo)
+> **演示视频**：[B 站 5 分钟演示](https://www.bilibili.com/video/BV1ZC1WzFEZC) · [YouTube 完整版](https://youtu.be/B95aYXkY6iU)
 
 ![码头 Matou 原生多 Agent 工作台演示](assets/shots/workspace-demo.gif)
 
