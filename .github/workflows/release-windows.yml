@@ -1,0 +1,114 @@
+name: Release Windows x64 Portable
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing GitHub Release tag to attach Windows x64 portable artifacts to (e.g. v0.3.1)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  ZIG_VERSION: '0.17.0'
+  PYTHONUTF8: '1'
+
+jobs:
+  package-windows-x64:
+    name: Build Windows x64 portable ZIP
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - run: rustup default stable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
+        with:
+          python-version: '3.13'
+
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          use-cache: false
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            apps/native/vendor/gpui
+            apps/native/terminal/vendor/build-cache/*.tar.gz
+            apps/native/terminal/vendor/build-cache/zig-global
+          key: ${{ runner.os }}-${{ runner.arch }}-native-deps-${{ env.ZIG_VERSION }}-${{ hashFiles('apps/native/scripts/prepare-gpui.py', 'apps/native/patches/*.patch', 'apps/native/terminal/scripts/build-libs.py', 'apps/native/terminal/native/reference_width.zig') }}
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            apps/native/target
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('apps/native/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-cargo-
+
+      - name: Prepare GPUI, Ghostty and Cargo offline cache
+        run: |
+          python apps/native/scripts/prepare-gpui.py
+          python apps/native/terminal/scripts/build-libs.py --target x86_64-pc-windows-msvc
+          cargo fetch --manifest-path apps/native/Cargo.toml --locked
+
+      - name: Build Windows x64 Claude accounts engine
+        run: |
+          uv sync --project tooling/claude-accounts --frozen
+          node tooling/claude-accounts/build.mjs
+
+      - name: Build patched Windows x64 model-router
+        id: router
+        shell: pwsh
+        run: |
+          $dir = (node tooling/model-router/build-patched.mjs --arch=x64 --platform=win32 | Select-Object -Last 1).Trim()
+          if (-not (Test-Path (Join-Path $dir 'model-router.exe'))) {
+            throw "model-router.exe not found in $dir"
+          }
+          "dir=$dir" >> $env:GITHUB_OUTPUT
+
+      - name: Package Windows x64 portable ZIP
+        shell: pwsh
+        run: |
+          $crt = Get-ChildItem 'C:\Program Files\Microsoft Visual Studio\2022' -Recurse -Directory -Filter 'Microsoft.VC143.CRT' -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '\\x64\\' } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1 -ExpandProperty FullName
+          if (-not $crt) {
+            throw 'Could not locate Microsoft.VC143.CRT for x64'
+          }
+          Write-Host "Using CRT: $crt"
+          New-Item -ItemType Directory -Force -Path apps/native/release | Out-Null
+          node tooling/release-native-win.mjs `
+            --arch x64 `
+            --portable-only `
+            --accounts-dir tooling/claude-accounts/dist/matou-claude-accounts `
+            --model-router "${{ steps.router.outputs.dir }}" `
+            --vc-runtime-dir "$crt" `
+            --out-dir apps/native/release
+
+      - name: Upload Windows x64 portable assets to GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $files = Get-ChildItem apps/native/release -File | Select-Object -ExpandProperty FullName
+          Write-Host "Uploading: $($files -join ', ')"
+          gh release upload "${{ inputs.tag }}" @files --clobber
